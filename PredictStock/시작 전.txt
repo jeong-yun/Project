@@ -2,6 +2,7 @@ pip install -U scipy
 pip install numpy
 pip install scipy
 pip install scikit-learn
+pip install pandas-datareader
 
 data 만들기
 Windows에서 Microsoft Excel을 사용하지만 UTF-8 CSV로 저장할 수 있는 기능이 없고 메모장이 있는 경우
