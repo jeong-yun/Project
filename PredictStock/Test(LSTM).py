@@ -1,8 +1,6 @@
 import pandas as pd
 import numpy as np
 
-
-
 hanabank = pd.read_csv("hanabank(21.1.27~23.2.3)_utf8.csv")
 print(hanabank.head)
 print(hanabank.shape)
