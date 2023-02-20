@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+
 
 
 hanabank = pd.read_csv("hanabank(21.1.27~23.2.3)_utf8.csv")
@@ -50,22 +50,34 @@ print('훈련 데이터의 크기 :', train_X.shape, train_y.shape)
 print('테스트 데이터의 크기 :', test_X.shape, test_y.shape)
 
 from tensorflow.keras import Sequential
-from tensorflow.keras.layers import Dense, LSTM, Dropout
+from tensorflow.keras.layers import Dense, LSTM, Dropout, BatchNormalization
 #setting Model
 model = Sequential()
 model.add(LSTM(units=20, activation='relu', return_sequences=True, input_shape=(10, 4)))
+model.add(BatchNormalization())
 model.add(Dropout(0.1))
 model.add(LSTM(units=20, activation='relu'))
+model.add(BatchNormalization())
 model.add(Dropout(0.1))
+
 model.add(Dense(units=1))
 model.summary()
+
 #training
 model.compile(optimizer='adam', loss='mean_squared_error')
 model.fit(train_X, train_y, epochs=70, batch_size=30)
 pred_y = model.predict(test_X)
 
+#print MSE, RMSE, R2
+from sklearn.metrics import mean_squared_error, r2_score
+MSE = mean_squared_error(test_y, pred_y)
+RMSE = np.sqrt(MSE)
+R2 = r2_score(test_y, pred_y)
+print(MSE, RMSE, R2)
 
-pred_y = model.predict(test_X)
+
+#to Graph
+import matplotlib.pyplot as plt
 plt.figure()
 plt.plot(test_y, color='red', label='real SEC stock price')
 plt.plot(pred_y, color='blue', label='predicted SEC stock price')
