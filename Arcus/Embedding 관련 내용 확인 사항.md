@@ -57,4 +57,5 @@
      - 장점: 동의어/변형/오탈자 등에도 정확도 ↑, 문맥/의미학습 가능.  
      - 단점: embedding이 변해 희귀/신규 신호가 빨리 흡수될 수 있어 탐지 신뢰도↓, 메모리/연산↑.
 
-=> 한 줄 요약: 목표가 신규/희귀 탐지일 경우 freeze 권장, 목표가 의미 일반화/정밀도 개선일 경우 finetune 고려
+=> 한 줄 요약: 목표가 신규/희귀 탐지일 경우 freeze 권장, 목표가 의미 일반화/정밀도 개선일 경우 finetune 고려  
+=> 현 ARCUSOnline_Embedding, ARCUSOnline_Dynamic에서 trainable=True로 설정해도 업데이트 안됨(그래프에 연결 아되어 있음)
