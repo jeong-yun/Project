@@ -58,7 +58,7 @@ class DynamicEmbeddingManager:
         self.token_to_id = {}
         self.embedding_matrix = tf.Variable(
             initial_value=tf.random.normal([0, embedding_dim]),  # 초기 크기 0
-            trainable=True,
+            trainable=False,
             dtype=tf.float32,
             name="embedding_matrix"
         )
@@ -98,11 +98,11 @@ class DynamicEmbeddingManager:
         """
         new_embedding = tf.random.normal([1, self.embedding_dim])
         if self.embedding_matrix.shape[0] == 0:
-            self.embedding_matrix = tf.Variable(new_embedding, trainable=True, dtype=tf.float32, name="embedding_matrix")
+            self.embedding_matrix = tf.Variable(new_embedding, trainable=False, dtype=tf.float32, name="embedding_matrix")
         else:
             # assign() 대신 embedding_matrix를 새로 생성
             expanded = tf.concat([self.embedding_matrix, new_embedding], axis=0)
-            self.embedding_matrix = tf.Variable(expanded, trainable=True, dtype=tf.float32, name="embedding_matrix")
+            self.embedding_matrix = tf.Variable(expanded, trainable=False, dtype=tf.float32, name="embedding_matrix")
 
     def get_embeddings(self, token_ids):
         """
