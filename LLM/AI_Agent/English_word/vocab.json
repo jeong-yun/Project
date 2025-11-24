@@ -1,0 +1,60 @@
+{
+  "answer": {
+    "word": "answer",
+    "domain": "일반(Common), 시험(Test), 대화(Conversation)",
+    "pos": "명사, 동사",
+    "ipa": "/ˈænsər/",
+    "meaning": "동사) 대답하다, 답변하다, (전화·문·요청 등에) 응하다  \n명사) 대답, 답, 해답, 해결책",
+    "senses": "말이나 글로 하는 ‘대답, 답변’]  \n의미(간단): 누군가의 말·질문에 대해 하는 말이나 글.  \n의미(확장): 질문, 부탁, 메시지 등에 대해 말이나 글로 돌려주는 반응을 가리키며, 일상 대화와 시험, 이메일 등에서 널리 쓰인다.  \n의미(영어): A spoken or written reply to a question, request, or message.  \n\nSense 2 — [명사: 문제의 ‘정답, 해답, 해결책’]  \n의미(간단): 문제나 상황을 해결해 주는 정답 또는 방법.  \n의미(확장): 시험 문제의 정답, 수학·과학 문제의 해, 또는 어려운 상황을 풀어 주는 해결책을 말한다.  \n의미(영어): The correct solution to a problem or an effective solution to a situation.  \n\nSense 3 — [동사: 질문·전화·문 등에 ‘대답하다, 응하다’]  \n의미(간단): 질문, 전화, 문 두드림 등에 반응하여 응답하거나 대응하다.  \n의미(확장): 말로 대답하거나, 전화를 받거나, 문을 열어 주는 등 어떤 요청·신호에 반응하는 행동을 표현한다.  \n의미(영어): To respond to a question, call, knock, or request.",
+    "level": "CEFR A1–A2, TOEIC 기본 어휘",
+    "frequency": "High",
+    "etymology": "중세 영어 answere, 고대 영어 andswaru(“and-” 함께 + “swaru” 말하다)에서 유래하여 ‘상대에게 말해 주는 것’이라는 의미가 발전함.",
+    "examples": "Sense 1)  \n2. I still haven’t received an answer to my email. → (사용된 의미: Sense 1)  \n3. The answer to question 5 is “C.” → (사용된 의미: Sense 2)  \n4. There is no simple answer to this problem. → (사용된 의미: Sense 2)  \n5. Could you answer the phone while I’m cooking? → (사용된 의미: Sense 3)",
+    "synonyms": [
+      "reply",
+      "response",
+      "solution",
+      "explanation",
+      "respond(to)(동사)"
+    ],
+    "antonyms": [
+      "question",
+      "problem",
+      "silence",
+      "ignore(동사)",
+      "leave unanswered"
+    ],
+    "collocations": [
+      "correct answer",
+      "wrong answer",
+      "quick answer",
+      "short answer",
+      "final answer",
+      "model answer",
+      "have the answer",
+      "know the answer",
+      "give an answer",
+      "get an answer",
+      "answer a question",
+      "answer the phone",
+      "answer the door",
+      "answer an email",
+      "answer a call"
+    ],
+    "derivatives": [
+      "answerable",
+      "unanswered",
+      "answering machine"
+    ],
+    "tags": [
+      "기본어휘",
+      "학교영어",
+      "시험어휘",
+      "회화표현",
+      "동사·명사"
+    ],
+    "confusable": "assure, ensure, enter, anger",
+    "lookup_count_raw": "1",
+    "lookup_count": 1
+  }
+}
