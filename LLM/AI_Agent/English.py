@@ -16,8 +16,13 @@ import json, re
 import pandas as pd
 from io import BytesIO
 from docx import Document
+from docx.shared import Pt
 from fpdf import FPDF
 from pathlib import Path  # 단어장 위치
+
+from langchain_teddynote import logging
+
+logging.langsmith("English_word_maker_project")
 
 load_dotenv()
 
@@ -98,24 +103,80 @@ def create_chain(prompt_type):
     return chain
 
 
+# 품사 정의
+POS_MAP = {
+    "n": "noun",
+    "v": "verb",
+    "adj": "adjective",
+    "adv": "adverb",
+}
+
+
+# 한글 의미 품사별 dict로 변경
+def extract_senses_ko(meaning_text: str) -> dict:
+    if not meaning_text:
+        return {}
+
+    senses_ko = {}
+    lines = [l.strip() for l in meaning_text.splitlines() if l.strip()]
+
+    for line in lines:
+        m = re.match(r"([a-zA-Z]+)\)\s*(.+)", line)
+        if not m:
+            continue
+
+        short_pos = m.group(1).lower()
+        ko_mean = m.group(2).strip()
+        pos_full = POS_MAP.get(short_pos, short_pos)
+
+        senses_ko[pos_full] = ko_mean
+
+    return senses_ko
+
+
+# 영어 의미 품사별 dict로 변경
+def extract_senses_en(senses_text: str) -> dict:
+    if not senses_text:
+        return {}
+
+    senses_en = {}
+    lines = [l.strip() for l in senses_text.splitlines() if l.strip()]
+
+    for line in lines:
+        m = re.match(r"([a-zA-Z]+)\)\s*(.+)", line)
+        if not m:
+            continue
+
+        short_pos = m.group(1).lower()
+        en_mean = m.group(2).strip()
+        pos_full = POS_MAP.get(short_pos, short_pos)
+
+        senses_en[pos_full] = en_mean
+
+    return senses_en
+
+
+# 유사단어가 다수 있을 경우 ',' 문자열을 리스트로 변경
+def extract_similar_words(confusable_text: str):
+    if not confusable_text:
+        return []
+    return [x.strip() for x in confusable_text.split(",") if x.strip()]
+
+
 # 프롬프트 설정에 따른 단어장 생성
 def parse_yaml_style_answer(answer_text: str) -> dict:
-    """
-    YAML 프롬프트에서 나온 번호 기반 텍스트를 파싱해서
-    { "word": ..., "domain": ..., ... } 형태의 dict로 변환
-    """
     # 번호 -> 내부 key 매핑
     field_map = {
         1: "word",
         2: "domain",
         3: "pos",
         4: "ipa",
-        5: "meaning",
-        6: "senses",
+        5: "senses_ko_raw",
+        6: "senses_en_raw",
         7: "level",
         8: "frequency",
         9: "etymology",
-        10: "examples",
+        10: "examples_raw",
         11: "synonyms",
         12: "antonyms",
         13: "collocations",
@@ -129,7 +190,7 @@ def parse_yaml_style_answer(answer_text: str) -> dict:
     pattern = re.compile(r"^\s*(\d+)\)\s", re.MULTILINE)
     matches = list(pattern.finditer(answer_text))
 
-    result = {}
+    result: dict[str, object] = {}
 
     if not matches:
         return result  # 파싱 실패 시 빈 dict
@@ -137,11 +198,7 @@ def parse_yaml_style_answer(answer_text: str) -> dict:
     for idx, m in enumerate(matches):
         num = int(m.group(1))
         start = m.start()
-
-        if idx + 1 < len(matches):
-            end = matches[idx + 1].start()
-        else:
-            end = len(answer_text)
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(answer_text)
 
         block = answer_text[start:end].strip()
 
@@ -150,7 +207,11 @@ def parse_yaml_style_answer(answer_text: str) -> dict:
         if len(header_split) == 2:
             value = header_split[1].strip()
         else:
-            value = ""
+            lines = block.splitlines()
+            if len(lines) >= 2:
+                value = "\n".join(lines[1:]).strip()
+            else:
+                value = ""
 
         key = field_map.get(num)
         if key:
@@ -161,12 +222,55 @@ def parse_yaml_style_answer(answer_text: str) -> dict:
         first_line = result["word"].splitlines()[0].strip()
         result["word"] = first_line
 
-    # 태그 / 유의어 / 반의어 / 콜로케이션 등은 쉼표 기준으로 리스트로 쪼개도 됨
+    # 태그 / 유의어 / 반의어 / 콜로케이션 등은 쉼표 기준으로 구분된 필드 설정
     for list_key in ["synonyms", "antonyms", "collocations", "derivatives", "tags"]:
         if list_key in result and result[list_key]:
             # "a, b, c" -> ["a", "b", "c"]
             items = [x.strip() for x in result[list_key].split(",") if x.strip()]
             result[list_key] = items
+        else:
+            result[list_key] = items
+
+    # 10) 예문 JSON 파싱 처리(내용 추가 25.11.25)
+    examples = {}
+    if "examples_raw" in result and result["examples_raw"]:
+        ex_raw = result["examples_raw"]
+
+        # JSON 부분만 추출: { ... } 안
+        json_match = re.search(r"\{[\s\S]*\}", ex_raw)
+        if json_match:
+            json_text = json_match.group(0)
+            try:
+                # JSON을 dict로 파싱
+                examples = json.loads(json_text)
+            except Exception:
+                # 파싱 안 되면 그나마 깔끔하게 정리
+                examples = {"raw": ex_raw}
+        else:
+            # 다른 형식에 따른 작성
+            temp = {}
+            for line in ex_raw.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                # pos: sentence...
+                if ":" in line:
+                    k, v = line.split(":", 1)
+                    temp[k.strip()] = v.strip()
+            examples = temp if temp else {"raw": ex_raw}
+    result["examples"] = examples
+
+    # 5) 뜻(Meaning) → senses_ko (품사별 한글 의미) 추가
+    senses_ko_raw = str(result.get("senses_ko_raw", "") or "")
+    result["senses_ko"] = extract_senses_ko(senses_ko_raw)
+
+    # 6) 영어 의미(Senses_En) → senses_en (품사별 영어 의미) 추가
+    senses_en_raw = str(result.get("senses_en_raw", "") or "")
+    result["senses_en"] = extract_senses_en(senses_en_raw)
+
+    # 16) 유사단어(Confusable) → similar_words 리스트 추가
+    confusable_text = str(result.get("confusable", "") or "")
+    result["similar_words"] = extract_similar_words(confusable_text)
 
     return result
 
@@ -196,30 +300,41 @@ def update_vocab_from_answer(answer_text: str):
 
 # 단어장을 저장하기 위한 작업(DF화)
 def vocab_to_df() -> pd.DataFrame:
-    """session_state['vocab'] 를 보기 좋은 DataFrame으로 변환"""
     vocab = st.session_state.get("vocab", {})
     rows = []
 
     for word_key, info in vocab.items():
+        senses_ko = info.get("senses_ko", {})
+        senses_en = info.get("senses_en", {})
+        examples = info.get("examples", {})
+        synonyms = info.get("synonyms", [])
+        antonyms = info.get("antonyms", [])
+        collocs = info.get("collocations", [])
+        derivatives = info.get("derivatives", [])
+        tags = info.get("tags", [])
+        similar_words = info.get("similar_words", [])
+        confusable_raw = info.get("confusable", "")
+
         rows.append(
             {
                 "Word": info.get("word", word_key),
                 "Domain": info.get("domain", ""),
                 "POS": info.get("pos", ""),
                 "IPA": info.get("ipa", ""),
-                "Meaning": info.get("meaning", ""),
-                "Senses": info.get("senses", ""),
                 "Level": info.get("level", ""),
                 "Frequency": info.get("frequency", ""),
                 "Etymology": info.get("etymology", ""),
-                "Examples": info.get("examples", ""),
-                "Synonyms": ", ".join(info.get("synonyms", [])),
-                "Antonyms": ", ".join(info.get("antonyms", [])),
-                "Collocations": ", ".join(info.get("collocations", [])),
-                "Derivatives": ", ".join(info.get("derivatives", [])),
-                "Tags": ", ".join(info.get("tags", [])),
-                "Confusable": info.get("confusable_word", ""),
                 "LookupCount": info.get("lookup_count", 1),
+                "Senses_Ko": json.dumps(senses_ko, ensure_ascii=False),
+                "Senses_En": json.dumps(senses_en, ensure_ascii=False),
+                "Examples": json.dumps(examples, ensure_ascii=False),
+                "Synonyms": json.dumps(synonyms, ensure_ascii=False),
+                "Antonyms": json.dumps(antonyms, ensure_ascii=False),
+                "Collocations": json.dumps(collocs, ensure_ascii=False),
+                "Derivatives": json.dumps(derivatives, ensure_ascii=False),
+                "Tags": json.dumps(tags, ensure_ascii=False),
+                "SimilarWords": json.dumps(similar_words, ensure_ascii=False),
+                "ConfusableRaw": confusable_raw,
             }
         )
 
@@ -232,19 +347,20 @@ def vocab_to_df() -> pd.DataFrame:
                 "Domain",
                 "POS",
                 "IPA",
-                "Meaning",
-                "Senses",
                 "Level",
                 "Frequency",
                 "Etymology",
+                "LookupCount",
+                "Senses_Ko",
+                "Senses_En",
                 "Examples",
                 "Synonyms",
                 "Antonyms",
                 "Collocations",
                 "Derivatives",
                 "Tags",
-                "Confusable",
-                "LookupCount",
+                "SimilarWords",
+                "ConfusableRaw",
             ]
         )
 
@@ -301,16 +417,17 @@ KOREAN_FONT_PATH = r"C:\Windows\Fonts\malgun.ttf"
 
 
 # PDF
+"""
 def get_pdf_bytes(df):
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    # 1️⃣ 유니코드 TTF 폰트 등록 + 사용
+    # 1 유니코드 TTF 폰트 등록 + 사용
     pdf.add_font("malgun", "", KOREAN_FONT_PATH, uni=True)
     pdf.set_font("malgun", size=12)
 
-    # 2️⃣ 여기서부터는 아무 텍스트나(한글/영문/특수기호) 써도 됨
+    # 2 여기서부터는 아무 텍스트나(한글/영문/특수기호) 써도 됨
     for _, row in df.iterrows():
         # 모든 텍스트를 한 번 정리
         word = clean_text(row.get("Word", ""))
@@ -381,6 +498,7 @@ def get_pdf_bytes(df):
     pdf.output(buf)
     buf.seek(0)
     return buf
+"""
 
 
 # 단어장 저장 함수
@@ -397,6 +515,170 @@ def save_vocab_to_disk():
             )
     except Exception as e:
         st.error(f"단어장 저장 중 오류 발생: {e}")
+
+
+# Word 포맷 출력
+def render_entry_to_doc(doc: Document, entry: dict):
+    # 1. 단어(품사) / 발음 기호 / 문의 횟수
+    word = entry.get("word", "")
+    pos = entry.get("pos", "")
+    ipa = entry.get("ipa", "")
+    lookup = entry.get("lookup_count", 1)
+
+    p = doc.add_paragraph()
+    run = p.add_run(f"{word} ")
+    run.bold = True
+    p.add_run(f"({pos}) {ipa}  [lookup: {lookup}]")
+
+    # 2. 분야 / 난이도 / 빈출도 / 어원 / 유사단어
+    domain = entry.get("domain", "")
+    level = entry.get("level", "")
+    freq = entry.get("frequency", "")
+    etym = entry.get("etymology", "")
+    similars = entry.get("similar_words", [])
+
+    doc.add_paragraph(f"Domain: {domain}  |  Level: {level}  |  Freq: {freq}")
+    if etym:
+        doc.add_paragraph(f"Etymology: {etym}")
+    if similars:
+        doc.add_paragraph("Similar: " + ", ".join(similars))
+
+    # 3. 품사별 의미(한글)
+    senses_ko = entry.get("senses_ko", {})
+    if isinstance(senses_ko, dict) and senses_ko:
+        doc.add_paragraph("[Meaning-KO]")
+        for pos_key, m_ko in senses_ko.items():
+            doc.add_paragraph(f"({pos_key}) {m_ko}")
+
+    # 4. 품사별 의미(영어)
+    senses_en = entry.get("senses_en", {})
+    if isinstance(senses_en, dict) and senses_en:
+        doc.add_paragraph("[Meaning-EN]")
+        for pos_key, m_en in senses_en.items():
+            doc.add_paragraph(f"({pos_key}) {m_en}")
+
+    # 5. 예문 품사별 1건
+    examples = entry.get("examples", {})
+    if isinstance(examples, dict) and examples:
+        doc.add_paragraph("[Examples]")
+        for pos_key, ex in examples.items():
+            doc.add_paragraph(f"({pos_key}) {ex}")
+
+    # 6. 유의어(최대 3)
+    syns = entry.get("synonyms", [])
+    if syns:
+        doc.add_paragraph("Synonyms: " + ", ".join(syns[:3]))
+
+    # 7. 반의어(최대 3)
+    ants = entry.get("antonyms", [])
+    if ants:
+        doc.add_paragraph("Antonyms: " + ", ".join(ants[:3]))
+
+    # 8. 구분선
+    doc.add_paragraph("-" * 50)
+
+
+# Word 포맷에 따른 수정
+def get_word_bytes_from_vocab(vocab: dict):
+    doc = Document()
+    style = doc.styles["Normal"]
+    style.font.name = "맑은 고딕"
+    style.font.size = Pt(11)
+
+    doc.add_heading("단어장", level=1)
+
+    for word_key, entry in vocab.items():
+        render_entry_to_doc(doc, entry)
+
+    buf = BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+
+# PDF 포맷 변경에 따른 수정(1줄 출력)
+def pdf_write_line(pdf: FPDF, text: str, max_chars: int = 80):
+    text = clean_text(text)
+    while text:
+        chunk = text[:max_chars]
+        pdf.cell(0, 8, chunk, ln=1)
+        text = text[max_chars:]
+
+
+# PDF 포맷 설정
+def render_entry_to_pdf(pdf: FPDF, entry: dict):
+    word = entry.get("word", "")
+    pos = entry.get("pos", "")
+    ipa = entry.get("ipa", "")
+    lookup = entry.get("lookup_count", 1)
+
+    # 1. 단어(품사) / 발음 기호 / 문의 횟수
+    header = f"{word} ({pos}) {ipa}  [lookup: {lookup}]"
+    pdf_write_line(pdf, header)
+
+    # 2. 분야 / 난이도 / 빈출도 / 유사단어
+    domain = entry.get("domain", "")
+    level = entry.get("level", "")
+    freq = entry.get("frequency", "")
+    similars = entry.get("similar_words", [])
+
+    meta_line = f"Domain: {domain}  |  Level: {level}  |  Freq: {freq}"
+    pdf_write_line(pdf, meta_line)
+    if similars:
+        pdf_write_line(pdf, "Similar: " + ", ".join(similars))
+
+    # 3. 품사별 의미(한글)
+    senses_ko = entry.get("senses_ko", {})
+    if isinstance(senses_ko, dict) and senses_ko:
+        pdf_write_line(pdf, "[Meaning-KO]")
+        for pos_key, m_ko in senses_ko.items():
+            pdf_write_line(pdf, f"({pos_key}) {m_ko}")
+
+    # 4. 품사별 의미(영어)
+    senses_en = entry.get("senses_en", {})
+    if isinstance(senses_en, dict) and senses_en:
+        pdf_write_line(pdf, "[Meaning-EN]")
+        for pos_key, m_en in senses_en.items():
+            pdf_write_line(pdf, f"({pos_key}) {m_en}")
+
+    # 5. 예문 품사별 1건
+    examples = entry.get("examples", {})
+    if isinstance(examples, dict) and examples:
+        pdf_write_line(pdf, "[Examples]")
+        for pos_key, ex in examples.items():
+            pdf_write_line(pdf, f"({pos_key}) {ex}")
+
+    # 6. 유의어(최대 3)
+    syns = entry.get("synonyms", [])
+    if syns:
+        pdf_write_line(pdf, "Synonyms: " + ", ".join(syns[:3]))
+
+    # 7. 반의어(최대 3)
+    ants = entry.get("antonyms", [])
+    if ants:
+        pdf_write_line(pdf, "Antonyms: " + ", ".join(ants[:3]))
+
+    # 8. 구분선
+    pdf_write_line(pdf, "-" * 50)
+    pdf.ln(4)
+
+
+# PDF 포맷 변경에 따른 수정
+def get_pdf_bytes_from_vocab(vocab: dict):
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    pdf.add_font("malgun", "", KOREAN_FONT_PATH, uni=True)
+    pdf.set_font("malgun", size=12)
+
+    for word_key, entry in vocab.items():
+        render_entry_to_pdf(pdf, entry)
+
+    buf = BytesIO()
+    pdf.output(buf)
+    buf.seek(0)
+    return buf
 
 
 # 사용자 입력
@@ -436,6 +718,7 @@ if user_input:
 
 st.subheader("현재 단어장")
 df = vocab_to_df()
+add_message("assistant", df)
 st.dataframe(df, use_container_width=True)
 
 # Excel
@@ -453,7 +736,10 @@ if not df.empty:
     )
 
     # 2) Word(docs) download
-    word_bytes = get_word_bytes(df)
+    # word_bytes = get_word_bytes(df)
+    # 2-1) Word(docs) 포맷에 따른 변경
+    vocab = st.session_state["vocab"]
+    word_bytes = get_word_bytes_from_vocab(vocab)
     st.download_button(
         label="📥 단어장 다운로드 (Word)",
         data=word_bytes,
@@ -462,7 +748,8 @@ if not df.empty:
     )
 
     # 3) PDF download
-    pdf_bytes = get_pdf_bytes(df)
+    # pdf_bytes = get_pdf_bytes(df)
+    pdf_bytes = get_pdf_bytes_from_vocab(vocab)
     st.download_button(
         label="📥 단어장 다운로드 (PDF)",
         data=pdf_bytes,
