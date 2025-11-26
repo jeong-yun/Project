@@ -20,7 +20,11 @@ from docx.shared import Pt
 from fpdf import FPDF
 from pathlib import Path  # 단어장 위치
 
-from langchain_teddynote import logging
+from langchain_teddynote import logging  # langsmith_logging
+
+# 단어장 발음 다운로드(251126)
+from openai import OpenAI
+from zipfile import ZipFile
 
 logging.langsmith("English_word_maker_project")
 
@@ -31,6 +35,7 @@ st.title("my chatgpt")
 # 단어장 저장 위치
 SAVE_DIR = Path("English_word")
 SAVE_PATH = SAVE_DIR / "vocab.json"
+
 
 # 처음 1번만 실행하기 위한 코드
 if "messages" not in st.session_state:
@@ -121,7 +126,7 @@ def extract_senses_ko(meaning_text: str) -> dict:
     lines = [l.strip() for l in meaning_text.splitlines() if l.strip()]
 
     for line in lines:
-        m = re.match(r"([a-zA-Z]+)\)\s*(.+)", line)
+        m = re.match(r"^\s*[-•*]?\s*([a-zA-Z]+)[\)\.\:]\s*(.+)", line)
         if not m:
             continue
 
@@ -143,7 +148,7 @@ def extract_senses_en(senses_text: str) -> dict:
     lines = [l.strip() for l in senses_text.splitlines() if l.strip()]
 
     for line in lines:
-        m = re.match(r"([a-zA-Z]+)\)\s*(.+)", line)
+        m = re.match(r"^\s*[-•*]?\s*([a-zA-Z]+)[\)\.\:]\s*(.+)", line)
         if not m:
             continue
 
@@ -296,6 +301,8 @@ def update_vocab_from_answer(answer_text: str):
         entry = parsed.copy()
         entry["lookup_count"] = 1  # LLM이 써준 15번 필드는 무시하고 우리가 관리
         vocab[word_key] = entry
+
+    return word_key  # 최근 단어 저장용
 
 
 # 단어장을 저장하기 위한 작업(DF화)
@@ -642,10 +649,18 @@ def render_entry_to_pdf(pdf: FPDF, entry: dict):
             pdf_write_line(pdf, f"({pos_key}) {m_en}")
 
     # 5. 예문 품사별 1건
+    """
     examples = entry.get("examples", {})
     if isinstance(examples, dict) and examples:
         pdf_write_line(pdf, "[Examples]")
         for pos_key, ex in examples.items():
+            pdf_write_line(pdf, f"({pos_key}) {ex}")
+    """
+    # 5-1. 공통함수 사용(예문 발음/pdf)
+    examples_for_pdf = get_examples_for_pdf(entry)
+    if examples_for_pdf:
+        pdf_write_line(pdf, "[Examples]")
+        for pos_key, ex in examples_for_pdf:
             pdf_write_line(pdf, f"({pos_key}) {ex}")
 
     # 6. 유의어(최대 3)
@@ -681,6 +696,84 @@ def get_pdf_bytes_from_vocab(vocab: dict):
     return buf
 
 
+# 단어/예문 발음 추가 - 25.11.26
+client = OpenAI()
+
+# 최근 조회 단어 확인
+if "last_word_key" not in st.session_state:
+    st.session_state["last_word_key"] = None
+
+
+# TTS 함수
+def tts_bytes(text: str) -> bytes:
+    if not text:
+        return b""
+
+    try:
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="coral",  # allay / coral / nova
+            input=text,
+        )
+        audio_bytes = response.read()
+        return audio_bytes
+    except Exception as e:
+        print("TTS error: ", e)
+        return b""
+
+
+# 음성파일 이름용 함수
+def sanitize_filename(name: str) -> str:
+    return re.sub(r"[^0-9a-zA-Z가-힣_]+", "_", name)
+
+
+# 단어/예문 발음 zip으로
+def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
+    buf = BytesIO()
+    with ZipFile(buf, "w") as z:
+        for word_key, entry in vocab.items():
+            word = entry.get("word", word_key)
+            safe_word = sanitize_filename(word)
+
+            # 1) 단어 발음
+            try:
+                word_audio = tts_bytes(word)
+                if word_audio:
+                    z.writestr(f"Pronunciation/{safe_word}.mp3", word_audio)
+            except Exception as e:
+                print("word tts error", word, e)
+
+            # 2) 예문 발음 (각 품사별 1개씩)
+            examples_for_pdf = get_examples_for_pdf(entry)
+            for idx, (pos_key, ex) in enumerate(examples_for_pdf, start=1):
+                try:
+                    ex_audio = tts_bytes(ex)
+                    if ex_audio:
+                        z.writestr(
+                            f"{safe_word}/{safe_word}_example{idx}.mp3",
+                            ex_audio,
+                        )
+                except Exception as e:
+                    print("example tts error:", word, pos_key, e)
+    buf.seek(0)
+    return buf
+
+
+# pdf에 표시할 예문을 공통으로 가지고 오는 함수(예문 발음)
+def get_examples_for_pdf(entry: dict):
+    examples = entry.get("examples", {})
+    if not isinstance(examples, dict) or not examples:
+        return []
+    result = []
+    for pos_key, ex in examples.items():
+        ex = (ex or "").strip()
+        if not ex:
+            continue
+        result.append((pos_key, ex))
+
+    return result
+
+
 # 사용자 입력
 user_input = st.chat_input("내용 입력")
 
@@ -701,7 +794,10 @@ if user_input:
         st.chat_message("assistant").markdown(answer_text)
         add_message("assistant", answer_text)
         # 단어장 업데이트
-        update_vocab_from_answer(answer_text)
+        word_key = update_vocab_from_answer(answer_text)
+        # 단어 발음 생성
+        if word_key:
+            st.session_state["last_word_key"] = word_key
     else:
         responce = chain.stream({user_input})
         # web assistant 대화 출력 방법2
@@ -715,6 +811,41 @@ if user_input:
 
         # assistant 대화 저장
         add_message("assistant", ai_answer)
+
+# 최근 조회한 단어 발음(UI)
+st.subheader("최근 조회한 단어 발음")
+last_key = st.session_state.get("last_word_key")
+vocab = st.session_state.get("vocab", {})
+
+if last_key and last_key in vocab:
+    entry = vocab[last_key]
+    word = entry.get("word", last_key)
+    examples = entry.get("examples", {})
+
+    st.write(f"**{word}** 발음")
+
+    # 단어 발음 버튼
+    if st.button("🔊 단어 발음 듣기"):
+        audio = tts_bytes(word)
+        if audio:
+            st.audio(audio, format="audio/mp3")
+
+    # 예문 발음 버튼 (최대 3개)
+    if isinstance(examples, dict) and examples:
+        st.write("예문 발음")
+        for idx, (pos_key, ex) in enumerate(examples.items()):
+            if idx >= 3:
+                break
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.write(f"({pos_key}) {ex}")
+            with col2:
+                if st.button(f"🔊 예문 {idx+1}", key=f"ex_{last_key}_{idx}"):
+                    audio = tts_bytes(ex)
+                    if audio:
+                        st.audio(audio, format="audio/mp3")
+else:
+    st.info("아직 조회한 단어가 없습니다.")
 
 st.subheader("현재 단어장")
 df = vocab_to_df()
@@ -755,6 +886,15 @@ if not df.empty:
         data=pdf_bytes,
         file_name="vocab.pdf",
         mime="application/pdf",
+    )
+
+    # 4) 발음 zip download 버튼
+    audio_zip = get_audio_zip_from_vocab(vocab)
+    st.download_button(
+        label="🔊 단어/예문 발음 다운로드 (ZIP)",
+        data=audio_zip,
+        file_name="vocab_audio.zip",
+        mime="application/zip",
     )
 else:
     st.info("아직 저장된 단어가 없습니다.")
