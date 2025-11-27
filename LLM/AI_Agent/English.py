@@ -36,6 +36,9 @@ st.title("my chatgpt")
 SAVE_DIR = Path("English_word")
 SAVE_PATH = SAVE_DIR / "vocab.json"
 
+# 발음 저장 위치(251127)
+AUDIO_DIR = Path("English_word/audio")
+AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 # 처음 1번만 실행하기 위한 코드
 if "messages" not in st.session_state:
@@ -134,7 +137,12 @@ def extract_senses_ko(meaning_text: str) -> dict:
         ko_mean = m.group(2).strip()
         pos_full = POS_MAP.get(short_pos, short_pos)
 
-        senses_ko[pos_full] = ko_mean
+        # 수정(251127-단어 의미 한 개만 저장 -> 모든 의미 저장)
+        prev = senses_ko.get(pos_full)
+        if prev:
+            senses_ko[pos_full] = f"{prev} / {ko_mean}"
+        else:
+            senses_ko[pos_full] = ko_mean
 
     return senses_ko
 
@@ -156,7 +164,12 @@ def extract_senses_en(senses_text: str) -> dict:
         en_mean = m.group(2).strip()
         pos_full = POS_MAP.get(short_pos, short_pos)
 
-        senses_en[pos_full] = en_mean
+        # 수정(251127-단어 의미 한 개만 저장 -> 모든 의미 저장)
+        prev = senses_en.get(pos_full)
+        if prev:
+            senses_en[pos_full] = f"{prev}/ {en_mean}"
+        else:
+            senses_en[pos_full] = en_mean
 
     return senses_en
 
@@ -166,6 +179,56 @@ def extract_similar_words(confusable_text: str):
     if not confusable_text:
         return []
     return [x.strip() for x in confusable_text.split(",") if x.strip()]
+
+
+# 예문 오류에 따른 함수(JSON 영역 파싱, 251127)
+def parse_examples_block(ex_raw: str) -> dict:
+    if not ex_raw:
+        return {}
+
+    text = ex_raw.strip()
+
+    # 1) 코드블럭(```` ``` )로 감싸져 있으면 안쪽만 추출
+    if text.startswith("```"):
+        end = text.rfind("```")
+        if end != -1:
+            text = text.split("```", 1)[1]
+            text = text.rsplit("```", 1)[0].strip()
+
+    # 2) { ... } 영역만 먼저 시도
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        json_candidate = text[start : end + 1].strip()
+
+        # 양쪽에 쓸데없는 따옴표가 붙어 있으면 제거
+        if json_candidate.startswith('"') and json_candidate.endswith('"'):
+            json_candidate = json_candidate[1:-1]
+
+        try:
+            data = json.loads(json_candidate)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass  # 아래 라인 기반 파서로 넘어감
+
+    # 3) 라인별 "key": "value" 형식 파싱 (JSON 실패 시)
+    lines = [l.strip().rstrip(",") for l in text.splitlines() if l.strip()]
+    temp = {}
+    for line in lines:
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k = k.strip().strip('"').strip()
+        v = v.strip().strip('"').strip()
+        if k:
+            temp[k] = v
+
+    if temp:
+        return temp
+
+    # 4) 진짜 답 없을 때만 raw로 저장
+    return {"raw": text}
 
 
 # 프롬프트 설정에 따른 단어장 생성
@@ -238,6 +301,7 @@ def parse_yaml_style_answer(answer_text: str) -> dict:
 
     # 10) 예문 JSON 파싱 처리(내용 추가 25.11.25)
     examples = {}
+    """
     if "examples_raw" in result and result["examples_raw"]:
         ex_raw = result["examples_raw"]
 
@@ -263,6 +327,10 @@ def parse_yaml_style_answer(answer_text: str) -> dict:
                     k, v = line.split(":", 1)
                     temp[k.strip()] = v.strip()
             examples = temp if temp else {"raw": ex_raw}
+    """
+    if "examples_raw" in result and result["examples_raw"]:
+        ex_raw = result["examples_raw"]
+        examples = parse_examples_block(ex_raw)  # 251127 추가
     result["examples"] = examples
 
     # 5) 뜻(Meaning) → senses_ko (품사별 한글 의미) 추가
@@ -727,6 +795,26 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r"[^0-9a-zA-Z가-힣_]+", "_", name)
 
 
+# 음성파일 로컬 저장
+def tts_cached(word_key: str, filename: str, text: str) -> bytes:
+    """TTS mp3를 파일로 캐싱하는 함수"""
+    word_dir = AUDIO_DIR / word_key
+    word_dir.mkdir(exist_ok=True)
+
+    file_path = word_dir / filename
+
+    # 이미 저장되어 있으면 재사용
+    if file_path.exists():
+        return file_path.read_bytes()
+
+    # 새로 생성
+    audio_bytes = tts_bytes(text)
+    if audio_bytes:
+        file_path.write_bytes(audio_bytes)
+
+    return audio_bytes
+
+
 # 단어/예문 발음 zip으로
 def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
     buf = BytesIO()
@@ -734,7 +822,7 @@ def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
         for word_key, entry in vocab.items():
             word = entry.get("word", word_key)
             safe_word = sanitize_filename(word)
-
+            """
             # 1) 단어 발음
             try:
                 word_audio = tts_bytes(word)
@@ -742,7 +830,22 @@ def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
                     z.writestr(f"Pronunciation/{safe_word}.mp3", word_audio)
             except Exception as e:
                 print("word tts error", word, e)
+            """
+            # 1-2) 단어 발음(로컬에 저장, 251127)
+            try:
+                word_filename = f"{safe_word}_word.mp3"
+                tts_cached(safe_word, word_filename, word)
 
+                word_file_path = AUDIO_DIR / safe_word / word_filename
+                if word_file_path.exists():
+                    # ZIP 내부 경로: "<단어폴더>/word.mp3"
+                    z.write(
+                        str(word_file_path),
+                        f"{safe_word}/{word_filename}",
+                    )
+            except Exception as e:
+                print("word tts error:", word, e)
+            """
             # 2) 예문 발음 (각 품사별 1개씩)
             examples_for_pdf = get_examples_for_pdf(entry)
             for idx, (pos_key, ex) in enumerate(examples_for_pdf, start=1):
@@ -755,6 +858,30 @@ def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
                         )
                 except Exception as e:
                     print("example tts error:", word, pos_key, e)
+            """
+            # 2-1) 예문 발음 (엑셀에 저장된 모든 예문 기준, 예문 발음 로컬에 저장, 251127)
+            examples = entry.get("examples", {})
+            if isinstance(examples, dict):
+                for idx, (label, ex) in enumerate(examples.items(), start=1):
+                    ex = (ex or "").strip()
+                    if not ex:
+                        continue
+                    try:
+                        # 1) 캐싱된 파일 생성/사용
+                        audio_bytes = tts_cached(
+                            safe_word,  # 단어 폴더명
+                            f"example{idx}.mp3",  # 파일명
+                            ex,  # 예문 텍스트
+                        )
+                        # 2) ZIP 안에 실제 파일을 넣음
+                        audio_file_path = AUDIO_DIR / safe_word / f"example{idx}.mp3"
+                        if audio_file_path.exists():
+                            z.write(
+                                str(audio_file_path),  # 실제 저장된 파일 경로
+                                f"{safe_word}/example{idx}.mp3",  # ZIP 내부 경로
+                            )
+                    except Exception as e:
+                        print("example tts error:", word, label, e)
     buf.seek(0)
     return buf
 
@@ -795,6 +922,7 @@ if user_input:
         add_message("assistant", answer_text)
         # 단어장 업데이트
         word_key = update_vocab_from_answer(answer_text)
+        st.session_state["vocab"][word_key]["examples"]
         # 단어 발음 생성
         if word_key:
             st.session_state["last_word_key"] = word_key
@@ -852,7 +980,8 @@ df = vocab_to_df()
 add_message("assistant", df)
 st.dataframe(df, use_container_width=True)
 
-# Excel
+
+# 단어장 다운로드 버튼
 if not df.empty:
     # 공통: 버튼 누르면 서버에 단어장 Json 저장
     save_vocab_to_disk()
