@@ -47,7 +47,7 @@ template: |
   7) 난이도(CEFR/TOEIC 등):
   8) 빈출도(Frequency): High / Medium / Low
   9) 어원(Etymology):
-  10) 예시 — 각 품사의 의미별 예문 작성 필수
+  10) 예시(Examples_Raw) — 각 품사의 의미별 예문 작성 필수
   - Return a JSON object mapping POS to one example sentence:
         {{
           "noun": "....",
