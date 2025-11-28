@@ -79,3 +79,21 @@ wikipedia==1.4.0
 scikit-learn==1.6.1 
 ## .env
 API key 등 관련된 정보
+##
+project_root/
+├─ app.py                          # 메인(홈, 일반 Q&A)
+├─ prompts/
+│   └─ English.yaml               # 단어장 프롬프트
+├─ English_word/                   # 단어장 데이터 저장 (자동 생성)
+│   ├─ vocab.json
+│   └─ audio/
+│       └─ ...mp3
+├─ english_word_maker/             # 단어장 기능 모듈 패키지
+│   ├─ __init__.py
+│   ├─ parsing.py                  # 의미/예문 파싱
+│   ├─ export_doc.py               # Excel/Word/PDF 생성
+│   ├─ tts_utils.py                # TTS + 캐싱 + ZIP 생성
+│   └─ (추가로 vocab_store.py 등 만들고 싶으면 여기에)
+└─ pages/
+    └─ english_word_maker/
+        └─ 1_english_word_maker.py #단어장 UI 페이지
