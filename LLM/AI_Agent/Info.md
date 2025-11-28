@@ -41,45 +41,7 @@ pymupdf4llm==0.0.17
 matplotlib==3.10.1
 streamlit==1.43.2
 jupyter==1.1.1
-notebook==7.3.3
-
-torch==2.6.0
-torchvision==0.21.0
-faiss-cpu==1.10.0
-open-clip-torch==2.31.0
-
-python-dotenv==1.0.1
-pydantic==2.10.6
-lxml==5.3.1
-pillow==10.4.0
-lark==1.2.2
-ragas==0.2.14
-unstructured==0.17.0
-arxiv==2.1.3
-tiktoken==0.9.0
-tenacity==8.5.0
-pymilvus==2.5.5
-google-search-results==2.4.2
-protobuf==3.20.3
-sqlalchemy==2.0.39
-llama-index-core==0.11.23
-llama-parse==0.6.4.post1
-llama-index-readers-file==0.2.2
-flashrank==0.2.10
-docx2txt==0.8
-nest-asyncio==1.6.0
-rapidocr-onnxruntime==1.4.4
-seaborn==0.13.2
-grandalf==0.8
-rouge-score==0.1.2
-langchain-ollama==0.2.3
-mypy==1.15.0
-pinecone==5.4.2
-wikipedia==1.4.0
-scikit-learn==1.6.1 
-## .env
-API key 등 관련된 정보
-##
+notebook화
 project_root/
 ├─ app.py                          # 메인(홈, 일반 Q&A)
 ├─ prompts/
