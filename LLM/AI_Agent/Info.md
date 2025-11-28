@@ -41,7 +41,8 @@ pymupdf4llm==0.0.17
 matplotlib==3.10.1
 streamlit==1.43.2
 jupyter==1.1.1
-notebook화
+
+## 프로젝트 도식화
 project_root/
 ├─ app.py                          # 메인(홈, 일반 Q&A)
 ├─ prompts/
