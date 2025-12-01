@@ -33,15 +33,12 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r"[^0-9a-zA-Z가-힣_]+", "_", name)
 
 
-def tts_cached(word_key: str, filename: str, text: str) -> bytes:
+def tts_cached(filename: str, text: str) -> bytes:
     text = (text or "").strip()
     if not text:
         return b""
 
-    word_dir = AUDIO_DIR / word_key
-    word_dir.mkdir(parents=True, exist_ok=True)
-
-    file_path = word_dir / filename
+    file_path = AUDIO_DIR / filename
 
     if file_path.exists():
         return file_path.read_bytes()
@@ -61,15 +58,13 @@ def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
             safe_word = sanitize_filename(word)
 
             try:
-                word_filename = "word.mp3"
-                tts_cached(safe_word, word_filename, word)
+                word_filename = f"{safe_word}_pronounciation.mp3"
+                tts_cached(word_filename, word)
 
-                word_file_path = AUDIO_DIR / safe_word / word_filename
+                word_file_path = AUDIO_DIR / word_filename
                 if word_file_path.exists():
-                    z.write(
-                        str(word_file_path),
-                        f"{safe_word}/{word_filename}",
-                    )
+                    # ZIP 안에서도 폴더 없이 파일만
+                    z.write(str(word_file_path), word_filename)
             except Exception as e:
                 print("word tts error:", word, e)
 
@@ -80,15 +75,13 @@ def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
                     if not ex:
                         continue
                     try:
-                        example_filename = f"example{idx}.mp3"
-                        tts_cached(safe_word, example_filename, ex)
+                        example_filename = f"{safe_word}_example{idx}.mp3"
+                        tts_cached(example_filename, ex)
 
-                        ex_file_path = AUDIO_DIR / safe_word / example_filename
+                        ex_file_path = AUDIO_DIR / example_filename
                         if ex_file_path.exists():
-                            z.write(
-                                str(ex_file_path),
-                                f"{safe_word}/{example_filename}",
-                            )
+                            # ZIP 안에서도 폴더 없이 파일만
+                            z.write(str(ex_file_path), example_filename)
                     except Exception as e:
                         print("example tts error:", word, label, e)
 
