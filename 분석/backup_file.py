@@ -12,6 +12,9 @@ import time
 
 warnings.filterwarnings("ignore")
 pd.set_option("display.max_columns", None)
+pd.set_option("display.max_colwidth", None)  # 컬럼 내용 자르지 않음
+pd.set_option("display.width", 10000)  # 한 줄 최대 길이 설정
+os.system("mode con: cols=10000")  # 문자열 최대한 한 줄로 출력
 
 
 # =========================
@@ -47,8 +50,14 @@ def load_data():
         print(f"CSV 파일 읽기 오류: {e}")
         sys.exit(1)
 
-    print("\n[데이터 확인] 상위 5행")
+    if "(detail)" in df.columns:
+        df = df.drop(columns={"(detail)"})
+
+    print("\n[데이터 확인1] 상위 5행")
     print(df.head(5))
+
+    print("\n[데이터 확인2] 컬럼 확인")
+    print("데이터 컬럼:", list(df.columns))
     return df
 
 
@@ -82,7 +91,7 @@ def check_prime_columns(df):
 
 def check_http_status(df):
     valid = {"200", "404"}
-    http_unique = set(df["http_status(http_status)"])
+    http_unique = set(df["http_status(http_status)"].astype(str))
     invalid_values = http_unique - valid
 
     if invalid_values:
@@ -187,13 +196,30 @@ def data_analysis(df):
     # 원본 데이터 전체 수(크기)
     print("\n원본 데이터 전체 수: ", len(df))
 
+    prime_columns = [
+        "수집 시간(mgr_time)",
+        "탐지 시간(event_time)",
+        "출발지 IP(s_ip)",
+        "http_status(http_status)",
+        "목적지 IP(d_ip)",
+        "http_url(http_url)",
+        "user_agent(user_agent)",
+        "referer(referer)",
+    ]
+
     # 비정상 user_agent 수
     print("\n비정상 user_agent(nikto, gobuster 등의 스캐너) 포함 데이터")
-    print(df[df["has_ua_scanner"] == True])
+    if len(df[df["has_ua_scanner"] == True]) == 0:
+        print("비정상 user_agent(nikto, gobuster 등의 스캐너) 포함 데이터가 없습니다.")
+    else:
+        print(df[df["has_ua_scanner"] == True].loc[:, prime_columns])
 
     # 비정상 referer 수
     print("\n비정상 referer(NaN, Null 등) 포함 데이터")
-    print(df[df["has_referer_error"] == True])
+    if len(df[df["has_referer_error"] == True]) == 0:
+        print("비정상 referer(NaN, Null 등) 포함 데이터가 없습니다.")
+    else:
+        print(df[df["has_referer_error"] == True].loc[:, prime_columns])
 
     # 백업 파일 횟수 & 비정상 user_agent & 비정상 referer
     print("\n백업 파일에 접속했으면서, 비정상 user_agent와 비정상 referer 사용 데이터")
@@ -202,7 +228,7 @@ def data_analysis(df):
             df[
                 (df["has_backupfile"] == True)
                 & (df["has_ua_scanner"] == True)
-                & (df[df["has_referer_error"] == True])
+                & (df["has_referer_error"] == True)
             ]
         )
         == 0
@@ -215,8 +241,8 @@ def data_analysis(df):
             df[
                 (df["has_backupfile"] == True)
                 & (df["has_ua_scanner"] == True)
-                & (df[df["has_referer_error"] == True])
-            ]
+                & (df["has_referer_error"] == True)
+            ].loc[:, prime_columns]
         )
 
     # 민감 경로 비율 & 비정상 user_agent & 비정상 referer
@@ -226,7 +252,7 @@ def data_analysis(df):
             df[
                 (df["has_sensitive_path"] == True)
                 & (df["has_ua_scanner"] == True)
-                & (df[df["has_referer_error"] == True])
+                & (df["has_referer_error"] == True)
             ]
         )
         == 0
@@ -239,8 +265,8 @@ def data_analysis(df):
             df[
                 (df["has_sensitive_path"] == True)
                 & (df["has_ua_scanner"] == True)
-                & (df[df["has_referer_error"] == True])
-            ]
+                & (df["has_referer_error"] == True)
+            ].loc[:, prime_columns]
         )
 
     # backup + sh & 비정상 user_agent & 비정상 referer
@@ -250,7 +276,7 @@ def data_analysis(df):
             df[
                 (df["has_backup_sh"] == True)
                 & (df["has_ua_scanner"] == True)
-                & (df[df["has_referer_error"] == True])
+                & (df["has_referer_error"] == True)
             ]
         )
         == 0
@@ -263,8 +289,8 @@ def data_analysis(df):
             df[
                 (df["has_backup_sh"] == True)
                 & (df["has_ua_scanner"] == True)
-                & (df[df["has_referer_error"] == True])
-            ]
+                & (df["has_referer_error"] == True)
+            ].loc[:, prime_columns]
         )
 
 
@@ -278,7 +304,7 @@ def risk_setting(agg):
     # 위험 점수 구하기
     risk_score_str = input(
         "\n위험 가중치를 입력하세요."
-        "(백업 파일 횟수, 민감 경로 횟수, backup + sh 횟수(예 1.2, 1.5, 1.7): "
+        "(백업 파일(.bak, .old 등), 민감 경로(backup + 압축 파일), backup + sh 횟수(예 1.2, 1.5, 1.7): "
     )
 
     try:
@@ -289,24 +315,41 @@ def risk_setting(agg):
         bf_backupfile_w, bf_sensitive_path_w, bf_backup_sh_w = 1.0, 1.0, 1.0
 
     agg["risk_score"] = (
-        bf_backupfile_w * agg["bf_bacupfile_cnt"].fillna(0)
-        + bf_sensitive_path_w * agg["bf_sensitive_path_cnt"].fillna(0)
-        + bf_backup_sh_w * agg["bf_backup_sh_cnt"].fillna(0)
+        bf_backupfile_w * agg["bf_bacupfile_rate"].fillna(0)
+        + bf_sensitive_path_w * agg["bf_sensitive_path_rate"].fillna(0)
+        + bf_backup_sh_w * agg["bf_backup_sh_rate"].fillna(0)
     ) * np.log10(agg["req_cnt"].fillna(0) + 1)
 
     # 장비에 접속한 모든 s_ip 확인
-    print("\n[장비에 접속한 모든 출발지 IP(s_ip)]")
-    print(agg["출발지 IP(s_ip)"].unique())
+    sip_num = len(agg["출발지 IP(s_ip)"].unique())
+    print(
+        "\n장비에 접속한 모든 출발지 IP(s_ip)의 수는 ",
+        sip_num,
+        "개 입니다.",
+    )
 
     # 상위 n개 출력
     agg_sorted = agg.sort_values("risk_score", ascending=False)
 
-    top_n_str = input("\n상위 공격 위험 IP 수 입력(예: 5): ")
+    top_n_str = input(
+        "\n위험 점수를 사용해서 위험도가 높은 출발지 IP를 조회합니다."
+        "\n - 숫자 외 값을 입력하면 기본값(5)로 적용됩니다. 최대 값은 100입니다."
+        "\n상위 공격 위험 출발지 IP 수 입력(예: 5): "
+    )
     try:
         top_n = int(top_n_str)
     except ValueError:
         print("숫자가 아닙니다. 기본값 5를 사용합니다.")
         top_n = 5
+
+    if top_n > 100:
+        top_n = 100
+
+    if sip_num < top_n:
+        print(
+            f"출발지 IP가 {sip_num} 이므로 상위 출발지 IP 수를 {top_n}에서 {sip_num}으로 변경합니다."
+        )
+        top_n = sip_num
 
     top_sip = agg_sorted.head(top_n)
 
@@ -322,13 +365,17 @@ def search_by_sip(df):
     sip = input("검색할 출발지 IP(s_ip)를 입력하세요: ").strip()
 
     if not sip:
-        print("IP가 입력되지 않았습니다.")
+        print("IP가 입력되지 않았습니다. 메뉴로 이동합니다.")
         return
 
     result = df[df["출발지 IP(s_ip)"] == sip]
 
+    print(
+        "\n기존 피처: bf_bacupfile_cnt(백업 파일 횟수), bf_sensitive_path_cnt(민감 경로 횟수), bf_backup_sh_cnt(backup + sh 횟수)"
+    )
+
     if result.empty:
-        print(f"'{sip}' 에 해당하는 데이터가 없습니다.")
+        print(f"\n'{sip}' 에 해당하는 데이터가 없습니다.메뉴로 이동합니다.")
     else:
         print(f"\n'{sip}' 에 해당하는 데이터 {len(result)}건")
         print(
@@ -340,9 +387,9 @@ def search_by_sip(df):
                     "user_agent(user_agent)",
                     "referer(referer)",
                     "http_status(http_status)",
-                    "bf_bacupfile_cnt",
-                    "bf_sensitive_path_cnt",
-                    "bf_backup_sh_cnt",
+                    "has_backupfile",
+                    "has_sensitive_path",
+                    "has_backup_sh",
                 ],
             ]
         )
@@ -363,18 +410,23 @@ def search_by_column(df):
     col_input = input("\n검색할 컬럼명을 그대로 입력하세요: ").strip()
 
     if col_input not in df.columns:
-        print("해당 컬럼이 존재하지 않습니다.")
+        print("해당 컬럼이 존재하지 않습니다.메뉴로 이동합니다.")
         return
 
     keyword = input(
         f"컬럼 '{col_input}'에서 찾을 값(문자열, 정규식)을 입력하세요.(검색어를 입력하지 않으면 메뉴로 이동합니다.): "
     ).strip()
     if keyword == "":
-        print("검색값이 비어 있습니다.")
+        print("검색값이 비어 있습니다. 메뉴로 이동합니다.")
         return
 
     # 문자열 포함 검색 (대소문자 무시)
-    mask = df[col_input].astype(str).str.contains(keyword, case=False, na=False)
+    try:
+        mask = df[col_input].astype(str).str.contains(keyword, case=False, na=False)
+    except Exception as e:
+        print(f"[오류] 검색 도중 문제가 발생했습니다: {e}")
+        mask = pd.Series([False] * len(df))
+
     result = df[mask]
 
     prime_columns = [
@@ -388,8 +440,9 @@ def search_by_column(df):
         "referer(referer)",
     ]
 
+    # 주요 컬럼에 찾는 컬럼이 없을 경우
     if col_input not in prime_columns:
-        prime_columns.add(col_input)
+        prime_columns.append(col_input)
 
     if result.empty:
         print(f"\n컬럼 '{col_input}'에서 '{keyword}' 를 포함하는 데이터가 없습니다.")
@@ -402,11 +455,11 @@ def search_by_column(df):
 
 def search_by_feature_exist(df):
     print("\n=== [5] 피처에 해당하는 데이터 검색 ===")
+    print("번호 중 하나 입력 → 해당 조건을 만족하는 원본 데이터만 추출하여 보여줍니다.")
+    print("피처 및 추가 정보 존재여부 컬럼 목록: ")
     print(
-        "피처 번호 중 하나를 입력하면 → 해당 피처 조건을 만족하는 원본 데이터만 추출하여 보여줍니다."
+        "1(백업 파일 횟수), 2(민감 경로 횟수), 3(backup + sh 횟수), 4(스캐너/툴 이용), 5(비정상 referer)"
     )
-    print("피처 존재여부 컬럼 목록: ")
-    print("1(백업 파일 횟수), 2(민감 경로 횟수), 3(backup + sh 횟수)")
 
     col_input = input("\n검색할 피처의 번호를 입력하세요.: ").strip()
 
@@ -416,12 +469,16 @@ def search_by_feature_exist(df):
         fea_col = "has_sensitive_path"
     elif col_input == "3":
         fea_col = "has_backup_sh"
+    elif col_input == "4":
+        fea_col = "has_ua_scanner"
+    elif col_input == "5":
+        fea_col = "has_referer_error"
     else:
-        print("해당 번호가 존재하지 않습니다.")
+        print("해당 번호가 존재하지 않습니다. 메뉴로 이동합니다.")
         return
 
     if fea_col not in df.columns:
-        print("해당 컬럼이 존재하지 않습니다.")
+        print("해당 컬럼이 존재하지 않습니다. 메뉴로 이동합니다.")
         return
 
     result = df[df[fea_col] == True]
@@ -485,10 +542,12 @@ def main():
     # 2) 주요 데이터 확인 (없으면 종료)
     # 2-1) 주요 컬럼 확인
     if not check_prime_columns(df):
+        os.system("pause")
         sys.exit(1)
 
     # 2-2) http_status 확인
     if not check_http_status(df):
+        os.system("pause")
         sys.exit(1)
 
     # 3) 전처리 & 피처 생성
@@ -510,3 +569,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
