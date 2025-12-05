@@ -50,7 +50,8 @@ def load_data():
         print(f"CSV 파일 읽기 오류: {e}")
         sys.exit(1)
 
-    df = df.drop(columns={"(detail)"})
+    if "(detail)" in df.columns:
+        df = df.drop(columns={"(detail)"})
 
     print("\n[데이터 확인] 상위 5행")
     print(df.head(5))
@@ -235,6 +236,7 @@ def risk_setting(agg):
 def search_by_sip(df):
     print("\n=== [1] 출발지 IP(s_ip)별 데이터 검색 ===")
     print("특정 출발지 IP를 입력 → 해당 IP에서 발생한 모든 데이터를 조회")
+
     print("\n모든 출발지 IP(s_ip): ", list(df["출발지 IP(s_ip)"].unique()))
     sip = input("\n검색할 출발지 IP(s_ip)를 입력하세요: ").strip()
 
@@ -295,7 +297,12 @@ def search_by_column(df):
         return
 
     # 문자열 포함 검색 (대소문자 무시)
-    mask = df[col_input].astype(str).str.contains(keyword, case=False, na=False)
+    try:
+        mask = df[col_input].astype(str).str.contains(keyword, case=False, na=False)
+    except Exception as e:
+        print(f"[오류] 검색 도중 문제가 발생했습니다: {e}")
+        mask = pd.Series([False] * len(df))
+
     result = df[mask]
 
     prime_columns = [
@@ -306,6 +313,9 @@ def search_by_column(df):
         "목적지 IP(d_ip)",
         "http_query(http_query)",
     ]
+
+    if col_input not in prime_columns:
+        prime_columns.append(col_input)
 
     if result.empty:
         print(f"\n컬럼 '{col_input}'에서 '{keyword}' 를 포함하는 데이터가 없습니다.")
@@ -422,3 +432,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
