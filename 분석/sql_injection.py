@@ -333,14 +333,12 @@ def search_by_column(df):
 
     # 새로운 컬럼명
     new_col = f"{col_input}_{keyword}"
-    # new_col = "".join(c if c.isalnum() or c in "._" else "_" for c in raw_new_col)
 
     # 문자열 포함 검색 (대소문자 무시)
     try:
         mask = df[col_input].astype(str).str.contains(keyword, case=False, na=False)
     except Exception as e:
         print(f"[오류] 검색 도중 문제가 발생했습니다: {e}")
-        # mask = pd.Series([False] * len(df))
         return df
 
     # 원본 데이터에 검색 결과 컬럼 추가
@@ -353,7 +351,6 @@ def search_by_column(df):
         "탐지 시간(event_time)",
         "출발지 IP(s_ip)",
         "http_status(http_status)",
-        "목적지 IP(d_ip)",
         "http_query(http_query)",
     ]
 
@@ -407,18 +404,28 @@ def search_by_feature_exist(df):
 
     result = df[df[fea_col] == True]
 
-    print(f"{col_input}({fea_col})에 대한 결과입니다.")
+    if result.empty:
+        print("\n검색 결과가 없습니다.")
+        return
+
     print(
-        result.loc[
-            :,
+        f"\n[{col_input}] 피처({fea_col})에 대한 그룹화 결과입니다.(전체 {len(result)}건)\n"
+    )
+
+    grouped = (
+        result.groupby(
             [
                 "출발지 IP(s_ip)",
                 "http_query(http_query)",
                 "http_status(http_status)",
                 fea_col,
-            ],
-        ]
+            ]
+        )
+        .size()
+        .reset_index(name="count")
     )
+
+    print(grouped)
 
 
 def data_download(df, agg):
@@ -511,5 +518,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
