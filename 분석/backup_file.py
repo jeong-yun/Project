@@ -8,10 +8,10 @@ import sys
 import glob
 import warnings
 import os
-import time
+import time, datetime
 
 warnings.filterwarnings("ignore")
-pd.set_option("display.max_columns", None)
+pd.set_option("display.max_columns", None)  # 컬럼 자동 줄바꿈 제거
 pd.set_option("display.max_colwidth", None)  # 컬럼 내용 자르지 않음
 pd.set_option("display.width", 10000)  # 한 줄 최대 길이 설정
 os.system("mode con: cols=10000")  # 문자열 최대한 한 줄로 출력
@@ -170,7 +170,7 @@ def aggregate_by_sip(df):
 
     # 피처 내용 설명
     print(
-        "\n기존 피처: bf_bacupfile_cnt(백업 파일 횟수), bf_sensitive_path_cnt(민감 경로 횟수), bf_backup_sh_cnt(backup + sh 횟수)"
+        "\n이상행위 탐지 피처: bf_bacupfile_cnt(백업 파일 횟수), bf_sensitive_path_cnt(민감 경로 횟수), bf_backup_sh_cnt(backup + sh 횟수)"
     )
     print("추가 조건: req_count(전체 요청), distinct_url_cnt(서로 다른 URL 수)")
     print(
@@ -178,8 +178,21 @@ def aggregate_by_sip(df):
     )
 
     print("s_ip 집계 예시(5)")
-    print(agg.head())
-    return agg
+    print(agg.head(5))
+
+    # 위험도 선정(모두 1, 표시 x)
+    bf_backupfile_w, bf_sensitive_path_w, bf_backup_sh_w = 1.0, 1.0, 1.0
+
+    agg["risk_score"] = (
+        bf_backupfile_w * agg["bf_bacupfile_rate"].fillna(0)
+        + bf_sensitive_path_w * agg["bf_sensitive_path_rate"].fillna(0)
+        + bf_backup_sh_w * agg["bf_backup_sh_rate"].fillna(0)
+    ) * np.log10(agg["req_cnt"].fillna(0) + 1)
+
+    agg_sorted = agg.sort_values("risk_score", ascending=False)
+    agg_sorted.reset_index(drop=True, inplace=True)
+    top_25 = agg_sorted.head(25)
+    return top_25
 
 
 # =========================
@@ -294,7 +307,7 @@ def data_analysis(df):
         )
 
 
-def risk_setting(agg):
+def risk_setting(agg, flag):
     print("\n=== [2] 가중치 입력을 통한 위험도 상위 출발지 IP 조회 ===")
     print(
         "위험 가중치는 위험 점수(위험 가중치*피처의 비율의 합)를 구하는데 사용됩니다."
@@ -333,7 +346,7 @@ def risk_setting(agg):
 
     top_n_str = input(
         "\n위험 점수를 사용해서 위험도가 높은 출발지 IP를 조회합니다."
-        "\n - 숫자 외 값을 입력하면 기본값(5)로 적용됩니다. 최대 값은 100입니다."
+        "\n - 숫자 외 값을 입력하면 기본값(5)로 적용됩니다. 최대 값은 25입니다."
         "\n상위 공격 위험 출발지 IP 수 입력(예: 5): "
     )
     try:
@@ -342,12 +355,12 @@ def risk_setting(agg):
         print("숫자가 아닙니다. 기본값 5를 사용합니다.")
         top_n = 5
 
-    if top_n > 100:
-        top_n = 100
+    if top_n > 25:
+        top_n = 25
 
     if sip_num < top_n:
         print(
-            f"출발지 IP가 {sip_num} 이므로 상위 출발지 IP 수를 {top_n}에서 {sip_num}으로 변경합니다."
+            f"출발지 IP가 {sip_num}개 이므로 상위 출발지 IP 수를 {top_n}에서 {sip_num}으로 변경합니다."
         )
         top_n = sip_num
 
@@ -355,14 +368,35 @@ def risk_setting(agg):
 
     print(f"\n[공격 위험 상위 {top_n} IP]")
     print(top_sip)
+    flag = True
+    return top_sip, top_n, flag
 
 
-def search_by_sip(df):
+def search_by_sip(df, agg, n, flag):
     print("\n=== [3] 출발지 IP(s_ip)별 데이터 조회 ===")
     print("특정 출발지 IP를 입력 → 해당 IP에서 발생한 모든 데이터를 조회")
 
-    print("\n모든 출발지 IP(s_ip): ", df["출발지 IP(s_ip)"].unique())
-    sip = input("검색할 출발지 IP(s_ip)를 입력하세요: ").strip()
+    # 위험 점수 진행 또는 기본
+    if flag == True:  # 진행
+        print(
+            "\n메뉴 1(가중치 입력을 통한 위험도 상위 출발지 IP 조회)을 진행했습니다."
+            "\n - 해당 분석 결과의 s_ip 순위 제공합니다."
+        )
+
+        print(f"\n[가중치 기반 위험도 분석 결과] 상위 {n}개 출발지 IP(s_ip): ")
+        print(agg["출발지 IP(s_ip)"].to_list())
+
+    elif flag == False:
+        print(
+            "\n메뉴 1(가중치 입력을 통한 위험도 상위 출발지 IP 조회)을 진행하지 않았습니다."
+            "\n - 기본 가중치를 적용한 위험점수를 바탕으로 상위 위험 출발지 IP(s_ip)를 출력합니다."
+        )
+        n = len(agg["출발지 IP(s_ip)"].unique())
+
+        print(f"\n[기본 가중치 기반] 상위 {n}개 출발지 IP(s_ip): ")
+        print(agg["출발지 IP(s_ip)"].to_list())
+
+    sip = input("\n검색할 출발지 IP(s_ip)를 입력하세요: ").strip()
 
     if not sip:
         print("IP가 입력되지 않았습니다. 메뉴로 이동합니다.")
@@ -371,7 +405,7 @@ def search_by_sip(df):
     result = df[df["출발지 IP(s_ip)"] == sip]
 
     print(
-        "\n기존 피처: bf_bacupfile_cnt(백업 파일 횟수), bf_sensitive_path_cnt(민감 경로 횟수), bf_backup_sh_cnt(backup + sh 횟수)"
+        "\n이상행위 탐지 피처: bf_bacupfile_cnt(백업 파일 횟수), bf_sensitive_path_cnt(민감 경로 횟수), bf_backup_sh_cnt(backup + sh 횟수)"
     )
 
     if result.empty:
@@ -407,25 +441,33 @@ def search_by_column(df):
     for i, col in enumerate(df.columns):
         print(f"{i}: {col}")
 
-    col_input = input("\n검색할 컬럼명을 그대로 입력하세요: ").strip()
+    col_input = input(
+        "\n검색할 컬럼명을 그대로 입력하세요(원본 데이터에 같은 컬럼이 존재하지 않으면 메뉴로 이동합니다.): "
+    ).strip()
 
     if col_input not in df.columns:
         print("해당 컬럼이 존재하지 않습니다.메뉴로 이동합니다.")
-        return
+        return df
 
     keyword = input(
         f"컬럼 '{col_input}'에서 찾을 값(문자열, 정규식)을 입력하세요.(검색어를 입력하지 않으면 메뉴로 이동합니다.): "
     ).strip()
     if keyword == "":
         print("검색값이 비어 있습니다. 메뉴로 이동합니다.")
-        return
+        return df
+
+    # 새로운 컬럼명
+    new_col = f"{col_input}_{keyword}"
 
     # 문자열 포함 검색 (대소문자 무시)
     try:
         mask = df[col_input].astype(str).str.contains(keyword, case=False, na=False)
     except Exception as e:
         print(f"[오류] 검색 도중 문제가 발생했습니다: {e}")
-        mask = pd.Series([False] * len(df))
+        return df
+
+    # 원본 데이터에 검색 결과 컬럼 추가
+    df[new_col] = mask
 
     result = df[mask]
 
@@ -434,7 +476,6 @@ def search_by_column(df):
         "탐지 시간(event_time)",
         "출발지 IP(s_ip)",
         "http_status(http_status)",
-        "목적지 IP(d_ip)",
         "http_url(http_url)",
         "user_agent(user_agent)",
         "referer(referer)",
@@ -444,13 +485,19 @@ def search_by_column(df):
     if col_input not in prime_columns:
         prime_columns.append(col_input)
 
+    display_cols = prime_columns.copy()
+    if new_col not in display_cols:
+        display_cols.append(new_col)
+
     if result.empty:
         print(f"\n컬럼 '{col_input}'에서 '{keyword}' 를 포함하는 데이터가 없습니다.")
     else:
         print(
             f"\n컬럼 '{col_input}'에서 '{keyword}' 를 포함하는 데이터 {len(result)}건"
         )
-        print(result.loc[:, prime_columns])
+        print(result.loc[:, display_cols])
+
+    return df
 
 
 def search_by_feature_exist(df):
@@ -478,28 +525,60 @@ def search_by_feature_exist(df):
         return
 
     if fea_col not in df.columns:
-        print("해당 컬럼이 존재하지 않습니다. 메뉴로 이동합니다.")
+        print("해당 컬럼이 존재하지 않습니다.")
         return
 
     result = df[df[fea_col] == True]
 
-    print(f"{col_input}({fea_col})에 대한 결과입니다.")
+    if result.empty:
+        print("\n검색 결과가 없습니다.")
+        return
+
     print(
-        result.loc[
-            :,
+        f"\n[{col_input}] 피처({fea_col})에 대한 그룹화 결과입니다.(전체 {len(result)}건)\n"
+    )
+    grouped = (
+        result.groupby(
             [
                 "출발지 IP(s_ip)",
                 "http_url(http_url)",
                 "http_status(http_status)",
-                "user_agent(user_agent)",
-                "referer(referer)",
                 fea_col,
-            ],
-        ]
+            ]
+        )
+        .size()
+        .reset_index(name="count")
     )
+    print(grouped)
+
+
+def data_download(df, agg):
+    print("\n=== [6] 지금까지의 결과 데이터 다운로드 ===")
+    print(
+        "프로그램 실행 중 수정된 원본 데이터와, 출발지 IP 단위 분석 결과를 하나의 Excel 파일로 저장"
+    )
+    print(
+        "두 데이터를 각각 다른 시트에 저장하여, 사용자가 Excel에서 동시에 확인할 수 있도록 구성"
+    )
+
+    now = datetime.datetime.now().strftime("%Y%m%d-%H%M")
+
+    file_name = f"sqli_result_{now}.xlsx"
+
+    try:
+        with pd.ExcelWriter(file_name, engine="openpyxl") as writer:
+            df.to_excel(writer, sheet_name="원본 데이터", index=False)
+            agg.to_excel(writer, sheet_name="s_ip 그룹화 데이터", index=False)
+
+        print("\n 파일 저장 완료")
+        print(f" - 파일 저장 위치: {os.path.abspath(file_name)}")
+    except Exception as e:
+        print(f"[오류] 저장 중 문제가 발생했습니다: {e}")
 
 
 def search_menu(df, agg):
+    flag = False
+    n = 25
     while True:
         print("\n==============================")
         print(" 검색 메뉴")
@@ -509,19 +588,22 @@ def search_menu(df, agg):
         print("3: 특정 출발지 IP의 원본 데이터 검색")
         print("4: 특정 컬럼에서 값 검색")
         print("5: 피처 조건에 해당하는 원본 데이터 조회")
+        print("6: 지금까지의 데이터 저장")
         print("99: 종료")
         choice = input("번호를 선택하세요: ").strip()
 
         if choice == "1":
             data_analysis(df)
         elif choice == "2":
-            risk_setting(agg)
+            agg, n, flag = risk_setting(agg, flag)
         elif choice == "3":
-            search_by_sip(df)
+            search_by_sip(df, agg, n, flag)
         elif choice == "4":
-            search_by_column(df)
+            df = search_by_column(df)
         elif choice == "5":
             search_by_feature_exist(df)
+        elif choice == "6":
+            data_download(df, agg)
         elif choice == "99":
             print("프로그램을 종료합니다.")
             break
