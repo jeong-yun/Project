@@ -55,8 +55,15 @@ fpdf2==2.8.7
 ```text
 project_root/
 ├─ app.py                          # 메인(홈, 일반 Q&A)
+├─ ai_safety/                      # 기능 모듈 패키지
+│   ├─ __init__.py                 # 패키지 설명
+│   ├─ testcases.py                # 카테고리 정의 + 공격 프롬프트 8개
+│   ├─ judge.py                    # 대상모델 호출 + LLM-as-judge 채점
+│   ├─ metrics.py                  # 방어율/점수 집계 + 표 변환
+│   └─ report.py                   # CSV/Excel 다운로드 변환
 ├─ prompts/
-│   └─ English.yaml                # 단어장 프롬프트
+│   ├─ English.yaml                # 단어장 프롬프트
+│   └─ safety_judge.yaml           # 심판(judge) 채점 프롬프트
 ├─ English_word/                   # 단어장 데이터 저장 (자동 생성)
 │   ├─ vocab.json
 │   └─ audio/
@@ -67,7 +74,8 @@ project_root/
 │   ├─ export_doc.py               # Excel/Word/PDF 생성
 │   ├─ tts_utils.py                # TTS + 캐싱 + ZIP 생성
 │   └─ (추가로 vocab_store.py 등 만들고 싶으면 여기에)
-└─ pages/
-    └─ english_word_maker/
-        └─ 1_english_word_maker.py # 단어장 UI 페이지
+├─ pages/
+|   ├─  1_english_word_maker.py     # 단어장 UI 페이지
+│   └─ 2_ai_safety_eval.py          # 평가 대시보드 페이지
+└─ ai_safety_data/                  # 결과 저장 폴더 (실행 시 자동 생성)
 ```
