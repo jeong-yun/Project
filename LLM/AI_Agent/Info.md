@@ -2,6 +2,8 @@
 
 ## Requirements
 실행 버전
+
+```text
 langchain==0.3.21
 langchain-core==0.3.46
 langchain-experimental==0.3.4
@@ -42,11 +44,19 @@ matplotlib==3.10.1
 streamlit==1.43.2
 jupyter==1.1.1
 
+# 단어장 download
+xlsxwriter==3.2.9
+python-docx==1.2.0
+fpdf2==2.8.7
+```
+
 ## 프로젝트 도식화
+
+```text
 project_root/
 ├─ app.py                          # 메인(홈, 일반 Q&A)
 ├─ prompts/
-│   └─ English.yaml               # 단어장 프롬프트
+│   └─ English.yaml                # 단어장 프롬프트
 ├─ English_word/                   # 단어장 데이터 저장 (자동 생성)
 │   ├─ vocab.json
 │   └─ audio/
@@ -59,4 +69,5 @@ project_root/
 │   └─ (추가로 vocab_store.py 등 만들고 싶으면 여기에)
 └─ pages/
     └─ english_word_maker/
-        └─ 1_english_word_maker.py #단어장 UI 페이지
+        └─ 1_english_word_maker.py # 단어장 UI 페이지
+```
