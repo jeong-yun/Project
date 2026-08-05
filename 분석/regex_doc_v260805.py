@@ -53,7 +53,7 @@ csv.field_size_limit(10**8)            # payload 한 칸이 매우 길 수 있�
 
 # ============================ 설정 (환경에 맞게 수정) ============================
 # ↓↓↓ 다른 PC라면 이 한 줄(표준모델 v26.01.02 폴더)만 바꾸면 대개 끝. ↓↓↓
-BASE_DIR = r"C:\Users\Jyun\Desktop\업무\TMAI\표준모델\v26.01.02"
+BASE_DIR = r"C:\Users\{사용}\Desktop\업무\TMAI\표준모델\v26.01.02"
 MODEL_PY = os.path.join(BASE_DIR, "IPS_최종_260202", "ips_v260202_py.py")   # 정규식 정의 소스
 IPS_CSV  = os.path.join(BASE_DIR, "IPS_최종_260202", "ips_sql_260202.csv")  # IPS 학습데이터
 WAF_CSV  = os.path.join(BASE_DIR, "WAF_최종_260202", "waf_sql_260202.csv")  # WAF 학습데이터
@@ -315,6 +315,10 @@ def feature_doc(key, T):
     for p in T['pats']:
         for cat, ref, _ in infer(p): allcat[cat] = ref
     w("- 추정 목적(종합): " + (", ".join(f"{c}({r})" for c, r in allcat.items()) if allcat else "미상"))
+    # 교대(a|b|c) 내 완전 중복 단어(있으면 요약에 경고) — 단일/전체 문서 어느 쪽이든 자동 표시
+    dups_all = [f"패턴{i+1} '{m}'×{n}" for i, p in enumerate(T['pats']) for m, n in dupes_in(p).items()]
+    if dups_all:
+        w("- ⚠️ **교대 내 중복 단어**: " + ", ".join(dups_all) + "  (잉여 — 제거 검토)"
     w("\n---\n")
     for i, p in enumerate(T['pats']):
         s = T['stat'][i]
@@ -333,6 +337,9 @@ def feature_doc(key, T):
             w(f"- ⚠️ **과탐 경고**: 오탐률 {fpr:.1f}% — 구조가 느슨(`(.*?)` 등)해 정상까지 잡음. 경계/앵커 강화 검토.")
         elif tt == 0 and (s['ips']+s['waf']) == 0:
             w("- ℹ️ 학습데이터 매칭 0 — 미사용/사문화 가능성.")
+        dp = dupes_in(p)                              # 이 패턴 자체의 교대 중복 단어
+        if dp:
+            w("- ⚠️ **중복 단어(교대)**: " + ", ".join(f"'{m}'×{n}" for m, n in dp.items()) + " — 잉여, 제거 검토")
         for tagname, arr, render in [
             ("탐지 예시(anomalies)", T['det'][i], lambda x: (f"    - `[{x[0]} {x[1]}]` 매칭='{x[4]}' | payload: `{x[3][:110]}`"
                                                             + (f"\n        · 디코딩: `{dec(x[3][:110])[:110]}`" if dec(x[3][:110]) != x[3][:110] else ""))),
