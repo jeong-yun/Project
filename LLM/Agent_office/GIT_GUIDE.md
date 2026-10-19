@@ -1,6 +1,6 @@
 # Git / GitHub 에 올리기 — 단계별 가이드
 
-26-Agent-Office 폴더를 **독립된 새 GitHub 저장소**로 올리는 절차입니다.
+처음 GitHub 에 올리는 절차입니다. (현재 코드는 이미 `jeong-yun/Project` 저장소의 `LLM/Agent_office` 에 올라가 있으므로, 다른 PC 에서 시작할 때는 10장부터 보면 됩니다.)
 Windows **PowerShell** 기준이며, 명령은 한 줄씩 순서대로 실행합니다.
 
 > 현재 PC 상태 (2026-10-19 확인)
@@ -248,13 +248,16 @@ git push                            # GitHub 에 올리기
 
 ## 10. 다른 PC 에서 내려받아 실행하기
 
+현재 코드는 `jeong-yun/Project` 저장소의 `LLM/Agent_office` 폴더에 있습니다.
+
 ```powershell
 cd 원하는\폴더
-git clone https://github.com/<내계정>/agent-office.git
-cd agent-office
+git clone https://github.com/jeong-yun/Project.git
+cd Project\LLM\Agent_office
 
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 
 Copy-Item .env.example .env
@@ -263,9 +266,11 @@ notepad .env                        # API 키 입력
 streamlit run app.py
 ```
 
-- `data/`(교훈·기록)는 git 에 없으므로 새 PC 에서는 빈 상태로 시작합니다.
-  교훈을 옮기려면 `data\runs.db` 파일만 직접 복사하면 됩니다.
-- 다른 PC 에서 수정한 내용을 이 PC 로 가져오려면: `git pull`
+- git 으로 옮겨지지 않는 것: `.env`(API 키), `data/`(교훈·기록), `results/`(채택 결과 파일), `.venv/`(가상환경).
+  교훈을 이어 쓰려면 `data\runs.db`, 저장한 결과를 옮기려면 `results\` 폴더를 같은 위치에 직접 복사합니다.
+- 두 PC 를 오가며 작업할 때: **시작 전 `git pull` → (작업) → `git add` · `git commit` · `git push`**.
+  `git pull` 뒤에는 새 패키지가 있을 수 있으니 `pip install -r requirements.txt` 를 한 번 더 실행합니다.
+- 새 PC 에서 처음 커밋할 때는 작성자 설정이 필요합니다: `git config user.name "이름"`, `git config user.email "메일"`
 
 ---
 

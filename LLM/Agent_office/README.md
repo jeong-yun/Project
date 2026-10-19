@@ -42,8 +42,9 @@
 | CPU / RAM | 일반 PC 수준, RAM 8GB 이상 권장 |
 | GPU | 불필요 (모든 추론은 API 호출) |
 | 디스크 | 약 1GB (가상환경 포함) |
-| 네트워크 | 인터넷 연결 필수 (LLM API 호출, 웹 검색) |
+| 네트워크 | 인터넷 연결 필수 (LLM API 호출, 웹 검색, 주가·지도 데이터) |
 | 브라우저 | Chrome / Edge / Safari 최신 버전 |
+| Git | 코드 내려받기·올리기용 (Windows: https://git-scm.com/download/win) |
 
 ## 2. 필요 API 키
 
@@ -62,33 +63,59 @@
 - 웹 검색은 DuckDuckGo(`ddgs` 패키지), 주가 데이터는 Yahoo Finance(`yfinance` 패키지)를 쓰므로 별도 키가 필요 없습니다.
 - 비용: 기본 팀 전체(팀장부터)에 질문하면 LLM 호출 약 12~15회 (브리프 1 + 검색어 1 + 분배 2 + 초안 3 + 검토·통합 5 + 비평 1 + 교훈 1).
 
-## 3. 설치
+## 3. 설치 — 새 PC 에서 처음 시작하기
 
-```bash
-# 1) 이 폴더로 이동 (GitHub jeong-yun/Project 저장소 기준)
-cd Project/LLM/Agent_office
+코드는 GitHub `jeong-yun/Project` 저장소의 `LLM/Agent_office` 폴더에 있습니다. 아래는 Windows PowerShell 기준입니다.
 
-# 2) 가상환경 생성
+```powershell
+# 1) 저장소 내려받기 (원하는 폴더에서)
+git clone https://github.com/jeong-yun/Project.git
+cd Project\LLM\Agent_office
+
+# 2) 가상환경 만들기 → 켜기 (Python 3.11 이상)
 python -m venv .venv
-
-# 3) 가상환경 활성화
-#   Windows (PowerShell)
 .venv\Scripts\Activate.ps1
-#   macOS / Linux
-source .venv/bin/activate
+#   macOS / Linux:  python3 -m venv .venv  →  source .venv/bin/activate
 
-# 4) 패키지 설치
+# 3) 패키지 설치
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 
-# 5) API 키 설정: .env.example 을 .env 로 복사 후 값 입력
-#   Windows
-copy .env.example .env
-#   macOS / Linux
-cp .env.example .env
+# 4) API 키 설정: .env.example 을 .env 로 복사한 뒤 메모장에서 키 입력
+Copy-Item .env.example .env
+notepad .env
+#   macOS / Linux:  cp .env.example .env
+
+# 5) 실행 → 브라우저에서 http://localhost:8501
+streamlit run app.py
 ```
 
 > `.env` 는 이 폴더 안의 것을 우선 읽고, 없는 값은 바로 위 폴더의 `.env` 에서 보충합니다.
 > **`.env` 는 절대 git 에 올리지 않습니다** — `.gitignore` 에 들어 있고, 저장소에는 값이 빈 `.env.example` 만 올립니다.
+> 잘 설치됐는지 확인하려면 `pip install -r requirements-dev.txt` 후 `python -m pytest -q` (API 키 없이 실행, 모두 passed 면 정상).
+
+### git 으로 옮겨지지 않는 것 (직접 챙기기)
+
+| 항목 | 내용 | 다른 PC 로 옮기는 방법 |
+|---|---|---|
+| `.env` | API 키 | 새로 만들어 키 입력 (메신저·메일로 키 파일을 보내지 않는 것을 권장) |
+| `data/runs.db` | 에이전트별 **교훈**·채택/반려 기록 | 이 파일을 USB·클라우드 드라이브로 같은 위치에 복사 → 교훈이 그대로 이어짐 |
+| `data/geocode_cache.json` | 여행 지도 좌표 캐시 | 선택 (없으면 처음 한 번 다시 검색) |
+| `results/` | 채택해서 저장한 결과 파일(.md, 지도 .html) | 폴더째 복사 |
+| `.venv/` | 가상환경 | 옮기지 말고 PC 마다 새로 만들기 (2~3단계) |
+
+### 이미 설치한 PC 에서 최신 코드로 업데이트
+
+```powershell
+cd Project\LLM\Agent_office
+git pull
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt   # 새 패키지가 추가됐을 수 있으므로 매번 실행
+streamlit run app.py
+```
+
+> 두 PC 에서 번갈아 작업할 때는 **작업 시작 전 `git pull`, 끝나면 `git add` → `git commit` → `git push`** 순서를 지키면 충돌이 생기지 않습니다.
+> 자세한 Git 사용법은 [GIT_GUIDE.md](GIT_GUIDE.md) 참고.
 
 ## 4. 실행
 
@@ -295,26 +322,22 @@ python -m pytest -q
 
 테스트는 가짜 모델·가짜 검색을 쓰므로 API 키·비용·인터넷 없이 실행됩니다.
 
-## 11. Git 에 올리기 (새 저장소로 분리하는 경우)
+## 11. Git — 수정한 내용 올리기
 
-> 처음 올리는 경우 **[GIT_GUIDE.md](GIT_GUIDE.md)** 의 단계별 가이드(GitHub 저장소 만들기 → 폴더 위치 → init → 메일 설정 →
-> .env 제외 확인 → 커밋 → push → 다른 PC 에서 받기 → 문제 해결)를 따라 하세요. 아래는 요약입니다.
+코드는 GitHub `jeong-yun/Project` 저장소(`main` 브랜치)의 `LLM/Agent_office` 폴더에서 관리합니다.
 
-```bash
-# 이 폴더를 독립 저장소로 (langchain-kr 안에 둔 채로도 가능)
-cd 26-Agent-Office
-git init -b main
-git config user.name "이름"          # 이 저장소에만 적용 (--global 아님)
-git config user.email "메일@example.com"
-git add .
-git status                           # .env, data/ 가 목록에 없는지 반드시 확인
-git commit -m "Agent Office 초기 버전"
-git remote add origin https://github.com/<계정>/<저장소>.git
-git push -u origin main
+```powershell
+cd Project            # 저장소 최상위 폴더
+git pull              # 다른 PC 에서 올린 내용 먼저 받기
+git status            # 바뀐 파일 확인 — .env, data/, results/ 가 없어야 정상 (.gitignore 로 제외)
+git add LLM/Agent_office
+git commit -m "무엇을 왜 바꿨는지 한 줄"
+git push
 ```
 
-- `.env`(API 키)와 `data/`(실행 기록·교훈)는 `.gitignore` 로 제외됩니다. 다른 PC 에서는 `.env.example` 을 복사해 키를 넣습니다.
-- langchain-kr 안에 둔 채 독립 저장소로 쓰면, 바깥 저장소가 이 폴더를 추적하지 않도록 `../.git/info/exclude` 에 `26-Agent-Office/` 를 한 줄 추가하세요 (커밋되지 않는 로컬 설정).
+- 처음 쓰는 PC 에서는 커밋 작성자를 한 번 설정합니다 (이 저장소에만 적용): `git config user.name "이름"`, `git config user.email "메일"`
+- 처음 push 할 때 브라우저 GitHub 로그인 창이 뜹니다 (Git Credential Manager).
+- 저장소 만들기·폴더 이름 바꾸기·실수로 `.env` 를 올렸을 때 대처 등 자세한 내용은 [GIT_GUIDE.md](GIT_GUIDE.md).
 
 ## 12. 트러블슈팅
 

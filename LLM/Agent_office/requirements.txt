@@ -2,7 +2,7 @@
 # langchain 0.3 계열로 고정 (1.x 는 API 변경이 커서 별도 검증 후 올린다)
 
 # UI
-streamlit>=1.43,<2.0
+streamlit>=1.43,<1.67   # 1.43·1.66 에서 검증 (이후 버전은 일부 옵션 제거 예정 — 검증 후 올린다)
 
 # LangChain / LangGraph
 langchain-core>=0.3.46,<1.0
