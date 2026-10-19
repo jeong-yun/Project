@@ -1,0 +1,3 @@
+# 개발/테스트용 (python -m pytest)
+-r requirements.txt
+pytest>=8

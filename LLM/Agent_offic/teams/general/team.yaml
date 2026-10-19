@@ -1,0 +1,80 @@
+# 기본 바탕 팀 — 특정 분야에 치우치지 않는 범용 팀
+id: general
+name: 기본 팀
+description: 범용 질의응답. 팀장(supervisor)이 질문을 받아 리서치·실행 전문가에게 나눠 맡기고 결과를 통합한다.
+
+# 직급별 기본 페르소나. 조직도(org)의 persona 가 비어 있으면 이 값을 쓴다.
+personas:
+  staff: 당신은 성실하고 의욕적인 신입 사원입니다. 빠르게 초안을 작성하되 근거를 함께 적습니다.
+  assistant_manager: 당신은 꼼꼼한 대리입니다. 사실 오류와 빠진 내용을 찾아 보완합니다.
+  deputy_gm: 당신은 경험 많은 차장입니다. 논리의 허점과 리스크를 짚고 반대 관점을 반영합니다.
+  gm: 당신은 실행을 책임지는 부장입니다. 실행 가능성과 우선순위를 기준으로 핵심만 남깁니다.
+  team_lead: 당신은 20년 경력의 팀장입니다. 질문 의도를 파악해 업무를 나누고, 최종 결론과 다음 행동을 명확하게 정리합니다.
+
+# 조직도 — 사용자는 맨 위(supervisor)와 대화한다.
+#   위 → 아래: 관리자가 질문을 보고 필요한 하위 에이전트를 골라 업무를 나눠 준다
+#   아래 → 위: 실무자(하위가 없는 에이전트)가 초안을 쓰고, 관리자가 검토·통합해 올린다
+# 칸(에이전트)을 추가하려면 children 에 항목을 더하면 된다. id 는 팀 안에서 겹치면 안 된다.
+# rank 는 config/ranks.yaml 의 직급 id (모델·기본 이미지 결정), specialty 는 전문 분야.
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장
+  specialty: 총괄 — 질문 의도 파악, 업무 분배, 최종 결론
+  children:
+    - id: gm_research
+      rank: gm
+      name: 부장·리서치
+      specialty: 사실관계·개념 정리
+      children:
+        - id: dgm_research
+          rank: deputy_gm
+          name: 차장·분석
+          specialty: 자료 분석·핵심 개념 설명
+          children:
+            - id: am_fact
+              rank: assistant_manager
+              name: 대리·팩트체크
+              specialty: 출처·수치·용어 검증
+            - id: staff_draft
+              rank: staff
+              name: 사원·초안
+              specialty: 기본 개념 초안 작성
+    - id: gm_action
+      rank: gm
+      name: 부장·실행
+      specialty: 활용 방안·리스크·우선순위
+      children:
+        - id: am_action
+          rank: assistant_manager
+          name: 대리·실행안
+          specialty: 실천 방법·주의사항 정리
+          children:
+            - id: staff_case
+              rank: staff
+              name: 사원·사례
+              specialty: 사례·예시 조사
+
+# 검토자가 공통으로 확인할 체크리스트
+review_criteria:
+  - 사실관계가 정확한가 (웹 검색 자료와 일치하는가)
+  - 질문의 의도에 맞게 답했는가
+  - 빠진 관점이나 리스크가 없는가
+  - 실제로 실행 가능한가
+
+output_format: markdown
+
+# 이 팀에서 사용할 툴. web_search: 답변 전에 웹 검색으로 최신 자료·용어를 확인
+tools: [web_search]
+
+# 결정론적 검증 하네스 (core/harness). 예: [python_syntax, sql_sandbox, json_keys]
+# 범용 팀은 코드가 없는 답변이 대부분이라 기본으로는 파이썬 코드 블록 문법 검사만 켠다 (코드가 없으면 통과).
+harness:
+  validators: [python_syntax]
+  max_retries: 2
+
+# 팀별로 직급 모델을 바꾸고 싶을 때 (형식은 config/models.yaml 의 ranks 와 동일)
+model_overrides: {}
+
+# 모든 최종 답변 하단에 붙일 문구 (예: 투자 권유 아님)
+disclaimer: ""

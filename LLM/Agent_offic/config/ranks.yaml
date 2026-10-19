@@ -1,0 +1,35 @@
+# 직급 정의
+# - 위에서 아래 순서 = 낮은 직급 → 높은 직급 (= 검토 순서)
+# - 직급을 추가/삭제하려면 이 파일과 models.yaml 을 함께 수정한다.
+# - avatar 파일이 없으면 emoji 로 표시된다. (팀별 avatars/ 폴더가 있으면 그쪽이 우선)
+
+ranks:
+  - id: staff
+    name: 사원
+    emoji: "🧑‍💼"
+    role: 질문에 대한 초안을 작성한다. 폭넓게 아이디어를 내고 근거를 함께 제시한다.
+    avatar: assets/avatars/staff.png
+
+  - id: assistant_manager
+    name: 대리
+    emoji: "👨‍💻"
+    role: 사실관계 오류와 누락된 내용을 찾아 보완한다.
+    avatar: assets/avatars/assistant_manager.png
+
+  - id: deputy_gm
+    name: 차장
+    emoji: "🧐"
+    role: 논리 구조와 리스크를 검토하고 반대 관점을 반영한다.
+    avatar: assets/avatars/deputy_gm.png
+
+  - id: gm
+    name: 부장
+    emoji: "👔"
+    role: 실행 가능성과 우선순위를 검토하고 핵심만 남긴다.
+    avatar: assets/avatars/gm.png
+
+  - id: team_lead
+    name: 팀장
+    emoji: "🦉"
+    role: 최종 품질을 판단하고 결론과 다음 행동을 명확히 정리한다.
+    avatar: assets/avatars/team_lead.png

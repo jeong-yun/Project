@@ -1,0 +1,30 @@
+# 앱 전역 설정
+
+default_team: general
+
+review:
+  # 관리자(상위 에이전트)는 지적만 하지 않고 보완된 답변을 직접 다시 작성한다.
+  rewrite_answer: true
+
+feedback:
+  # 다음 실행 시 에이전트별 시스템 프롬프트에 주입할 최근 교훈 개수
+  max_lessons_in_prompt: 5
+
+storage:
+  data_dir: data           # gitignore 대상 (runs.db, 업로드 이미지 등)
+  db_file: runs.db
+  # 사람이 채택/반려하지 않은(피드백 없는) 실행은 불필요한 기록이므로 삭제한다.
+  # 앱 시작 시 이 시간보다 오래된 미결정 실행을 지운다 (진행 중인 화면을 보호하기 위해 약간의 여유를 둠)
+  purge_undecided_after_hours: 1
+
+avatar:
+  allowed_ext: [png, jpg, jpeg, webp]
+  size: 256                # 업로드 시 정사각형으로 리사이즈
+
+web_search:
+  # 팀 team.yaml 의 tools 에 web_search 가 있고, 질문 화면의 '🌐 웹 검색' 이 켜져 있을 때 사용
+  provider: duckduckgo     # 현재 지원: duckduckgo (API 키 불필요)
+  max_queries: 3           # 질문 하나당 검색어 수 (보조 모델이 생성)
+  max_results: 5           # 검색어당 결과 수
+  max_total_results: 10    # 프롬프트에 넣을 최대 결과 수 (중복 제거 후, 뉴스 포함)
+  region: kr-kr            # 한국 (영어 자료도 함께 나옴). wt-wt(전 세계)는 ddgs 내부 오류가 있어 비추천

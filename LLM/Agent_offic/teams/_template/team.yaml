@@ -1,0 +1,63 @@
+# 새 팀 템플릿
+# 사용법: teams/_template 폴더를 teams/<새_팀_id> 로 복사한 뒤 아래 값을 수정한다.
+#        (폴더 이름이 '_' 로 시작하면 앱에서 팀 목록에 표시되지 않는다)
+# 이미지 바꾸기 (먼저 찾은 것 사용):
+#   teams/<팀>/avatars/<에이전트id>.png  → 에이전트 한 명만
+#   teams/<팀>/avatars/<직급id>.png      → 이 팀의 해당 직급 전체
+#   같은 이름 + _working.png (예: lead_working.png) → 답변·검토 중일 때 이미지
+
+id: my_team
+name: 새 팀 이름
+description: "이 팀이 다루는 분야 한 줄 설명 (예: 보안 로그 분석)"
+
+personas:
+  staff: ""
+  assistant_manager: ""
+  deputy_gm: ""
+  gm: ""
+  team_lead: ""
+
+# 조직도 — 맨 위가 supervisor. 하위가 없는 칸이 실무자(초안 작성).
+# 예) 보안 로그 분석 팀: 단계별로 전문가를 나누면 하네스로 단계별 평가를 할 수 있다.
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장
+  specialty: 위협 판단 총괄
+  children:
+    - id: decoder
+      rank: deputy_gm
+      name: 차장·페이로드 복원
+      specialty: 인코딩된 악성 페이로드 복원 (Step 1)
+    - id: matcher
+      rank: assistant_manager
+      name: 대리·시그니처 매칭
+      specialty: 알려진 공격 시그니처 매칭 (Step 2)
+    - id: scorer
+      rank: gm
+      name: 부장·위험도
+      specialty: 위험도 스코어링 (Step 3)
+
+review_criteria:
+  - 이 분야에서 반드시 확인해야 할 항목 1
+  - 이 분야에서 반드시 확인해야 할 항목 2
+
+output_format: markdown
+
+tools: [web_search]  # web_search: 답변 전 웹 검색 (끄려면 [] 로)
+
+# 결정론적 검증 하네스 — 검증 실패 시 에러 로그를 돌려주고 다시 쓰게 한다 (최대 max_retries 회)
+#   python_syntax : 답변 속 ```python 코드 블록 문법 검사
+#   sql_sandbox   : 답변 속 ```sql 쿼리를 메모리 SQLite 에 schema 를 만들고 실행 계획(EXPLAIN)으로 검사
+#   json_keys     : 답변 속 ```json 블록이 올바른 JSON 이고 required_keys 를 모두 가졌는지 검사
+harness:
+  validators: []
+  max_retries: 2
+  options: {}
+  # options 예시:
+  #   sql_schema: teams/my_team/schema.sql
+  #   required_keys: [extract_payload, analyze_anomaly_pattern, final_decision]
+
+model_overrides: {}  # 예: { team_lead: { primary: { provider: openai, model: gpt-5.5 } } }
+
+disclaimer: ""       # 예: "본 내용은 투자 권유가 아니며 투자 판단의 책임은 본인에게 있습니다."

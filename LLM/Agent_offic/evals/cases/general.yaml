@@ -1,0 +1,44 @@
+# 기본 팀 평가 케이스 — python -m evals.run_eval evals/cases/general.yaml
+# 단계(step): research | plan | draft | review | integrate | final
+# 검사(expect): contains_all · contains_any · not_contains · regex · min_score · critic_min · harness_pass · assigned
+# 자세한 설명: core/harness/evaluation.py
+
+team: general
+
+cases:
+  # 실제로 겪은 오류: "HBF" 질문에 HBM 설명이 나옴 → 검색어 단계부터 최종까지 어디서 틀리는지 추적
+  - id: hbf_definition
+    question: HBF에 대해 알려줘
+    use_web: true
+    checks:
+      - name: 검색어·결과에 정식 명칭(High Bandwidth Flash)이 나온다
+        step: research
+        expect: {contains_any: ["High Bandwidth Flash"]}
+      - name: 팀장이 리서치 부장에게 업무를 맡긴다
+        step: plan
+        node: lead
+        expect: {assigned: [gm_research]}
+      - name: 초안 중 하나 이상이 HBF 를 플래시 메모리로 설명한다
+        step: draft
+        expect: {contains_any: ["High Bandwidth Flash", "고대역폭 플래시", "NAND"]}
+      - name: 최종 답변이 HBF 를 HBM 과 같은 것으로 설명하지 않는다
+        step: final
+        expect:
+          contains_any: ["High Bandwidth Flash", "고대역폭 플래시"]
+          not_contains: ["HBM의 다른 이름", "HBM과 같은"]
+      - name: 최종 답변이 출처 번호를 표시한다
+        step: final
+        expect: {regex: "\\[\\d+\\]"}
+
+  # 하네스 확인용 — 코드가 포함된 답변은 python_syntax 검증을 통과해야 한다
+  - id: python_code
+    question: 파이썬으로 리스트에서 중복을 제거하는 함수를 짧게 작성해줘
+    use_web: false
+    checks:
+      - name: 초안 코드가 문법 검증을 통과한다
+        step: draft
+        match: all
+        expect: {harness_pass: true}
+      - name: 최종 답변에 코드 블록이 있고 문법 검증을 통과한다
+        step: final
+        expect: {regex: "```python", harness_pass: true}

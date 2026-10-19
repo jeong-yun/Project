@@ -1,0 +1,29 @@
+# (예시 템플릿) 보안 로그 분석 팀의 단계별 평가 — 팀을 만든 뒤 team 과 node id 를 맞춰 사용
+# 조직도 예: teams/_template/team.yaml (decoder → matcher → scorer)
+# 1) 인코딩된 악성 페이로드 복원(Step 1) 2) 시그니처 매칭(Step 2) 3) 위험도 스코어링(Step 3)
+# 각 노드에 유닛 테스트를 걸어 '정확히 어느 노드에서 실패했는지' 추적한다.
+
+team: security_log   # teams/security_log 를 만든 뒤 사용
+
+cases:
+  - id: base64_sqli
+    question: |
+      다음 웹 로그를 분석해줘:
+      GET /search?q=JyBPUiAxPTEgLS0= HTTP/1.1
+    use_web: false
+    checks:
+      - name: "[Step 1] 페이로드 복원 — Base64 를 디코딩해 SQL 구문을 찾는다"
+        step: draft
+        node: decoder
+        expect: {contains_any: ["' OR 1=1", "OR 1=1"]}
+      - name: "[Step 2] 시그니처 매칭 — SQL Injection 으로 분류한다"
+        step: draft
+        node: matcher
+        expect: {contains_any: ["SQL Injection", "SQLi", "SQL 인젝션"]}
+      - name: "[Step 3] 위험도 — 높음 이상으로 판정한다"
+        step: draft
+        node: scorer
+        expect: {regex: "(높음|High|Critical|심각)"}
+      - name: 최종 판단이 단계 분할 JSON 키를 갖는다 (json_keys 하네스)
+        step: final
+        expect: {harness_pass: true}

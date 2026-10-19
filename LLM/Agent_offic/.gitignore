@@ -1,0 +1,9 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/
+
+# 레포 루트 .gitignore 의 '*.md' 규칙 예외 — 이 폴더의 문서(README, PLAN, today_worked)는 커밋한다
+!*.md

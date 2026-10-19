@@ -1,0 +1,65 @@
+# Today Worked — 26-Agent-Office
+
+날짜별 진행 기록. 각 항목은 이력서/JD 에 바로 옮길 수 있도록 **작업 · 기술 · 성과 · 다음 할 일** 로 짧게 적는다.
+
+---
+
+## 2026-10-19
+
+**기획**
+- 작업: 직급형 멀티 에이전트 검토 시스템 기획 및 아키텍처 설계 ([PLAN.md](PLAN.md))
+- 기술: LangGraph(Human-in-the-loop), Multi-LLM(OpenAI/Claude/Gemini/Upstage), Streamlit
+- 성과: 직급별 차등 모델 + 단계 검토 + 사람 채택 피드백 루프 구조 설계, P0~P6 마일스톤 수립
+
+**P0 골격 구축**
+- 작업: 프로젝트 골격 생성 — 설정 파일(직급/모델/앱), 기본 팀·팀 템플릿, 설정 로더, 메인 화면(에이전트 카드), 기본 아바타 생성 스크립트, README
+- 기술: Streamlit, PyYAML, python-dotenv, Pillow
+- 성과: 코드 수정 없이 YAML 만으로 직급·모델·팀·이미지를 바꿀 수 있는 설정 기반 구조 확립, API 키 유무에 따른 모델 자동 fallback 표시
+- 다음 할 일: P1 — LLM factory(provider 추상화), 직급 에이전트 단일 답변
+
+**P1 LLM factory · 직급 에이전트 단일 답변**
+- 작업: 4개 provider(OpenAI/Anthropic/Google/Upstage) 통합 LLM factory, 직급 에이전트(페르소나 프롬프트·스트리밍 답변), pydantic 설정 검증, 질문/답변 UI, 모의 LLM 테스트 13건
+- 기술: LangChain ChatModel 추상화, Streaming(`st.write_stream`), Pydantic v2, pytest + FakeListChatModel, OpenAI 호환 API(Upstage)
+- 성과: 키 부재뿐 아니라 **런타임 실패(크레딧 부족·할당량 초과·모델 단종)까지 자동 fallback** — 실제 API 스모크 테스트에서 Anthropic 크레딧 부족·Gemini Pro 무료 할당량 0 상황에서도 5개 직급 모두 응답 성공. 단종 모델 2종(Gemini 2.5 Flash-Lite/Pro)을 실측으로 발견해 교체
+- 다음 할 일: P2 — LangGraph 검토 체인(상위 직급 순차 검토·보완, 구조화 출력)
+
+**P2 LangGraph 검토 체인**
+- 작업: 클릭한 직급 → 팀장까지 순차 검토 워크플로우(StateGraph, 조건부 루프), 검토 결과 구조화 출력(승인/보완·점수·지적사항·보완답변·코멘트), 조기 종료 정책, 검토 타임라인 UI, 워크플로우 테스트 6건 추가(총 19건)
+- 기술: LangGraph(StateGraph, reducer, 조건부 엣지, `stream_mode=["messages","updates"]`), `with_structured_output`(OpenAI json_schema / Gemini·Claude tool calling), Pydantic
+- 성과: 실제 API 로 사원→팀장 5단계 체인 동작 확인(Gemini·GPT-4.1·GPT-5 구조화 출력 파싱 성공). 승인 시에도 답변 전문을 다시 쓰던 낭비(승인 1회당 출력 약 670 토큰)를 발견해, 승인이면 재작성을 생략하도록 프롬프트·스키마 개선 (동일 질문 기준 절감률은 추후 측정)
+- 다음 할 일: P3 — 사람 채택(LangGraph interrupt) + 에이전트별 교훈 피드백 저장·주입
+
+**P3 사람 채택 · 교훈 피드백 루프**
+- 작업: LangGraph `interrupt` 기반 사람 결정 단계(안 선택·직접 수정·만족도·코멘트, 채택/반려), SQLite 체크포인터로 대기 상태 영속화, 결정 → 직급별 교훈 생성(LLM + 규칙 기반 보충) → 저장 → 다음 실행 시 직급별 프롬프트에 자동 주입, 실행 이력·교훈 저장소(SQLite), 카드별 누적 교훈 표시, 테스트 9건 추가(총 28건)
+- 기술: LangGraph Human-in-the-loop(`interrupt`, `Command(resume=…)`, `SqliteSaver`), 구조화 출력 공통 fallback 헬퍼, SQLite, Streamlit form/state 관리
+- 성과: 실제 API 로 질문 → 3단계 검토 → 대기(interrupt) → 재개 → 교훈 저장 전체 사이클 검증. 실측에서 Flash-Lite 피드백 모델이 사람 코멘트를 누락·반대로 해석하는 문제를 발견 → 모델 상향 + 사람 코멘트 원문을 코드로 보장하는 장치를 추가해 반복 실행에서도 지적 사항이 일관되게 전달되도록 개선
+- 다음 할 일: P4 — UI 완성(이력·피드백 관리·설정 페이지, 아바타 업로드, 단계별 비교 뷰)
+
+**모델 전환 · 웹 검색 · 작업 중 표시**
+- 작업: Claude 크레딧 부족에 맞춰 provider 비활성화(`disabled_providers`) 기능과 사용 가능한 대안 모델 구성(GPT-5.4/5.5, Gemini 3.5/3.8 Flash — 각 사 모델 목록 API 조회 + 실제 호출로 검증), DuckDuckGo 웹 검색 단계(검색어 계획 → 검색 → 출처 번호 주입), 답변·검토 중 아바타/애니메이션 배지
+- 성과: "HBF" 질문에 HBM 설명이 나오던 문제의 원인을 '검색 부재 + 약어 단독 검색 시 무관한 결과'로 규명 → 검색어 계획 단계 도입으로 해결
+
+**조직도(Supervisor) 구조 전환 · 검증 체계 · 하네스**
+- 작업: 일렬 직급 체인을 **Supervisor → Specialist 트리**로 재설계 (팀장이 필요한 전문가만 골라 분배 → 실무자 초안 → 관리자 검토·통합 → 사람 결정), 조직도 UI(실시간 상태), Desired-State 브리프(목표·완료 기준·제약·형식) + 질문 예시, 팀 스킬(고정 지침), 적대적 리뷰어·CoT 강제·퓨샷 루브릭·비평가(LLM-as-a-Judge)·자가 교정, 결정론적 하네스(python/SQL 샌드박스/JSON 키 검증 + Backtracking), 단계별 평가 하네스(PRM vs ORM CLI), 피드백 없는 실행 자동 삭제, 기존 DB 마이그레이션, 테스트 53건
+- 기술: LangGraph(할 일 스택 기반 트리 순회, `get_stream_writer` custom 이벤트, 태그 기반 토큰 라우팅, `interrupt`/`SqliteSaver`), 구조화 출력 단계 분할, SQLite 샌드박스(progress handler 타임아웃), HTML/CSS 조직도
+- 성과: 단계별 평가 하네스로 "HBF" 질문의 실패 지점을 순서대로 추적·수정 (실제 모델·검색, 2026-10-19)
+  1) 1차: PRM 33%·ORM 실패 — 처음 실패 노드 **research**(검색 결과에 정식 명칭 없음) → 검색어 계획 규칙 + 뉴스 검색 + 검색 지역 오류(wt-wt) 수정
+  2) 2차: PRM 100%·ORM 실패 — 모든 단계가 맞았는데 **최종 통합에서 하위 결과(High Bandwidth Flash)를 버림** → 통합 시 하위 사실 보존·최신 동향 우선 규칙 + 브리프 모호성 규칙 추가
+  3) 3차: PRM 100%·ORM 통과 — HBF 를 High Bandwidth Flash(반도체/AI 메모리) 중심으로 출처와 함께 설명, HBM 과 구분
+  - 실제 UI 에서 의사결정 질문 실행 시 적대적 검토가 출처 없는 단정·TCO 누락·권한 노출 리스크를 찾아내 보완
+- 다음 할 일: 이력·교훈 관리 페이지, 전문 팀(주식·보안 로그·여행) 추가, 형제 노드 병렬 실행으로 속도 개선
+
+---
+
+## JD / 이력서용 요약 (누적)
+
+- **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph, LangChain, Human-in-the-loop, LLM-as-a-Judge, Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration (OpenAI · Anthropic · Google · Upstage), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, 설정 기반(Config-driven) 설계
+- **프로젝트 한 줄 소개**: 사용자가 supervisor 에게 '최종 상태'를 맡기면 전문가 에이전트 트리가 분배·작성·적대적 검토·통합하고, 비평가·하네스로 검증한 결과를 사람이 채택하면 각 에이전트가 교훈을 학습하는 멀티 에이전트 프레임워크
+- **정량 성과** (측정 후 기입 예정)
+  - 단계별 평가 하네스(PRM/ORM)로 실패 노드를 특정해 2회 수정 → HBF 케이스 PRM 33%·ORM 실패 → PRM 100%·ORM 통과 (2026-10-19 실측)
+  - 4개 LLM provider 장애·크레딧·할당량 상황에서도 자동 대안 모델 전환으로 전 에이전트 응답 유지 (2026-10-19 실측)
+  - 직급별 모델 차등 적용에 따른 비용 절감률: -
+  - 검토 승인 단계 재작성 생략에 따른 출력 토큰 절감률: - (동일 질문 기준 측정 예정)
+  - 4개 LLM provider 장애·크레딧·할당량 상황에서도 자동 fallback 으로 전 직급 응답 유지 (2026-10-19 실측)
+  - 검토 단계별 품질 점수 변화: -
+  - 신규 전문 팀 추가 소요 시간: -
