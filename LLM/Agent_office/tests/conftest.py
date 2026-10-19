@@ -23,7 +23,7 @@ def no_network_search(monkeypatch):
 
     calls: list[str] = []
 
-    def fake_backend(query, max_results, region):
+    def fake_backend(query, max_results, region, **kwargs):
         calls.append(query)
         return [
             search.SearchResult(title=f"{query} 결과", url=f"https://example.com/{len(calls)}", snippet="요약"),

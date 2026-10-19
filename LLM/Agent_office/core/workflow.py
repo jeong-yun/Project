@@ -37,9 +37,10 @@ from core.agent import OrgAgent, chunk_text, with_feedback
 from core.brief import DesiredState, draft_brief, empty_state
 from core.config import load_skills, parent_map, subtree
 from core.feedback import generate_lessons
-from core.schemas import AgentAnswer, HumanDecision, Lesson, ModelsConfig, OrgNode, Rank, Team
+from core.schemas import AgentAnswer, HumanDecision, Lesson, ModelsConfig, OrgNode, Rank, Team, ToolResult
 from core.search import WebContext
 from core.storage import Storage
+from core.tools import run_tools
 
 WEB_SEARCH_TOOL = "web_search"
 DRAFT_TAG = "draft:"  # 초안 스트리밍 토큰에 붙이는 태그 접두어 (뒤에 에이전트 id)
@@ -55,6 +56,10 @@ class OfficeState(TypedDict, total=False):
     brief: DesiredState  # 완성된 브리프 → 에이전트들이 실제로 받는 업무 지시
     use_web: bool
     web: WebContext | None
+    tool_inputs: dict  # 팀 업무 양식의 입력값 → 데이터 툴 입력 (예: stock, quantity, start_date)
+    tool_results: list[ToolResult]  # 데이터 툴 결과 (주가·여행 달력 등)
+    extra_validators: list[str]  # 업무 양식이 추가로 요구하는 하네스 검증기
+    harness_options: dict  # 업무·툴이 정한 하네스 옵션 (예: required_terms, trip_days)
     agenda: list[dict]  # 할 일 스택 [{"op": "visit"|"integrate", "node": id}]
     tasks: dict[str, str]  # 에이전트 id → 맡은 업무 (위에서 내려온 지시)
     assigned: dict[str, list[str]]  # 관리자 id → 업무를 맡긴 하위 id 목록
@@ -116,24 +121,37 @@ def build_office_graph(
         return storage.recent_lessons(team.id, node_id, max_lessons) if storage else None
 
     def web_text(state: OfficeState) -> str:
+        """에이전트에게 줄 근거 자료 = 데이터 툴 결과(사실 수치) + 웹 검색 결과."""
+        parts = [f"## {t.title}\n{t.content}" for t in state.get("tool_results") or [] if t.content]
         web = state.get("web")
-        return web.as_prompt() if web else ""
+        if web and web.results:
+            parts.append("## 🌐 웹 검색 결과\n" + web.as_prompt())
+        return "\n\n".join(parts)
 
     def emit(event: dict) -> None:
         """화면에 '누가 지금 무엇을 하는지' 알린다 (stream_mode='custom' 이벤트)."""
         get_stream_writer()(event)
 
-    def run_harness(answer: AgentAnswer, redo) -> AgentAnswer:
+    def harness_plan(state: OfficeState) -> tuple[list[str], dict]:
+        """이번 실행에서 돌릴 검증기와 옵션 = 팀 기본 + 업무 양식 추가분 + 툴이 계산한 값."""
+        validators = list(dict.fromkeys([*team.harness.validators, *(state.get("extra_validators") or [])]))
+        options = {**team.harness.options, **(state.get("harness_options") or {})}
+        for t in state.get("tool_results") or []:
+            options = {**t.harness_options, **options}
+        return validators, options
+
+    def run_harness(answer: AgentAnswer, redo, state: OfficeState) -> AgentAnswer:
         """하네스 검증 → 실패하면 에러 로그를 돌려주고 다시 쓰게 한다 (최대 max_retries 회).
 
         redo(feedback, previous) 는 '피드백을 반영해 다시 작성'하는 함수 (초안/검토마다 다름).
         """
         cfg = team.harness
-        if not cfg.validators:
+        validators, options = harness_plan(state)
+        if not validators:
             return answer
         log: list[str] = []
         for attempt in range(cfg.max_retries + 1):
-            results = harness.run_validators(cfg.validators, answer.content, cfg.options)
+            results = harness.run_validators(validators, answer.content, options)
             if harness.all_passed(results) or attempt == cfg.max_retries:
                 break
             feedback = harness.harness_feedback(results)
@@ -167,16 +185,24 @@ def build_office_graph(
         return {"brief": brief, "notes": notes}
 
     def research_node(state: OfficeState) -> dict:
-        """웹 검색(선택) 후 할 일 스택을 준비한다."""
+        """자료 조사 — 데이터 툴(주가·여행 달력 등) + 웹 검색(선택) 후 할 일 스택을 준비한다."""
         root = state["root_id"]
         brief = state["brief"]
+        data_tools = [t for t in team.tools if t != WEB_SEARCH_TOOL]
+        tool_results = []
+        if data_tools:
+            emit({"type": "start", "node": root, "kind": "tools"})
+            tool_results = run_tools(data_tools, state["question"], state.get("tool_inputs") or {}, models)
         web = None
         if state.get("use_web") and WEB_SEARCH_TOOL in team.tools:
             emit({"type": "start", "node": root, "kind": "research"})
-            # 검색어는 원 질문 + 목표로 만든다 (브리프 전체는 검색어 생성에 너무 길다)
-            web = search.research(f"{state['question']}\n(목표: {brief.goal})", models, settings)
+            # 검색어는 원 질문 + 목표로 만든다 (브리프 전체는 검색어 생성에 너무 길다). 팀별 검색 설정을 덮어쓴다
+            web = search.research(
+                f"{state['question']}\n(목표: {brief.goal})", models, {**settings, "web_search": {**settings.get("web_search", {}), **team.search}}
+            )
         return {
             "web": web,
+            "tool_results": tool_results,
             "agenda": [{"op": "visit", "node": root}],
             "tasks": {root: brief.goal or state["question"]},  # supervisor 의 업무 = 최종 목표
             "assigned": {},
@@ -231,7 +257,7 @@ def build_office_graph(
             def redo_draft(feedback: str, previous: AgentAnswer) -> AgentAnswer:
                 return agent.draft(with_feedback(messages, previous.content, feedback), tag)
 
-            answer = run_harness(answer, redo_draft)
+            answer = run_harness(answer, redo_draft, state)
             results[node_id] = answer
             new_steps.append(answer)
 
@@ -273,7 +299,7 @@ def build_office_graph(
             def redo_review(feedback: str, previous: AgentAnswer) -> AgentAnswer:
                 return agent.review(with_feedback(messages, previous.review.model_dump_json(), feedback), children, rewrite_answer)
 
-            answer = run_harness(answer, redo_review)
+            answer = run_harness(answer, redo_review, state)
             results[node_id] = answer
             new_steps.append(answer)
 
@@ -349,6 +375,8 @@ def _events(graph, inputs, config) -> Iterator[tuple[str, object]]:
                 for note in update.get("notes", []):
                     yield "note", note
             elif node == "research":
+                if update.get("tool_results"):
+                    yield "tools", update["tool_results"]
                 yield "research", update.get("web")
             elif node == "feedback":
                 yield "lessons", update["lessons"]
@@ -368,18 +396,25 @@ def stream_office(
     use_web: bool = False,
     brief: DesiredState | None = None,
     auto_brief: bool = True,
+    tool_inputs: dict | None = None,
+    extra_validators: list[str] | None = None,
+    harness_options: dict | None = None,
 ) -> Iterator[tuple[str, object]]:
-    """질문 → 브리프 → (웹 검색) → 분배·초안·검토·통합 진행 이벤트.
+    """질문 → 브리프 → (데이터 툴·웹 검색) → 분배·초안·검토·통합 진행 이벤트.
 
     Args:
-        brief:      사용자가 화면에서 채운 최종 상태 정의 (없거나 일부만 있어도 됨)
-        auto_brief: 빈 항목을 보조 모델이 채울지
+        brief:            사용자가 화면에서 채운 최종 상태 정의 (없거나 일부만 있어도 됨)
+        auto_brief:       빈 항목을 보조 모델이 채울지
+        tool_inputs:      팀 업무 양식 입력값 (데이터 툴이 사용)
+        extra_validators: 업무 양식이 추가로 요구하는 하네스 검증기
+        harness_options:  하네스 옵션 (예: required_terms)
 
     Yields:
-        ("start",   {"node", "kind"})  — 어떤 에이전트가 어떤 일을 시작함 (brief/research/plan/draft/review/integrate/critic)
+        ("start",   {"node", "kind"})  — 어떤 에이전트가 어떤 일을 시작함 (brief/tools/research/plan/draft/review/integrate/critic)
         ("retry",   {"node", "reason"}) — 자가 교정(critic) 또는 하네스(harness) 실패로 다시 씀
         ("delegated", {"node", "children"}) — 관리자가 하위에게 업무를 넘김 (하위 결과를 기다리는 중)
         ("brief",   DesiredState)       — 정리된 업무 브리프
+        ("tools",   list[ToolResult])   — 데이터 툴 결과 (주가·여행 달력 등)
         ("research", WebContext | None) — 웹 검색 결과
         ("token",   (에이전트 id, 텍스트)) — 실무자 초안 토큰
         ("step",    AgentAnswer)        — 한 단계 완료
@@ -393,6 +428,10 @@ def stream_office(
         "auto_brief": auto_brief,
         "use_web": use_web,
         "web": None,
+        "tool_inputs": tool_inputs or {},
+        "tool_results": [],
+        "extra_validators": extra_validators or [],
+        "harness_options": harness_options or {},
         "steps": [],
     }
     yield from _events(graph, inputs, _config(org, thread_id))

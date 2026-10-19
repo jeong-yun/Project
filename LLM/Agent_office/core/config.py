@@ -11,6 +11,8 @@
 읽은 YAML 은 core/schemas.py 의 pydantic 모델로 검증되어, 오타가 있으면 앱 시작 시 바로 알려 준다.
 """
 
+import os
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -33,6 +35,19 @@ def load_env() -> None:
     """API 키 읽기: 폴더 내 .env 를 우선 읽고, 없는 값은 상위(레포 루트) .env 에서 보충한다."""
     load_dotenv(BASE_DIR / ".env")
     load_dotenv(BASE_DIR.parent / ".env", override=False)
+
+
+WEEKDAYS = "월화수목금토일"
+
+
+def today() -> date:
+    """오늘 날짜 — '현 시점' 기준. 테스트에서는 환경변수 AGENT_OFFICE_TODAY=YYYY-MM-DD 로 고정한다."""
+    fixed = os.getenv("AGENT_OFFICE_TODAY")
+    return date.fromisoformat(fixed) if fixed else date.today()
+
+
+def date_label(d: date) -> str:
+    return f"{d.isoformat()} ({WEEKDAYS[d.weekday()]})"
 
 
 def load_yaml(path: Path) -> dict:
@@ -146,13 +161,21 @@ def validate_config(ranks: list[Rank], models: ModelsConfig, teams: list[Team]) 
         if bad_rank:
             raise ConfigError(f"teams/{team.id}/team.yaml 조직도의 rank 가 ranks.yaml 에 없음: {bad_rank}")
         from core.harness import REGISTRY  # 순환 import 방지를 위해 여기서 import
+        from core.tools import TOOLS
 
-        unknown_validators = set(team.harness.validators) - REGISTRY.keys()
+        used_validators = set(team.harness.validators) | {v for t in team.tasks for v in t.validators}
+        unknown_validators = used_validators - REGISTRY.keys()
         if unknown_validators:
             raise ConfigError(
-                f"teams/{team.id}/team.yaml harness.validators 에 없는 검증기: {sorted(unknown_validators)} "
-                f"(사용 가능: {sorted(REGISTRY)})"
+                f"teams/{team.id}/team.yaml 에 없는 검증기: {sorted(unknown_validators)} (사용 가능: {sorted(REGISTRY)})"
             )
+        known_tools = {"web_search", *TOOLS}
+        unknown_tools = set(team.tools) - known_tools
+        if unknown_tools:
+            raise ConfigError(f"teams/{team.id}/team.yaml tools 에 없는 툴: {sorted(unknown_tools)} (사용 가능: {sorted(known_tools)})")
+        task_ids = [t.id for t in team.tasks]
+        if len(task_ids) != len(set(task_ids)):
+            raise ConfigError(f"teams/{team.id}/team.yaml 에 중복된 업무 id 가 있습니다: {task_ids}")
 
 
 def rank_models(rank_id: str, models: ModelsConfig, team: Team | None = None) -> RankModels:

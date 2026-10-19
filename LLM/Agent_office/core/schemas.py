@@ -99,6 +99,39 @@ class HarnessConfig(BaseModel):
     options: dict = Field(default_factory=dict)  # 검증기별 옵션 (예: sql_schema 파일 경로)
 
 
+class TaskField(BaseModel):
+    """업무 입력 양식의 칸 하나 — 화면에 입력란으로 그려진다."""
+
+    key: str  # 템플릿에서 {key} 로 쓰는 이름
+    label: str
+    type: Literal["text", "textarea", "number", "date", "select"] = "text"
+    required: bool = False
+    options: list[str] = Field(default_factory=list)  # select 일 때 선택지
+    default: str | float | int | None = None
+    placeholder: str = ""
+    help: str = ""
+
+
+class TaskTemplate(BaseModel):
+    """팀의 정형 업무 (예: 주가 전망). 입력값으로 질문과 '최종 상태' 브리프를 자동으로 만든다.
+
+    question·goal·success_criteria 등에는 {입력칸key} 를 쓸 수 있다.
+    값이 비어 있는 {key} 가 들어간 줄은 통째로 빠진다 → 선택 입력을 자연스럽게 처리.
+    """
+
+    id: str
+    title: str
+    description: str = ""
+    fields: list[TaskField] = Field(default_factory=list)
+    question: str
+    goal: str
+    success_criteria: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    output_format: str = ""
+    validators: list[str] = Field(default_factory=list)  # 이 업무에서 추가로 돌릴 하네스 검증기
+    harness_options: dict = Field(default_factory=dict)  # 검증기 옵션 (예: required_terms)
+
+
 class Team(BaseModel):
     """팀 (teams/<id>/team.yaml). 팀마다 조직도·검토 기준·툴·하네스를 따로 가진다."""
 
@@ -108,12 +141,14 @@ class Team(BaseModel):
     personas: dict[str, str] = Field(default_factory=dict)  # 직급 id → 기본 페르소나
     review_criteria: list[str] = Field(default_factory=list)
     output_format: str = "markdown"
-    tools: list[str] = Field(default_factory=list)  # 예: [web_search]
+    tools: list[str] = Field(default_factory=list)  # 예: [web_search, stock_data]
     model_overrides: dict[str, RankModels] = Field(default_factory=dict)
     disclaimer: str = ""
     org: OrgNode | None = None  # 없으면 ranks.yaml 순서대로 일렬 조직도를 자동 생성
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     rubric: dict | None = None  # 없으면 config/verification.yaml 의 review_rubric 사용
+    tasks: list[TaskTemplate] = Field(default_factory=list)  # 정형 업무 양식 (없으면 자유 질문만)
+    search: dict = Field(default_factory=dict)  # 웹 검색 설정 덮어쓰기 (hint, news_timelimit 등)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -179,6 +214,16 @@ class LessonSet(BaseModel):
 # ════════════════════════════════════════════════════════════════════
 # 3) 실행 결과 스키마
 # ════════════════════════════════════════════════════════════════════
+
+
+class ToolResult(BaseModel):
+    """데이터 툴(주가 조회, 여행 달력 등)의 결과 — 웹 검색 결과와 함께 모든 에이전트의 근거 자료가 된다."""
+
+    tool: str  # 툴 이름 (예: stock_data)
+    title: str  # 화면 표시 제목 (예: 📈 시장 데이터)
+    content: str  # 프롬프트에 들어갈 본문 (마크다운)
+    notes: list[str] = Field(default_factory=list)  # 경고·실패 기록
+    harness_options: dict = Field(default_factory=dict)  # 툴이 계산해 하네스에 넘기는 값 (예: 여행 일수)
 
 
 class HarnessResult(BaseModel):

@@ -1,0 +1,172 @@
+# 주식 팀 — 종목 추천 · 주가 전망 · 보유 종목 전략 · 포트폴리오 구성
+#
+# 근거 자료
+#   - stock_data 툴: Yahoo Finance 시세로 현재가·수익률·이동평균·변동성·밸류에이션·보유 평가손익을 '코드로' 계산
+#   - web_search  : 최근 1개월 뉴스(news_timelimit: m) + 증권사 리포트·실적 검색
+# ※ 모든 결과는 참고용 분석이며 투자 권유가 아니다 (disclaimer).
+
+id: stock
+name: 주식 팀
+description: 최신 뉴스·리포트·시세 데이터를 근거로 종목 추천, 주가 전망, 보유 종목 대응 전략, 포트폴리오 구성안을 만든다.
+
+personas:
+  staff: 당신은 증권사 리서치센터의 신입 애널리스트입니다. 자료를 빠짐없이 모으고 출처와 날짜를 정확히 적습니다.
+  assistant_manager: 당신은 꼼꼼한 주니어 애널리스트입니다. 숫자·날짜·출처가 자료와 일치하는지 검증합니다.
+  deputy_gm: 당신은 시니어 애널리스트입니다. 실적·밸류에이션·산업 흐름으로 종목의 핵심 논리를 세웁니다.
+  gm: 당신은 리스크 관리 책임자입니다. 하락 시나리오와 손실 한도를 먼저 따지고, 확정적 표현을 경계합니다.
+  team_lead: 당신은 20년 경력의 투자전략 총괄입니다. 근거·시나리오·리스크를 균형 있게 묶어 실행 가능한 결론을 냅니다.
+
+# 조직도 — 팀장이 업무 유형에 맞는 전문가에게 나눠 준다
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장·투자전략
+  specialty: 투자전략 총괄 — 업무 분배, 최종 결론·행동 지침
+  children:
+    - id: gm_research
+      rank: gm
+      name: 부장·리서치
+      specialty: 종목·산업 분석 총괄 (뉴스·리포트·실적·시세)
+      children:
+        - id: dgm_news
+          rank: deputy_gm
+          name: 차장·뉴스리포트
+          specialty: 최근 뉴스·증권사 리포트·목표주가·실적 발표 정리와 시장 심리
+        - id: am_data
+          rank: assistant_manager
+          name: 대리·시세데이터
+          specialty: 시장 데이터(주가 흐름·이동평균·변동성·밸류에이션) 해석
+    - id: gm_risk
+      rank: gm
+      name: 부장·리스크
+      specialty: 리스크 관리·포지션 전략·포트폴리오 비중
+      children:
+        - id: dgm_scenario
+          rank: deputy_gm
+          name: 차장·시나리오
+          specialty: 상승·기본·하락 시나리오와 가격 범위·대응 조건
+        - id: staff_portfolio
+          rank: staff
+          name: 사원·포트폴리오
+          specialty: 분산 투자 비중 계산·리밸런싱 규칙 초안
+
+review_criteria:
+  - 숫자(주가·수익률·평가손익)가 시장 데이터와 일치하는가
+  - 근거 뉴스·리포트에 날짜와 출처가 있고 최근(1개월 이내) 자료인가
+  - 확정적 표현 없이 시나리오·확률·조건으로 표현했는가
+  - 하락 리스크와 손실 대응(손절 기준 등)을 다뤘는가
+  - 투자자 조건(기간·성향·금액)에 맞는가
+
+output_format: markdown
+
+tools: [stock_data, web_search]
+
+# 웹 검색 설정 덮어쓰기 — '현 시점' 자료 위주
+search:
+  hint: "종목명(정식 명칭)과 코드에 '주가 전망', '목표주가 리포트', '실적', '최신 뉴스' 를 붙인 검색어를 만들고, 오늘의 연·월을 넣는다. 분야 추천이면 '<분야> 유망주 <연도>', '<분야> 관련주 리포트' 형태로 찾는다."
+  news_timelimit: m        # 뉴스는 최근 1개월만
+  max_total_results: 12
+
+harness:
+  validators: [required_terms]
+  max_retries: 2
+
+# 업무 양식 — 화면에서 업무를 고르면 입력란이 나타나고, 입력값으로 질문·목표·완료 기준이 자동으로 만들어진다
+# {key} 는 입력값으로 바뀌고, 값이 비어 있는 {key} 가 있는 줄은 빠진다.
+tasks:
+  - id: recommend
+    title: 1) 분야별 종목 추천
+    description: 관심 분야를 입력하면 최근 뉴스·리포트 기준 유망 종목을 추천합니다.
+    fields:
+      - {key: sector, label: 관심 분야, required: true, placeholder: "예: AI 반도체, 2차전지, 방산"}
+      - {key: market, label: 시장, type: select, options: [국내, 미국, 국내+미국]}
+      - {key: horizon, label: 투자 기간, type: select, options: ["단기(1~3개월)", "중기(6~12개월)", "장기(1년 이상)"]}
+      - {key: risk, label: 투자 성향, type: select, options: [안정형, 중립형, 공격형]}
+      - {key: count, label: 추천 종목 수, type: number, default: 3}
+    question: "{market} 시장의 {sector} 분야에서 {horizon} 관점의 {risk} 투자자에게 맞는 종목 {count}개를 추천해줘."
+    goal: "{sector} 분야 유망 종목 {count}개와 종목별 추천 근거·리스크를 담은 투자 검토 자료"
+    success_criteria:
+      - "종목마다 정식 종목명과 코드(티커)를 쓴다"
+      - "종목마다 최근 1개월 내 뉴스·리포트·실적 근거를 날짜·출처 번호와 함께 2개 이상 제시한다"
+      - "종목마다 핵심 리스크를 1개 이상 쓴다"
+      - "{risk} 성향에 맞는 이유를 설명한다"
+    constraints:
+      - "확정적 표현(무조건 오른다 등)을 쓰지 않는다"
+      - "{horizon} 기준으로 판단한다"
+    output_format: "한 줄 결론 → 추천 종목 비교 표(종목·코드·추천 근거·리스크) → 종목별 상세 → 유의사항"
+    harness_options:
+      required_terms: ["리스크|위험", "출처|[1]"]
+
+  - id: forecast
+    title: 2) 주가 전망
+    description: 종목 이름 또는 코드를 입력하면 시세 데이터·최신 뉴스·리포트로 향후 주가를 시나리오별로 전망합니다.
+    fields:
+      - {key: stock, label: 종목 이름 또는 코드, required: true, placeholder: "예: 삼성전자, 005930, AAPL"}
+      - {key: horizon, label: 전망 기간, type: select, options: [1주, 1개월, 3개월, 6개월]}
+    question: "{stock} 종목의 향후 {horizon} 주가를 최근 뉴스·증권사 리포트·주가 흐름을 근거로 전망해줘."
+    goal: "{stock} 종목의 {horizon} 주가 시나리오(상승·기본·하락)와 판단 근거를 담은 전망 보고서"
+    success_criteria:
+      - "기준일과 기준 주가를 시장 데이터에서 그대로 인용한다"
+      - "상승·기본·하락 3개 시나리오마다 예상 가격 범위와 확률(합 100%)을 제시한다"
+      - "근거가 된 최근 뉴스·리포트를 날짜·출처 번호와 함께 제시한다"
+      - "주가에 영향을 줄 핵심 변수(실적 발표·금리·업황 등)와 확인할 시점을 쓴다"
+    constraints:
+      - "확정적 표현을 쓰지 않고 조건·확률로 표현한다"
+    output_format: "한 줄 전망 → 기준 데이터 표 → 시나리오 표(가격 범위·확률·조건) → 근거 → 체크포인트"
+    harness_options:
+      required_terms: ["기준일", "시나리오", "상승", "하락", "확률"]
+
+  - id: position
+    title: 3) 보유 종목 전략
+    description: 보유 종목·수량·매입가를 입력하면 현재 평가손익과 최신 자료를 반영한 대응 전략을 세웁니다.
+    fields:
+      - {key: stock, label: 종목 이름 또는 코드, required: true, placeholder: "예: 삼성전자"}
+      - {key: quantity, label: 보유 수량(주), type: number, required: true}
+      - {key: buy_price, label: 평균 매입가, type: number, required: true, help: "원화 종목은 원, 미국 종목은 달러"}
+      - {key: horizon, label: 앞으로의 투자 기간, type: select, options: ["단기(1~3개월)", "중기(6~12개월)", "장기(1년 이상)"]}
+      - {key: risk, label: 투자 성향, type: select, options: [안정형, 중립형, 공격형]}
+    question: "{stock} 종목을 {quantity}주, 평균 매입가 {buy_price}에 보유 중이야. 최신 뉴스·리포트와 현재 주가를 반영해 {horizon} 대응 전략을 세워줘. 내 성향은 {risk}이야."
+    goal: "{stock} 보유분({quantity}주)의 현재 평가와 보유·추가매수·분할매도·전량매도 중 권고 전략"
+    success_criteria:
+      - "현재가 기준 평가금액·평가손익·수익률을 시장 데이터의 계산값 그대로 제시한다"
+      - "보유 / 추가매수 / 분할매도 / 전량매도 중 권고안 1개와 그 근거를 쓴다"
+      - "목표가와 손절가(또는 비중 축소 조건)를 구체적 가격·조건으로 제시한다"
+      - "시나리오별(상승·하락) 대응 행동을 쓴다"
+    constraints:
+      - "{risk} 성향과 {horizon} 기간에 맞춘다"
+      - "확정적 표현을 쓰지 않는다"
+    output_format: "한 줄 권고 → 현재 평가 표 → 근거 → 행동 기준 가격(목표가·손절가) → 시나리오별 대응"
+    harness_options:
+      required_terms: ["평가손익", "손절", "목표가", "시나리오"]
+
+  - id: portfolio
+    title: 4) 포트폴리오 구성
+    description: 투자 금액·기간·성향을 입력하면 종목(또는 ETF)별 비중과 리밸런싱 규칙을 담은 구성안을 만듭니다.
+    fields:
+      - {key: amount, label: 투자 금액, required: true, placeholder: "예: 1,000만원"}
+      - {key: horizon, label: 투자 기간, type: select, options: ["단기(1~3개월)", "중기(6~12개월)", "장기(1년 이상)"]}
+      - {key: risk, label: 투자 성향, type: select, options: [안정형, 중립형, 공격형]}
+      - {key: market, label: 시장, type: select, options: [국내, 미국, 국내+미국]}
+      - {key: preference, label: 선호 분야 (선택), placeholder: "예: 반도체, 배당주"}
+      - {key: exclude, label: 제외할 분야·종목 (선택), placeholder: "예: 바이오"}
+      - {key: holdings, label: 현재 보유 종목 (선택), type: textarea, placeholder: "예: 삼성전자 10주 평균 70,000원 / 애플 5주 평균 180달러"}
+    question: |
+      {amount}으로 {market} 시장에서 {horizon} 동안 운용할 {risk} 포트폴리오를 구성해줘.
+      선호 분야: {preference}
+      제외: {exclude}
+      현재 보유: {holdings}
+    goal: "{amount} 규모 {risk} 포트폴리오의 종목(또는 ETF)별 비중·금액과 운용 규칙"
+    success_criteria:
+      - "종목(또는 ETF)별 비중(%)과 금액을 표로 제시하고 비중 합이 100%가 되게 한다"
+      - "종목마다 편입 이유를 최근 뉴스·리포트 근거와 함께 쓴다"
+      - "분산 기준(업종·국가·자산군)과 예상 위험(최대 낙폭 등)을 설명한다"
+      - "리밸런싱 주기와 규칙을 쓴다"
+      - "현재 보유 종목이 있으면 유지·조정 방안을 포함한다"
+    constraints:
+      - "{risk} 성향과 {horizon} 기간에 맞춘다"
+      - "제외 조건: {exclude}"
+    output_format: "한 줄 요약 → 비중 표(종목·비중·금액·이유) → 분산·위험 설명 → 리밸런싱 규칙 → 유의사항"
+    harness_options:
+      required_terms: ["비중", "리밸런싱", "100%"]
+
+disclaimer: "본 내용은 AI 가 공개 자료와 시세 데이터로 작성한 참고용 분석이며 투자 권유가 아닙니다. 투자 판단과 그 결과의 책임은 투자자 본인에게 있습니다."

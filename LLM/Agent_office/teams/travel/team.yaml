@@ -1,0 +1,108 @@
+# 여행 팀 — 국내/해외 · 여행 날짜를 입력하면 일자별 여행 계획서를 만든다
+#
+# 근거 자료
+#   - travel_calendar 툴: N박 M일, 날짜별 요일·주말, 계절, D-day 를 '코드로' 계산 (LLM 의 날짜 계산 실수 방지)
+#   - web_search      : 목적지의 그 시기 날씨·축제, 교통편, 숙소 지역, 맛집, (해외) 입국·환전 정보
+# 하네스: itinerary_days — 일정이 1일차~마지막 날까지 모든 날을 다루는지 코드로 검사
+
+id: travel
+name: 여행 팀
+description: 국내/해외 구분과 여행 날짜·인원·예산을 받아, 그대로 따라 할 수 있는 일자별 여행 계획서를 만든다.
+
+personas:
+  staff: 당신은 여행사 신입 플래너입니다. 장소·식당·준비물 정보를 꼼꼼히 모으고 출처를 적습니다.
+  assistant_manager: 당신은 현장 경험이 많은 여행 플래너입니다. 이동 시간·영업시간·예약 필요 여부를 현실적으로 확인합니다.
+  deputy_gm: 당신은 일정 설계 전문가입니다. 동선이 겹치지 않고 무리 없는 하루 일정을 짭니다.
+  gm: 당신은 여행 상품 책임자입니다. 예산·안전·동행자(아이·어르신) 조건을 기준으로 계획을 점검합니다.
+  team_lead: 당신은 20년 경력의 여행 기획 총괄입니다. 여행자가 그대로 따라 할 수 있는 완성된 계획서로 정리합니다.
+
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장·여행기획
+  specialty: 여행 기획 총괄 — 목적지·컨셉 결정, 최종 계획서
+  children:
+    - id: gm_itinerary
+      rank: gm
+      name: 부장·일정
+      specialty: 일자별 동선·일정 설계
+      children:
+        - id: am_spots
+          rank: assistant_manager
+          name: 대리·명소체험
+          specialty: 명소·체험·운영시간·예약 정보
+        - id: staff_food
+          rank: staff
+          name: 사원·맛집
+          specialty: 지역 맛집·카페·식사 동선
+    - id: gm_logistics
+      rank: gm
+      name: 부장·교통숙박
+      specialty: 교통·숙소·예산 관리
+      children:
+        - id: am_transport
+          rank: assistant_manager
+          name: 대리·교통숙소
+          specialty: 항공·기차·현지 교통, 숙소 위치·가격대
+        - id: staff_prep
+          rank: staff
+          name: 사원·준비물
+          specialty: "그 시기 날씨·준비물·주의사항 (해외: 입국·환전·전압·통신)"
+
+review_criteria:
+  - 여행 기간의 모든 날(날짜·요일)에 일정이 있는가 (여행 달력과 일치)
+  - 이동 시간과 동선이 현실적인가 (하루에 무리한 이동이 없는가)
+  - 예산 안에 들어오는가 (항목별 합계)
+  - 동행자 조건(아이·어르신 등)과 여행 스타일에 맞는가
+  - 그 시기의 날씨·휴무·행사를 반영했는가 (출처 포함)
+
+output_format: markdown
+
+tools: [travel_calendar, web_search]
+
+search:
+  hint: "목적지 + 여행 월을 넣어 '<목적지> <월> 날씨', '<목적지> 축제 <연도>', '<목적지> 가볼만한곳', '<목적지> 맛집', '<출발지>에서 <목적지> 가는 법' 검색어를 만든다. 목적지가 없으면 조건에 맞는 '<계절> <국내/해외> 여행지 추천' 으로 찾는다."
+  max_total_results: 12
+
+harness:
+  validators: [itinerary_days, required_terms]
+  max_retries: 2
+
+tasks:
+  - id: plan
+    title: 여행 계획서
+    description: 국내/해외와 날짜를 입력하면 일자별 일정·교통·숙소·예산이 담긴 여행 계획서를 만듭니다.
+    fields:
+      - {key: scope, label: 국내 / 해외, type: select, options: [국내, 해외], required: true}
+      - {key: destination, label: 목적지 (비우면 추천), placeholder: "예: 부산, 오사카, 다낭"}
+      - {key: start_date, label: 출발일, type: date, required: true}
+      - {key: end_date, label: 도착(귀가)일, type: date, required: true}
+      - {key: departure, label: 출발지, default: 서울}
+      - {key: people, label: 인원·동행, placeholder: "예: 성인 2, 초등학생 1"}
+      - {key: budget, label: 예산, placeholder: "예: 총 200만원, 1인 80만원"}
+      - {key: style, label: 여행 스타일, placeholder: "예: 맛집·휴양 위주, 걷기 적게"}
+    question: |
+      {start_date} 부터 {end_date} 까지 {nights}박 {days}일 {scope} 여행 계획을 세워줘.
+      목적지: {destination}
+      출발지: {departure}
+      인원·동행: {people}
+      예산: {budget}
+      여행 스타일: {style}
+    goal: "{nights}박 {days}일 {scope} 여행을 그대로 따라 할 수 있는 일자별 여행 계획서"
+    success_criteria:
+      - "1일차부터 {days}일차까지 모든 날의 일정을 'n일차 (날짜·요일)' 형식으로 오전·오후·저녁으로 나눠 쓴다"
+      - "장소 사이 이동 수단과 대략의 소요 시간을 쓴다"
+      - "숙소 추천 지역과 이유, 가격대를 쓴다"
+      - "교통·숙박·식비·입장료 등 항목별 예산 표와 합계를 쓴다"
+      - "여행 시기의 날씨·행사·휴무와 주의사항을 출처와 함께 쓴다"
+      - "목적지가 정해지지 않았으면 조건에 맞는 후보 2곳을 비교해 1곳을 고른 이유를 먼저 쓴다"
+    constraints:
+      - "예산: {budget}"
+      - "동행: {people}"
+      - "스타일: {style}"
+    output_format: "한 줄 요약 → (목적지 선정 이유) → 일자별 일정 표 → 교통·숙소 → 예산 표 → 날씨·준비물·주의사항"
+    validators: [itinerary_days]
+    harness_options:
+      required_terms: ["예산", "숙소", "교통|이동"]
+
+disclaimer: "운영시간·요금·교통편은 바뀔 수 있으니 출발 전 공식 사이트에서 다시 확인하세요."

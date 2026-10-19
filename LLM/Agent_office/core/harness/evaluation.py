@@ -28,11 +28,11 @@ expect 에 쓸 수 있는 검사
 import re
 from dataclasses import dataclass, field
 
-from core.schemas import AgentAnswer
+from core.schemas import AgentAnswer, ToolResult
 from core.search import WebContext
 
 # 파이프라인 순서 — '처음 실패한 단계'를 찾을 때 이 순서를 따른다
-STEP_ORDER = ["research", "plan", "draft", "review", "integrate", "final"]
+STEP_ORDER = ["tools", "research", "plan", "draft", "review", "integrate", "final"]
 
 
 @dataclass
@@ -42,6 +42,7 @@ class RunTrace:
     root_id: str
     web: WebContext | None
     steps: list[AgentAnswer]
+    tools: list[ToolResult] = field(default_factory=list)  # 데이터 툴 결과 (주가·여행 달력)
 
     @property
     def final(self) -> AgentAnswer | None:
@@ -91,6 +92,8 @@ class CaseReport:
 
 def _texts_for(step: str, trace: RunTrace, node: str | None) -> list[tuple[str, AgentAnswer | None]]:
     """검사 대상 (텍스트, 단계 결과) 목록."""
+    if step == "tools":
+        return [("\n".join(t.content for t in trace.tools), None)]
     if step == "research":
         web = trace.web
         if web is None:

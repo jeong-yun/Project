@@ -20,6 +20,9 @@ pydantic>=2.10
 PyYAML>=6.0
 pillow>=10.4
 
+# 주가 데이터 (Yahoo Finance, API 키 불필요) — 주식 팀 stock_data 툴
+yfinance>=1.7,<2
+
 # 웹 검색 (DuckDuckGo, API 키 불필요)
 ddgs>=9.16,<10
 

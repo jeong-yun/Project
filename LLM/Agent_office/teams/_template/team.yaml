@@ -58,6 +58,23 @@ harness:
   #   sql_schema: teams/my_team/schema.sql
   #   required_keys: [extract_payload, analyze_anomaly_pattern, final_decision]
 
+# 데이터 툴: web_search 외에 stock_data(주가), travel_calendar(여행 달력) 등 core/tools 에 등록된 이름
+# 웹 검색 설정 덮어쓰기 (선택): hint = 검색어 만드는 요령, news_timelimit = d/w/m/y (최근 뉴스만)
+search: {}
+
+# 업무 양식 (선택) — 화면의 '📋 업무 선택'에 나타나고, 입력칸 값으로 질문·목표·완료 기준이 만들어진다.
+# 완성된 예시는 teams/stock/team.yaml, teams/travel/team.yaml 참고.
+tasks: []
+#  - id: analyze_log
+#    title: 웹 로그 분석
+#    fields:
+#      - {key: log, label: 분석할 로그, type: textarea, required: true}
+#    question: "다음 웹 로그를 분석해줘:\n{log}"
+#    goal: "공격 여부와 위험도를 판정한 분석 보고서"
+#    success_criteria: ["페이로드를 복원한다", "시그니처를 매칭한다", "위험도를 높음/중간/낮음으로 판정한다"]
+#    validators: [json_keys]
+#    harness_options: {required_keys: [extract_payload, analyze_anomaly_pattern, final_decision]}
+
 model_overrides: {}  # 예: { team_lead: { primary: { provider: openai, model: gpt-5.5 } } }
 
 disclaimer: ""       # 예: "본 내용은 투자 권유가 아니며 투자 판단의 책임은 본인에게 있습니다."

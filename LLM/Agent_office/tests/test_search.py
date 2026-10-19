@@ -35,7 +35,7 @@ def test_research_falls_back_to_question_when_planner_fails(models, use_script, 
 def test_search_failure_does_not_block(models, use_script, monkeypatch):
     use_script(Script(SearchPlan=PLAN))
 
-    def broken(query, max_results, region):
+    def broken(query, max_results, region, **kwargs):
         raise ConnectionError("offline")
 
     monkeypatch.setitem(search.SEARCH_BACKENDS, "duckduckgo", broken)

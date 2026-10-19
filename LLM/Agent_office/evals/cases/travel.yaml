@@ -1,0 +1,31 @@
+# 여행 팀 평가 케이스 — python -m evals.run_eval evals/cases/travel.yaml
+
+team: travel
+
+cases:
+  - id: osaka_3n4d
+    task: plan
+    inputs:
+      scope: 해외
+      destination: 오사카
+      start_date: "2026-11-20"
+      end_date: "2026-11-23"
+      departure: 서울
+      people: "성인 2, 초등학생 1"
+      budget: "총 250만원"
+      style: 맛집·테마파크
+    checks:
+      - name: 여행 달력이 3박 4일과 요일을 계산한다
+        step: tools
+        expect: {contains_all: ["3박 4일", "| 1일차 | 2026-11-20 | 금 |"]}
+      - name: 웹 검색이 목적지 자료를 찾는다
+        step: research
+        expect: {contains_any: ["오사카", "Osaka"]}
+      - name: 실무자 초안이 모든 날 일정을 다룬다 (하네스)
+        step: draft
+        expect: {harness_pass: true}
+      - name: 최종 계획서가 모든 날·예산·숙소를 담고 하네스를 통과한다
+        step: final
+        expect:
+          contains_all: ["1일차", "4일차", "예산", "숙소"]
+          harness_pass: true

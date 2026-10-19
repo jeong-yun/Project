@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from core import llm_factory
+from core.config import date_label, today
 from core.llm_factory import NoAvailableModelError
 from core.schemas import ModelsConfig
 
@@ -48,29 +49,32 @@ class WebContext(BaseModel):
         return "\n\n".join(lines)
 
 
-def _duckduckgo(query: str, max_results: int, region: str) -> list[SearchResult]:
+def _duckduckgo(
+    query: str, max_results: int, region: str, text_timelimit: str | None = None, news_timelimit: str | None = None
+) -> list[SearchResult]:
     """DuckDuckGo 웹 검색 + 뉴스 검색.
 
     뉴스를 섞는 이유: 'HBF' 처럼 뜻이 여러 개인 약어는 일반 검색에서 사전·가구 회사 등이 먼저 나오지만,
     뉴스에는 '요즘 화제가 되는 의미'(예: 반도체 High Bandwidth Flash)가 나온다.
+    timelimit: d(하루)·w(1주)·m(1개월)·y(1년) — 주식처럼 '현 시점' 자료가 중요한 팀은 team.yaml search 에서 지정.
     """
     from ddgs import DDGS
 
     ddgs = DDGS()
     try:
-        rows = ddgs.text(query, max_results=max_results, region=region) or []
+        rows = ddgs.text(query, max_results=max_results, region=region, timelimit=text_timelimit) or []
     except Exception:  # noqa: BLE001 — 일부 지역 설정(예: wt-wt)에서 내부 엔진 오류가 나면 us-en 으로 한 번 더
         if region == "us-en":
             raise
         region = "us-en"
-        rows = ddgs.text(query, max_results=max_results, region=region) or []
+        rows = ddgs.text(query, max_results=max_results, region=region, timelimit=text_timelimit) or []
     results = [
         SearchResult(title=r.get("title", ""), url=r.get("href", ""), snippet=r.get("body", ""))
         for r in rows
         if r.get("href")
     ]
     try:
-        news = ddgs.news(query, max_results=max(2, max_results // 2), region=region) or []
+        news = ddgs.news(query, max_results=max(2, max_results // 2), region=region, timelimit=news_timelimit) or []
     except Exception:  # noqa: BLE001 — 뉴스 검색 실패는 무시 (일반 검색 결과만 사용)
         news = []
     results += [
@@ -86,13 +90,15 @@ SEARCH_BACKENDS: dict[str, Callable[[str, int, str], list[SearchResult]]] = {
 }
 
 
-def plan_queries(question: str, models: ModelsConfig, max_queries: int) -> tuple[SearchPlan, list[str]]:
-    """검색어 계획. 모델 호출이 실패하면 질문 자체를 검색어로 쓴다."""
+def plan_queries(question: str, models: ModelsConfig, max_queries: int, hint: str = "") -> tuple[SearchPlan, list[str]]:
+    """검색어 계획. 모델 호출이 실패하면 질문 자체를 검색어로 쓴다. hint = 팀별 검색 요령 (team.yaml search.hint)."""
     messages = [
         SystemMessage(
             "\n".join(
                 [
                     "너는 리서치 보조다. 사용자의 질문에 정확히 답하기 위해 웹 검색이 필요한지 판단하고 검색어를 만든다.",
+                    f"- 오늘 날짜: {date_label(today())}. 최신 자료가 필요하면 검색어에 연도·월을 넣는다.",
+                    *([f"- 이 팀의 검색 요령: {hint}"] if hint else []),
                     "- 약어, 신조어, 제품·기술·회사 이름, 최신 동향, 수치·날짜가 걸린 질문은 반드시 검색한다(need_search=true).",
                     "- 일반 상식이나 의견·작문 요청처럼 검색이 도움 안 되면 need_search=false.",
                     f"- 검색어는 최대 {max_queries}개. 짧은 약어만 단독으로 쓰지 말고, 풀어 쓴 정식 명칭이나 분야 키워드를 붙인다.",
@@ -122,7 +128,7 @@ def research(question: str, models: ModelsConfig, settings: dict) -> WebContext:
     max_total = cfg.get("max_total_results", 8)
     region = cfg.get("region", "kr-kr")
 
-    plan, notes = plan_queries(question, models, cfg.get("max_queries", 3))
+    plan, notes = plan_queries(question, models, cfg.get("max_queries", 3), cfg.get("hint", ""))
     context = WebContext(provider=provider, notes=notes)
     if not plan.need_search or not plan.queries:
         context.notes.append("검색이 필요 없는 질문으로 판단")
@@ -137,7 +143,10 @@ def research(question: str, models: ModelsConfig, settings: dict) -> WebContext:
     seen: set[str] = set()
     for query in plan.queries:
         try:
-            results = backend(query, max_results, region)
+            results = backend(
+                query, max_results, region,
+                text_timelimit=cfg.get("text_timelimit"), news_timelimit=cfg.get("news_timelimit"),
+            )
         except Exception as e:  # noqa: BLE001 — 네트워크·검색 엔진 오류는 답변을 막지 않는다
             context.notes.append(f"검색 실패 ({query}): {type(e).__name__}: {str(e)[:200]}")
             continue

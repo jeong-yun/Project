@@ -15,7 +15,7 @@ from collections.abc import Iterator
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
 
 from core import llm_factory
-from core.config import rank_models
+from core.config import date_label, rank_models, today
 from core.llm_factory import NoAvailableModelError
 from core.schemas import AgentAnswer, Delegation, ModelsConfig, ModelSpec, OrgNode, Rank, ReviewResult, Team
 from core.verification import rubric_text
@@ -80,6 +80,7 @@ class OrgAgent:
             f"이름: {self.name} (직급: {self.rank.name})",
             f"전문 분야: {self.node.specialty or self.rank.role}",
             f"소속 팀: {self.team.name} — {self.team.description}",
+            f"오늘 날짜: {date_label(today())} — '현재·최근·향후'는 이 날짜 기준이다. 학습 지식이 아니라 근거 자료의 날짜를 우선한다.",
             "",
             "업무 규칙:",
             "- 한국어로 쓴다.",
@@ -96,7 +97,7 @@ class OrgAgent:
 
     @staticmethod
     def _web_block(web_context: str, purpose: str) -> list[str]:
-        return [f"[웹 검색 결과 — {purpose}]\n{web_context}"] if web_context else []
+        return [f"[근거 자료 — {purpose}]\n{web_context}"] if web_context else []
 
     # ─── 위 → 아래: 업무 분배 ─────────────────────────────────────
 
@@ -145,7 +146,8 @@ class OrgAgent:
         if web_context:
             parts += self._web_block(web_context, "답변 근거로 활용")
             parts.append(
-                "위 자료를 근거로 답하고, 활용한 자료는 해당 문장 끝에 [번호]로 출처를 표시한다. "
+                "위 자료를 근거로 답한다. 웹 검색 자료는 해당 문장 끝에 [번호]로, 데이터 툴 자료(시장 데이터·여행 달력 등)는 "
+                "'(시장 데이터, 기준일)'처럼 출처를 표시한다. 데이터 툴의 숫자는 다시 계산하지 말고 그대로 인용한다. "
                 "자료에 없는 내용은 추측임을 밝히고, 질문과 무관한 동음이의어 자료는 무시한다."
             )
         return [SystemMessage(self.system_prompt(lessons)), HumanMessage("\n\n".join(parts))]
@@ -209,7 +211,7 @@ class OrgAgent:
                 *job,
                 "- score 는 아래 채점 기준에 맞춰 하위 결과의 품질을 매긴다 (분석 → 문제점 → 점수 순서).",
                 "- comment 는 하위 에이전트가 다음에 참고할 한두 문장의 조언이다.",
-                *(["- [웹 검색 결과]와 어긋나는 내용은 issues 에 지적하고 바로잡는다."] if web_context else []),
+                *(["- [근거 자료](데이터·웹 검색)와 어긋나는 내용, 숫자를 잘못 옮긴 부분은 issues 에 지적하고 바로잡는다."] if web_context else []),
                 "",
                 rubric_text(self.rubric),
             ]

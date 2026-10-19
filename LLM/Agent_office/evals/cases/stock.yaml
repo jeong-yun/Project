@@ -1,0 +1,39 @@
+# 주식 팀 평가 케이스 — python -m evals.run_eval evals/cases/stock.yaml
+# task + inputs = 화면의 업무 양식을 채운 것과 같다 (질문·브리프·하네스 옵션이 자동으로 만들어짐)
+
+team: stock
+
+cases:
+  - id: forecast_samsung
+    task: forecast
+    inputs: {stock: 삼성전자, horizon: 1개월}
+    checks:
+      - name: 시장 데이터 툴이 종목을 찾아 기준일 종가를 계산한다
+        step: tools
+        expect: {contains_all: ["005930.KS", "기준일 종가"]}
+      - name: 웹 검색이 해당 종목 자료를 찾는다
+        step: research
+        expect: {contains_any: ["삼성전자", "Samsung"]}
+      - name: 팀장이 리서치 부장에게 업무를 맡긴다
+        step: plan
+        node: lead
+        expect: {assigned: [gm_research]}
+      - name: 최종 전망이 시나리오·확률·기준일을 담고 하네스를 통과한다
+        step: final
+        expect:
+          contains_all: ["시나리오", "확률", "기준일"]
+          harness_pass: true
+      - name: 확정적 표현을 쓰지 않는다
+        step: final
+        expect: {not_contains: ["무조건 오른", "반드시 오른", "확실히 오른"]}
+
+  - id: position_samsung
+    task: position
+    inputs: {stock: 삼성전자, quantity: 10, buy_price: 70000, horizon: "중기(6~12개월)", risk: 중립형}
+    checks:
+      - name: 툴이 보유 평가손익을 코드로 계산한다
+        step: tools
+        expect: {contains_all: ["보유 평가 (코드 계산)", "평가손익"]}
+      - name: 최종 전략에 손절·목표가·평가손익이 있고 하네스를 통과한다
+        step: final
+        expect: {contains_all: ["손절", "목표가", "평가손익"], harness_pass: true}

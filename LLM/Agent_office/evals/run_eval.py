@@ -29,25 +29,39 @@ from core.config import (  # noqa: E402
     team_org,
 )
 from core.harness.evaluation import RunTrace, evaluate  # noqa: E402
+from core.tasks import build_request  # noqa: E402
 from core.workflow import build_office_graph, stream_office  # noqa: E402
 
 import yaml  # noqa: E402
 
 
 def run_case(case: dict, team_id: str, use_web: bool) -> RunTrace:
+    """케이스 하나 실행. question 으로 자유 질문, 또는 task + inputs 로 팀 업무 양식을 실행한다."""
     ranks, models, settings = load_ranks(), load_models(), load_settings()
     team = load_team(team_id)
     org = team_org(team, ranks)
     graph = build_office_graph(org, ranks, team, models, settings, load_verification())  # storage·checkpointer 없음
     root = case.get("start", org.id)
-    web, steps = None, []
-    for kind, payload in stream_office(graph, org, case["question"], root, use_web=case.get("use_web", use_web)):
+    kwargs: dict = {"use_web": case.get("use_web", use_web)}
+    question = case.get("question", "")
+    if "task" in case:  # 팀 업무 양식 — 화면에서 입력칸을 채운 것과 같다
+        task = next(t for t in team.tasks if t.id == case["task"])
+        req = build_request(task, case.get("inputs", {}), case.get("extra", ""))
+        question = req.question
+        kwargs.update(brief=req.brief, auto_brief=False, tool_inputs=req.tool_inputs,
+                      extra_validators=req.validators, harness_options=req.harness_options)
+    web, tools, steps = None, [], []
+    for kind, payload in stream_office(graph, org, question, root, **kwargs):
         if kind == "research":
             web = payload
+        elif kind == "tools":
+            tools = payload
+            for t in payload:
+                print(f"   · [툴] {t.title} {('· ' + '; '.join(t.notes)) if t.notes else ''}")
         elif kind == "step":
             steps.append(payload)
-            print(f"   · {payload.node_id:<14} {payload.kind:<9} {payload.model.label} {payload.elapsed_sec}s")
-    return RunTrace(root_id=root, web=web, steps=steps)
+            print(f"   · {payload.node_id:<15} {payload.kind:<9} {payload.model.label} {payload.elapsed_sec}s")
+    return RunTrace(root_id=root, web=web, steps=steps, tools=tools)
 
 
 def main() -> None:
@@ -62,7 +76,7 @@ def main() -> None:
     cases = [c for c in spec["cases"] if not args.case or c["id"] == args.case]
     summary = []
     for case in cases:
-        print(f"\n▶ {case['id']}: {case['question']}")
+        print(f"\n▶ {case['id']}: {case.get('question') or case.get('task')}")
         trace = run_case(case, spec.get("team", "general"), use_web=not args.no_web)
         report = evaluate(case, trace)
         for c in report.checks:

@@ -6,8 +6,9 @@
   ① 조직도   : 👤 사용자 ↔ supervisor(팀장) → 전문가들 → 하위 전문가 (첨부 그림의 Multi-Agent Team 구조)
                각 칸에 지금 하는 일(📋 분배 중 / ✍️ 작성 중 / 🔍 검토 중 …)이 실시간으로 표시된다
   ② 문의 대상 : 기본은 팀장. 다른 칸을 고르면 그 에이전트가 supervisor 가 되어 그 아래 팀만 일한다
-  ③ 질문      : 질문 + '원하는 최종 상태'(목표·완료 기준·제약·형식). 예시를 고르면 자동으로 채워진다
-  ④ 타임라인  : 업무 브리프 → 웹 검색 자료 → 분배·초안·검토·통합 단계가 끝나는 대로 표시
+  ③ 질문      : 팀 업무 양식(예: 주가 전망 — 종목·기간 입력칸) 또는 자유 질문 + '원하는 최종 상태'
+               (업무 양식은 team.yaml 의 tasks 로 정의, 입력값으로 질문·목표·완료 기준이 자동으로 만들어진다)
+  ④ 타임라인  : 업무 브리프 → 데이터(주가·여행 달력) → 웹 검색 자료 → 분배·초안·검토·통합 단계 표시
   ⑤ 최종 결정 : 사람이 채택(수정 가능)/반려 → 참여한 에이전트마다 교훈 저장
                결정 없이 버린 결과는 저장소에서 삭제된다 (피드백이 있는 결과만 보관)
 
@@ -45,9 +46,10 @@ from core.config import (
     validate_config,
 )
 from core.harness import REGISTRY as HARNESS_REGISTRY
-from core.schemas import AgentAnswer, HumanDecision, OrgNode
+from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTemplate, ToolResult
 from core.search import WebContext
 from core.storage import Storage
+from core.tasks import TaskInputError, build_request
 from core.workflow import WEB_SEARCH_TOOL, build_office_graph, make_checkpointer, resume_with_decision, stream_office
 
 load_env()
@@ -72,7 +74,7 @@ PROVIDER_STATUS = {"ok": ("✅", "사용 가능"), "disabled": ("⛔", "비활�
 # 단계 종류 → 화면 표시
 KIND_LABELS = {"plan": "📋 업무 분배", "draft": "📝 초안", "review": "🔍 검토", "integrate": "🧩 통합"}
 WORKING_LABELS = {
-    "brief": "🎯 요청 정리 중", "research": "🌐 자료 조사 중", "plan": "📋 업무 분배 중", "draft": "✍️ 작성 중",
+    "brief": "🎯 요청 정리 중", "tools": "📊 데이터 조회 중", "research": "🌐 자료 조사 중", "plan": "📋 업무 분배 중", "draft": "✍️ 작성 중",
     "review": "🔍 검토 중", "integrate": "🧩 통합 중", "critic": "⚖️ 비평 받는 중",
 }
 RETRY_LABELS = {"critic": "🔁 자가 교정 중", "harness": "🧪 오류 수정 중"}
@@ -329,6 +331,16 @@ def render_web(web: WebContext | None) -> None:
             st.caption(f"ℹ️ {note[:300]}")
 
 
+def render_tools(results: list[ToolResult]) -> None:
+    """데이터 툴 결과 (시장 데이터·여행 달력 등) — 에이전트들이 근거로 쓴 사실 자료."""
+    for r in results:
+        with st.expander(r.title, expanded=False):
+            if r.content:
+                st.markdown(r.content)
+            for note in r.notes:
+                st.caption(f"ℹ️ {note[:300]}")
+
+
 def render_meta(step: AgentAnswer) -> None:
     tokens = (
         f" · 토큰 {step.input_tokens or 0:,} → {step.output_tokens or 0:,}"
@@ -508,6 +520,7 @@ def render_run(run: dict, run_key: tuple) -> None:
     """저장된 실행 결과를 다시 그린다 (버튼 클릭 등으로 화면이 다시 그려질 때)."""
     st.markdown(f"**Q.** {run['question']}")
     render_brief(run.get("brief"))
+    render_tools(run.get("tools") or [])
     render_web(run.get("web"))
     for step in run["steps"]:
         render_step(step, run["root_id"])
@@ -562,86 +575,154 @@ with st.expander("👥 에이전트 상세 (모델 · 전문 분야 · 누적 �
         })
     st.dataframe(rows, hide_index=True, use_container_width=True)
 
-# ③ 질문 — 예시 선택 / 좋은 질문 쓰는 법 / 최종 상태 정의
+# ③ 질문 — 팀 업무 양식 또는 자유 질문(예시 선택 / 좋은 질문 쓰는 법 / 최종 상태 정의)
 st.divider()
 st.markdown(f"#### 💬 {name_of(target)} 에게 맡기기")
 
-
-def apply_example() -> None:
-    """예시를 고르면 질문·최종 상태 입력란을 채운다 (selectbox 의 on_change 콜백)."""
-    title = st.session_state["example_pick"]
-    ex = next((e for e in EXAMPLES if e["title"] == title), None)
-    if ex is None:
-        return
-    st.session_state["q_text"] = ex["question"]
-    st.session_state["b_goal"] = ex["goal"]
-    st.session_state["b_criteria"] = "\n".join(ex["success_criteria"])
-    st.session_state["b_constraints"] = "\n".join(ex["constraints"])
-    st.session_state["b_format"] = ex["output_format"]
+FREE_FORM = "free"
+web_available = WEB_SEARCH_TOOL in team.tools
+# 이번 제출에서 워크플로우로 넘길 값 — 업무 양식이든 자유 질문이든 아래 변수로 모은다
+request: dict = {}
 
 
-c1, c2 = st.columns([1, 1])
-c1.selectbox(
-    "💡 질문 예시 (고르면 아래가 채워집니다)",
-    ["(직접 입력)", *[e["title"] for e in EXAMPLES]],
-    key="example_pick",
-    on_change=apply_example,
+def render_field(field: TaskField, key: str):
+    """업무 양식의 입력칸 하나를 그린다. 값이 없으면 None 또는 빈 문자열."""
+    label = field.label + (" *" if field.required else "")
+    if field.type == "select":
+        index = field.options.index(field.default) if field.default in field.options else 0
+        return st.selectbox(label, field.options, index=index, key=key, help=field.help or None)
+    if field.type == "number":
+        value = float(field.default) if field.default is not None else None
+        return st.number_input(label, value=value, min_value=0.0, step=1.0, key=key,
+                               placeholder=field.placeholder or None, help=field.help or None)
+    if field.type == "date":
+        picked = st.date_input(label, value=None, key=key, format="YYYY-MM-DD", help=field.help or None)
+        return picked.isoformat() if picked else None
+    if field.type == "textarea":
+        return st.text_area(label, value=str(field.default or ""), key=key, height=80,
+                            placeholder=field.placeholder, help=field.help or None)
+    return st.text_input(label, value=str(field.default or ""), key=key, placeholder=field.placeholder, help=field.help or None)
+
+
+task_ids = [t.id for t in team.tasks]
+mode = (
+    st.selectbox(
+        "📋 업무 선택",
+        [*task_ids, FREE_FORM],
+        format_func=lambda tid: "💬 자유 질문" if tid == FREE_FORM else next(t.title for t in team.tasks if t.id == tid),
+        key=f"task_pick_{team_id}",
+    )
+    if team.tasks
+    else FREE_FORM
 )
-with c2.expander("📝 좋은 질문 쓰는 법 — '과정'이 아니라 '최종 상태'를 정의하기"):
-    st.markdown(
-        """
+task: TaskTemplate | None = next((t for t in team.tasks if t.id == mode), None)
+
+if task:
+    # ── 팀 업무 양식: 입력칸 → 질문·최종 상태 브리프 자동 생성 (core/tasks.py) ──
+    st.caption(task.description)
+    with st.form(f"task_form_{team_id}_{task.id}", clear_on_submit=False):
+        values = {}
+        cols = st.columns(2)
+        for i, field in enumerate(task.fields):
+            with cols[i % 2] if field.type != "textarea" else st.container():
+                values[field.key] = render_field(field, key=f"tf_{team_id}_{task.id}_{field.key}")
+        extra = st.text_area("추가 요청 (선택)", key=f"tf_{team_id}_{task.id}__extra", height=68,
+                             placeholder="예: 배당도 함께 고려해줘 / 아이가 걷기 힘들어해")
+        use_web = st.checkbox("🌐 웹 검색 사용 (최신 뉴스·자료)", value=web_available, disabled=not web_available)
+        submitted = st.form_submit_button("맡기기", type="primary")
+    if submitted:
+        try:
+            built = build_request(task, values, extra)
+        except TaskInputError as e:
+            st.warning(str(e))
+        else:
+            request = {
+                "question": built.question, "brief": built.brief, "auto_brief": False,
+                "use_web": bool(use_web and web_available), "tool_inputs": built.tool_inputs,
+                "extra_validators": built.validators, "harness_options": built.harness_options,
+            }
+else:
+    # ── 자유 질문 ──
+    def apply_example() -> None:
+        """예시를 고르면 질문·최종 상태 입력란을 채운다 (selectbox 의 on_change 콜백)."""
+        title = st.session_state["example_pick"]
+        ex = next((e for e in EXAMPLES if e["title"] == title), None)
+        if ex is None:
+            return
+        st.session_state["q_text"] = ex["question"]
+        st.session_state["b_goal"] = ex["goal"]
+        st.session_state["b_criteria"] = "\n".join(ex["success_criteria"])
+        st.session_state["b_constraints"] = "\n".join(ex["constraints"])
+        st.session_state["b_format"] = ex["output_format"]
+
+    c1, c2 = st.columns([1, 1])
+    c1.selectbox(
+        "💡 질문 예시 (고르면 아래가 채워집니다)",
+        ["(직접 입력)", *[e["title"] for e in EXAMPLES]],
+        key="example_pick",
+        on_change=apply_example,
+    )
+    with c2.expander("📝 좋은 질문 쓰는 법 — '과정'이 아니라 '최종 상태'를 정의하기"):
+        st.markdown(
+            """
 - ❌ 과정 지시: "1) HBF 검색하고 2) 정리한 다음 3) 표로 만들어줘"
 - ✅ 최종 상태: "**목표** 팀 회의에서 5분 안에 공유할 HBF 설명 자료 / **완료 기준** 정식 명칭·정의, HBM 과 비교 표, 사실마다 출처 / **제약** 비전공자용, A4 1장"
 - 과정(누가 무엇을 조사할지)은 supervisor 가 스스로 나눕니다. 사람은 **무엇이 되면 끝인지**만 정하면 됩니다.
 - 완료 기준은 검토자·비평가가 '충족/미충족'을 판단하는 채점 기준이 됩니다 → 검증 가능한 문장으로 쓰세요.
 - 결과는 그대로 믿지 말고, 최종 결정 전에 '취약점이 없는지' 타임라인의 검토·비평 기록을 확인하세요.
 """
-    )
+        )
 
-web_available = WEB_SEARCH_TOOL in team.tools
-with st.form("ask_form", clear_on_submit=False):
-    question = st.text_area("질문", placeholder="무엇을 원하는지 한두 문장으로", height=90, key="q_text")
-    with st.expander("🎯 원하는 최종 상태 (선택 — 비워 두면 AI 가 질문에서 정리합니다)", expanded=False):
-        goal = st.text_input("최종 목표 — 결과물과 용도", key="b_goal", placeholder="예: 팀 회의에서 공유할 1장짜리 설명 자료")
-        criteria = st.text_area("완료 기준 — 한 줄에 하나", key="b_criteria", height=90,
-                                placeholder="예: 정식 명칭과 정의를 쓴다\n예: 사실마다 출처 번호를 단다")
-        constraints = st.text_area("제약 — 한 줄에 하나", key="b_constraints", height=68, placeholder="예: 비전공자용, A4 1장")
-        output_format = st.text_input("결과 형식", key="b_format", placeholder="예: 요약 → 비교 표 → 핵심 3개 → 출처")
-    o1, o2 = st.columns(2)
-    use_web = o1.checkbox("🌐 웹 검색 사용", value=web_available, disabled=not web_available,
-                          help="답변 전에 검색어를 만들어 웹을 검색하고, 결과를 모든 에이전트가 근거로 사용합니다.")
-    auto_brief = o2.checkbox("🤖 빈 항목은 AI 가 정리", value=True,
-                             help="최종 목표·완료 기준이 비어 있으면 보조 모델이 질문에서 추론해 채웁니다.")
-    submitted = st.form_submit_button("맡기기", type="primary")
+    with st.form("ask_form", clear_on_submit=False):
+        question = st.text_area("질문", placeholder="무엇을 원하는지 한두 문장으로", height=90, key="q_text")
+        with st.expander("🎯 원하는 최종 상태 (선택 — 비워 두면 AI 가 질문에서 정리합니다)", expanded=False):
+            goal = st.text_input("최종 목표 — 결과물과 용도", key="b_goal", placeholder="예: 팀 회의에서 공유할 1장짜리 설명 자료")
+            criteria = st.text_area("완료 기준 — 한 줄에 하나", key="b_criteria", height=90,
+                                    placeholder="예: 정식 명칭과 정의를 쓴다\n예: 사실마다 출처 번호를 단다")
+            constraints = st.text_area("제약 — 한 줄에 하나", key="b_constraints", height=68, placeholder="예: 비전공자용, A4 1장")
+            output_format = st.text_input("결과 형식", key="b_format", placeholder="예: 요약 → 비교 표 → 핵심 3개 → 출처")
+        o1, o2 = st.columns(2)
+        use_web = o1.checkbox("🌐 웹 검색 사용", value=web_available, disabled=not web_available,
+                              help="답변 전에 검색어를 만들어 웹을 검색하고, 결과를 모든 에이전트가 근거로 사용합니다.")
+        auto_brief = o2.checkbox("🤖 빈 항목은 AI 가 정리", value=True,
+                                 help="최종 목표·완료 기준이 비어 있으면 보조 모델이 질문에서 추론해 채웁니다.")
+        submitted = st.form_submit_button("맡기기", type="primary")
 
+    def lines(text: str) -> list[str]:
+        return [x.strip() for x in text.splitlines() if x.strip()]
 
-def lines(text: str) -> list[str]:
-    return [x.strip() for x in text.splitlines() if x.strip()]
+    if submitted and not question.strip():
+        st.warning("질문을 입력하세요.")
+    elif submitted:
+        brief_input = DesiredState(
+            goal=goal.strip(), context="", success_criteria=lines(criteria), constraints=lines(constraints),
+            output_format=output_format.strip(), assumptions=[],
+        )
+        has_brief = not brief_input.is_empty() or brief_input.constraints or brief_input.output_format
+        request = {
+            "question": question.strip(), "brief": brief_input if has_brief else None, "auto_brief": auto_brief,
+            "use_web": bool(use_web and web_available), "tool_inputs": {}, "extra_validators": [], "harness_options": {},
+        }
 
 
 # ④ 실행 — 이벤트가 올 때마다 조직도·타임라인을 갱신한다
-if submitted and not question.strip():
-    st.warning("질문을 입력하세요.")
-elif submitted:
+if request:
     # 같은 대상에 대한 직전 결과가 결정 없이 남아 있으면 → 피드백 없는 불필요 기록이므로 삭제
     previous = st.session_state["runs"].get(run_key)
     if previous and previous["status"] not in ("adopted", "rejected"):
         discard_run(previous)
 
-    brief_input = DesiredState(
-        goal=goal.strip(), context="", success_criteria=lines(criteria), constraints=lines(constraints),
-        output_format=output_format.strip(), assumptions=[],
-    )
     run = {
-        "run_id": uuid.uuid4().hex, "question": question.strip(), "root_id": target, "steps": [],
+        "run_id": uuid.uuid4().hex, "question": request["question"], "root_id": target, "steps": [],
         "status": "reviewing", "error": None, "decision": None, "lessons": [], "notes": [], "web": None, "brief": None,
+        "tools": [],
     }
     st.session_state["runs"][run_key] = run
     storage.create_run(run["run_id"], team_id, target, run["question"])
 
     statuses: dict = {target: ("working", "🎯 요청 정리 중")}
     render_chart(chart_slot, statuses, target, active_ids)
-    brief_slot, web_slot = st.empty(), st.empty()
+    brief_slot, tools_slot, web_slot = st.empty(), st.empty(), st.empty()
     timeline = st.container()
     with timeline:
         draft_slot = st.empty()  # 실무자가 쓰는 중인 초안 미리보기
@@ -656,9 +737,9 @@ elif submitted:
     try:
         events = stream_office(
             make_graph(), org, run["question"], target, thread_id=run["run_id"],
-            use_web=bool(use_web and web_available),
-            brief=None if brief_input.is_empty() and not brief_input.constraints and not brief_input.output_format else brief_input,
-            auto_brief=auto_brief,
+            use_web=request["use_web"], brief=request["brief"], auto_brief=request["auto_brief"],
+            tool_inputs=request["tool_inputs"], extra_validators=request["extra_validators"],
+            harness_options=request["harness_options"],
         )
         for kind, payload in events:
             if kind == "start":
@@ -678,6 +759,10 @@ elif submitted:
                 run["brief"] = payload
                 with brief_slot.container():
                     render_brief(payload)
+            elif kind == "tools":
+                run["tools"] = payload
+                with tools_slot.container():
+                    render_tools(payload)
             elif kind == "research":
                 run["web"] = payload
                 with web_slot.container():

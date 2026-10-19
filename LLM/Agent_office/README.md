@@ -21,6 +21,14 @@
   ⑥ 👤 결정    사람이 채택(수정 가능)/반려 → 에이전트별 교훈 저장 → 다음 실행 프롬프트에 주입
 ```
 
+### 팀
+
+| 팀 | 업무 (화면의 📋 업무 선택) | 근거 자료 |
+|---|---|---|
+| 기본 팀 | 자유 질문 (예시 4종) | 웹 검색 |
+| 📈 주식 팀 | ① 분야별 종목 추천 ② 주가 전망 ③ 보유 종목 전략(수량·매입가) ④ 포트폴리오 구성 | **시세 데이터**(Yahoo Finance: 현재가·수익률·이동평균·변동성·평가손익을 코드로 계산) + 최근 1개월 뉴스·리포트 |
+| ✈️ 여행 팀 | 여행 계획서 (국내/해외, 출발·도착일, 인원, 예산, 스타일) | **여행 달력**(N박 M일·날짜별 요일을 코드로 계산) + 목적지 날씨·행사·교통 검색 |
+
 > 진행 상황은 [today_worked.md](today_worked.md), 초기 계획은 [PLAN.md](PLAN.md) 참고.
 
 ---
@@ -51,14 +59,14 @@
 - 키가 있어도 호출이 실패하면(크레딧 부족, 할당량 초과, 모델 단종 등) 다음 후보로 넘어가고, 타임라인의 "검증 기록"에 사유가 남습니다.
 - **Claude 를 다시 쓰려면**: `config/models.yaml` 의 `disabled_providers: [anthropic]` 에서 anthropic 을 지우고, 부장·팀장 primary 를 Claude 모델로 바꾸면 됩니다.
 - Gemini **Pro** 계열은 무료 등급 할당량이 0 입니다 (Flash 계열은 무료 사용 가능).
-- 웹 검색은 DuckDuckGo(`ddgs` 패키지)를 쓰므로 별도 키가 필요 없습니다.
+- 웹 검색은 DuckDuckGo(`ddgs` 패키지), 주가 데이터는 Yahoo Finance(`yfinance` 패키지)를 쓰므로 별도 키가 필요 없습니다.
 - 비용: 기본 팀 전체(팀장부터)에 질문하면 LLM 호출 약 12~15회 (브리프 1 + 검색어 1 + 분배 2 + 초안 3 + 검토·통합 5 + 비평 1 + 교훈 1).
 
 ## 3. 설치
 
 ```bash
-# 1) 이 폴더로 이동
-cd 26-Agent-Office
+# 1) 이 폴더로 이동 (GitHub jeong-yun/Project 저장소 기준)
+cd Project/LLM/Agent_office
 
 # 2) 가상환경 생성
 python -m venv .venv
@@ -79,7 +87,7 @@ copy .env.example .env
 cp .env.example .env
 ```
 
-> 이 폴더를 langchain-kr 레포 안에서 실행하는 경우, 레포 루트의 `.env` 도 자동으로 읽습니다 (폴더 내 `.env` 값이 우선).
+> `.env` 는 이 폴더 안의 것을 우선 읽고, 없는 값은 바로 위 폴더의 `.env` 에서 보충합니다.
 > **`.env` 는 절대 git 에 올리지 않습니다** — `.gitignore` 에 들어 있고, 저장소에는 값이 빈 `.env.example` 만 올립니다.
 
 ## 4. 실행
@@ -103,6 +111,9 @@ streamlit run app.py
 - 과정(누가 무엇을 조사할지)은 supervisor 가 스스로 나눕니다.
 - 결과를 그대로 받아들이지 말고, 타임라인의 **검토·비평 기록**(취약점·논리 비약)을 확인한 뒤 채택하세요.
 - **문의 대상**에서 다른 칸을 고르면 그 에이전트가 supervisor 가 되어 그 아래 팀만 일합니다 (비용·시간 절약).
+- 주식·여행 팀은 **📋 업무 선택**에서 업무를 고르고 입력칸만 채우면 됩니다. 목표·완료 기준은 업무 양식에 미리 정의돼 있어
+  자동으로 '최종 상태' 브리프가 됩니다 (예: 주가 전망 → "상승·기본·하락 시나리오와 확률, 기준일 인용").
+- 모든 에이전트는 **오늘 날짜**를 기준으로 '현재·최근'을 판단하고, 주식 팀 뉴스 검색은 최근 1개월로 제한됩니다.
 
 ## 6. 검증 장치
 
@@ -124,14 +135,22 @@ streamlit run app.py
 | `python_syntax` | 답변 속 ```python 블록을 `compile()` 로 문법 검사 (실행하지 않음) |
 | `sql_sandbox` | ```sql 블록을 메모리 SQLite 에 스키마(`options.sql_schema`)를 만들고 EXPLAIN 컴파일 + 선택적 시간 제한 실행 (`sql_execute`, `sql_timeout_sec`) |
 | `json_keys` | ```json 블록 형식 + 단계 분할 필수 키(`options.required_keys`) 검사 |
+| `required_terms` | 업무 필수 항목(예: 시나리오·손절·목표가·예산)이 답변에 있는지 검사 (`"A\|B"` 는 둘 중 하나) |
+| `itinerary_days` | 여행 일정이 1일차~마지막 날까지 모든 날을 다루는지 검사 (일수는 여행 달력 툴이 계산해 전달) |
+
+업무 양식(team.yaml `tasks`)마다 `validators`·`harness_options` 를 따로 지정할 수 있습니다 (예: 주가 전망은 `required_terms: [기준일, 시나리오, 상승, 하락, 확률]`).
 
 새 검증기(예: ClickHouse 테스트 DB 실행)는 `core/harness/validators.py` 에 `Validator` 를 상속한 클래스를 만들고 `@register` 를 붙이면 됩니다.
 
 ### 단계별 평가 실행
 
 ```bash
-python -m evals.run_eval evals/cases/general.yaml
+python -m evals.run_eval evals/cases/general.yaml   # 기본 팀 (HBF 등)
+python -m evals.run_eval evals/cases/stock.yaml     # 주식 팀 (삼성전자 전망·보유 전략)
+python -m evals.run_eval evals/cases/travel.yaml    # 여행 팀 (오사카 3박 4일)
 ```
+
+케이스는 `question`(자유 질문) 또는 `task` + `inputs`(업무 양식) 로 쓰고, 단계는 `tools · research · plan · draft · review · integrate · final` 중에서 검사합니다.
 
 케이스 작성법은 `evals/cases/general.yaml`, 보안 로그 분석(페이로드 복원 → 시그니처 매칭 → 위험도) 예시는 `evals/cases/_security_template.yaml` 참고.
 결과는 화면 표와 `data/evals/<시각>.json` 으로 저장됩니다.
@@ -158,7 +177,31 @@ python -m evals.run_eval evals/cases/general.yaml
 `config/models.yaml` 에서 직급별 `primary` / `fallback` 을 수정합니다. 특정 팀만 바꾸려면 team.yaml 의 `model_overrides`.
 
 ### 새 팀 추가
-`teams/_template` 폴더를 `teams/<새_팀_id>` 로 복사하고 `team.yaml`(조직도·검토 기준·하네스) 과 `skills/` 를 작성합니다.
+`teams/_template` 폴더를 `teams/<새_팀_id>` 로 복사하고 `team.yaml`(조직도·검토 기준·하네스·업무 양식) 과 `skills/` 를 작성합니다.
+`teams/stock`, `teams/travel` 이 완성된 예시입니다.
+
+### 업무 양식 추가 (team.yaml `tasks`)
+업무 하나 = 입력칸(`fields`) + 질문 템플릿 + 목표·완료 기준 + 하네스. 앱을 새로고침하면 **📋 업무 선택**에 나타납니다.
+
+```yaml
+tasks:
+  - id: forecast
+    title: 2) 주가 전망
+    fields:                                  # type: text | textarea | number | date | select
+      - {key: stock, label: 종목 이름 또는 코드, required: true}
+      - {key: horizon, label: 전망 기간, type: select, options: [1주, 1개월, 3개월]}
+    question: "{stock} 종목의 향후 {horizon} 주가를 전망해줘."   # {key} = 입력값, 빈 값이 든 줄은 자동 삭제
+    goal: "{stock} 종목의 {horizon} 시나리오별 전망 보고서"
+    success_criteria: ["상승·기본·하락 시나리오와 확률을 제시한다"]
+    validators: [required_terms]             # 이 업무에서 추가로 돌릴 하네스
+    harness_options: {required_terms: [시나리오, 확률]}
+```
+`start_date`·`end_date` 입력칸이 있으면 `{nights}`·`{days}` 가 자동으로 계산되어 템플릿에서 쓸 수 있습니다.
+
+### 데이터 툴 추가 (team.yaml `tools`)
+`core/tools/` 에 `run(question, inputs, models) -> ToolResult | None` 함수를 만들고 `core/tools/__init__.py` 의 `TOOLS` 에 등록합니다.
+`inputs` 는 업무 양식의 입력값입니다. 결과는 모든 에이전트의 근거 자료와 화면 타임라인에 들어갑니다.
+현재 툴: `stock_data`(주가·평가손익), `travel_calendar`(여행 날짜·요일). 팀별 검색 요령·기간은 team.yaml `search`(`hint`, `news_timelimit` 등).
 
 ## 8. 저장 정책
 
@@ -173,8 +216,8 @@ python -m evals.run_eval evals/cases/general.yaml
 ## 9. 폴더 구조와 코드 읽는 순서
 
 ```
-26-Agent-Office/
-├── app.py                  ⑥ 화면 (조직도·질문·타임라인·결정) — Streamlit
+Agent_office/
+├── app.py                  ⑥ 화면 (조직도·업무 양식·질문·타임라인·결정) — Streamlit
 ├── core/
 │   ├── schemas.py          ① 모든 데이터 형식 (설정·LLM 출력·실행 결과) — 여기부터 읽기
 │   ├── config.py           ② 설정 읽기·검증, 조직도·아바타·스킬
@@ -182,13 +225,16 @@ python -m evals.run_eval evals/cases/general.yaml
 │   ├── agent.py            ④ 에이전트 한 명: 분배(plan)·초안(draft)·검토(review) 프롬프트
 │   ├── workflow.py         ⑤ LangGraph: brief → research → work⟲ → human_decision → feedback
 │   ├── brief.py            요청 정리(최종 상태 정의) + 질문 예시
-│   ├── search.py           웹 검색(검색어 생성 → DuckDuckGo)
+│   ├── tasks.py            팀 업무 양식 → 질문·브리프·하네스 옵션
+│   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력)
+│   ├── search.py           웹 검색(검색어 생성 → DuckDuckGo 웹+뉴스)
 │   ├── verification.py     루브릭·비평가·자가 교정
 │   ├── feedback.py         사람 결정 → 에이전트별 교훈
 │   ├── storage.py          SQLite (실행 이력·교훈, 미결정 삭제)
 │   └── harness/            결정론적 검증기(validators) + 단계별 평가(evaluation)
 ├── config/                 ranks / models / settings / verification (.yaml)
-├── teams/                  팀별 team.yaml (조직도) + skills/ + avatars/ (general = 기본 팀, _template = 템플릿)
+├── teams/                  팀별 team.yaml (조직도·업무 양식) + skills/ + avatars/
+│                           (general = 기본, stock = 주식, travel = 여행, _template = 템플릿)
 ├── evals/                  단계별 평가 실행기 + 케이스
 ├── assets/avatars/         공용 에이전트 이미지 (+ _working 이미지)
 ├── scripts/                기본 아바타 생성

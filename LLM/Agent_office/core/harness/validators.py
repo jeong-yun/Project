@@ -3,6 +3,8 @@
   python_syntax : ```python 블록을 compile() 로 문법 검사 (실행하지 않음 → 안전)
   sql_sandbox   : ```sql 블록을 메모리 SQLite 샌드박스에서 검사 (스키마 생성 → EXPLAIN 컴파일 → 선택적으로 시간 제한 실행)
   json_keys     : ```json 블록이 올바른 JSON 인지 + 필수 키(단계 분할 키)를 모두 가졌는지 검사
+  required_terms: 업무에 꼭 들어가야 할 항목(예: 시나리오·손절가·예산)이 답변에 있는지 검사
+  itinerary_days: 여행 일정이 1일차~마지막 날까지 모든 날을 다루는지 검사 (일수는 코드가 계산)
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -11,6 +13,7 @@ ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Vali
 import json
 import sqlite3
 import time
+from datetime import date, timedelta
 
 from core.config import BASE_DIR
 from core.harness.base import Validator, extract_code_blocks, register
@@ -100,3 +103,43 @@ class JsonKeysValidator(Validator):
             if missing:
                 return self.fail(f"JSON 블록 {i} 에 필수 키가 없다: {missing}")
         return self.ok(f"JSON 블록 {len(blocks)}개 통과")
+
+
+@register
+class RequiredTermsValidator(Validator):
+    name = "required_terms"
+    description = "업무 필수 항목(예: 시나리오·손절가·예산)이 답변에 있는지 검사"
+
+    def check(self, answer: str, options: dict):
+        # 항목 하나에 "A|B" 처럼 대안을 적으면 그중 하나만 있어도 통과
+        required = options.get("required_terms", [])
+        low = answer.lower()
+        missing = [term for term in required if not any(alt.strip().lower() in low for alt in term.split("|"))]
+        if missing:
+            return self.fail(f"반드시 들어가야 할 항목이 빠졌다: {missing}. 이 항목들을 다루는 내용을 추가하라.")
+        return self.ok(f"필수 항목 {len(required)}개 포함" if required else "검사할 필수 항목 없음")
+
+
+@register
+class ItineraryDaysValidator(Validator):
+    name = "itinerary_days"
+    description = "여행 일정이 모든 날(1일차~마지막 날)을 다루는지 검사"
+
+    def check(self, answer: str, options: dict):
+        days = int(options.get("trip_days") or 0)
+        if days <= 0:
+            return self.ok("검사할 여행 일정 정보 없음")
+        start = options.get("trip_start")
+        start_d = date.fromisoformat(start) if start else None
+        compact = answer.replace(" ", "").lower()
+        missing = []
+        for i in range(1, days + 1):
+            labels = [f"{i}일차", f"day{i}", f"{i}일째", f"day-{i}"]
+            if start_d:
+                d = start_d + timedelta(days=i - 1)
+                labels += [f"{d.month}/{d.day}", f"{d.month}월{d.day}일", d.isoformat(), f"{d.month:02d}-{d.day:02d}", f"{d.month}.{d.day}"]
+            if not any(label.lower() in compact for label in labels):
+                missing.append(f"{i}일차")
+        if missing:
+            return self.fail(f"여행 기간 {days}일 중 일정이 없는 날: {missing}. 모든 날의 일정을 'n일차(날짜)' 형식으로 작성하라.")
+        return self.ok(f"{days}일 모두 일정 있음")

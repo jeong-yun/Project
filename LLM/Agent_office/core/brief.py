@@ -18,6 +18,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from core import llm_factory
+from core.config import date_label, today
 from core.llm_factory import NoAvailableModelError
 from core.schemas import ModelsConfig
 
@@ -72,6 +73,7 @@ def draft_brief(question: str, models: ModelsConfig, partial: DesiredState | Non
             "\n".join(
                 [
                     "너는 요청 정리 담당이다. 사용자의 질문을 '최종 상태 정의(Desired State)' 브리프로 바꾼다.",
+                    f"- 오늘 날짜: {date_label(today())} ('최근·현재'는 이 날짜 기준).",
                     "- 과정(1단계, 2단계…)을 지시하지 말고, 도달해야 할 결과물과 완료 기준을 정의한다.",
                     "- 완료 기준은 나중에 검토자가 '충족/미충족'을 판정할 수 있도록 구체적이고 검증 가능하게 쓴다.",
                     "- 사실 확인이 필요한 질문이면 '출처를 제시한다' 같은 기준을 포함한다.",
