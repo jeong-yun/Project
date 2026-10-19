@@ -13,6 +13,8 @@ feedback:
 storage:
   data_dir: data           # gitignore 대상 (runs.db, 업로드 이미지 등)
   db_file: runs.db
+  # 사람이 채택한 결과를 파일(.md, 여행은 지도 .html 도)로 저장하는 폴더 — results/<팀>/
+  results_dir: results
   # 사람이 채택/반려하지 않은(피드백 없는) 실행은 불필요한 기록이므로 삭제한다.
   # 앱 시작 시 이 시간보다 오래된 미결정 실행을 지운다 (진행 중인 화면을 보호하기 위해 약간의 여유를 둠)
   purge_undecided_after_hours: 1

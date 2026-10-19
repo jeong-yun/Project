@@ -149,6 +149,7 @@ class Team(BaseModel):
     rubric: dict | None = None  # 없으면 config/verification.yaml 의 review_rubric 사용
     tasks: list[TaskTemplate] = Field(default_factory=list)  # 정형 업무 양식 (없으면 자유 질문만)
     search: dict = Field(default_factory=dict)  # 웹 검색 설정 덮어쓰기 (hint, news_timelimit 등)
+    features: list[str] = Field(default_factory=list)  # 추가 기능 (예: route_map = 여행 경로 지도)
 
 
 # ════════════════════════════════════════════════════════════════════

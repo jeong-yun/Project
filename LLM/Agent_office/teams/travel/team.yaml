@@ -60,6 +60,9 @@ output_format: markdown
 
 tools: [travel_calendar, web_search]
 
+# 추가 기능: route_map — 최종 계획서를 방문지 목록으로 바꿔 움직이는 지도(종류별 기호)로 보여 주고, 채택 시 지도도 함께 저장
+features: [route_map]
+
 search:
   hint: "목적지 + 여행 월을 넣어 '<목적지> <월> 날씨', '<목적지> 축제 <연도>', '<목적지> 가볼만한곳', '<목적지> 맛집', '<출발지>에서 <목적지> 가는 법' 검색어를 만든다. 목적지가 없으면 조건에 맞는 '<계절> <국내/해외> 여행지 추천' 으로 찾는다."
   max_total_results: 12

@@ -14,12 +14,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import ImageFont
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.avatars import SIZE, make_avatar, make_working  # noqa: E402,F401
 from core.config import BASE_DIR, load_ranks  # noqa: E402
 
-SIZE = 256
 COLORS = ["#4C9AFF", "#36B37E", "#FFAB00", "#FF5630", "#6554C0"]  # 직급 순서대로
 FONT_CANDIDATES = [
     "C:/Windows/Fonts/malgunbd.ttf",
@@ -34,27 +34,6 @@ def load_korean_font(size: int) -> ImageFont.FreeTypeFont | None:
         if Path(path).exists():
             return ImageFont.truetype(path, size)
     return None
-
-
-def make_avatar(label: str, color: str, font: ImageFont.ImageFont) -> Image.Image:
-    img = Image.new("RGBA", (SIZE, SIZE), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-    draw.ellipse((8, 8, SIZE - 8, SIZE - 8), fill=color)
-    draw.text((SIZE / 2, SIZE / 2), label, fill="white", font=font, anchor="mm")
-    return img
-
-
-def make_working(base: Image.Image, color: str) -> Image.Image:
-    """평소 이미지 오른쪽 아래에 '말하는 중' 말풍선(…)을 붙인다."""
-    img = base.copy()
-    draw = ImageDraw.Draw(img)
-    box = (130, 160, 250, 236)  # 말풍선 몸통
-    draw.rounded_rectangle(box, radius=30, fill="white", outline=color, width=6)
-    draw.polygon([(150, 226), (138, 252), (176, 232)], fill="white", outline=color)  # 꼬리
-    draw.rounded_rectangle((146, 222, 180, 232), radius=4, fill="white")  # 꼬리 이음새 덮기
-    for cx in (162, 190, 218):
-        draw.ellipse((cx - 9, 189, cx + 9, 207), fill=color)
-    return img
 
 
 def main() -> None:
