@@ -759,7 +759,9 @@ target = st.radio(
 active_ids = {n.id for n in subtree(org, target).walk()}
 run_key = (team_id, target)
 FOCUS_KEY, CLICK_KEY, PENDING_FOCUS_KEY = f"focus_{team_id}", f"last_click_{team_id}", f"pending_focus_{team_id}"
-st.session_state.setdefault(FOCUS_KEY, target)
+# 기본은 '아무 에이전트도 고르지 않음' — 조직도와 질문만 보이고, 칸을 누른 에이전트의 내용만 펼친다
+NO_FOCUS = "__none__"
+st.session_state.setdefault(FOCUS_KEY, NO_FOCUS)
 # 위젯이 그려진 뒤에는 그 값을 바꿀 수 없으므로, 제출 시 정한 포커스는 다음 실행 맨 앞에서 반영한다
 if PENDING_FOCUS_KEY in st.session_state:
     st.session_state[FOCUS_KEY] = st.session_state.pop(PENDING_FOCUS_KEY)
@@ -789,15 +791,32 @@ def render_live() -> None:
         st.rerun(scope="fragment")  # 조직도의 파란 테두리(선택 표시)도 바로 옮기도록 이 영역만 다시 그림
 
     # 선택지 이름은 고정(에이전트 이름)으로 둔다 — 진행 상태를 이름에 넣으면 1초마다 선택지가 바뀌어 선택이 풀릴 수 있다
-    focus = st.selectbox("🔎 에이전트 보기 (조직도의 칸을 눌러도 됩니다)", [n.id for n in org.walk()],
-                         format_func=name_of, key=FOCUS_KEY)
-    render_agent_panel(focus, run)
+    focus = st.selectbox("🔎 에이전트 보기 (조직도의 칸을 눌러도 됩니다)", [NO_FOCUS, *[n.id for n in org.walk()]],
+                         format_func=lambda n: "— 고르지 않음 (질문만 보기) —" if n == NO_FOCUS else name_of(n), key=FOCUS_KEY)
 
     if run:
         elapsed = int(time.time() - run["started_at"])
-        if not run["done"]:
-            st.info(f"⏳ 진행 중 ({elapsed}초) — 다른 에이전트를 눌러 봐도 작업은 계속됩니다.")
+        progress = f"⏳ 진행 중 ({elapsed}초)" if not run["done"] else "✅ 완료"
+        done_steps = len([s for s in run["steps"] if s.kind != "plan"])
+        # 질문 요약 — 개념 편집 팀은 질문에 초안·관련 항목이 길게 들어가므로 개념명과 판정만 보여 준다
+        info = run.get("concept")
+        if info:
+            how = "✏️ 수정 — " + info["target"] if info.get("target") else "🆕 추가"
+            question = f"**{info['title']}** · {how}"
+        else:
+            question = run["question"] if len(run["question"]) <= 300 else run["question"][:300] + "…"
+        with st.container(border=True):
+            st.markdown(f"**Q.** {question}")
+            st.caption(f"{progress} · 완료된 단계 {done_steps}개 — 조직도에서 에이전트를 누르면 그 에이전트가 한 일과 지금 작성 중인 내용을 볼 수 있습니다.")
+
+    if focus != NO_FOCUS:
+        render_agent_panel(focus, run)
+
+    if run:
         has_map = ROUTE_MAP in team.features
+        # 전체 타임라인은 원할 때만 펼친다 (기본은 조직도·질문만 — 실시간으로 늘어나는 글이 화면을 채우지 않게)
+        if not st.toggle("📜 전체 진행·근거 자료 보기", key=f"show_all_{team_id}"):
+            return
         tabs = st.tabs(["📜 전체 진행", "🎯 브리프·근거 자료", *(["🗺 여행 지도"] if has_map else [])])
         tab_all, tab_ctx = tabs[0], tabs[1]
         if has_map:
@@ -820,7 +839,11 @@ def render_live() -> None:
                     for note in run["notes"]:
                         st.text(note[:500])
 
-        # 작업이 끝나거나(→ '최종 결정' 표시) 지도 만들기가 끝나면(→ 자동 갱신 멈춤) 화면 전체를 다시 그린다
+
+def watch_run_state() -> None:
+    """작업이 끝나거나(→ '최종 결정' 표시) 지도 만들기가 끝나면(→ 자동 갱신 멈춤) 화면 전체를 다시 그린다."""
+    run = st.session_state["runs"].get(run_key)
+    if run:
         state_key = f"live_state_{run['run_id']}"
         state_now = (run["done"], run.get("post_busy", False))
         previous_state = st.session_state.get(state_key)
@@ -832,7 +855,14 @@ def render_live() -> None:
 
 current = st.session_state["runs"].get(run_key)
 running = bool(current and (not current["done"] or current.get("post_busy")))  # 지도 만드는 중에도 자동 갱신
-st.fragment(run_every=REFRESH_SEC if running else None)(render_live)()
+
+
+def live_area() -> None:
+    render_live()
+    watch_run_state()  # 전체 진행을 접어 둔 상태(render_live 가 일찍 끝남)에서도 완료를 감지해야 한다
+
+
+st.fragment(run_every=REFRESH_SEC if running else None)(live_area)()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -994,7 +1024,7 @@ if request:
         # 지도 기능이 있는 팀은 처음부터 '후처리 예정'으로 표시 — 워크플로우가 끝난 뒤 지도까지 다 만들 때까지 화면이 자동 갱신된다
         run["post_busy"] = ROUTE_MAP in team.features
         st.session_state["runs"][run_key] = run
-        st.session_state[PENDING_FOCUS_KEY] = target  # 다음 화면에서 supervisor 를 보여 준다
+        st.session_state[PENDING_FOCUS_KEY] = NO_FOCUS  # 새 업무는 조직도·질문만 보이는 상태로 시작 (에이전트를 누르면 펼침)
         storage.create_run(run["run_id"], team_id, target, run["question"])
         graph = make_graph()
 
