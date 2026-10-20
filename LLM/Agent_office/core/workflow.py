@@ -34,6 +34,7 @@ from langgraph.types import Command, interrupt
 
 from core import harness, search, verification
 from core.agent import OrgAgent, chunk_text, with_feedback
+from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
 from core.config import load_skills, parent_map, subtree
 from core.feedback import generate_lessons
@@ -252,12 +253,26 @@ def build_office_graph(
             emit({"type": "start", "node": node_id, "kind": "draft"})
             messages = agent.draft_messages(question, tasks[node_id], web, lessons_for(node_id))
             tag = DRAFT_TAG + node_id
-            answer = agent.draft(messages, tag)
 
-            def redo_draft(feedback: str, previous: AgentAnswer) -> AgentAnswer:
-                return agent.draft(with_feedback(messages, previous.content, feedback), tag)
+            def restart() -> None:
+                # 모델이 쓰는 도중 끊겨 처음부터 다시 쓸 때 — 화면의 '작성 중' 미리보기를 비운다
+                emit({"type": "retry", "node": node_id, "reason": "model"})
 
-            answer = run_harness(answer, redo_draft, state)
+            try:
+                answer = agent.draft(messages, tag, restart)
+
+                def redo_draft(feedback: str, previous: AgentAnswer) -> AgentAnswer:
+                    return agent.draft(with_feedback(messages, previous.content, feedback), tag, restart)
+
+                answer = run_harness(answer, redo_draft, state)
+            except NoAvailableModelError as e:
+                # 실무자 한 명의 모든 모델이 실패해도 팀 전체를 멈추지 않는다 → 실패 표시를 남기고 관리자가 나머지로 진행
+                answer = AgentAnswer(
+                    node_id=node_id, rank_id=agent.rank.id, kind="draft",
+                    content=f"⚠️ {agent.name}: 모델 오류로 초안을 작성하지 못했습니다. 이 부분은 다른 결과로 보완해야 합니다.",
+                    model=agent.rank_models.primary, errors=str(e).splitlines()[1:][:6],
+                    verification_log=["모든 후보 모델 호출 실패 → 이 에이전트 없이 진행"],
+                )
             results[node_id] = answer
             new_steps.append(answer)
 

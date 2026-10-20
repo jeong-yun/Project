@@ -29,7 +29,7 @@ WORKING_LABELS = {
     "plan": "📋 업무 분배 중", "draft": "✍️ 작성 중", "review": "🔍 검토 중", "integrate": "🧩 통합 중",
     "critic": "⚖️ 비평 받는 중",
 }
-RETRY_LABELS = {"critic": "🔁 자가 교정 중", "harness": "🧪 오류 수정 중"}
+RETRY_LABELS = {"critic": "🔁 자가 교정 중", "harness": "🧪 오류 수정 중", "model": "🔄 모델 오류 — 다시 작성 중"}
 KIND_LABELS = {"plan": "📋 업무 분배", "draft": "📝 초안", "review": "🔍 검토", "integrate": "🧩 통합"}
 
 

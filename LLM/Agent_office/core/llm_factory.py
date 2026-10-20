@@ -20,6 +20,31 @@ from core.schemas import ModelsConfig, ModelSpec, RankModels
 class NoAvailableModelError(RuntimeError):
     """사용 가능한 모델이 없거나 모든 후보 모델 호출이 실패한 경우."""
 
+
+# ─── 일시적 오류 재시도 ──────────────────────────────────────────────
+# 503(과부하)·429(요청 과다)·시간 초과·연결 끊김은 잠시 뒤 다시 하면 대부분 성공한다.
+# → 같은 모델로 RETRY_DELAYS 만큼 기다렸다 다시 시도하고, 그래도 안 되면 다음 후보(대안 모델)로 넘어간다.
+# 키 오류·모델 없음(404)·잘못된 요청(400) 같은 영구 오류는 기다려도 소용없으므로 바로 다음 후보로 간다.
+RETRY_DELAYS = (2.0, 5.0)  # 초
+TRANSIENT_MARKERS = (
+    "503", "502", "500 ", "429", "unavailable", "overloaded", "high demand", "try again later",
+    "ratelimit", "rate limit", "resourceexhausted", "timeout", "timed out", "connection", "temporarily",
+    "deadlineexceeded", "internalservererror", "apiconnectionerror",
+)
+
+
+def is_transient(error: Exception) -> bool:
+    """잠시 뒤 다시 하면 될 가능성이 높은 오류인가 (provider 마다 예외 종류가 달라 이름·메시지로 판단)."""
+    text = f"{type(error).__name__} {error}".lower()
+    if "quota" in text and ("free_tier" in text or "limit: 0" in text):
+        return False  # 무료 할당량 0 (예: Gemini Pro) — 기다려도 안 됨
+    return any(marker in text for marker in TRANSIENT_MARKERS)
+
+
+def sleep(seconds: float) -> None:
+    """재시도 대기 (테스트에서 0 초로 바꿀 수 있게 함수로 분리)."""
+    time.sleep(seconds)
+
 # Upstage Solar 는 OpenAI 호환 API 를 제공하므로 별도 패키지 없이 ChatOpenAI 로 호출한다.
 UPSTAGE_BASE_URL = "https://api.upstage.ai/v1"
 # langchain-anthropic 의 기본 max_tokens(1024)는 긴 답변에 부족하다.
@@ -125,26 +150,35 @@ def invoke_structured(
     messages: list[BaseMessage],
     who: str,
 ) -> StructuredCall:
-    """구조화 출력 호출. 후보 모델을 우선순위대로 시도하고, 실패하면 다음 후보로 넘어간다."""
+    """구조화 출력 호출. 일시적 오류는 같은 모델로 재시도하고, 그래도 실패하면 다음 후보로 넘어간다."""
     errors: list[str] = []
     for spec, is_fallback in require_candidates(rank_models, models, who):
-        started = time.perf_counter()
-        try:
-            llm = create_chat_model(spec, models)
-            out = llm.with_structured_output(schema, include_raw=True, **structured_output_kwargs(spec)).invoke(
-                messages
-            )
-            if out.get("parsed") is None:
-                raise ValueError(f"구조화 출력 파싱 실패: {out.get('parsing_error')}")
-        except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
-            # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
-            errors.append(f"{spec.label}: {type(e).__name__}: {str(e)[:300]}")
+        out = None
+        for attempt in range(len(RETRY_DELAYS) + 1):
+            started = time.perf_counter()
+            try:
+                llm = create_chat_model(spec, models)
+                out = llm.with_structured_output(schema, include_raw=True, **structured_output_kwargs(spec)).invoke(
+                    messages
+                )
+                if out.get("parsed") is None:
+                    raise ValueError(f"구조화 출력 파싱 실패: {out.get('parsing_error')}")
+                break
+            except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
+                # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
+                errors.append(f"{spec.label}: {type(e).__name__}: {str(e)[:300]}")
+                out = None
+                if attempt < len(RETRY_DELAYS) and is_transient(e):
+                    sleep(RETRY_DELAYS[attempt])  # 잠깐 기다렸다 같은 모델로 다시
+                    continue
+                break  # 영구 오류이거나 재시도를 다 썼으면 다음 후보로
+        if out is None:
             continue
         usage = getattr(out.get("raw"), "usage_metadata", None) or {}
         return StructuredCall(
             parsed=out["parsed"],
             spec=spec,
-            is_fallback=is_fallback or bool(errors),
+            is_fallback=is_fallback,  # 후보 순서로 판단 (같은 모델 재시도 성공은 대안이 아님)
             elapsed_sec=round(time.perf_counter() - started, 2),
             input_tokens=usage.get("input_tokens"),
             output_tokens=usage.get("output_tokens"),

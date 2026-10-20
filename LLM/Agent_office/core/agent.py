@@ -152,12 +152,12 @@ class OrgAgent:
             )
         return [SystemMessage(self.system_prompt(lessons)), HumanMessage("\n\n".join(parts))]
 
-    def stream_draft(self, messages: list[BaseMessage], tag: str = "") -> "AnswerStream":
+    def stream_draft(self, messages: list[BaseMessage], tag: str = "", on_restart=None) -> "AnswerStream":
         """초안을 토큰 단위로 스트리밍한다. tag 는 화면에서 '누가 쓰는 중인지' 구분하는 표시."""
-        return AnswerStream(self, messages, tag)
+        return AnswerStream(self, messages, tag, on_restart)
 
-    def draft(self, messages: list[BaseMessage], tag: str = "") -> AgentAnswer:
-        stream = self.stream_draft(messages, tag)
+    def draft(self, messages: list[BaseMessage], tag: str = "", on_restart=None) -> AgentAnswer:
+        stream = self.stream_draft(messages, tag, on_restart)
         for _ in stream:  # 끝까지 소비해야 stream.result 가 채워진다
             pass
         return stream.result
@@ -260,14 +260,18 @@ class OrgAgent:
 class AnswerStream:
     """텍스트 조각을 yield 하고, 끝나면 .result 에 AgentAnswer 를 담는 이터레이터.
 
-    후보 모델을 우선순위대로 시도하며, 첫 토큰을 받기 전에 실패하면 다음 후보로 넘어간다.
-    (이미 일부를 출력한 뒤의 실패는 답변이 섞이지 않도록 그대로 예외를 올린다.)
+    실패 처리 (예: Gemini 503 '요청 폭주', 429, 연결 끊김)
+      - 일시적 오류  : 같은 모델로 잠깐 기다렸다 다시 (llm_factory.RETRY_DELAYS)
+      - 그 밖의 오류 : 다음 후보(대안 모델)로
+      - 쓰는 도중 끊김: 반쯤 쓴 초안은 버리고 처음부터 다시 쓴다 → on_restart() 로 화면의 미리보기를 지우게 알린다
+        (yield 된 조각에는 버려진 초안이 섞일 수 있으므로, 최종 답변은 항상 .result 를 쓴다)
     """
 
-    def __init__(self, agent: OrgAgent, messages: list[BaseMessage], tag: str = ""):
+    def __init__(self, agent: OrgAgent, messages: list[BaseMessage], tag: str = "", on_restart=None):
         self.agent = agent
         self.messages = messages
         self.tag = tag
+        self.on_restart = on_restart  # 다시 쓰기 시작할 때 부르는 함수 (화면 미리보기 초기화용)
         self.result: AgentAnswer | None = None
 
     def __iter__(self) -> Iterator[str]:
@@ -275,38 +279,46 @@ class AnswerStream:
 
         errors: list[str] = []
         for spec, is_fallback in candidates:
-            started = time.perf_counter()
-            full: AIMessageChunk | None = None
-            try:
-                llm = llm_factory.create_chat_model(spec, self.agent.models)
-                # tags: LangGraph 스트림에서 '이 토큰은 누구의 초안인지' 알아보는 표시
-                config = {"tags": [self.tag]} if self.tag else None
-                for chunk in llm.stream(self.messages, config=config):
-                    full = chunk if full is None else full + chunk
-                    text = chunk_text(chunk.content)
-                    if text:
-                        yield text
-            except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
-                if full is not None and chunk_text(full.content):
-                    raise
-                # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
-                errors.append(f"{spec.label}: {type(e).__name__}: {str(e)[:300]}")
-                continue
+            for attempt in range(len(llm_factory.RETRY_DELAYS) + 1):
+                started = time.perf_counter()
+                full: AIMessageChunk | None = None
+                try:
+                    llm = llm_factory.create_chat_model(spec, self.agent.models)
+                    # tags: LangGraph 스트림에서 '이 토큰은 누구의 초안인지' 알아보는 표시
+                    config = {"tags": [self.tag]} if self.tag else None
+                    for chunk in llm.stream(self.messages, config=config):
+                        full = chunk if full is None else full + chunk
+                        text = chunk_text(chunk.content)
+                        if text:
+                            yield text
+                except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
+                    # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
+                    started_writing = full is not None and bool(chunk_text(full.content))
+                    errors.append(
+                        f"{spec.label}: {type(e).__name__}: {str(e)[:300]}"
+                        + (" (작성 도중 끊김 → 처음부터 다시)" if started_writing else "")
+                    )
+                    if started_writing and self.on_restart:
+                        self.on_restart()  # 반쯤 쓴 초안은 버린다
+                    if attempt < len(llm_factory.RETRY_DELAYS) and llm_factory.is_transient(e):
+                        llm_factory.sleep(llm_factory.RETRY_DELAYS[attempt])  # 잠깐 기다렸다 같은 모델로 다시
+                        continue
+                    break  # 영구 오류이거나 재시도를 다 썼으면 다음 후보로
 
-            usage = (full.usage_metadata or {}) if full is not None else {}
-            self.result = AgentAnswer(
-                node_id=self.agent.node.id,
-                rank_id=self.agent.rank.id,
-                kind="draft",
-                content=chunk_text(full.content) if full is not None else "",
-                model=spec,
-                is_fallback=is_fallback or bool(errors),
-                elapsed_sec=round(time.perf_counter() - started, 2),
-                input_tokens=usage.get("input_tokens"),
-                output_tokens=usage.get("output_tokens"),
-                errors=errors,
-            )
-            return
+                usage = (full.usage_metadata or {}) if full is not None else {}
+                self.result = AgentAnswer(
+                    node_id=self.agent.node.id,
+                    rank_id=self.agent.rank.id,
+                    kind="draft",
+                    content=chunk_text(full.content) if full is not None else "",
+                    model=spec,
+                    is_fallback=is_fallback,  # 후보 순서로 판단 (같은 모델 재시도 성공은 대안이 아님)
+                    elapsed_sec=round(time.perf_counter() - started, 2),
+                    input_tokens=usage.get("input_tokens"),
+                    output_tokens=usage.get("output_tokens"),
+                    errors=errors,
+                )
+                return
 
         raise NoAvailableModelError(
             f"{self.agent.name}: 모든 후보 모델 호출에 실패했습니다.\n" + "\n".join(errors)

@@ -69,6 +69,15 @@
 
 ---
 
+## 2026-10-20
+
+**모델 장애 대응 (Gemini 503 '요청 폭주'로 실행이 멈춘 문제)**
+- 원인: 실무자 초안을 **스트리밍하는 도중** Gemini 가 503 으로 끊김 → 반쯤 쓴 초안이 섞이지 않도록 예외를 그대로 올리던 설계 때문에 대안 모델이 있는데도 실행 전체가 중단. 같은 모델 재시도도 없었음
+- 작업: 일시적 오류(503·429·과부하·시간 초과·연결 끊김) 판별 → 같은 모델 2초·5초 대기 후 재시도 → 대안 모델 순으로 처리(스트리밍·구조화 출력 공통), 작성 도중 끊기면 반쯤 쓴 초안을 버리고 처음부터 다시 쓰며 화면 미리보기 초기화, 실무자 한 명이 끝내 실패해도 '작성 실패' 표시 후 관리자가 나머지로 계속 진행, 무료 할당량 0 같은 영구 오류는 재시도 생략. 테스트 6건 추가(총 86건)
+- 기술: 재시도·백오프·폴백 설계, 부분 실패 허용(Graceful degradation)
+
+---
+
 ## JD / 이력서용 요약 (누적)
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph, LangChain, Human-in-the-loop, LLM-as-a-Judge, Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration (OpenAI · Anthropic · Google · Upstage), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, 설정 기반(Config-driven) 설계
