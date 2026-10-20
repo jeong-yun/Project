@@ -29,7 +29,8 @@ import streamlit.components.v1 as components
 from pydantic import ValidationError
 from st_click_detector import click_detector
 
-from core import llm_factory, stock_calc
+import concept_ui
+from core import concept, llm_factory, stock_calc
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
 from core.config import (
@@ -71,8 +72,6 @@ try:
     verification_cfg = load_verification()
     teams = list_teams()
     validate_config(ranks, models, teams)
-    # 전용 페이지가 있는 팀(개념 편집 팀 → 📚 개념 작성 페이지)은 메인 화면 팀 목록에서 뺀다
-    teams = [t for t in teams if "concept_page" not in t.features]
 except (ConfigError, ValidationError, FileNotFoundError) as e:
     st.error(f"설정 파일 오류 — config/ 또는 teams/ 의 YAML 을 확인하세요.\n\n{e}")
     st.stop()
@@ -168,6 +167,10 @@ with st.sidebar:
     skills_dir = BASE_DIR / "teams" / team_id / "skills"
     skill_files = sorted(p.stem for p in skills_dir.glob("*.md")) if skills_dir.exists() else []
     st.caption("📚 팀 스킬: " + (", ".join(skill_files) if skill_files else "없음"))
+
+    # 개념 편집 팀: 카탈로그(GitHub CS 저장소) 위치·git 상태
+    is_concept = concept_ui.CONCEPT_FEATURE in team.features
+    concept_ctx = concept_ui.sidebar(settings) if is_concept else None
 
     # 채택해서 저장한 결과 파일 — 내려받기
     saved = list_results(RESULTS_DIR, team_id, limit=10)
@@ -631,8 +634,11 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
     final = final_answer(run)
     if final:
         st.markdown(f"#### 📌 최종 결과 — {name_of(final.node_id)}")
-        with st.container(height=420, border=True):
-            st.markdown(final.content)
+        if is_concept:
+            concept_ui.result_tabs(final.content, run)  # 최종본·검증 로그·GitHub 요약·적용 계획
+        else:
+            with st.container(height=420, border=True):
+                st.markdown(final.content)
         report = calc_report(run, final.content)
         if report:
             # LLM 이 쓴 숫자를 코드로 다시 계산한 결과 — 판단 전에 꼭 확인할 값
@@ -659,8 +665,12 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         )
         chosen = candidates[idx]
         with st.form(f"decide_{run['run_id']}"):
-            edited = st.text_area("최종 답변 (필요하면 직접 수정)", value=chosen.content, height=260,
-                                  key=f"final_{run['run_id']}_{idx}")
+            if is_concept:  # 개념 편집 팀: 카탈로그에 들어갈 최종본과 적용 계획을 나눠서 고친다
+                concept_entry, concept_plan = concept_ui.decision_fields(chosen.content, f"{run['run_id']}_{idx}")
+                edited = chosen.content
+            else:
+                edited = st.text_area("최종 답변 (필요하면 직접 수정)", value=chosen.content, height=260,
+                                      key=f"final_{run['run_id']}_{idx}")
             score = st.slider("만족도", 1, 5, 4)
             comment = st.text_input("코멘트 (에이전트들에게 전달할 피드백, 선택)")
             c1, c2, c3 = st.columns(3)
@@ -671,6 +681,14 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             discard_run(run)
             del st.session_state["runs"][run_key]
             st.rerun()
+        plan = None
+        if adopt and is_concept:
+            plan, problem = concept_ui.check_adoptable(concept_entry, concept_plan)
+            if problem:
+                st.error(problem)
+                return
+            parsed = concept.parse_result(chosen.content)
+            edited = chosen.content.replace(parsed.final_entry, concept_entry) if parsed.final_entry else chosen.content
         if adopt or reject:
             decision = HumanDecision(
                 action="adopt" if adopt else "reject",
@@ -685,6 +703,14 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             except Exception as e:  # noqa: BLE001
                 st.error(f"결정 반영 중 오류: {type(e).__name__}: {e}")
                 return
+            if adopt and is_concept:
+                # 📚 채택한 최종본을 카탈로그 파일에 반영 (로컬만 — 커밋·푸시는 아래 버튼)
+                try:
+                    if concept_ctx is None:
+                        raise ValueError("카탈로그 폴더를 찾지 못했습니다 (사이드바 경로 확인)")
+                    concept_ui.apply_adopted(concept_ctx, run, concept_entry, plan)
+                except (ValueError, KeyError) as e:
+                    run["concept_error"] = f"카탈로그 반영 실패: {e} — 파일은 바뀌지 않았습니다."
             st.rerun()
         return
 
@@ -692,8 +718,11 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
     if decision.action == "adopt":
         edited_mark = " · ✍️ 직접 수정" if decision.edited else ""
         st.success(f"✅ {name_of(decision.adopted_node_id)} 안 채택{edited_mark} · 만족도 {decision.score}/5 · 저장됨")
-        with st.container(height=300, border=True):
-            st.markdown(decision.final_answer)
+        if is_concept:
+            concept_ui.adopted_section(concept_ctx, run)  # 📚 카탈로그 반영 결과 → 💾 커밋 → 🚀 푸시
+        else:
+            with st.container(height=300, border=True):
+                st.markdown(decision.final_answer)
     else:
         st.warning(f"❌ 전체 반려 · 만족도 {decision.score}/5 · 저장됨")
     if decision.comment:
@@ -860,7 +889,15 @@ with st.container(border=True):
     )
     task: TaskTemplate | None = next((t for t in team.tasks if t.id == mode), None)
 
-    if task:
+    if task and is_concept:
+        # ── 개념 편집 팀: ✍️ 작성(추가·수정 자동 판정) / 🗑 삭제 (concept_ui.py) ──
+        st.caption(task.description)
+        if concept_ctx is None:
+            st.warning("사이드바의 '📁 개념 카탈로그' 폴더를 먼저 맞춰 주세요.")
+        else:
+            request = concept_ui.input_form(concept_ctx, task.id, team_id, web_available, running,
+                                            settings.get("concept", {}).get("related_limit", 6)) or {}
+    elif task:
         # ── 팀 업무 양식: 입력칸 → 질문·최종 상태 브리프 자동 생성 (core/tasks.py) ──
         st.caption(task.description)
         with st.form(f"task_form_{team_id}_{task.id}", clear_on_submit=False):
@@ -953,6 +990,7 @@ if request:
         run = new_run(uuid.uuid4().hex, request["question"], target)
         run["trip_start"] = request["tool_inputs"].get("start_date")  # 지도 재생 시각용
         run["harness_options"] = request["harness_options"]  # 화면 검산표용 (주식 업무의 stock_checks 등)
+        run["concept"] = request.get("concept")  # 개념 편집 팀: 자동 판정(추가/수정)·대상 항목
         # 지도 기능이 있는 팀은 처음부터 '후처리 예정'으로 표시 — 워크플로우가 끝난 뒤 지도까지 다 만들 때까지 화면이 자동 갱신된다
         run["post_busy"] = ROUTE_MAP in team.features
         st.session_state["runs"][run_key] = run

@@ -300,9 +300,9 @@ tasks:
 
 판단 업무 결정 밴드: 종합 = Σ(점수×가중치)÷100 → **3.75 이상 매수 / 2.50~3.74 보유 / 2.50 미만 매도**, `데이터 부족` 3개 이상이면 **판단 보류**.
 
-## 7-2. 📚 개념 작성 페이지 (IT 개념 카탈로그)
+## 7-2. 📚 개념 편집 팀 (IT 개념 카탈로그)
 
-왼쪽 메뉴의 **📚 개념 작성** — GitHub [jeong-yun/CS](https://github.com/jeong-yun/CS/tree/main/Term/Every_day) 의 IT 개념 카탈로그에 항목을 추가·수정·삭제합니다.
+사이드바 **팀 선택 → 개념 편집 팀** — 다른 팀과 똑같이 조직도·에이전트 패널(칸을 누르면 그 에이전트의 진행 상황)·이미지 편집·타임라인을 쓰면서, GitHub [jeong-yun/CS](https://github.com/jeong-yun/CS/tree/main/Term/Every_day) 의 IT 개념 카탈로그에 항목을 작성(추가·수정)·삭제합니다. 사이드바 **📁 개념 카탈로그** 에서 폴더 위치와 git 상태를 확인합니다.
 
 1. CS 저장소를 clone: `git clone https://github.com/jeong-yun/CS.git` (기본 위치: 프로젝트 폴더 옆, `config/settings.yaml` 의 `concept.catalog_dir`)
 2. **✍️ 작성**에 개념명·초안 입력 → 추가/수정은 **자동 판정**: 같은 개념이 독립 항목으로 있거나 다른 항목의 `7. 변형·확장 상세` 소절에 들어 있으면 **수정**(그 항목/부모 항목), 없으면 **추가** (판정은 화면에서 바꿀 수 있음). **관련 기존 항목**도 코드가 찾아 함께 보냄
@@ -312,7 +312,7 @@ tasks:
 4. **사람 승인** (최종본·적용 계획 수정 가능) → 파일 반영
    - 추가: 해당 분류 파일 맨 위 / 수정: 제자리 교체 + 수정일 추가(작성일은 기존 그대로, 분류가 바뀌면 이동) / 삭제·통합: 원문을 `old_term.txt` 로
    - `0. Summary.md` 로드맵·한 줄 요약 표 갱신, `basic_Term.txt` 에 기초 용어 추가, 다른 항목의 관계 문장 교체(정확히 일치할 때만)
-5. **💾 커밋** → **🚀 GitHub 에 푸시** (버튼을 눌러야만 올라감)
+5. 채택 후 결과 영역의 **📚 카탈로그 반영** → **💾 커밋** → **🚀 GitHub 에 푸시** (버튼을 눌러야만 올라감)
 
 ## 7-3. 여행 경로 지도 (여행 팀)
 
@@ -346,7 +346,7 @@ tasks:
 ```
 Agent_office/
 ├── app.py                  ⑥ 화면 (클릭형 조직도·에이전트 패널·탭·결정·업무 양식) — Streamlit
-├── pages/1_개념_작성.py     📚 개념 작성 페이지 (IT 개념 카탈로그 추가·수정·삭제 → 승인 → 커밋·푸시)
+├── concept_ui.py           개념 편집 팀 화면 조각 (카탈로그 사이드바·작성/삭제 입력·결과 탭·채택 후 반영 → 커밋 → 푸시)
 ├── core/
 │   ├── schemas.py          ① 모든 데이터 형식 (설정·LLM 출력·실행 결과) — 여기부터 읽기
 │   ├── config.py           ② 설정 읽기·검증, 조직도·아바타·스킬
@@ -370,7 +370,7 @@ Agent_office/
 │   └── harness/            결정론적 검증기(validators) + 단계별 평가(evaluation)
 ├── config/                 ranks / models / settings / verification (.yaml)
 ├── teams/                  팀별 team.yaml (조직도·업무 양식) + skills/ + avatars/
-│                           (general = 기본, stock = 주식, travel = 여행, concept = 개념 편집(📚 페이지 전용), _template = 템플릿)
+│                           (general = 기본, stock = 주식, travel = 여행, concept = 개념 편집, _template = 템플릿)
 ├── evals/                  단계별 평가 실행기 + 케이스
 ├── results/                채택한 결과 파일 (git 제외 — 개인 정보 보호. 올리려면 .gitignore 에서 results/ 삭제)
 ├── assets/avatars/         공용 에이전트 이미지 (+ _working 이미지)

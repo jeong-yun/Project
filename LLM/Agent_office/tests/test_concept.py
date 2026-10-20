@@ -240,3 +240,22 @@ def test_request_explains_auto_decision(root):
     assert "자동 판정" in q_sub and "7.변형·확장 상세 소절" in q_sub and "수정 대상 전문" in q_sub
     q_add, _ = concept.build_concept_request("add", "DAPO", "초안", [], None, D)
     assert "추가 (add)" in q_add and "수정 대상" not in q_add
+
+
+# ─── 메인 화면 채택 → 카탈로그 반영 (concept_ui) ─────────────────────────
+
+
+def test_main_app_adoption_helpers(root):
+    import concept_ui
+
+    plan, err = concept_ui.check_adoptable(GOOD_ENTRY, "{not json")
+    assert plan is None and "JSON" in err
+    plan, err = concept_ui.check_adoptable("", json.dumps(PLAN))
+    assert plan is None and "최종본" in err  # 하위 초안(<final> 없음)을 고르면 반영 불가
+    # 팀이 수정으로 판정했지만 대상 이름을 엉뚱하게 쓴 경우 → 화면에서 판정한 기존 항목으로 반영
+    ctx = concept_ui.CatalogContext(root, None, "", cat.Catalog.load(root))
+    run = {"concept": {"action": "update", "title": "GRPO", "target": "그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO)"}}
+    new = GOOD_ENTRY.replace("DAPO(Decoupled Clip and Dynamic sAmpling Policy Optimization)",
+                             "그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO)")
+    concept_ui.apply_adopted(ctx, run, new, {**PLAN, "action": "update", "target": "Dr.GRPO"})
+    assert [c.action for c in run["concept_changes"]][0] == "교체" and run["concept_commit"].endswith("수정")
