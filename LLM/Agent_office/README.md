@@ -54,6 +54,7 @@
 | OpenAI (ChatGPT) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys | 차장·부장·팀장 |
 | Anthropic (Claude) | `ANTHROPIC_API_KEY` | https://console.anthropic.com/ | **현재 비활성** (크레딧 충전 후 사용) |
 | Upstage (Solar) | `UPSTAGE_API_KEY` | https://console.upstage.ai/ | 대안 모델 (선택) |
+| FreeLLMAPI (무료 모델) | `FREELLMAPI_API_KEY`, `FREELLMAPI_BASE_URL` | 내 PC 의 FreeLLMAPI 대시보드 (아래 2-1) | 유료 키가 모두 안 될 때 마지막 대안 / '🆓 무료 모델만 사용' |
 | LangSmith (선택) | `LANGSMITH_API_KEY` | https://smith.langchain.com/ | 실행 추적 |
 
 - **일부 키만 있어도 동작합니다.** 사용할 수 없는 provider 는 `config/models.yaml` 의 대안(fallback) 모델로 자동 대체됩니다.
@@ -62,6 +63,33 @@
 - Gemini **Pro** 계열은 무료 등급 할당량이 0 입니다 (Flash 계열은 무료 사용 가능).
 - 웹 검색은 DuckDuckGo(`ddgs` 패키지), 주가 데이터는 Yahoo Finance(`yfinance` 패키지)를 쓰므로 별도 키가 필요 없습니다.
 - 비용: 기본 팀 전체(팀장부터)에 질문하면 LLM 호출 약 12~15회 (브리프 1 + 검색어 1 + 분배 2 + 초안 3 + 검토·통합 5 + 비평 1 + 교훈 1).
+
+## 2-1. 무료 모델 (FreeLLMAPI) — 유료 키를 쓸 수 없을 때
+
+`langchain-kr/25-FreeLLMAPI-FreeModels` 에서 설치한 **FreeLLMAPI**(Google·Groq 등 무료 티어를 OpenAI 호환 주소 하나로 묶는 내 PC 의 프록시)를
+`freellm` provider 로 연결했습니다. 직급마다 유료 후보가 모두 실패(키 없음·크레딧 부족·장애)하면 무료 모델로 넘어가고,
+사이드바의 **🆓 무료 모델만 사용** 을 켜면 처음부터 무료 모델만 씁니다.
+
+1. FreeLLMAPI 서버 켜기: Docker Desktop 실행 후 `docker compose -f C:/Users/<사용자>/freellmapi/docker-compose.yml up -d`
+2. `.env` 에 `FREELLMAPI_BASE_URL=http://127.0.0.1:3001/v1`, `FREELLMAPI_API_KEY=freellmapi-…`(대시보드 Keys 페이지의 통합 키)
+3. 사이드바 provider 상태에 `✅ freellm` 이 보이면 준비 완료 (`🔌 서버 꺼짐`이면 1번 확인). 평가도 `python -m evals.run_eval … --free`
+
+**직급별 무료 모델 배정** (2026-10-20 실측: FreeLLMAPI 카탈로그의 지능 순위·무료 한도 + 직접 호출한 속도·구조화 출력 성공 여부)
+
+| 직급 | 1순위 → 대안 | 이유 |
+|---|---|---|
+| 사원 | gpt-oss-20b → gemini-3.1-flash-lite → gemini-3.5-flash-lite | 가장 많이 호출되는 직급 → 하루 1,000회·0.5초로 가장 빠른 Groq gpt-oss-20b. 긴 프롬프트(분당 8천 토큰 초과)는 문맥이 큰 Flash-Lite 로 |
+| 대리 | gemini-3.5-flash-lite → gpt-oss-120b → gemini-3.1-flash-lite | 검토(구조화 출력)가 빠르고 안정적(0.8초, 두 방식 모두 성공). 지능 순위 63 |
+| 차장 | gpt-oss-120b → gemini-3.5-flash → gemini-3.1-flash-lite | 추론형 120B, 하루 1,000회라 여러 번 쓰는 실무 분석에 적합. 긴 입력은 Gemini 로 |
+| 부장 | gemini-3.6-flash → gemini-3.5-flash → gpt-oss-120b | 하위 결과를 모아 통합 → 긴 입력(분당 25만 토큰)·지능 순위 39·5~7초 |
+| 팀장 | gemini-3.7-flash → gemini-3.8-flash → gemini-3.6-flash → gpt-oss-120b | 최종 품질 담당·호출 수가 가장 적음 → 동작이 확인된 최상위 모델(순위 29, 37~52초로 느림). 3.8 은 순위 25 이지만 실측 시 시간 초과 |
+| 보조 작업 | gpt-oss-120b → gemini-3.1-flash-lite | 브리프·검색어·비평·교훈 — 호출이 많아 하루 1,000회 한도가 필요 |
+
+- **제외한 무료 모델**: qwen3.8-27b(분당 1천 토큰 — 긴 프롬프트 불가), gemma-4(3만 토큰 문맥·느림·구조화 출력 실패), gemini-2.5 계열(404), auto(자동 선택 — 응답 형식 오류).
+- **한도 주의**: Gemini 무료 모델은 **모델마다 하루 20회·분당 10회**, Groq gpt-oss 는 **분당 8천 토큰**이라 하루 실행 횟수가 적습니다.
+  곧 풀리는 한도(150초 이내, 예: 분당 토큰)는 그만큼 기다렸다 같은 모델로 다시 하고, 하루 한도가 찬 모델은 10분 동안 건너뜁니다.
+  직급마다 Google(Gemini)과 Groq(gpt-oss)를 섞어 둔 것은 실측 중 Gemini 가 503 '요청 폭주'로 동시에 막힌 적이 있기 때문입니다.
+- 무료 티어 입력은 제공자 학습에 쓰일 수 있습니다 — 회사·개인 민감 데이터에는 유료 키를 쓰세요.
 
 ## 3. 설치 — 새 PC 에서 처음 시작하기
 
@@ -272,7 +300,21 @@ tasks:
 
 판단 업무 결정 밴드: 종합 = Σ(점수×가중치)÷100 → **3.75 이상 매수 / 2.50~3.74 보유 / 2.50 미만 매도**, `데이터 부족` 3개 이상이면 **판단 보류**.
 
-## 7-2. 여행 경로 지도 (여행 팀)
+## 7-2. 📚 개념 작성 페이지 (IT 개념 카탈로그)
+
+왼쪽 메뉴의 **📚 개념 작성** — GitHub [jeong-yun/CS](https://github.com/jeong-yun/CS/tree/main/Term/Every_day) 의 IT 개념 카탈로그에 항목을 추가·수정·삭제합니다.
+
+1. CS 저장소를 clone: `git clone https://github.com/jeong-yun/CS.git` (기본 위치: 프로젝트 폴더 옆, `config/settings.yaml` 의 `concept.catalog_dir`)
+2. 작업(추가/수정/삭제)·개념명·초안 입력 → **관련 기존 항목**을 코드가 찾아 함께 보냄 (목록에서 추가·삭제 가능)
+3. **개념 편집 팀**(편집장 → 수석에디터 → 팩트체크·계보분석)이 'IT 개념 프롬프트'(`teams/concept/skills/it_concept_prompt.md`) 규칙으로
+   1단계 비교(이중 해리) → 2단계 검증 로그 → 카탈로그 형식 최종본 → GitHub 요약 → 적용 계획(JSON) 을 작성
+   - 형식은 하네스 `concept_entry` 가 코드로 검사: `<thought>`가 먼저인지, 1~6절·등장 배경·관계의 유사/차이 짝, 개조식, 절대 표현, 참고문헌 형식, 적용 계획
+4. **사람 승인** (최종본·적용 계획 수정 가능) → 파일 반영
+   - 추가: 해당 분류 파일 맨 위 / 수정: 제자리 교체 + 수정일 (분류가 바뀌면 이동) / 삭제·통합: 원문을 `old_term.txt` 로
+   - `0. Summary.md` 로드맵·한 줄 요약 표 갱신, `basic_Term.txt` 에 기초 용어 추가, 다른 항목의 관계 문장 교체(정확히 일치할 때만)
+5. **💾 커밋** → **🚀 GitHub 에 푸시** (버튼을 눌러야만 올라감)
+
+## 7-3. 여행 경로 지도 (여행 팀)
 
 여행 팀의 최종 계획서가 나오면 백그라운드에서 지도를 만듭니다 (약 30초~1분, 그동안 결과를 보고 결정해도 됩니다).
 
@@ -304,6 +346,7 @@ tasks:
 ```
 Agent_office/
 ├── app.py                  ⑥ 화면 (클릭형 조직도·에이전트 패널·탭·결정·업무 양식) — Streamlit
+├── pages/1_개념_작성.py     📚 개념 작성 페이지 (IT 개념 카탈로그 추가·수정·삭제 → 승인 → 커밋·푸시)
 ├── core/
 │   ├── schemas.py          ① 모든 데이터 형식 (설정·LLM 출력·실행 결과) — 여기부터 읽기
 │   ├── config.py           ② 설정 읽기·검증, 조직도·아바타·스킬
@@ -317,6 +360,8 @@ Agent_office/
 │   ├── route.py            여행 계획서 → 방문지 → OSM 좌표 → 움직이는 지도(folium)
 │   ├── tasks.py            팀 업무 양식 → 질문·브리프·하네스 옵션
 │   ├── stock_calc.py       주식 숫자 검산 (가중 점수·결정 밴드·평균가·손익비·평단)
+│   ├── catalog.py          IT 개념 카탈로그(CS 저장소) 읽기·관련 항목 찾기·반영·git
+│   ├── concept.py          개념 작성 요청·결과 나누기·형식 검사
 │   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력)
 │   ├── search.py           웹 검색(검색어 생성 → DuckDuckGo 웹+뉴스)
 │   ├── verification.py     루브릭·비평가·자가 교정
@@ -325,7 +370,7 @@ Agent_office/
 │   └── harness/            결정론적 검증기(validators) + 단계별 평가(evaluation)
 ├── config/                 ranks / models / settings / verification (.yaml)
 ├── teams/                  팀별 team.yaml (조직도·업무 양식) + skills/ + avatars/
-│                           (general = 기본, stock = 주식, travel = 여행, _template = 템플릿)
+│                           (general = 기본, stock = 주식, travel = 여행, concept = 개념 편집(📚 페이지 전용), _template = 템플릿)
 ├── evals/                  단계별 평가 실행기 + 케이스
 ├── results/                채택한 결과 파일 (git 제외 — 개인 정보 보호. 올리려면 .gitignore 에서 results/ 삭제)
 ├── assets/avatars/         공용 에이전트 이미지 (+ _working 이미지)

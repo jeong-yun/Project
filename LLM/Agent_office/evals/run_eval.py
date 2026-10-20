@@ -4,6 +4,7 @@
     python -m evals.run_eval evals/cases/general.yaml            # 모든 케이스
     python -m evals.run_eval evals/cases/general.yaml --case hbf_definition
     python -m evals.run_eval evals/cases/general.yaml --no-web   # 웹 검색 끄고
+    python -m evals.run_eval evals/cases/general.yaml --free     # 무료 모델(FreeLLMAPI)만
 
 실제 모델·웹 검색을 호출하므로 API 비용이 든다. 결과는 화면 표와 data/evals/<시각>.json 으로 저장된다.
 사람 결정 단계(interrupt)는 쓰지 않으므로 교훈은 저장되지 않는다 (평가가 학습 데이터를 오염시키지 않게).
@@ -29,15 +30,18 @@ from core.config import (  # noqa: E402
     team_org,
 )
 from core.harness.evaluation import RunTrace, evaluate  # noqa: E402
+from core.llm_factory import free_only  # noqa: E402
 from core.tasks import build_request  # noqa: E402
 from core.workflow import build_office_graph, stream_office  # noqa: E402
 
 import yaml  # noqa: E402
 
 
-def run_case(case: dict, team_id: str, use_web: bool) -> RunTrace:
+def run_case(case: dict, team_id: str, use_web: bool, free: bool = False) -> RunTrace:
     """케이스 하나 실행. question 으로 자유 질문, 또는 task + inputs 로 팀 업무 양식을 실행한다."""
     ranks, models, settings = load_ranks(), load_models(), load_settings()
+    if free:
+        models = free_only(models)
     team = load_team(team_id)
     org = team_org(team, ranks)
     graph = build_office_graph(org, ranks, team, models, settings, load_verification())  # storage·checkpointer 없음
@@ -69,6 +73,7 @@ def main() -> None:
     parser.add_argument("cases", help="평가 케이스 YAML 경로")
     parser.add_argument("--case", help="특정 케이스 id 만 실행")
     parser.add_argument("--no-web", action="store_true", help="웹 검색 끄기")
+    parser.add_argument("--free", action="store_true", help="무료 모델(FreeLLMAPI)만 사용")
     args = parser.parse_args()
 
     load_env()
@@ -77,7 +82,7 @@ def main() -> None:
     summary = []
     for case in cases:
         print(f"\n▶ {case['id']}: {case.get('question') or case.get('task')}")
-        trace = run_case(case, spec.get("team", "general"), use_web=not args.no_web)
+        trace = run_case(case, spec.get("team", "general"), use_web=not args.no_web, free=args.free)
         report = evaluate(case, trace)
         for c in report.checks:
             print(f"   {'✅' if c.passed else '❌'} [{c.step}] {c.name} — {c.detail}")

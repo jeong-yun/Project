@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.config import list_teams, load_models, load_ranks, team_org  # noqa: E402
 
-ALL_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "UPSTAGE_API_KEY")
+ALL_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "UPSTAGE_API_KEY", "FREELLMAPI_API_KEY")
+ENV_KEY = {"freellm": "FREELLMAPI_API_KEY"}  # 이름 규칙이 다른 provider
 
 
 @pytest.fixture(autouse=True)
@@ -72,7 +73,7 @@ def set_keys(monkeypatch):
         for env_key in ALL_KEYS:
             monkeypatch.delenv(env_key, raising=False)
         for provider in providers:
-            monkeypatch.setenv(f"{provider.upper()}_API_KEY", "test-key")
+            monkeypatch.setenv(ENV_KEY.get(provider, f"{provider.upper()}_API_KEY"), "test-key")
 
     return _set
 

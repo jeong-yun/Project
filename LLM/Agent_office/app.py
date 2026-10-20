@@ -71,12 +71,17 @@ try:
     verification_cfg = load_verification()
     teams = list_teams()
     validate_config(ranks, models, teams)
+    # 전용 페이지가 있는 팀(개념 편집 팀 → 📚 개념 작성 페이지)은 메인 화면 팀 목록에서 뺀다
+    teams = [t for t in teams if "concept_page" not in t.features]
 except (ConfigError, ValidationError, FileNotFoundError) as e:
     st.error(f"설정 파일 오류 — config/ 또는 teams/ 의 YAML 을 확인하세요.\n\n{e}")
     st.stop()
 
 ranks_by_id = {r.id: r for r in ranks}
-PROVIDER_STATUS = {"ok": ("✅", "사용 가능"), "disabled": ("⛔", "비활성 (models.yaml)"), "no_key": ("⚪", "키 없음")}
+PROVIDER_STATUS = {
+    "ok": ("✅", "사용 가능"), "disabled": ("⛔", "비활성"), "no_key": ("⚪", "키 없음"),
+    "offline": ("🔌", "서버 꺼짐 (FreeLLMAPI Docker 를 켜세요)"),
+}
 REFRESH_SEC = 1.0  # 작업 중 화면 자동 갱신 간격
 # AGENT_OFFICE_DATA_DIR 환경변수로 저장 위치를 바꿀 수 있다 (테스트·여러 사용자 분리용)
 DATA_DIR = Path(os.getenv("AGENT_OFFICE_DATA_DIR") or BASE_DIR / settings.get("storage", {}).get("data_dir", "data"))
@@ -142,7 +147,13 @@ with st.sidebar:
     for provider, status in llm_factory.provider_status(models).items():
         icon, text = PROVIDER_STATUS[status]
         st.markdown(f"{icon} {provider} — {text}")
-    st.caption("사용할 수 없는 provider 는 config/models.yaml 의 대안(fallback) 모델로 대체됩니다.")
+    st.caption("사용할 수 없는 provider 는 config/models.yaml 의 대안(fallback) 모델로 대체됩니다. "
+               "유료 키가 모두 안 되면 마지막에 freellm(무료 모델)으로 넘어갑니다.")
+    # 유료 키를 아끼거나 키가 없을 때: 유료 provider 를 모두 끄고 FreeLLMAPI 무료 모델만 쓴다
+    if st.toggle("🆓 무료 모델만 사용", key="free_only", help="FreeLLMAPI(무료 티어) 모델만 사용합니다. 무료 모델은 하루 호출 한도가 작습니다."):
+        models = llm_factory.free_only(models)
+        if llm_factory.provider_status(models).get("freellm") != "ok":
+            st.warning("FreeLLMAPI 가 꺼져 있거나 키가 없습니다. README 의 '무료 모델' 절을 확인하세요.")
 
     st.markdown("### 검증 장치")
     critic = verification_cfg.get("critic", {})

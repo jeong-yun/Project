@@ -30,3 +30,9 @@ web_search:
   max_results: 5           # 검색어당 결과 수
   max_total_results: 10    # 프롬프트에 넣을 최대 결과 수 (중복 제거 후, 뉴스 포함)
   region: kr-kr            # 한국 (영어 자료도 함께 나옴). wt-wt(전 세계)는 ddgs 내부 오류가 있어 비추천
+
+concept:
+  # 📚 개념 작성 페이지가 읽고 쓰는 IT 개념 카탈로그 (GitHub jeong-yun/CS 저장소를 로컬에 clone 한 경로)
+  # 상대 경로는 이 프로젝트 폴더(Agent_office) 기준. 다른 PC 에서는 clone 한 위치로 바꾼다.
+  catalog_dir: ../../../CS/Term/Every_day
+  related_limit: 6          # 함께 비교할 관련 기존 항목 수 (무료 모델은 토큰 한도가 작아 6개 이하 권장)

@@ -1,5 +1,7 @@
 # 직급 → 모델 매핑 (직급이 낮을수록 저가 모델)
-# - provider: openai | anthropic | google | upstage
+# - provider: openai | anthropic | google | upstage | freellm
+# - freellm = FreeLLMAPI(내 PC 의 무료 모델 프록시, langchain-kr/25-FreeLLMAPI-FreeModels 참고).
+#   유료 모델이 모두 안 될 때(키 없음·크레딧 부족·장애) 마지막 대안으로 쓰인다. 화면의 '🆓 무료 모델만 사용'을 켜면 이것만 쓴다.
 # - primary 가 사용 불가(키 없음·비활성·호출 실패)이면 fallback 을 순서대로 시도한다.
 # - 모델명은 각 사에서 자주 바뀌므로 코드가 아닌 이 파일에서만 관리한다.
 #   (2026-10-19 각 사 모델 목록 조회 + 실제 호출(텍스트·구조화 출력)로 확인)
@@ -12,41 +14,73 @@ providers:              # provider 별로 필요한 .env 키 이름
   anthropic: ANTHROPIC_API_KEY
   google: GOOGLE_API_KEY
   upstage: UPSTAGE_API_KEY
+  freellm: FREELLMAPI_API_KEY   # 주소는 FREELLMAPI_BASE_URL (기본 http://127.0.0.1:3001/v1)
 
 # 키가 있어도 쓰지 않을 provider (크레딧 부족 등). 실패 호출로 시간 낭비하지 않고 바로 대안 모델로 간다.
 # Claude 크레딧을 충전하면 anthropic 을 이 목록에서 지우고, 부장·팀장 primary 를 Claude 로 되돌리면 된다.
 disabled_providers: [anthropic]
 
+# ── 무료 모델(freellm) 배정 기준 — 2026-10-20 FreeLLMAPI 실측 (Google·Groq 무료 키 등록 상태) ──
+#   지능 순위(FreeLLMAPI 카탈로그, 낮을수록 우수)·하루 한도(RPD)·분당 토큰(TPM)·실제 응답 시간·구조화 출력(json_schema) 성공 여부로 정함
+#   gemini-3.8-flash  순위 25  한도 미공개   — 실측 시 시간 초과·429 → 팀장 2순위
+#   gemini-3.7-flash  순위 29  20회/일       — 37~52초로 느리지만 정상, 구조화 출력 OK → 팀장 1순위 (호출 수가 적은 직급)
+#   gemini-3.6-flash  순위 39  20회/일·25만 TPM — 5~7초, 구조화 출력 OK, 긴 입력 가능 → 부장 (하위 결과를 모아 통합)
+#   gemini-3.5-flash  순위 41  20회/일       — 구조화 출력 502 발생 → 차장·부장의 보조
+#   gemini-3.5-flash-lite 순위 63 20회/일    — 0.8초, 구조화 출력(두 방식) OK → 대리 (검토 응답이 빠름)
+#   gemini-3.1-flash-lite 순위 75 20회/일·25만 TPM — 긴 입력 대비용 → 사원·보조 작업의 2순위
+#   gpt-oss-120b(Groq) 순위 83  1,000회/일·8천 TPM — 1.6~2초, 추론형, 구조화 출력 OK → 차장·보조 작업 (호출이 많음)
+#   gpt-oss-20b(Groq)  순위 89  1,000회/일·8천 TPM — 0.5초 최속, json_schema OK → 사원 (가장 많이 호출되는 직급)
+#   제외: qwen3.8-27b(분당 1천 토큰 — 긴 프롬프트 불가), gemma-4(3만 토큰 문맥·느림·구조화 출력 실패), gemini-2.5 계열(404)
+#   auto(FreeLLMAPI 자동 선택)는 쓰지 않음 — 실측 시 응답에 role 이 빠져 LangChain 이 거부함
+#   직급마다 Google(Gemini)과 Groq(gpt-oss)를 섞어 둔다 — 실측 중 Gemini 가 503 '요청 폭주'·분당 한도로 동시에 막힌 적이 있음
+#   ※ Gemini 무료 모델은 모델마다 하루 20회라 하루 실행 횟수가 제한된다 → 한도 소진 시 10분간 건너뛰고 다음 후보로
+
 ranks:
-  # 현재 구성 (Claude 미사용): Google Flash 계열(무료 등급 가능) → OpenAI GPT-5.4/5.5 순으로 상향
+  # 현재 구성 (Claude 미사용): Google Flash 계열(무료 등급 가능) → OpenAI GPT-5.4/5.5 순으로 상향 → 마지막에 freellm 무료 모델
   staff:              # 사원 — 가장 가볍고 빠른 모델
     primary:  { provider: google, model: gemini-3.5-flash-lite, temperature: 0.7 }
     fallback:
       - { provider: openai, model: gpt-5.4-nano }
       - { provider: upstage, model: solar-mini, temperature: 0.7 }
+      - { provider: freellm, model: gpt-oss-20b, temperature: 0.7 }
+      - { provider: freellm, model: gemini-3.1-flash-lite, temperature: 0.7 }
+      - { provider: freellm, model: gemini-3.5-flash-lite, temperature: 0.7 }
 
   assistant_manager:  # 대리
     primary:  { provider: google, model: gemini-3.5-flash, temperature: 0.5 }
     fallback:
       - { provider: openai, model: gpt-5.4-mini }
+      - { provider: freellm, model: gemini-3.5-flash-lite, temperature: 0.5 }
+      - { provider: freellm, model: gpt-oss-120b, temperature: 0.5 }
+      - { provider: freellm, model: gemini-3.1-flash-lite, temperature: 0.5 }
 
   deputy_gm:          # 차장
     primary:  { provider: openai, model: gpt-5.4-mini }
     fallback:
       - { provider: google, model: gemini-3.8-flash, temperature: 0.4 }
       - { provider: upstage, model: solar-pro2, temperature: 0.4 }
+      - { provider: freellm, model: gpt-oss-120b, temperature: 0.4 }
+      - { provider: freellm, model: gemini-3.5-flash, temperature: 0.4 }
+      - { provider: freellm, model: gemini-3.1-flash-lite, temperature: 0.4 }
 
   gm:                 # 부장
     primary:  { provider: openai, model: gpt-5.4 }
     fallback:
       - { provider: google, model: gemini-3.8-flash, temperature: 0.3 }
       - { provider: anthropic, model: claude-sonnet-5-5, temperature: 0.3 }   # 크레딧 충전 후 사용
+      - { provider: freellm, model: gemini-3.6-flash, temperature: 0.3 }
+      - { provider: freellm, model: gemini-3.5-flash, temperature: 0.3 }
+      - { provider: freellm, model: gpt-oss-120b, temperature: 0.3 }
 
   team_lead:          # 팀장 — 가장 상위 모델
     primary:  { provider: openai, model: gpt-5.5 }
     fallback:
       - { provider: openai, model: gpt-5.4 }
       - { provider: anthropic, model: claude-opus-5-5, temperature: 0.2 }     # 크레딧 충전 후 사용
+      - { provider: freellm, model: gemini-3.7-flash, temperature: 0.2 }
+      - { provider: freellm, model: gemini-3.8-flash, temperature: 0.2 }
+      - { provider: freellm, model: gemini-3.6-flash, temperature: 0.2 }
+      - { provider: freellm, model: gpt-oss-120b, temperature: 0.2 }    # Gemini 가 모두 과부하·한도일 때 (Groq)
 
 # 피드백(교훈) 생성·웹 검색어 작성 등 보조 작업용 모델
 # 교훈은 이후 모든 답변의 프롬프트에 들어가므로 Flash-Lite 보다 한 단계 위 모델을 쓴다
@@ -55,3 +89,5 @@ utility:
   primary:  { provider: google, model: gemini-3.5-flash, temperature: 0.0 }
   fallback:
     - { provider: openai, model: gpt-5.4-mini }
+    - { provider: freellm, model: gpt-oss-120b, temperature: 0.0 }
+    - { provider: freellm, model: gemini-3.1-flash-lite, temperature: 0.0 }

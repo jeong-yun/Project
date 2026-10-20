@@ -13,7 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-Provider = Literal["openai", "anthropic", "google", "upstage"]
+# freellm = FreeLLMAPI 프록시 (무료 티어 모델 모음, OpenAI 호환) — 유료 키를 쓸 수 없을 때의 무료 대안
+Provider = Literal["openai", "anthropic", "google", "upstage", "freellm"]
 
 
 # ════════════════════════════════════════════════════════════════════

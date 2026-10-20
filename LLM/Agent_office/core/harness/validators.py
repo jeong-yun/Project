@@ -6,6 +6,7 @@
   required_terms: 업무에 꼭 들어가야 할 항목(예: 시나리오·손절가·예산)이 답변에 있는지 검사
   itinerary_days: 여행 일정이 1일차~마지막 날까지 모든 날을 다루는지 검사 (일수는 코드가 계산)
   stock_plan    : 주식 점수표·매매 계획 JSON 을 코드로 검산 (core/stock_calc.py)
+  concept_entry : 개념 카탈로그 결과 형식 검사 (core/concept.py)
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -163,3 +164,17 @@ class StockPlanValidator(Validator):
                 "코드 검산 결과 다음이 틀렸다. 코드가 계산한 값으로 본문과 JSON 을 함께 고쳐라: " + " / ".join(problems)
             )
         return self.ok("검산 통과: " + ", ".join(r.kind for r in results))
+
+
+@register
+class ConceptEntryValidator(Validator):
+    name = "concept_entry"
+    description = "개념 카탈로그 결과 형식 검사 (<thought>·<final>·개조식·절대 표현·참고문헌 형식·적용 계획 JSON)"
+
+    def check(self, answer: str, options: dict):
+        from core.concept import check_answer  # concept 가 harness.base 를 쓰므로 늦게 불러온다
+
+        problems = check_answer(answer, options)
+        if problems:
+            return self.fail("개념 결과 형식 오류: " + " / ".join(problems) + " — 이 부분을 고쳐 같은 형식으로 다시 작성하라.")
+        return self.ok("개념 결과 형식 통과")

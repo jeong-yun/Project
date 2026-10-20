@@ -174,3 +174,21 @@ def test_daily_quota_is_not_retried_and_model_cools_down(staff, monkeypatch, no_
     assert first.content == "첫 초안" and second.content == "둘째 초안"
     assert calls == ["google", "openai", "openai"]  # 두 번째부터는 소진된 google 을 건너뛴다
     assert no_wait == []  # 할당량 소진은 기다리지 않는다
+
+
+def test_short_free_tier_reset_waits_then_retries_same_model(staff, monkeypatch, no_wait):
+    # FreeLLMAPI: 'Soonest reset ~45s' (Groq 분당 토큰 한도) → 쿨다운하지 않고 그만큼 기다렸다 같은 모델로
+    minute_limit = Exception("Error code: 429 - All models exhausted: 1 route checked (1 rate-limited or on cooldown). Soonest reset ~45s.")
+    day_limit = Exception("Error code: 429 - All models exhausted: 1 route checked. Soonest reset ~3h.")
+    assert llm_factory.retry_delay(minute_limit, 0) == 47 and llm_factory.retry_delay(minute_limit, 1) is None
+    assert llm_factory.retry_delay(day_limit, 0) is None and llm_factory.is_quota_exhausted(day_limit)
+    assert not llm_factory.is_quota_exhausted(minute_limit)
+    calls = install(monkeypatch, {"google": [("fail", minute_limit), ("ok", "기다린 뒤 초안")], "openai": []})
+    result = staff.draft(staff.draft_messages("질문", "업무"))
+    assert result.content == "기다린 뒤 초안" and calls == ["google", "google"] and no_wait == [47]
+
+
+def test_rate_limit_without_reset_hint_waits_once():
+    groq = Exception("Error code: 429 - All models exhausted: 1 route checked (1 rate-limited or on cooldown). Add more API keys.")
+    assert llm_factory.retry_delay(groq, 0) == llm_factory.UNKNOWN_RESET_WAIT and llm_factory.retry_delay(groq, 1) is None
+    assert not llm_factory.is_quota_exhausted(groq)

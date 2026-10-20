@@ -301,8 +301,9 @@ class AnswerStream:
                     llm_factory.note_failure(spec, e)
                     if started_writing and self.on_restart:
                         self.on_restart()  # 반쯤 쓴 초안은 버린다
-                    if attempt < len(llm_factory.RETRY_DELAYS) and llm_factory.is_transient(e):
-                        llm_factory.sleep(llm_factory.RETRY_DELAYS[attempt])  # 잠깐 기다렸다 같은 모델로 다시
+                    delay = llm_factory.retry_delay(e, attempt)
+                    if delay is not None:
+                        llm_factory.sleep(delay)  # 잠깐 기다렸다 같은 모델로 다시 (곧 풀리는 무료 한도면 그 시간만큼)
                         continue
                     break  # 영구 오류이거나 재시도를 다 썼으면 다음 후보로
 
