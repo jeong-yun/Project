@@ -149,6 +149,9 @@ def result_tabs(content: str, run: dict) -> None:
     with tabs[0], st.container(height=420):
         st.text(res.final_entry or "(최종본 없음 — <final> 블록이 없습니다)")
     with tabs[1], st.container(height=420):
+        if res.change_notes:  # 최종본에서 떼어 낸 🔧수정·➕추가 표시와 이유 — 확인용 (카탈로그에는 들어가지 않음)
+            notes = "\n".join(f"- {n}" for n in res.change_notes)
+            st.markdown(f"**🔧 초안 대비 변경 요약** (최종본에는 넣지 않음)\n{notes}")
         st.markdown(res.thought or "(검증 로그 없음)")
     with tabs[2], st.container(height=420):
         st.markdown(res.summary_md or "(요약 없음)")

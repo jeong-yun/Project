@@ -46,6 +46,38 @@ SECTION_LINE = re.compile(r"^\s*#{0,4}\s*\**\s*(\d)\s*[.)]\s*\**\s*(정의|작�
 CATEGORY_PREFIX = re.compile(r"^\s*\[\s*\d\s*\.\s*(Cloud[^\]]*|AI[^\]]*|Security[^\]]*)\]\s*")
 
 
+# 🔧수정 / ➕추가 표시는 '변경 요약'(사람이 확인하는 용도)이지 카탈로그 본문이 아니다 → 최종본에서 뺀다
+NOTE_LINE = re.compile(r"^\s*(?:[-○●·*]\s*)?[🔧➕]\s*(?:수정|추가|삭제)\s*[:：]")
+NOTE_PAREN = re.compile(r"\s*[🔧➕]\s*\*?\((?:초안|기존 독립 항목|원문)[^)]*\)\*?")  # 예: 🔧*(초안 서술 정반대 교정)*
+NOTE_SENTENCE = re.compile(r"\s*[🔧➕]\s*초안[^.。]*[.。]")  # 예: 🔧 초안의 "완벽히 보완적"은 절대 표현 → 완화.
+NOTE_MARK = re.compile(r"[🔧➕]\s*(\*?)")  # 내용 앞에 붙은 표시만 — 내용은 남긴다
+
+
+def strip_change_notes(entry: str) -> tuple[str, list[str]]:
+    """최종본에서 변경 표시(🔧수정·➕추가 + 이유)를 떼어 낸다. (깨끗한 본문, 떼어 낸 변경 요약 목록)
+
+    - '🔧수정: … / 이유: …' 같은 변경 메모 줄 → 통째로 빼서 변경 요약으로
+    - '🔧*(초안 서술 정반대 교정)*', '🔧 초안의 … → 완화.' 같은 메모 구절 → 빼서 변경 요약으로
+    - '🔧 단, 효과는 …' 처럼 내용 앞에 붙은 표시 → 표시만 지우고 내용은 그대로
+    """
+    notes, out = [], []
+    for line in entry.split("\n"):
+        if "🔧" not in line and "➕" not in line:
+            out.append(line)  # 표시가 없는 줄은 그대로 (공백 하나도 바꾸지 않음)
+            continue
+        if NOTE_LINE.match(line):
+            notes.append(re.sub(r"^\s*(?:[-○●·*]\s*)?", "", line).strip())
+            continue
+        for pattern in (NOTE_PAREN, NOTE_SENTENCE):
+            for m in pattern.finditer(line):
+                notes.append(m.group(0).strip())
+            line = pattern.sub("", line)
+        line = NOTE_MARK.sub("", line)
+        line = re.sub(r"\(([^()]*)\)\*", r"(\1)", line)  # '🔧*(…)*' 에서 남은 기울임 표시 정리
+        out.append(line.rstrip())
+    return "\n".join(out), notes
+
+
 def normalize_entry(entry: str) -> str:
     """LLM 이 쓴 최종본을 카탈로그 파일 형식으로 맞춘다 (결정론적 — 내용은 바꾸지 않음).
 
@@ -89,6 +121,7 @@ class ConceptResult:
     summary_md: str = ""
     plan: dict = field(default_factory=dict)
     problems: list[str] = field(default_factory=list)
+    change_notes: list[str] = field(default_factory=list)  # 최종본에서 떼어 낸 🔧수정·➕추가 표시와 이유 (화면에만)
 
 
 def _between(text: str, tag: str) -> str:
@@ -96,8 +129,17 @@ def _between(text: str, tag: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def replace_final(answer: str, new_entry: str) -> str:
+    """답변의 <final>…</final> 내용을 (사람이 고친) 최종본으로 바꾼다 — 채택 기록에 실제 반영본이 남도록."""
+    pattern = re.compile(r"(<final>).*?(</final>)", flags=re.DOTALL | re.IGNORECASE)
+    if not pattern.search(answer):
+        return answer
+    return pattern.sub(lambda m: f"{m.group(1)}\n{new_entry.strip()}\n{m.group(2)}", answer, count=1)
+
+
 def parse_result(answer: str) -> ConceptResult:
-    res = ConceptResult(thought=_between(answer, "thought"), final_entry=normalize_entry(_between(answer, "final")))
+    entry, notes = strip_change_notes(normalize_entry(_between(answer, "final")))
+    res = ConceptResult(thought=_between(answer, "thought"), final_entry=entry, change_notes=notes)
     after = re.split(r"</final>", answer, flags=re.IGNORECASE)[-1] if "</final>" in answer.lower() else answer
     res.summary_md = re.sub(r"```json.*?```", "", after, flags=re.DOTALL).strip()
     for src in extract_code_blocks(answer, "json"):
@@ -234,6 +276,7 @@ def build_concept_request(
             "맨 끝에 적용 계획 ```json 블록을 쓴다 (편입·병합이면 absorb 에 흡수될 기존 항목, 다른 항목 수정은 edits 에)",
         ],
         constraints=[
+            "🔧수정·➕추가 표시와 이유는 최종본(<final>)에 넣지 않고 </final> 뒤 '## 변경 요약'에만 쓴다 — 최종본에는 고친 결과만",
             "최종본 형식: 첫 줄 '[태그]한글명(English, 약어) (작성일: YY.MM.DD)' (분류는 제목에 쓰지 않고 적용 계획 JSON 에만), "
             "절 제목 '1. 정의 및 개념' ~ '6. 관계(기존 개념과 비교)'·'7. 변형·확장 상세'·'참고 문헌', 불릿은 ' - ' 와 '  ○ ', 마크다운 굵게(**) 쓰지 않음",
             "존재를 확인할 수 없는 논문·arXiv ID·URL·수치를 만들지 않는다",

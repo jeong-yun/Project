@@ -282,3 +282,36 @@ def test_update_replaces_summary_line_in_place():
     assert out[2] == "* **[Perf]Muon Optimizer(Muon):** 새 정의"  # 옛 자리 그대로
     assert "| **Muon Optimizer(Muon)** | 새 | 새 정의 |" in out and "옛 정의" not in "\n".join(out)
     assert "* **[Perf]KAN:** b" in out and "| **KAN** | k | b |" in out  # 다른 항목은 그대로
+
+
+def test_change_notes_are_kept_out_of_final_entry():
+    # 실제 사례(Muon): 최종본 안에 '🔧수정: … / 이유: …' 메모가 섞여 카탈로그에 그대로 들어감
+    entry = "\n".join([
+        "[Perf]뮤온 옵티마이저(Muon) (작성일: 26.09.04)",
+        "1. 정의 및 개념",
+        " - Newton-Schulz 기반 근사 직교화.",
+        '  ○ 🔧수정: "SVD로 직교화"류 표현 삭제 / 이유: 원형은 직접 SVD가 아님',
+        " - ➕추가: Gram Newton-Schulz drop-in 가속 / 이유: 후속 구현 반영",
+        " - 정확도 향상. 🔧 단, 효과는 규모 의존적.",
+        "   3) LoRA-GA — 초기화 축 🔧*(기존 독립 항목에서 이관, 내용 보존)*",
+        ' - 별도이며 보완적. 🔧 초안의 "완벽히 보완적"은 절대 표현 → 완화.',
+        " - 전망 이론 기반. 🔧*(카너먼=2002 노벨 경제학상)* 쌍 없이 정렬.",
+        "  끝 공백이 있는 줄도 그대로   ",
+    ])
+    clean, notes = concept.strip_change_notes(entry)
+    lines = clean.splitlines()
+    assert "🔧" not in clean and "➕" not in clean and "이유:" not in clean
+    assert " - 정확도 향상. 단, 효과는 규모 의존적." in lines  # 내용 앞 표시만 지움
+    assert "   3) LoRA-GA — 초기화 축" in lines and " - 별도이며 보완적." in lines  # 메모 구절은 뺌
+    assert " - 전망 이론 기반. (카너먼=2002 노벨 경제학상) 쌍 없이 정렬." in lines  # 사실 괄호는 남김
+    assert "  끝 공백이 있는 줄도 그대로   " in lines  # 표시 없는 줄은 한 글자도 안 바꿈
+    assert len(notes) == 4 and notes[0].startswith("🔧수정:")
+    # 결과 나누기에서도 자동으로 떼어 내고, 화면용 변경 요약으로 보관
+    res = concept.parse_result(answer_with(GOOD_ENTRY.replace("학습 안정성 향상.", "학습 안정성 향상.\n - 🔧수정: '완벽' 삭제 / 이유: 절대 표현"), PLAN))
+    assert "🔧" not in res.final_entry and res.change_notes == ["🔧수정: '완벽' 삭제 / 이유: 절대 표현"]
+
+
+def test_replace_final_keeps_rest_of_answer():
+    answer = answer_with(GOOD_ENTRY, PLAN)
+    replaced = concept.replace_final(answer, "[Perf]새 제목 (작성일: 26.10.20)\n1. 정의 및 개념")
+    assert "<final>\n[Perf]새 제목" in replaced and "<thought>" in replaced and "concept_plan" in replaced

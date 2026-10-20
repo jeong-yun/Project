@@ -687,8 +687,7 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             if problem:
                 st.error(problem)
                 return
-            parsed = concept.parse_result(chosen.content)
-            edited = chosen.content.replace(parsed.final_entry, concept_entry) if parsed.final_entry else chosen.content
+            edited = concept.replace_final(chosen.content, concept_entry)  # 채택 기록에도 실제 반영본이 남게
         if adopt or reject:
             decision = HumanDecision(
                 action="adopt" if adopt else "reject",
