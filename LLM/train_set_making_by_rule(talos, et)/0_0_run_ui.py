@@ -238,7 +238,8 @@ def parallel():
 def _llm_counts(name, since, until, ok_re):
     """3_2·3_3 로그 → 이번 실행(since~until)의 대상 수, 성공·실패 수, 최근 경고(재시도 등), 토큰."""
     s = {"header": False, "target": None, "follow": False, "wait": 0, "cap": 0, "workers": None, "now": None, "auto": False, "chk_ok": 0, "chk_fail": 0, "fixed": 0, "dropped": 0, "ok": 0,
-         "fail": 0, "pending": 0, "retry": None, "start": None, "last": None, "tin": 0, "tout": 0, "stopped": False}
+         "fail": 0, "pending": 0, "retry": None, "start": None, "last": None, "tin": 0, "tout": 0, "stopped": False,
+         "done_ts": [], "by_name": {}}
     for ts, lv, msg in _log_since(name, since):
         if until and ts > until:
             break
@@ -261,6 +262,8 @@ def _llm_counts(name, since, until, ok_re):
             s["pending"] = int(m.group(1))
         elif re.match(ok_re, msg):
             s["ok"] += 1
+            s["done_ts"].append(ts)
+            s["by_name"][msg.strip().split(":", 1)[0]] = ts
             s["last"] = ts
             if (m := re.search(r"코드 검사 ok (\d+) / fail (\d+)", msg)):      # 생성: 샘플 코드 검사 결과
                 s["chk_ok"] += int(m.group(1))
@@ -273,6 +276,7 @@ def _llm_counts(name, since, until, ok_re):
             s["tout"] += to
         elif lv == "ERROR" and re.match(r"\s*\S+ 실패", msg):
             s["fail"] += 1
+            s["done_ts"].append(ts)
             s["last"] = ts
         elif lv == "WARNING":                           # 응답 해석 실패·반복 루프로 잘림·LLM 호출 실패·속도 제한(429)
             s["retry"] = (ts, msg.strip()[:110])
@@ -334,8 +338,14 @@ def run_progress():
     lat_g, lat_r = float(avg.get("generate_seconds") or 80.0), float(avg.get("review_seconds") or 140.0)
     gen_done, rev_done = g["ok"] + g["fail"], r["ok"] + r["fail"]
     # 몇 초마다 1개씩 끝나는지 (동시 처리 반영)
-    gs = max(1.0, _secs(g["start"], g["last"]) / gen_done) if gen_done and g["start"] else lat_g / ng
-    rs = max(1.0, _secs(r["start"], r["last"]) / rev_done) if rev_done and r["start"] else lat_r / nr
+    # (예전: 단계 시작부터 잰 평균 → 실행 초반에 검토가 생성을 기다린 시간·동시 처리가 빠져 남은 시간이 몇 배로 나옴)
+    def interval(done_ts, lat, conc):
+        n = len(done_ts)
+        if n >= 5:                                      # 최근 20개가 끝난 실제 간격 (동시 처리·지금 속도 반영)
+            k = min(n, 20)
+            return max(1.0, _secs(done_ts[-k], done_ts[-1]) / (k - 1))
+        return max(1.0, lat / max(1, conc))              # 아직 적으면 요청 1개 평균 시간 ÷ 지금 동시 수
+    gs, rs = interval(g["done_ts"], lat_g, ng), interval(r["done_ts"], lat_r, nr)
 
     # 생성·검토 대상 수 (로그에 나오기 전에는 추정)
     if dry:
@@ -361,8 +371,15 @@ def run_progress():
 
     gen_rem = 0.0 if st("3.2") in ("done", "fail") else remain(n_gen, gen_done, gs, g, st("3.2") == "running")
     rev_rem = 0.0 if st("3.3") in ("done", "fail") else remain(n_rev, rev_done, rs, r, st("3.3") == "running")
-    if overlap:   # 마지막 생성이 끝난 뒤 그 검토가 한 번 더 걸린다
-        llm_rem = max(rev_rem, gen_rem + (lat_r if gen_rem and n_rev > rev_done else 0.0))
+    if overlap:
+        # 검토는 생성된 요청이 와야 시작하므로, 끝난 간격으로 재면 생성을 기다린 시간이 섞인다 (실행 초반에 몇 배로 나옴).
+        # 이번 실행에서 '생성 → 검토' 에 걸린 시간(검토 1개 소요 시간)을 지금 동시 수로 나눠 검토 속도로 쓴다.
+        lags = sorted(_secs(g["by_name"][k], t) for k, t in r["by_name"].items() if k in g["by_name"] and t >= g["by_name"][k])
+        lat_rv = lags[len(lags) // 2] if len(lags) >= 3 else lat_r
+        if st("3.3") not in ("done", "fail"):
+            rev_rem = max(0, n_rev - rev_done) * lat_rv / max(1, nr)
+        # 마지막 생성이 끝난 뒤 그 검토가 한 번 더 걸린다
+        llm_rem = max(rev_rem, gen_rem + (lat_rv if gen_rem and n_rev > rev_done else 0.0))
     else:
         llm_rem = gen_rem + rev_rem
     prep_rem = 0.0 if by != "3_0" or st("3.1") in ("done", "fail") else max(5.0, 60.0 - _secs(since, now))
