@@ -205,13 +205,26 @@ def git_panel(ctx: CatalogContext, key: str, message: str) -> None:
     with st.expander("변경 내용 (git diff)"):
         st.code(cat.git_diff(ctx.repo, ctx.subdir)[:30000] or "(차이 없음 — 이미 커밋했거나 새 파일만 있음)", language="diff")
     msg = st.text_input("커밋 메시지", value=message, key=f"msg_{key}")
+    pending = cat.git_status(ctx.repo, ctx.subdir)
+    st.caption("📝 아직 커밋하지 않은 변경이 있습니다 — '🚀 커밋 후 푸시'를 누르면 커밋과 GitHub 업로드를 한 번에 합니다."
+               if pending else "커밋하지 않은 변경 없음")
     c1, c2 = st.columns(2)
-    if c1.button("💾 커밋", use_container_width=True, key=f"commit_{key}"):
+    if c1.button("💾 커밋만", use_container_width=True, key=f"commit_{key}", disabled=not pending):
         ok, log = cat.git_commit(ctx.repo, ctx.subdir, msg)
         (st.success if ok else st.error)(log[-800:])
-    if c2.button("🚀 GitHub 에 푸시", type="primary", use_container_width=True, key=f"push_{key}"):
+    if c2.button("🚀 커밋 후 GitHub 에 푸시", type="primary", use_container_width=True, key=f"push_{key}"):
+        if pending:  # 커밋 안 된 변경이 있으면 먼저 커밋 — 커밋 없이 푸시하면 아무것도 올라가지 않는다
+            ok, log = cat.git_commit(ctx.repo, ctx.subdir, msg)
+            if not ok:
+                st.error("커밋 실패: " + log[-800:])
+                return
         ok, log = cat.git_push(ctx.repo)
-        (st.success if ok else st.error)(log[-800:] or "푸시 완료")
+        if not ok:
+            st.error("푸시 실패: " + log[-800:])
+        elif "up-to-date" in log.lower() or "up to date" in log.lower():
+            st.warning("올릴 새 커밋이 없습니다 (GitHub 와 이미 같음).")
+        else:
+            st.success("GitHub 에 올렸습니다.\n\n" + log[-500:])
 
 
 def adopted_section(ctx: CatalogContext | None, run: dict) -> None:

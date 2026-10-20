@@ -259,3 +259,26 @@ def test_main_app_adoption_helpers(root):
                              "그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO)")
     concept_ui.apply_adopted(ctx, run, new, {**PLAN, "action": "update", "target": "Dr.GRPO"})
     assert [c.action for c in run["concept_changes"]][0] == "교체" and run["concept_commit"].endswith("수정")
+
+
+def test_update_replaces_summary_line_in_place():
+    # 실제 사례: 요약 'Muon(MomentUm Orthogonalized…)' ↔ 항목 '뮤온 옵티마이저(Muon: MomentUm …)' — 수정 시 옛 요약이 남아 2번 나옴
+    text = """### 2. Artificial Intelligence(AI 지능 및 시스템)
+* **[Perf]FlashAttention:** a
+* **[Perf]Muon(MomentUm Orthogonalized by Newton-Schulz):** 옛 정의
+* **[Perf]KAN:** b
+### 3. Security & Trust(보안 및 신뢰성)
+
+## 🛠️ 핵심 개념 한 줄 요약
+| 주제 | 핵심 키워드 | 한 줄 정의 |
+| :--- | :--- | :--- |
+| **Muon(MomentUm Orthogonalized by Newton-Schulz)** | 옛 | 옛 정의 |
+| **KAN** | k | b |"""
+    plan = {"action": "update", "category": "AI", "tag": "Perf", "title": "뮤온",
+            "target": "뮤온 옵티마이저(Muon: MomentUm Orthogonalized by Newton-Schulz)",
+            "summary": {"name": "Muon Optimizer(Muon)", "keywords": "새", "one_line": "새 정의"}}
+    out = cat.update_summary(text, plan, []).splitlines()
+    assert sum("Muon" in l for l in out) == 2  # 불릿 1 + 표 1 (중복 없음)
+    assert out[2] == "* **[Perf]Muon Optimizer(Muon):** 새 정의"  # 옛 자리 그대로
+    assert "| **Muon Optimizer(Muon)** | 새 | 새 정의 |" in out and "옛 정의" not in "\n".join(out)
+    assert "* **[Perf]KAN:** b" in out and "| **KAN** | k | b |" in out  # 다른 항목은 그대로

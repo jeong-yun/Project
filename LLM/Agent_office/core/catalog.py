@@ -318,32 +318,54 @@ def summary_row(plan: dict) -> str:
     return f"| **{s.get('name') or plan['title']}** | {s.get('keywords', '')} | {s.get('one_line', '').strip()} |"
 
 
-def _summary_name(entry_or_name) -> str:
-    name = entry_or_name.name if isinstance(entry_or_name, Entry) else str(entry_or_name)
-    m = re.search(r"\(([^()]*)\)\s*$", name)  # 영문명이 괄호 안에 있으면 그것으로 요약을 찾는다
-    return (m.group(1) if m else name).split(",")[0].strip()
-
 
 def update_summary(text: str, plan: dict, removed: list[Entry]) -> str:
     """0. Summary.md — 로드맵 불릿과 한 줄 요약 표 행을 추가·교체·삭제한다."""
     lines = text.split("\n")
-    drop_keys = {normalize(_summary_name(e)) for e in removed}
+    # 지울 요약 줄 = 흡수·삭제된 항목 + 수정 대상 항목. 요약 줄의 영문명과 항목 이름을 name_keys 로 비교한다
+    # (예: 요약 'Muon(MomentUm Orthogonalized…)' ↔ 항목 '뮤온 옵티마이저(Muon: MomentUm …)' — 'muon' 이 겹침)
+    drop_keys: set[str] = set()
+    for e in removed:
+        drop_keys |= name_keys(e.name)
     if plan.get("action") in ("update", "delete") and plan.get("target"):
-        drop_keys.add(normalize(_summary_name(plan["target"])))
+        drop_keys |= name_keys(str(plan["target"]))
+        if plan.get("action") == "update" and (plan.get("summary") or {}).get("name"):
+            drop_keys |= name_keys(plan["summary"]["name"])  # 같은 이름으로 이미 있는 요약도 교체
 
     def mentions_dropped(line: str) -> bool:
         m = re.match(r"^\* \*\*(?:\[[^\]]+\])?(.+?):\*\*", line) or re.match(r"^\| \*\*(.+?)\*\* \|", line)
-        return bool(m) and normalize(m.group(1)) in drop_keys
+        return bool(m) and bool(name_keys(m.group(1)) & drop_keys)
 
-    lines = [l for l in lines if not mentions_dropped(l)]
+    # 지운 자리를 기억해 두었다가 수정본 요약을 같은 자리에 넣는다 (없으면 분류 섹션·표의 끝)
+    bullet_at = row_at = None
+    kept = []
+    for line in lines:
+        if mentions_dropped(line):
+            if line.startswith("* ") and bullet_at is None:
+                bullet_at = len(kept)
+            elif line.startswith("|") and row_at is None:
+                row_at = len(kept)
+            continue
+        kept.append(line)
+    lines = kept
     if plan.get("action") in ("add", "update") and plan.get("summary"):
         heading = CATEGORY_TITLES[plan["category"]]
-        if heading in lines:
-            i = lines.index(heading) + 1
-            while i < len(lines) and lines[i].startswith("* "):
-                i += 1
-            lines.insert(i, summary_bullet(plan))
-        if TABLE_HEADER in lines:
+        section = lines.index(heading) if heading in lines else None
+        end = None
+        if section is not None:
+            end = section + 1
+            while end < len(lines) and lines[end].startswith("* "):
+                end += 1
+        # 이전 자리가 같은 분류 섹션 안이면 그 자리, 아니면(분류 이동 등) 섹션 끝
+        if bullet_at is not None and section is not None and section < bullet_at <= end:
+            lines.insert(bullet_at, summary_bullet(plan))
+            row_at = row_at + 1 if row_at is not None and row_at >= bullet_at else row_at
+        elif end is not None:
+            lines.insert(end, summary_bullet(plan))
+            row_at = row_at + 1 if row_at is not None and row_at >= end else row_at
+        if row_at is not None:
+            lines.insert(row_at, summary_row(plan))
+        elif TABLE_HEADER in lines:
             i = lines.index(TABLE_HEADER) + 1
             while i < len(lines) and lines[i].startswith("|"):
                 i += 1
