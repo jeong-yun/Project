@@ -26,7 +26,7 @@
 | 팀 | 업무 (화면의 📋 업무 선택) | 근거 자료 |
 |---|---|---|
 | 기본 팀 | 자유 질문 (예시 4종) | 웹 검색 |
-| 📈 주식 팀 | ① 분야별 종목 추천 ② 주가 전망 ③ 보유 종목 전략(수량·매입가) ④ 포트폴리오 구성 | **시세 데이터**(Yahoo Finance: 현재가·수익률·이동평균·변동성·평가손익을 코드로 계산) + 최근 1개월 뉴스·리포트 |
+| 📈 주식 팀 | ① 분야별 종목 추천(1~5점 매력도) ② 종목 판단(7개 항목 → 매수·보유·매도) ③ 주가 전망 ④ 매매 전략(분할 매수·목표가·손절가·손익비) ⑤ 보유 종목 추가 매매(물타기·불타기·익절·손절) ⑥ 포트폴리오 구성 | **시세 데이터**(Yahoo Finance: 현재가·이동평균·재무 지표·컨센서스·평가손익·평단 시뮬레이션을 코드로 계산) + 최근 1개월 공시·리포트·뉴스 (블로그·커뮤니티 제외) + **코드 검산**(가중 점수·평균가·손익비) |
 | ✈️ 여행 팀 | 여행 계획서 (국내/해외, 출발·도착일, 인원, 예산, 스타일) + **🗺 움직이는 경로 지도** | **여행 달력**(N박 M일·날짜별 요일을 코드로 계산) + 목적지 날씨·행사·교통 검색 |
 
 > 진행 상황은 [today_worked.md](today_worked.md), 초기 계획은 [PLAN.md](PLAN.md) 참고.
@@ -180,6 +180,10 @@ streamlit run app.py
 | `json_keys` | ```json 블록 형식 + 단계 분할 필수 키(`options.required_keys`) 검사 |
 | `required_terms` | 업무 필수 항목(예: 시나리오·손절·목표가·예산)이 답변에 있는지 검사 (`"A\|B"` 는 둘 중 하나) |
 | `itinerary_days` | 여행 일정이 1일차~마지막 날까지 모든 날을 다루는지 검사 (일수는 여행 달력 툴이 계산해 전달) |
+| `stock_plan` | 주식 답변 끝 ```json 요약의 가중 점수·결정 밴드·분할 매수 평균가·손익비·손절폭·물타기 평단·추가 매수 한도를 코드로 다시 계산 → 틀리면 정답 값과 함께 재작성 (`core/stock_calc.py`) |
+
+`harness.final_only` 에 적은 검증기는 최종 답변(문의 대상 에이전트)에만 돌립니다 — 하위 실무자는 업무 일부만 쓰므로 전체 형식을 요구하지 않습니다.
+team.yaml `verification.critic` 으로 팀별 비평 설정을 덮어쓸 수 있습니다 (주식 팀: 모든 검토 단계 비평, 자가 교정 최대 2회, 점수-분석 불일치·근거 없는 수치 규칙).
 
 업무 양식(team.yaml `tasks`)마다 `validators`·`harness_options` 를 따로 지정할 수 있습니다 (예: 주가 전망은 `required_terms: [기준일, 시나리오, 상승, 하락, 확률]`).
 
@@ -189,7 +193,7 @@ streamlit run app.py
 
 ```bash
 python -m evals.run_eval evals/cases/general.yaml   # 기본 팀 (HBF 등)
-python -m evals.run_eval evals/cases/stock.yaml     # 주식 팀 (삼성전자 전망·보유 전략)
+python -m evals.run_eval evals/cases/stock.yaml     # 주식 팀 (삼성전자 전망·보유 전략·판단·매매 전략)
 python -m evals.run_eval evals/cases/travel.yaml    # 여행 팀 (오사카 3박 4일)
 ```
 
@@ -241,17 +245,34 @@ tasks:
     question: "{stock} 종목의 향후 {horizon} 주가를 전망해줘."   # {key} = 입력값, 빈 값이 든 줄은 자동 삭제
     goal: "{stock} 종목의 {horizon} 시나리오별 전망 보고서"
     success_criteria: ["상승·기본·하락 시나리오와 확률을 제시한다"]
+    instructions: |                          # (선택) 사고 절차·루브릭·퓨샷·JSON 형식 → 브리프 [배경]으로 모든 에이전트에게
+      근거를 먼저 쓰고 점수는 마지막에 쓴다 …
     validators: [required_terms]             # 이 업무에서 추가로 돌릴 하네스
-    harness_options: {required_terms: [시나리오, 확률]}
+    harness_options: {required_terms: [시나리오, 확률]}   # 문자열 값의 {key} 도 입력값으로 바뀜
 ```
 `start_date`·`end_date` 입력칸이 있으면 `{nights}`·`{days}` 가 자동으로 계산되어 템플릿에서 쓸 수 있습니다.
 
 ### 데이터 툴 추가 (team.yaml `tools`)
 `core/tools/` 에 `run(question, inputs, models) -> ToolResult | None` 함수를 만들고 `core/tools/__init__.py` 의 `TOOLS` 에 등록합니다.
 `inputs` 는 업무 양식의 입력값입니다. 결과는 모든 에이전트의 근거 자료와 화면 타임라인에 들어갑니다.
-현재 툴: `stock_data`(주가·평가손익), `travel_calendar`(여행 날짜·요일). 팀별 검색 요령·기간은 team.yaml `search`(`hint`, `news_timelimit` 등).
+현재 툴: `stock_data`(주가·재무 지표·컨센서스·평가손익·추가 매수 한도), `travel_calendar`(여행 날짜·요일). 팀별 검색 요령·기간은 team.yaml `search`(`hint`, `news_timelimit` 등).
 
-## 7-1. 여행 경로 지도 (여행 팀)
+## 7-1. 주식 팀 — 판단을 돕는 장치
+
+| 장치 | 내용 |
+|---|---|
+| 종목 식별 | 시장(KOSPI/KOSDAQ/NASDAQ…)·업종을 시세 툴이 먼저 확인 |
+| 재무 지표 | EPS·ROE·영업이익률·성장률·부채비율·유동비율·배당성향·베타 (Yahoo 집계값 — DART 교차 확인 안내, 없으면 `확인 불가`) |
+| 컨센서스 극단값 주의 | 평균 목표가가 현재가와 60% 이상 차이 나거나 최고/최저가 2배 이상이면 ⚠️ 표시 → 최신 리포트 확인 전에는 근거로 쓰지 않음 |
+| 손절 참고가 | 단기 3~5% · 중기 8~10% · 장기 15% 이상 가격을 코드로 계산 |
+| 보유 포지션 | 평가손익·본전 상승률, 현재/최대 비중으로 **추가 매수 가능 금액**, 25·50·100% 추가 시 **새 평균 단가** 시뮬레이션 |
+| 근거 먼저 → 점수 | 추천·판단 업무는 리스크 → 기회 → 점수 순서 강제 + 1점/5점(추천), 4.35 매수/1.55 매도(판단) 기준점 예시 |
+| 출처 규칙 | 모든 수치 `[출처, YYYY-MM-DD]`, 우선순위 DART → KRX → 네이버 금융·FnGuide → 증권사 리포트 → 뉴스, 블로그·카페·종목토론방은 검색 결과에서 제외 (team.yaml `search.exclude_domains`) |
+| 🧮 코드 검산 | 최종 결과 아래에 LLM 이 아닌 코드가 다시 계산한 점수표·평균 매수가·손익비·평단을 따로 표시 (채택 시 저장 파일에도 포함) |
+
+판단 업무 결정 밴드: 종합 = Σ(점수×가중치)÷100 → **3.75 이상 매수 / 2.50~3.74 보유 / 2.50 미만 매도**, `데이터 부족` 3개 이상이면 **판단 보류**.
+
+## 7-2. 여행 경로 지도 (여행 팀)
 
 여행 팀의 최종 계획서가 나오면 백그라운드에서 지도를 만듭니다 (약 30초~1분, 그동안 결과를 보고 결정해도 됩니다).
 
@@ -295,6 +316,7 @@ Agent_office/
 │   ├── exporter.py         채택 결과 → results/<팀>/ 파일 (.md, 지도 .html)
 │   ├── route.py            여행 계획서 → 방문지 → OSM 좌표 → 움직이는 지도(folium)
 │   ├── tasks.py            팀 업무 양식 → 질문·브리프·하네스 옵션
+│   ├── stock_calc.py       주식 숫자 검산 (가중 점수·결정 밴드·평균가·손익비·평단)
 │   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력)
 │   ├── search.py           웹 검색(검색어 생성 → DuckDuckGo 웹+뉴스)
 │   ├── verification.py     루브릭·비평가·자가 교정

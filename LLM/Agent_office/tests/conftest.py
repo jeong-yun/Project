@@ -17,6 +17,16 @@ ALL_KEYS = ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY", "UPSTAGE_AP
 
 
 @pytest.fixture(autouse=True)
+def clear_model_cooldown():
+    """할당량 소진으로 쉬게 한 모델 기록을 테스트마다 비운다."""
+    from core import llm_factory
+
+    llm_factory._cooldown.clear()
+    yield
+    llm_factory._cooldown.clear()
+
+
+@pytest.fixture(autouse=True)
 def no_network_search(monkeypatch):
     """테스트 중 실제 웹 검색을 막는다. 호출된 검색어는 반환값 리스트에 기록된다."""
     from core import search

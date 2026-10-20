@@ -18,8 +18,9 @@ from core.schemas import CriticResult, ModelsConfig, ReviewResult
 DEFAULT_CRITIC = {"enabled": True, "scope": "final", "min_score": 4, "max_self_corrections": 1}
 
 
-def critic_settings(verification: dict) -> dict:
-    return {**DEFAULT_CRITIC, **(verification.get("critic") or {})}
+def critic_settings(verification: dict, team_override: dict | None = None) -> dict:
+    """기본값 ← config/verification.yaml 의 critic ← team.yaml 의 verification.critic 순으로 덮어쓴다."""
+    return {**DEFAULT_CRITIC, **(verification.get("critic") or {}), **((team_override or {}).get("critic") or {})}
 
 
 def rubric_text(rubric: dict | None) -> str:
@@ -38,8 +39,10 @@ def rubric_text(rubric: dict | None) -> str:
     return "\n".join(lines)
 
 
-def build_critic_messages(question: str, reviewed_input: str, review: ReviewResult, criteria: list[str]) -> list:
-    """비평가 프롬프트. 최종 답변의 좋고 나쁨이 아니라 '검토 과정의 논리'만 보게 한다."""
+def build_critic_messages(
+    question: str, reviewed_input: str, review: ReviewResult, criteria: list[str], rules: list[str] | None = None
+) -> list:
+    """비평가 프롬프트. 최종 답변의 좋고 나쁨이 아니라 '검토 과정의 논리'만 보게 한다. rules = 팀 전용 비평 규칙."""
     system = "\n".join(
         [
             "너는 비평가(Critic)다. 다른 검토자가 작성한 '검토 과정'의 논리만 전문적으로 채점한다.",
@@ -48,6 +51,7 @@ def build_critic_messages(question: str, reviewed_input: str, review: ReviewResu
             "- 검토자의 점수가 분석·문제점과 일관되는가?",
             "점수를 매기기 전에 반드시 analysis 에 3문장 이내로 분석을 먼저 쓴다.",
             "rule_violations 는 'A 부분이 B 규칙에 어긋남' 형식으로 구체적으로 쓴다.",
+            *(["[이 팀의 추가 비평 규칙 — 하나라도 어기면 rule_violations 에 넣는다]", *(f"- {r}" for r in rules)] if rules else []),
         ]
     )
     criteria_text = "\n".join(f"- {c}" for c in criteria) or "- (없음)"
@@ -65,12 +69,13 @@ def build_critic_messages(question: str, reviewed_input: str, review: ReviewResu
 
 
 def critique(
-    question: str, reviewed_input: str, review: ReviewResult, criteria: list[str], models: ModelsConfig
+    question: str, reviewed_input: str, review: ReviewResult, criteria: list[str], models: ModelsConfig,
+    rules: list[str] | None = None,
 ) -> tuple[CriticResult | None, list[str]]:
     """비평가 호출. 모델이 모두 실패하면 (None, 에러) — 비평 없이 진행한다 (답변을 막지 않음)."""
     try:
         call = llm_factory.invoke_structured(
-            models.utility, models, CriticResult, build_critic_messages(question, reviewed_input, review, criteria), "비평가"
+            models.utility, models, CriticResult, build_critic_messages(question, reviewed_input, review, criteria, rules), "비평가"
         )
     except NoAvailableModelError as e:
         return None, [f"비평가 호출 실패 → 비평 생략: {e}"]
@@ -94,5 +99,6 @@ def correction_message(critic: CriticResult) -> str:
     return (
         "너의 이전 단계 논리에서 다음 부분이 규칙에 어긋난다.\n"
         f"{bullet}\n"
-        "이 부분들을 수정하여 같은 형식으로 다시 작성하라. 분석(analysis)부터 다시 쓰고, 점수는 마지막에 매긴다."
+        "분석(analysis) 맨 앞에 지적마다 '[지적된 부분] → 어떻게 고쳤는지' 교정 사유를 1문장씩 먼저 쓰고"
+        " (고칠 필요가 없다고 판단한 지적은 '수정 없음: 이유'), 그 다음 같은 형식으로 다시 작성하라. 점수는 마지막에 매긴다."
     )

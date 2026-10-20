@@ -155,3 +155,22 @@ def test_failed_drafter_does_not_stop_the_team(org, ranks, team, models, set_key
     assert [(s.node_id, s.kind) for s in steps] == [("staff_case", "draft"), ("am_action", "review")]
     assert "모델 오류로 초안을 작성하지 못했습니다" in steps[0].content
     assert steps[0].errors  # 실패 사유가 검증 기록에 남는다
+
+
+# ─── 할당량 소진: 기다리지 않고, 잠시 후보에서 뺀다 ─────────────────────
+
+
+DAILY_QUOTA = Exception(
+    "429 ResourceExhausted You exceeded your current quota. Quota exceeded for metric: "
+    "generate_content_free_tier_requests, limit: 20 GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+)
+
+
+def test_daily_quota_is_not_retried_and_model_cools_down(staff, monkeypatch, no_wait):
+    assert not is_transient(DAILY_QUOTA) and not is_transient(Exception("429 insufficient_quota"))
+    calls = install(monkeypatch, {"google": [("fail", DAILY_QUOTA)], "openai": [("ok", "첫 초안"), ("ok", "둘째 초안")]})
+    first = staff.draft(staff.draft_messages("질문", "업무"))
+    second = staff.draft(staff.draft_messages("질문", "업무"))
+    assert first.content == "첫 초안" and second.content == "둘째 초안"
+    assert calls == ["google", "openai", "openai"]  # 두 번째부터는 소진된 google 을 건너뛴다
+    assert no_wait == []  # 할당량 소진은 기다리지 않는다

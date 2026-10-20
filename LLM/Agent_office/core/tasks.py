@@ -85,15 +85,19 @@ def build_request(task: TaskTemplate, values: dict, extra_request: str = "") -> 
     question = render(task.question, full)
     if extra_request.strip():
         question += f"\n추가 요청: {extra_request.strip()}"
+    context = f"업무 유형: {task.title}"
+    if task.instructions.strip():
+        context += "\n\n[업무 수행 지침]\n" + render(task.instructions, full)
     brief = DesiredState(
         goal=render(task.goal, full),
-        context=f"업무 유형: {task.title}",
+        context=context,
         success_criteria=render_list(task.success_criteria, full),
         constraints=render_list(task.constraints, full) + ([f"추가 요청 반영: {extra_request.strip()}"] if extra_request.strip() else []),
         output_format=render(task.output_format, full),
         assumptions=[],
     )
-    harness_options = dict(task.harness_options)
+    # 문자열 옵션의 {key} 도 입력값으로 바꾼다 (예: expected_count: "{count}")
+    harness_options = {k: render(v, full) if isinstance(v, str) else v for k, v in task.harness_options.items()}
     if "days" in full:
         harness_options.setdefault("trip_days", full["days"])
         harness_options.setdefault("trip_start", str(full["start_date"]))

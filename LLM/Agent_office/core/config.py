@@ -163,7 +163,7 @@ def validate_config(ranks: list[Rank], models: ModelsConfig, teams: list[Team]) 
         from core.harness import REGISTRY  # 순환 import 방지를 위해 여기서 import
         from core.tools import TOOLS
 
-        used_validators = set(team.harness.validators) | {v for t in team.tasks for v in t.validators}
+        used_validators = set(team.harness.validators) | set(team.harness.final_only) | {v for t in team.tasks for v in t.validators}
         unknown_validators = used_validators - REGISTRY.keys()
         if unknown_validators:
             raise ConfigError(

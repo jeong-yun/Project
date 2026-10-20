@@ -46,7 +46,7 @@ def test_new_teams_are_valid(ranks, models):
     teams = {t.id: t for t in list_teams()}
     assert {"stock", "travel"} <= teams.keys()
     validate_config(ranks, models, list(teams.values()))
-    assert [t.id for t in teams["stock"].tasks] == ["recommend", "forecast", "position", "portfolio"]
+    assert [t.id for t in teams["stock"].tasks] == ["recommend", "judge", "forecast", "trade", "position", "portfolio"]
     assert "travel_calendar" in teams["travel"].tools and "stock_data" in teams["stock"].tools
     assert len(team_org(teams["stock"], ranks).walk()) == 7
 
@@ -67,19 +67,32 @@ def test_render_drops_lines_with_empty_values():
     assert render("{price}원", {"price": 70000}) == "70,000원"
 
 
+def task_of(team: Team, task_id: str):
+    return next(t for t in team.tasks if t.id == task_id)
+
+
 def test_position_task_builds_full_brief(stock):
-    req = build_request(stock.tasks[2], {"stock": "삼성전자", "quantity": 10.0, "buy_price": 70000.0,
-                                         "horizon": "중기(6~12개월)", "risk": "중립형"}, extra_request="배당도 고려")
-    assert req.question.startswith("삼성전자 종목을 10주, 평균 매입가 70,000에 보유 중이야")
+    req = build_request(task_of(stock, "position"), {"stock": "삼성전자", "quantity": 10.0, "buy_price": 70000.0,
+                                                     "horizon": "중기(6~12개월)", "risk": "중립형"}, extra_request="배당도 고려")
+    assert req.question.startswith("삼성전자 종목을 10주, 평균 단가 70,000에 보유 중이야")
     assert "추가 요청: 배당도 고려" in req.question
-    assert req.brief.goal and len(req.brief.success_criteria) == 4  # 브리프가 완성 → 요청 정리 LLM 불필요
+    assert "투자 목적" not in req.question  # 비운 선택 입력 줄은 빠짐
+    assert req.brief.goal and len(req.brief.success_criteria) == 6  # 브리프가 완성 → 요청 정리 LLM 불필요
+    assert "[업무 수행 지침]" in req.brief.context and "position_plan" in req.brief.context
     assert req.tool_inputs["quantity"] == 10.0
-    assert req.harness_options["required_terms"] == ["평가손익", "손절", "목표가", "시나리오"]
+    assert req.harness_options["stock_checks"] == ["position_plan"] and "stock_plan" in req.validators
+
+
+def test_task_harness_options_are_rendered(stock):
+    req = build_request(task_of(stock, "recommend"), {"sector": "AI 반도체", "market": "국내", "count": 4})
+    assert req.harness_options["expected_count"] == "4"
+    assert '"sector": "AI 반도체"' in req.brief.context  # 지침 속 {sector} 도 치환
+    assert "후보 종목" not in req.question
 
 
 def test_required_fields_and_dates_are_checked(stock, travel):
     with pytest.raises(TaskInputError, match="종목"):
-        build_request(stock.tasks[1], {"stock": ""})
+        build_request(task_of(stock, "judge"), {"stock": ""})
     with pytest.raises(TaskInputError, match="도착일"):
         build_request(travel.tasks[0], {"scope": "국내", "start_date": "2026-11-23", "end_date": "2026-11-20"})
 

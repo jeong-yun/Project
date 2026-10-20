@@ -33,12 +33,37 @@ TRANSIENT_MARKERS = (
 )
 
 
+# 할당량 소진(무료 일일 한도·크레딧 부족)은 몇 초 기다려도 풀리지 않는다.
+# → 그 모델을 QUOTA_COOLDOWN_SEC 동안 후보에서 빼서, 다음 호출부터는 바로 대안 모델을 쓴다 (매번 실패를 기다리지 않음).
+QUOTA_COOLDOWN_SEC = 600
+_cooldown: dict[str, float] = {}  # "provider:model" → 다시 써 볼 시각 (time.monotonic)
+
+
+def is_quota_exhausted(error: Exception) -> bool:
+    text = f"{type(error).__name__} {error}".lower()
+    return ("quota" in text and ("free_tier" in text or "limit: 0" in text or "perday" in text)) or "insufficient_quota" in text
+
+
 def is_transient(error: Exception) -> bool:
     """잠시 뒤 다시 하면 될 가능성이 높은 오류인가 (provider 마다 예외 종류가 달라 이름·메시지로 판단)."""
+    if is_quota_exhausted(error):
+        return False  # 무료 할당량 소진·크레딧 부족 — 기다려도 안 됨
     text = f"{type(error).__name__} {error}".lower()
-    if "quota" in text and ("free_tier" in text or "limit: 0" in text):
-        return False  # 무료 할당량 0 (예: Gemini Pro) — 기다려도 안 됨
     return any(marker in text for marker in TRANSIENT_MARKERS)
+
+
+def _model_key(spec: ModelSpec) -> str:
+    return f"{spec.provider}:{spec.model}"
+
+
+def note_failure(spec: ModelSpec, error: Exception) -> None:
+    """호출 실패 기록 — 할당량 소진이면 잠시 후보에서 뺀다."""
+    if is_quota_exhausted(error):
+        _cooldown[_model_key(spec)] = time.monotonic() + QUOTA_COOLDOWN_SEC
+
+
+def cooling_down(spec: ModelSpec) -> bool:
+    return _cooldown.get(_model_key(spec), 0.0) > time.monotonic()
 
 
 def sleep(seconds: float) -> None:
@@ -72,12 +97,12 @@ def provider_status(models: ModelsConfig) -> dict[str, str]:
 
 
 def available_candidates(rank_models: RankModels, models: ModelsConfig) -> list[tuple[ModelSpec, bool]]:
-    """사용 가능한 후보 모델을 우선순위대로 반환. (spec, is_fallback) 목록."""
-    return [
-        (spec, i > 0)
-        for i, spec in enumerate(rank_models.candidates)
-        if is_available(spec.provider, models)
-    ]
+    """사용 가능한 후보 모델을 우선순위대로 반환. (spec, is_fallback) 목록.
+
+    할당량 소진으로 쉬는 중인 모델은 뒤로 미룬다 (모두 쉬는 중이면 그래도 시도한다).
+    """
+    usable = [(spec, i > 0) for i, spec in enumerate(rank_models.candidates) if is_available(spec.provider, models)]
+    return [c for c in usable if not cooling_down(c[0])] + [c for c in usable if cooling_down(c[0])]
 
 
 def create_chat_model(spec: ModelSpec, models: ModelsConfig) -> BaseChatModel:
@@ -107,6 +132,8 @@ def create_chat_model(spec: ModelSpec, models: ModelsConfig) -> BaseChatModel:
 
         if spec.max_tokens:
             kwargs["max_output_tokens"] = spec.max_tokens
+        # 라이브러리 자체 재시도(기본 6회, 지수 대기)는 할당량 소진 때 수 분씩 멈추게 한다 → 재시도는 위의 공통 로직이 맡는다
+        kwargs.setdefault("max_retries", 1)
         return ChatGoogleGenerativeAI(google_api_key=api_key, **kwargs)
 
     raise ValueError(f"지원하지 않는 provider: {spec.provider}")
@@ -167,6 +194,7 @@ def invoke_structured(
             except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
                 # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
                 errors.append(f"{spec.label}: {type(e).__name__}: {str(e)[:300]}")
+                note_failure(spec, e)
                 out = None
                 if attempt < len(RETRY_DELAYS) and is_transient(e):
                     sleep(RETRY_DELAYS[attempt])  # 잠깐 기다렸다 같은 모델로 다시

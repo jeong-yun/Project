@@ -97,6 +97,8 @@ class HarnessConfig(BaseModel):
     validators: list[str] = Field(default_factory=list)  # core/harness/validators.py 의 REGISTRY 이름
     max_retries: int = 2  # 검증 실패 시 에러 로그를 돌려주고 다시 쓰게 하는 최대 횟수 (Backtracking)
     options: dict = Field(default_factory=dict)  # 검증기별 옵션 (예: sql_schema 파일 경로)
+    # 최종 답변(문의 대상 에이전트의 결과)에만 돌릴 검증기 — 하위 실무자는 업무의 일부만 맡으므로 전체 형식을 요구하지 않는다
+    final_only: list[str] = Field(default_factory=list)
 
 
 class TaskField(BaseModel):
@@ -128,8 +130,10 @@ class TaskTemplate(BaseModel):
     success_criteria: list[str] = Field(default_factory=list)
     constraints: list[str] = Field(default_factory=list)
     output_format: str = ""
+    # 업무 수행 지침 (사고 절차·채점 루브릭·퓨샷 예시·출력 JSON 형식 등) — 브리프 [배경]에 들어가 모든 에이전트가 본다
+    instructions: str = ""
     validators: list[str] = Field(default_factory=list)  # 이 업무에서 추가로 돌릴 하네스 검증기
-    harness_options: dict = Field(default_factory=dict)  # 검증기 옵션 (예: required_terms)
+    harness_options: dict = Field(default_factory=dict)  # 검증기 옵션 (예: required_terms). 문자열 값의 {key} 도 입력값으로 바뀐다
 
 
 class Team(BaseModel):
@@ -150,6 +154,9 @@ class Team(BaseModel):
     tasks: list[TaskTemplate] = Field(default_factory=list)  # 정형 업무 양식 (없으면 자유 질문만)
     search: dict = Field(default_factory=dict)  # 웹 검색 설정 덮어쓰기 (hint, news_timelimit 등)
     features: list[str] = Field(default_factory=list)  # 추가 기능 (예: route_map = 여행 경로 지도)
+    # 검증 설정 덮어쓰기 (config/verification.yaml 의 critic 위에 덮어씀)
+    #   critic: {scope: all, max_self_corrections: 2, rules: [이 팀의 비평 규칙 …]}
+    verification: dict = Field(default_factory=dict)
 
 
 # ════════════════════════════════════════════════════════════════════

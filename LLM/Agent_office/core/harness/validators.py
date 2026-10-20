@@ -5,6 +5,7 @@
   json_keys     : ```json 블록이 올바른 JSON 인지 + 필수 키(단계 분할 키)를 모두 가졌는지 검사
   required_terms: 업무에 꼭 들어가야 할 항목(예: 시나리오·손절가·예산)이 답변에 있는지 검사
   itinerary_days: 여행 일정이 1일차~마지막 날까지 모든 날을 다루는지 검사 (일수는 코드가 계산)
+  stock_plan    : 주식 점수표·매매 계획 JSON 을 코드로 검산 (core/stock_calc.py)
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -143,3 +144,22 @@ class ItineraryDaysValidator(Validator):
         if missing:
             return self.fail(f"여행 기간 {days}일 중 일정이 없는 날: {missing}. 모든 날의 일정을 'n일차(날짜)' 형식으로 작성하라.")
         return self.ok(f"{days}일 모두 일정 있음")
+
+
+@register
+class StockPlanValidator(Validator):
+    name = "stock_plan"
+    description = "주식 업무의 점수표·매매 계획 JSON 을 코드로 다시 계산해 검산 (가중 점수·결정 밴드·평균가·손익비·평단가)"
+
+    def check(self, answer: str, options: dict):
+        from core import stock_calc  # stock_calc 가 harness.base 를 쓰므로 순환 import 를 피해 늦게 불러온다
+
+        results = stock_calc.run_checks(answer, options)
+        if not results:
+            return self.ok("검산할 주식 계획 없음")
+        problems = [p for r in results for p in r.problems]
+        if problems:
+            return self.fail(
+                "코드 검산 결과 다음이 틀렸다. 코드가 계산한 값으로 본문과 JSON 을 함께 고쳐라: " + " / ".join(problems)
+            )
+        return self.ok("검산 통과: " + ", ".join(r.kind for r in results))

@@ -6,11 +6,14 @@
 2) 검색어마다 웹 검색을 하고, 중복을 뺀 결과를 번호를 붙여 모든 직급의 프롬프트에 넣는다.
    → 답변자는 근거로 쓰고 [번호]로 출처를 표시, 검토자는 사실관계 검증에 사용한다.
 
+3) team.yaml 의 search.exclude_domains 에 적힌 사이트(블로그·커뮤니티 등)는 근거에서 뺀다.
+
 검색 엔진: DuckDuckGo (ddgs 패키지, API 키 불필요)
 새 검색 엔진을 추가하려면 SEARCH_BACKENDS 에 함수를 등록하고 settings.yaml 의 web_search.provider 를 바꾼다.
 """
 
 from collections.abc import Callable
+from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
@@ -120,6 +123,21 @@ def plan_queries(question: str, models: ModelsConfig, max_queries: int, hint: st
         return SearchPlan(need_search=True, queries=[question[:200]]), [f"검색어 생성 실패 → 질문으로 검색: {e}"]
 
 
+def excluded(url: str, patterns: list[str]) -> bool:
+    """URL 이 제외 목록에 걸리는지. 패턴은 도메인(blog.naver.com) 또는 도메인+경로(finance.naver.com/item/board)."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    target = host + parsed.path.lower()
+    for pattern in patterns:
+        pattern = pattern.lower().strip()
+        if "/" in pattern:
+            if target.startswith(pattern) or target.startswith("www." + pattern):
+                return True
+        elif host == pattern or host.endswith("." + pattern):
+            return True
+    return False
+
+
 def research(question: str, models: ModelsConfig, settings: dict) -> WebContext:
     """검색 계획 → 검색 → 중복 제거. 어떤 단계가 실패해도 예외 없이 notes 에 남긴다."""
     cfg = settings.get("web_search", {})
@@ -141,6 +159,8 @@ def research(question: str, models: ModelsConfig, settings: dict) -> WebContext:
         return context
 
     seen: set[str] = set()
+    exclude = cfg.get("exclude_domains") or []
+    dropped = 0
     for query in plan.queries:
         try:
             results = backend(
@@ -151,7 +171,12 @@ def research(question: str, models: ModelsConfig, settings: dict) -> WebContext:
             context.notes.append(f"검색 실패 ({query}): {type(e).__name__}: {str(e)[:200]}")
             continue
         for r in results:
+            if exclude and excluded(r.url, exclude):
+                dropped += 1
+                continue
             if r.url not in seen and len(context.results) < max_total:
                 seen.add(r.url)
                 context.results.append(r)
+    if dropped:
+        context.notes.append(f"근거로 쓰지 않는 사이트(블로그·커뮤니티 등) 결과 {dropped}건 제외")
     return context

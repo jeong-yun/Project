@@ -298,6 +298,7 @@ class AnswerStream:
                         f"{spec.label}: {type(e).__name__}: {str(e)[:300]}"
                         + (" (작성 도중 끊김 → 처음부터 다시)" if started_writing else "")
                     )
+                    llm_factory.note_failure(spec, e)
                     if started_writing and self.on_restart:
                         self.on_restart()  # 반쯤 쓴 초안은 버린다
                     if attempt < len(llm_factory.RETRY_DELAYS) and llm_factory.is_transient(e):

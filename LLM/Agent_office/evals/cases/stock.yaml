@@ -29,11 +29,33 @@ cases:
 
   - id: position_samsung
     task: position
-    inputs: {stock: 삼성전자, quantity: 10, buy_price: 70000, horizon: "중기(6~12개월)", risk: 중립형}
+    inputs: {stock: 삼성전자, quantity: 10, buy_price: 250000, weight: 20, max_weight: 30, horizon: "중기(6~12개월)", risk: 중립형}
     checks:
-      - name: 툴이 보유 평가손익을 코드로 계산한다
+      - name: 툴이 보유 평가손익·추가 매수 한도·평단 시뮬레이션을 코드로 계산한다
         step: tools
-        expect: {contains_all: ["보유 평가 (코드 계산)", "평가손익"]}
-      - name: 최종 전략에 손절·목표가·평가손익이 있고 하네스를 통과한다
+        expect: {contains_all: ["보유 평가 (코드 계산)", "추가 매수 가능 금액", "평균 단가 시뮬레이션"]}
+      - name: 최종 전략에 손절·익절이 있고 평단·한도 검산(하네스)을 통과한다
         step: final
-        expect: {contains_all: ["손절", "목표가", "평가손익"], harness_pass: true}
+        expect: {contains_all: ["손절", "익절", "position_plan"], harness_pass: true}
+
+  - id: judge_samsung
+    task: judge
+    inputs: {stock: 삼성전자}
+    checks:
+      - name: 툴이 종목 식별·재무 지표·컨센서스를 준다
+        step: tools
+        expect: {contains_all: ["[종목 식별]", "재무 지표", "애널리스트 컨센서스"]}
+      - name: 최종 판단이 7개 항목 점수표를 담고 가중 점수·결정 밴드 검산을 통과한다
+        step: final
+        expect: {contains_all: ["종목 식별", "종합 점수", "신뢰도", "scorecard"], harness_pass: true}
+
+  - id: trade_samsung
+    task: trade
+    inputs: {stock: 삼성전자, horizon_pref: 팀이 추천}
+    checks:
+      - name: 툴이 보유 기간별 손절 참고가를 계산한다
+        step: tools
+        expect: {contains_all: ["보유 기간별 손절 참고가"]}
+      - name: 최종 전략이 분할 매수·손익비를 담고 평균가·손익비·손절폭 검산을 통과한다
+        step: final
+        expect: {contains_all: ["분할 매수", "손익비", "trade_plan"], harness_pass: true}

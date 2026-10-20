@@ -44,6 +44,7 @@ def new_run(run_id: str, question: str, root_id: str) -> dict:
         # 후처리(여행 지도 등): post_busy=True 인 동안 화면이 계속 자동 갱신된다
         "post_busy": False, "route": None, "route_error": None, "trip_start": None,
         "saved_files": [],  # 채택해서 저장한 결과 파일 경로
+        "harness_options": {},  # 업무 양식의 검증 옵션 (주식 검산표 등)
     }
 
 

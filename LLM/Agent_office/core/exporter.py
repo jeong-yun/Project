@@ -19,7 +19,9 @@ def slugify(text: str, limit: int = 40) -> str:
     return (slug[:limit].rstrip("_")) or "result"
 
 
-def result_markdown(run: dict, decision: HumanDecision, team_name: str, names: dict[str, str], disclaimer: str = "") -> str:
+def result_markdown(
+    run: dict, decision: HumanDecision, team_name: str, names: dict[str, str], disclaimer: str = "", appendix: str = ""
+) -> str:
     """저장할 마크다운 본문."""
     brief = run.get("brief")
     lines = [
@@ -39,6 +41,8 @@ def result_markdown(run: dict, decision: HumanDecision, team_name: str, names: d
         lines += [f"- [완료 기준] {c}" for c in brief.success_criteria]
         lines += [f"- [제약] {c}" for c in brief.constraints]
     lines += ["", "## 최종 결과", "", decision.final_answer.strip()]
+    if appendix:
+        lines += ["", "## 코드 검산 (점수·평균가·손익비)", "", appendix]
     if disclaimer:
         lines += ["", f"> {disclaimer}"]
 
@@ -62,13 +66,14 @@ def export_adopted(
     results_root: Path,
     disclaimer: str = "",
     map_html: str | None = None,
+    appendix: str = "",
 ) -> list[Path]:
     """채택 결과를 파일로 저장하고, 저장한 파일 경로 목록을 돌려준다."""
     folder = results_root / team_id
     folder.mkdir(parents=True, exist_ok=True)
     stem = f"{datetime.now():%Y%m%d-%H%M%S}_{slugify(run['question'])}"
     md_path = folder / f"{stem}.md"
-    md_path.write_text(result_markdown(run, decision, team_name, names, disclaimer), encoding="utf-8")
+    md_path.write_text(result_markdown(run, decision, team_name, names, disclaimer, appendix), encoding="utf-8")
     paths = [md_path]
     if map_html:
         map_path = folder / f"{stem}_지도.html"

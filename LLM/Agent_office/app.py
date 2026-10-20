@@ -29,7 +29,7 @@ import streamlit.components.v1 as components
 from pydantic import ValidationError
 from st_click_detector import click_detector
 
-from core import llm_factory
+from core import llm_factory, stock_calc
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
 from core.config import (
@@ -565,6 +565,20 @@ def adoptable_steps(run: dict) -> list[AgentAnswer]:
     return ([final] if final else []) + others
 
 
+def check_options(run: dict) -> dict:
+    """검산 옵션 = 데이터 툴이 계산한 값(현재가·보유 수량 등) + 업무 양식 옵션(stock_checks 등)."""
+    options: dict = {}
+    for tool in run.get("tools") or []:
+        options.update(tool.harness_options)
+    return {**options, **(run.get("harness_options") or {})}
+
+
+def calc_report(run: dict, answer: str) -> str:
+    """주식 업무의 코드 검산표 (점수·평균가·손익비·평단). 검산 대상이 없으면 빈 문자열."""
+    options = check_options(run)
+    return stock_calc.report(answer, options) if options.get("stock_checks") else ""
+
+
 def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
     """채택한 결과를 results/<팀>/ 에 파일로 저장 (여행 팀은 지도 .html 도). 실패해도 결정은 유지된다."""
     try:
@@ -578,7 +592,8 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
                 run["route"] = route
             html_text = map_html(route, trip_start=run.get("trip_start")) if route else None
         names = {nid: name_of(nid) for nid in nodes}
-        paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text)
+        appendix = calc_report(run, decision.final_answer)  # 채택한(수정한) 내용 기준으로 다시 검산
+        paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text, appendix)
         return [str(p) for p in paths]
     except Exception as e:  # noqa: BLE001
         run["notes"].append(f"결과 파일 저장 실패: {type(e).__name__}: {e}")
@@ -607,6 +622,11 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         st.markdown(f"#### 📌 최종 결과 — {name_of(final.node_id)}")
         with st.container(height=420, border=True):
             st.markdown(final.content)
+        report = calc_report(run, final.content)
+        if report:
+            # LLM 이 쓴 숫자를 코드로 다시 계산한 결과 — 판단 전에 꼭 확인할 값
+            with st.expander("🧮 코드 검산 — 점수·평균 매수가·손익비·평단 (LLM 이 아닌 코드 계산)", expanded=True):
+                st.markdown(report)
         if team.disclaimer:
             st.caption(f"ℹ️ {team.disclaimer}")
 
@@ -921,6 +941,7 @@ if request:
             discard_run(current)
         run = new_run(uuid.uuid4().hex, request["question"], target)
         run["trip_start"] = request["tool_inputs"].get("start_date")  # 지도 재생 시각용
+        run["harness_options"] = request["harness_options"]  # 화면 검산표용 (주식 업무의 stock_checks 등)
         # 지도 기능이 있는 팀은 처음부터 '후처리 예정'으로 표시 — 워크플로우가 끝난 뒤 지도까지 다 만들 때까지 화면이 자동 갱신된다
         run["post_busy"] = ROUTE_MAP in team.features
         st.session_state["runs"][run_key] = run

@@ -102,7 +102,7 @@ def build_office_graph(
     verification_cfg = verification_cfg or {}
     rewrite_answer = settings.get("review", {}).get("rewrite_answer", True)
     max_lessons = settings.get("feedback", {}).get("max_lessons_in_prompt", 5)
-    critic_cfg = verification.critic_settings(verification_cfg)
+    critic_cfg = verification.critic_settings(verification_cfg, team.verification)
     rubric = team.rubric or verification_cfg.get("review_rubric")
     with_human = checkpointer is not None  # interrupt 는 체크포인터가 있어야 동작한다
 
@@ -133,9 +133,14 @@ def build_office_graph(
         """화면에 '누가 지금 무엇을 하는지' 알린다 (stream_mode='custom' 이벤트)."""
         get_stream_writer()(event)
 
-    def harness_plan(state: OfficeState) -> tuple[list[str], dict]:
-        """이번 실행에서 돌릴 검증기와 옵션 = 팀 기본 + 업무 양식 추가분 + 툴이 계산한 값."""
+    def harness_plan(state: OfficeState, node_id: str | None = None) -> tuple[list[str], dict]:
+        """이번 실행에서 돌릴 검증기와 옵션 = 팀 기본 + 업무 양식 추가분 + 툴이 계산한 값.
+
+        node_id 가 최종 답변자(root)가 아니면 final_only 검증기는 뺀다.
+        """
         validators = list(dict.fromkeys([*team.harness.validators, *(state.get("extra_validators") or [])]))
+        if node_id is not None and node_id != state["root_id"]:
+            validators = [v for v in validators if v not in team.harness.final_only]
         options = {**team.harness.options, **(state.get("harness_options") or {})}
         for t in state.get("tool_results") or []:
             options = {**t.harness_options, **options}
@@ -147,7 +152,7 @@ def build_office_graph(
         redo(feedback, previous) 는 '피드백을 반영해 다시 작성'하는 함수 (초안/검토마다 다름).
         """
         cfg = team.harness
-        validators, options = harness_plan(state)
+        validators, options = harness_plan(state, answer.node_id)
         if not validators:
             return answer
         log: list[str] = []
@@ -292,7 +297,8 @@ def build_office_graph(
                     emit({"type": "start", "node": node_id, "kind": "critic"})
                     critic, errs = verification.critique(
                         # 채점 기준 = 팀 검토 기준 + 브리프의 완료 기준
-                        question, reviewed_input, answer.review, [*team.review_criteria, *brief.success_criteria], models
+                        question, reviewed_input, answer.review, [*team.review_criteria, *brief.success_criteria], models,
+                        critic_cfg.get("rules"),
                     )
                     answer.critic = critic
                     answer.verification_log += errs
