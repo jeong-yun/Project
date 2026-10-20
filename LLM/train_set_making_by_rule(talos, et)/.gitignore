@@ -1,0 +1,22 @@
+# 코드만 공개: 데이터·실행 결과·비밀 설정은 넣지 않는다
+.env
+01_raw/
+02_extracted/
+03_processed/
+04_integrated/
+05_llm_input/
+06_기존 데이터/
+07_llm_output/
+08_dataset/
+09_features/
+10_review/
+logs/
+.run/
+__pycache__/
+state.json
+parse_state.json
+*.broken
+*.tmp
+# 사용자 룰은 안내 파일만
+00_custom_rules/*
+!00_custom_rules/README.md
