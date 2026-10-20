@@ -1,7 +1,8 @@
 """📚 개념 작성 — IT 개념 카탈로그(GitHub jeong-yun/CS 의 Term/Every_day)에 항목을 추가·수정·삭제한다.
 
 흐름
-  ① 작업 입력   추가 / 수정 / 삭제 + 개념명·초안 → 관련 기존 항목을 코드로 찾아 함께 보낸다
+  ① 작업 입력   ✍️ 작성(개념명·초안) 또는 🗑 삭제 — 추가/수정은 고르지 않는다: 개념명으로 기존 항목을 찾아
+                (독립 항목이거나 다른 항목의 7.변형 소절에 있으면) 수정, 없으면 추가. 관련 기존 항목도 코드로 찾아 함께 보낸다
   ② 팀 검토     개념 편집 팀(편집장 → 수석에디터 → 팩트체크·계보분석)이 'IT 개념 프롬프트' 규칙으로 검증·작성
                 (형식은 하네스 concept_entry 가 코드로 검사: <thought>·<final>·개조식·절대 표현·참고문헌 형식·적용 계획)
   ③ 사람 승인   최종본·적용 계획을 확인(필요하면 수정) → 승인하면 카탈로그 파일에 반영
@@ -106,13 +107,14 @@ busy = run is not None and not run.get("done")
 # ── ① 작업 입력 ───────────────────────────────────────────────────────
 st.markdown("#### ① 작업 입력")
 with st.container(border=True):
-    action = st.radio("작업", list(concept.ACTIONS), format_func=lambda a: concept.ACTIONS[a], horizontal=True, key="c_action")
-    target = None
-    if action in ("update", "delete"):
-        target_name = st.selectbox("대상 기존 항목", [e.name for e in catalog.entries], format_func=lambda n: label_of[n], key="c_target")
-        target = catalog.find(target_name) or next(e for e in catalog.entries if e.name == target_name)
+    # 추가·수정은 고르지 않는다 — 개념명으로 기존 항목을 찾아 있으면 '수정', 없으면 '추가' (core.catalog.find_existing)
+    mode = st.radio("작업", ["write", "delete"], horizontal=True, key="c_mode",
+                    format_func=lambda m: "✍️ 작성 (기존에 있으면 수정 · 없으면 추가)" if m == "write" else "🗑 삭제")
+    target, sub_title, action = None, "", "add"
 
-    if action == "delete":
+    if mode == "delete":
+        target_name = st.selectbox("삭제할 항목", [e.name for e in catalog.entries], format_func=lambda n: label_of[n], key="c_target")
+        target = next(e for e in catalog.entries if e.name == target_name)
         st.markdown("**삭제 미리보기** — 승인하면 이 항목을 `old_term.txt` 로 옮기고 요약에서 뺍니다.")
         with st.expander(target.header, expanded=False):
             st.text(target.body[:4000])
@@ -125,15 +127,36 @@ with st.container(border=True):
                                          "title": target.name, "action": "delete", "steps": [], "statuses": {}, "drafting": {}}
             st.rerun()
     else:
-        name = st.text_input("개념명(한/영)", value=target.name if target else "", placeholder="예: 그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO)", key="c_name")
+        name = st.text_input("개념명(한/영)", placeholder="예: 그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO)", key="c_name")
         draft = st.text_area("초안", height=260, key="c_draft", placeholder="정의·작동 원리·장단점·참고 자료 등 초안을 붙여 넣으세요 (비워도 개념명으로 작성)")
+        if name.strip():
+            matches = cat.find_existing(catalog, name)
+            ADD = "__add__"
+
+            def option_label(n: str) -> str:
+                if n == ADD:
+                    return "🆕 새 항목으로 추가"
+                m = next(m for m in matches if m.entry.name == n)
+                return f"✏️ 수정 — {label_of[n]}" + (f" (7.변형 소절 '{m.detail[:40]}')" if m.kind == "하위" else "")
+
+            if matches:
+                m0 = matches[0]
+                st.info(f"기존에 있는 개념입니다 → **수정**으로 진행합니다: {label_of[m0.entry.name]}"
+                        + (f"  \n(다른 항목의 7.변형 소절 '{m0.detail}' 로 편입되어 있어 그 부모 항목을 수정합니다)" if m0.kind == "하위" else ""))
+            else:
+                st.success("카탈로그에 없는 개념입니다 → **추가**로 진행합니다. (검토 중 팀이 기존 개념의 하위라고 판단하면 편입으로 바꿉니다)")
+            picked = st.selectbox("판정 (필요하면 바꾸기)", [m.entry.name for m in matches] + [ADD], format_func=option_label,
+                                  key=f"c_pick_{hash(name)}")
+            if picked != ADD:
+                hit = next(m for m in matches if m.entry.name == picked)
+                target, sub_title, action = hit.entry, (hit.detail if hit.kind == "하위" else ""), "update"
         suggested = [e.name for e, _ in cat.find_related(catalog, name, draft, concept_cfg.get("related_limit", 6)) if not target or e.name != target.name]
         related_names = st.multiselect("함께 비교할 기존 항목 (자동 추천 — 추가·삭제 가능)", [e.name for e in catalog.entries],
                                        default=suggested, format_func=lambda n: label_of[n], key=f"c_related_{hash(name)}")
         use_web = st.checkbox("🌐 웹 검색으로 원전 확인", value=True, key="c_web")
         if st.button("🔍 검토 시작", type="primary", disabled=busy or not name.strip()):
             related = [e for e in catalog.entries if e.name in related_names]
-            question, brief = concept.build_concept_request(action, name.strip(), draft, related, target)
+            question, brief = concept.build_concept_request(action, name.strip(), draft, related, target, sub_title=sub_title)
             new = new_run(uuid.uuid4().hex, question, org.id)
             new.update(action=action, title=name.strip(), target=target.name if target else "", catalog_root=str(root))
             graph = make_graph(models)
@@ -248,6 +271,10 @@ if run.get("status") == "awaiting_human":
                     run["lessons"] = payload
             storage.save_decision(run["run_id"], decision)
         if approve:
+            # 팀이 '수정'으로 판정했는데 대상 이름을 빠뜨렸거나 못 찾는 이름이면, 코드가 찾은 기존 항목을 쓴다
+            if plan.get("action") == "update" and run.get("target") and not cat.Catalog.load(root).find(str(plan.get("target", ""))):
+                plan["target"] = run["target"]
+            run["action"] = plan.get("action", run.get("action"))  # 커밋 메시지의 추가/수정 표시
             try:
                 fresh = cat.Catalog.load(root)
                 run["applied"] = cat.apply_plan(fresh, plan, edited_entry)

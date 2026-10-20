@@ -16,6 +16,9 @@ AI_TEXT = """[Perf]그룹 상대적 정책 최적화(Group Relative Policy Optim
  - 그룹 평균으로 이점을 추정하는 RL 알고리즘.
 6. 관계
  - RLVR: 유사: RL 정렬 / 차이: 보상 출처 ↔ 이점 추정
+7. 변형·확장 상세
+   1) Dr.GRPO(GRPO Done Right) — 길이 정규화 제거
+     - 개념: 편향 제거 변형
 
 [Perf]보정된 테스트 타임 스케일링(Calibrated Test-Time Scaling, CaTS) (작성일: 26.07.08)
 1. 정의 및 개념
@@ -198,5 +201,42 @@ def test_normalize_entry_to_catalog_style():
 def test_request_includes_related_digest_and_target(root):
     c = cat.Catalog.load(root)
     q, brief = concept.build_concept_request("update", "GRPO", "초안", [c.entries[1]], c.entries[0], D)
-    assert "- 작업: 수정 (update)" in q and "수정 대상 전문" in q and "보정된 테스트 타임" in q
+    assert "수정 (update)" in q and "수정 대상 전문" in q and "보정된 테스트 타임" in q
     assert "(작성일: 26.10.20)" not in q and "26.10.20" in brief.context
+
+
+# ─── 추가 / 수정 자동 판정 ─────────────────────────────────────────────
+
+
+def test_find_existing_decides_update_or_add(root):
+    c = cat.Catalog.load(root)
+    # 독립 항목 — 한글명·영문명·약어 어느 것으로 써도 같은 항목
+    for q in ["GRPO", "그룹 상대적 정책 최적화", "Group Relative Policy Optimization", "CaTS"]:
+        hits = cat.find_existing(c, q)
+        assert len(hits) == 1 and hits[0].kind == "항목", q
+    # 다른 항목의 7.변형 소절로 편입된 개념 → 부모 항목을 수정
+    sub = cat.find_existing(c, "Dr.GRPO(GRPO Done Right)")
+    assert sub[0].kind == "하위" and sub[0].entry.name.startswith("그룹 상대적") and "Dr.GRPO" in sub[0].detail
+    # 없는 개념 → 추가
+    assert cat.find_existing(c, "DAPO(Decoupled Clip)") == []
+    # 이름 일부만 겹치는 것은 같은 개념이 아님 ('RAG' ≠ '에이전틱 RAG')
+    (root / cat.CATEGORY_FILES["AI"]).write_text(AI_TEXT + "\n\n에이전틱 RAG(Agentic RAG) (작성일: 26.03.16)\n1. 개념", encoding="utf-8")
+    assert cat.find_existing(cat.Catalog.load(root), "RAG(Retrieval-Augmented Generation)") == []
+
+
+def test_update_keeps_original_created_date(root):
+    # 모델이 수정본 제목에 오늘 날짜를 작성일로 써도, 기존 작성일·수정일 이력은 보존하고 수정일만 추가
+    new = GOOD_ENTRY.replace("DAPO(Decoupled Clip and Dynamic sAmpling Policy Optimization) (작성일: 26.10.20)",
+                             "그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO) (작성일: 26.10.20)")
+    cat.apply_plan(cat.Catalog.load(root), {**PLAN, "action": "update", "target": "GRPO"}, new, D)
+    header = (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8").splitlines()[0]
+    assert header == "[Perf]그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO) (작성일: 26.08.19)(수정일: 26.09.11, 10.20)"
+
+
+def test_request_explains_auto_decision(root):
+    c = cat.Catalog.load(root)
+    grpo = c.find("GRPO")
+    q_sub, _ = concept.build_concept_request("update", "Dr.GRPO", "초안", [], grpo, D, sub_title="Dr.GRPO(GRPO Done Right)")
+    assert "자동 판정" in q_sub and "7.변형·확장 상세 소절" in q_sub and "수정 대상 전문" in q_sub
+    q_add, _ = concept.build_concept_request("add", "DAPO", "초안", [], None, D)
+    assert "추가 (add)" in q_add and "수정 대상" not in q_add

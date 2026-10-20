@@ -188,6 +188,66 @@ def find_related(catalog: Catalog, name: str, draft: str = "", limit: int = 6, m
     return scored[:limit]
 
 
+# ─── 기존 개념인가? (추가 / 수정 자동 판정) ─────────────────────────────
+
+
+def name_keys(name: str) -> set[str]:
+    """개념 이름의 비교용 열쇠 — 전체 이름, 한글명, 괄호 속 영문명·약어를 각각 (공백·기호 무시, 영문 복수형 s 제거).
+
+    'RAG' 같은 약어는 괄호 안에 단독으로 있을 때만 열쇠가 된다 → '에이전틱 RAG' 가 'RAG' 로 오인되지 않음.
+    """
+    keys = {normalize(name), normalize(name.split("(")[0])}
+    for part in re.findall(r"\(([^()]*)\)", name):
+        keys |= {normalize(x) for x in re.split(r"[,/:]|\s-\s|·", part)}
+    keys |= {k[:-1] for k in keys if re.fullmatch(r"[a-z0-9\-]{4,}s", k)}
+    return {k for k in keys if len(k) >= 3}
+
+
+@dataclass
+class ExistingMatch:
+    entry: Entry  # 수정할 항목 (하위 개념이면 그것을 품은 부모 항목)
+    kind: str  # "항목" = 독립 항목으로 있음 / "하위" = 다른 항목의 7.변형·확장 상세 안에 있음
+    detail: str = ""  # 하위 개념이면 그 소절 제목
+
+
+SUBTITLE = re.compile(r"^\s*(?:-\s*)?(?:\d+\)\s*)?(.+?)(?:\s+—.*|:.*)?$")
+
+
+def find_existing(catalog: Catalog, name: str) -> list[ExistingMatch]:
+    """새로 쓰려는 개념이 카탈로그에 이미 있는지 — 있으면 '수정', 없으면 '추가'.
+
+    1) 독립 항목의 이름(한글·영문·약어)이 같으면 그 항목
+    2) 없으면 다른 항목의 '7. 변형·확장 상세' 소절 제목에 있는지 (통합으로 편입된 개념) → 그 부모 항목
+    """
+    keys = name_keys(name)
+    if not keys:
+        return []
+    direct = [ExistingMatch(e, "항목") for e in catalog.entries if keys & name_keys(e.name)]
+    if direct:
+        return direct
+    found = []
+    for e in catalog.entries:
+        section = re.search(r"^\s?\d\.\s*(?:변형|확장|상세).*?(?=^\s?(?:\d\.\s|참고)|\Z)", e.body, flags=re.MULTILINE | re.DOTALL)
+        if not section:
+            continue
+        for line in section.group(0).splitlines()[1:]:
+            m = SUBTITLE.match(line)
+            if m and not line.lstrip().startswith(("○", "●", "·")) and keys & name_keys(m.group(1)):
+                found.append(ExistingMatch(e, "하위", m.group(1).strip()))
+                break
+    return found
+
+
+def keep_dates(new_header: str, old_header: str) -> str:
+    """수정본 제목 줄의 날짜 부분을 기존 항목의 것(작성일·수정일 이력)으로 되돌린다 — 모델이 작성일을 오늘로 바꿔 써도 보존."""
+    old = re.search(r"\((?:작성일|수정일)", old_header)
+    if not old:
+        return new_header
+    new = re.search(r"\((?:작성일|수정일)", new_header)
+    prefix = (new_header[: new.start()] if new else new_header).rstrip()
+    return f"{prefix} {old_header[old.start():].strip()}"
+
+
 def mentions(catalog: Catalog, entry: Entry) -> list[Entry]:
     """다른 항목 본문에서 이 항목을 언급하는 곳 (삭제·이관 시 같이 고쳐야 할 후보)."""
     keys = {k for k in acronyms(entry.name)} | {entry.name.split("(")[0].strip().lower()}
@@ -338,7 +398,7 @@ def apply_plan(catalog: Catalog, plan: dict, final_entry: str, d: date | None = 
         new_path = root / CATEGORY_FILES[category]
         if action == "update":
             first, _, rest = entry_text.partition("\n")
-            entry_text = f"{with_updated_date(first, d)}\n{rest}".rstrip()
+            entry_text = f"{with_updated_date(keep_dates(first, target.header), d)}\n{rest}".rstrip()
             old_file = root / CATEGORY_FILES[target.category]
             if target.category == category:
                 _write(new_path, replace_entry(_read(new_path), target, entry_text))

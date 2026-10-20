@@ -190,13 +190,27 @@ def entry_digest(entry: Entry, limit: int = 900) -> str:
 
 
 def build_concept_request(
-    action: str, name: str, draft: str, related: list[Entry], target: Entry | None, d: date | None = None
+    action: str, name: str, draft: str, related: list[Entry], target: Entry | None, d: date | None = None,
+    sub_title: str = "",
 ) -> tuple[str, DesiredState]:
-    """개념 작성 요청 → (질문, 최종 상태 브리프). 질문 = 프롬프트의 [입력] 절."""
+    """개념 작성 요청 → (질문, 최종 상태 브리프). 질문 = 프롬프트의 [입력] 절.
+
+    action 은 코드가 판정한 것 (catalog.find_existing): 기존에 있으면 update, 없으면 add.
+    sub_title 이 있으면 이 개념이 target 항목의 '7. 변형·확장 상세' 소절로 이미 들어 있다는 뜻 → 부모 항목 전체를 수정한다.
+    """
     d = d or date.today()
+    if action == "update" and sub_title:
+        how = (f"수정 (update) — 이 개념은 「{target.name}」의 7.변형·확장 상세 소절 '{sub_title}' 로 이미 있음 "
+               "→ 부모 항목 전체를 다시 쓰되 그 소절을 초안으로 보완")
+    elif action == "update":
+        how = "수정 (update) — 같은 개념이 카탈로그에 이미 있음 → 기존 항목을 초안으로 보완한 전체 수정본 작성 (작성일은 기존 그대로)"
+    elif action == "add":
+        how = "추가 (add) — 같은 이름의 항목이 없음 (단, 1단계에서 기존 항목에 편입·병합해야 하면 update/absorb 로 판정)"
+    else:
+        how = f"{ACTIONS[action]} ({action})"
     parts = [
         "[입력]",
-        f"- 작업: {ACTIONS[action]} ({action})",
+        f"- 작업(코드 자동 판정): {how}",
         f"- 개념명(한/영): {name}",
         f"- 초안:\n{draft.strip() or '(없음 — 개념명만으로 작성)'}",
     ]
