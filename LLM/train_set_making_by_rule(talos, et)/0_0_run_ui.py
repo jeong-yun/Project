@@ -148,8 +148,11 @@ def log_text(job, lines=150):
 TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),\d{3} \[(\w+)\]\s?(.*)$")
 STEPS = [("3.1a", "기존 데이터 확인"), ("3.1", "요청 준비"), ("3.2", "생성"), ("3.3", "검토"), ("3.4", "증강"),
          ("1.4", "학습 로그 변환"), ("3.5", "진행 현황 갱신")]
-POST_SECONDS = {"3.4": 10.0, "1.4": 5.0, "3.5": 10.0}     # 마무리 단계 대략 시간 (지난 실행 기록 기준)
+# 준비·마무리 단계 시간 - 3_0 로그에 지난 실행 기록이 없을 때만 (3.4 는 요청 1개당 초, FIRST = 새 입력 날짜의 첫 실행)
+STEP_DEFAULT = {"3.1a": 2.0, "3.1": 60.0, "3.4": 0.6, "1.4": 30.0, "3.5": 10.0}
+FIRST_DEFAULT = {"3.1a": 900.0, "3.1": 340.0}
 _tails, _tail_lock = {}, threading.Lock()
+_step_cache = {"key": None, "val": None}
 
 
 def _log_since(name, since):
@@ -196,6 +199,61 @@ def _last_run_start():
         if m and m.group(3).startswith("입력 날짜"):
             last = m.group(1)
     return last
+
+
+def step_seconds():
+    """준비(3.1a·3.1)·마무리(3.4·1.4·3.5) 단계가 걸리는 시간 = 3_0 로그의 지난 실행(정상 종료, dry-run 제외) 최근 3번 중앙값.
+    3.4(증강)는 요청 수에 비례해 요청 1개당 초. first = 새 입력 날짜의 첫 실행: 3.1a 가 기존 로그를 새로 대조하고
+    3.1 이 요청 파일을 만들어 20분 넘게 걸린다 (그 뒤 실행은 결과를 다시 써서 1~2분). 로그가 바뀌었을 때만 다시 읽는다."""
+    path = BASE / "logs" / "3_0_run_generation.log"
+    try:
+        key = (path.stat().st_size, path.stat().st_mtime)
+    except OSError:
+        key = None
+    if _step_cache["val"] is None or _step_cache["key"] != key:
+        runs = []
+        for line in tail(path, 100_000).splitlines():
+            m = TS_RE.match(line)
+            if not m:
+                continue
+            ts, msg = m.group(1), m.group(3)
+            if msg.startswith("입력 날짜"):
+                n = re.search(r"요청 (\d+)개", msg)              # '남은 전부' 는 수를 모름
+                runs.append({"n": int(n.group(1)) if n else 0, "dry": "(dry-run)" in msg, "start": {}, "sec": {}})
+            elif runs and (s := re.match(r"[▶■] \[(\S+)\] \S+ (시작|종료)(?: \(코드 (-?\d+))?", msg)):
+                k, what, code = s.groups()
+                if what == "시작":
+                    runs[-1]["start"][k] = ts
+                elif code == "0" and k in runs[-1]["start"]:
+                    runs[-1]["sec"][k] = _secs(runs[-1]["start"][k], ts)
+        normal, first = {k: [] for k in STEP_DEFAULT}, {k: [] for k in FIRST_DEFAULT}
+        for r in (r for r in runs if not r["dry"]):
+            sec = r["sec"]
+            for k in ("3.1a", "3.1"):                   # 3.1a 가 1분 넘게 걸린 실행 = 기존 로그를 새로 대조한 첫 실행
+                if k in sec:
+                    (first if sec.get("3.1a", 0) > 60 else normal)[k].append(sec[k])
+            if "3.4" in sec and r["n"]:
+                normal["3.4"].append(sec["3.4"] / r["n"])
+            for k in ("1.4", "3.5"):
+                if k in sec:
+                    normal[k].append(sec[k])
+        med = lambda xs, d: sorted(xs[-3:])[len(xs[-3:]) // 2] if xs else d
+        _step_cache.update(key=key, val={"normal": {k: med(normal[k], d) for k, d in STEP_DEFAULT.items()},
+                                         "first": {k: med(first[k], d) for k, d in FIRST_DEFAULT.items()}})
+    return _step_cache["val"]
+
+
+def step_summary():
+    """요청 수별 예상 시간(화면)에 더하는 준비·마무리 시간. first_dates = 아직 생성을 돌리지 않은 입력 날짜
+    (다음 실행이 기존 로그 대조·요청 파일 만들기를 새로 해서 준비가 오래 걸림)."""
+    ss = step_seconds()
+    n, f = ss["normal"], ss["first"]
+    has_logs = any((BASE / "06_기존 데이터").glob("*.log"))     # 없으면 3.1a 는 대조를 건너뜀
+    out = BASE / "07_llm_output"
+    first = [d for d in input_dates() if not (out / d / "_1_requests").is_dir()
+             or (has_logs and not (out / d / "_0_existing" / "summary.json").is_file())]
+    return {"prep": n["3.1a"] + n["3.1"], "prep_first": f["3.1a"] + f["3.1"], "augment_per_request": n["3.4"],
+            "post": n["1.4"] + n["3.5"], "first_dates": first}
 
 
 SETTINGS_FILE = BASE / "docs" / "코드참조" / "LLM_설정.md"
@@ -286,12 +344,14 @@ def _llm_counts(name, since, until, ok_re):
 
 
 def run_progress():
-    """지금(또는 마지막) 학습데이터 생성 1회의 진행률. 3_0·3_2·3_3 로그만 읽는다 (실행 중인 작업에는 손대지 않음).
+    """지금(또는 마지막) 학습데이터 생성 1회의 진행률. 3_0·3_1a·3_2·3_3 로그만 읽는다 (실행 중인 작업에는 손대지 않음).
 
     남은 시간 = 준비(3.1a·3.1) + 생성·검토 + 마무리(3.4·1.4·3.5)
-      생성·검토: 남은 요청 수 × 몇 초마다 1개씩 끝나는지 (이번 실행의 실제 간격이라 동시 처리가 반영됨.
-                 아직 끝난 것이 없으면 요청 1개 평균 시간 ÷ 동시 요청 수). 처리 중인 요청은 지난 시간만큼 뺀다.
-                 생성·검토를 함께 돌리면(3_0 '생성·검토 동시 진행') 늦게 끝나는 쪽 기준.
+      생성·검토: 남은 요청 수 × 몇 초마다 1개씩 끝나는지 (최근 20개가 끝난 실제 간격이라 동시 처리가 반영됨.
+                 끝난 것이 5개 미만이면 요청 1개 평균 시간 ÷ 지금 동시 수). 처리 중인 요청은 지난 시간만큼 뺀다.
+                 생성·검토를 함께 돌리면(3_0 '생성·검토 동시 진행') 늦게 끝나는 쪽 기준, 검토 속도는 '생성 끝 → 검토 끝' 시간 ÷ 동시 수.
+      준비·마무리: 지난 실행 기록의 단계별 시간 (step_seconds, 증강은 요청 수에 비례). 진행 중인 단계는 지난 시간만큼 뺀다.
+                   새 입력 날짜의 첫 실행이면 3.1a 의 기존 로그 대조 진행 줄(… N / M payload 대조)로 잰다.
     % = 지난 시간 ÷ (지난 시간 + 남은 시간)."""
     lock = RT.read_lock("generation")
     since = str(lock.get("started_at", "")).replace("T", " ") if lock else _last_run_start()
@@ -382,9 +442,30 @@ def run_progress():
         llm_rem = max(rev_rem, gen_rem + (lat_rv if gen_rem and n_rev > rev_done else 0.0))
     else:
         llm_rem = gen_rem + rev_rem
-    prep_rem = 0.0 if by != "3_0" or st("3.1") in ("done", "fail") else max(5.0, 60.0 - _secs(since, now))
-    post = [k for k in POST_SECONDS if not (dry and k in ("3.4", "1.4"))] if by == "3_0" else []
-    remaining = prep_rem + llm_rem + sum(POST_SECONDS[k] for k in post if st(k) not in ("done", "fail"))
+    # 준비·마무리: 지난 실행 기록의 단계별 시간. 새 입력 날짜의 첫 실행이면 3.1a 가 기존 로그를 새로 대조한다 (진행 줄로 잼)
+    ss, first, chk = step_seconds(), False, None
+    if by == "3_0" and st("3.1") not in ("done", "fail"):
+        for ts, lv, msg in _log_since("3_1a_existing_coverage.log", since):
+            if until and ts > until:
+                break
+            if msg.startswith("[3.1a] 기존 로그"):
+                first = True
+            elif (m := re.search(r"(\d+) / (\d+) payload 대조 \((\d+)초\)", msg)):
+                chk = (int(m.group(1)), int(m.group(2)), int(m.group(3)), ts)
+
+    def step_left(k):
+        s = st(k)
+        if by != "3_0" or s in ("done", "fail") or (dry and k in ("3.4", "1.4")):
+            return 0.0
+        if k == "3.1a" and chk:                         # 지금까지 대조한 속도로 남은 payload
+            done, total, secs, at = chk
+            return max(5.0, secs * (total - done) / max(1, done) - _secs(at, now))
+        d = (ss["first"] if first and k in ss["first"] else ss["normal"])[k]
+        if k == "3.4":
+            d = max(3.0, d * max(1, n_gen))             # 증강은 요청 수에 비례
+        return max(0.1 * d, d - _secs(steps[k]["at"], now)) if s == "running" else d
+    prep_rem = step_left("3.1a") + step_left("3.1")
+    remaining = prep_rem + llm_rem + sum(step_left(k) for k in ("3.4", "1.4", "3.5"))
     end = now if not finished else until or max([last_ts] + [s["last"] for s in (g, r) if s["last"]])
     elapsed = _secs(since, end)
 
@@ -1237,7 +1318,8 @@ def state():
     return {"now": RT.now_iso(), "generation": dict(job_state("generation"), run=run), "collect": job_state("collect"),
             "agent": dict(job_state("agent"), status=RT.read_status("agent")),
             "last_collect": RT.read_status("collect"), "input_dates": input_dates(),
-            "models": settings_summary(), "settings": dict(zip(("generate", "review", "overlap"), parallel()))}
+            "models": settings_summary(), "settings": dict(zip(("generate", "review", "overlap"), parallel())),
+            "step_seconds": step_summary()}
 
 
 # ── 요청 처리 ────────────────────────────────────────────────────────────
@@ -1593,7 +1675,7 @@ function runHtml(g){const r=g.run;
   <b>검토</b><span>${revWait?`예정 ${fmt(R.target)}개 (생성 성공분 + 이전 대기분)`:`${fmt(R.ok)}개 성공 · ${fmt(R.fail)}개 실패 / ${fmt(R.target)}개${R.ok+R.fail?` · 약 ${hms(R.sec_per_req)}마다 1개 완료 · 토큰 ${fmt(R.tokens_in+R.tokens_out)}`:""}`}</span>
   ${G.check_ok+G.check_fail?`<b>생성 품질</b><span>코드 검사 통과 <b>${(100*G.check_ok/(G.check_ok+G.check_fail)).toFixed(1)}%</b> (샘플 ${fmt(G.check_ok)} / ${fmt(G.check_ok+G.check_fail)})${R.ok?` · 검토가 고친 샘플 요청당 <b>${(R.fixed/R.ok).toFixed(1)}개</b>, 뺀 샘플 ${(R.dropped/R.ok).toFixed(1)}개`:""} <span class="muted">(정규식 예시·요청 줄 자동 수정 전 100개 실행: 통과 69.5% · 고친 샘플 요청당 11.6개)</span></span>`:""}
   ${r.parallel?`<b>동시 처리</b><span>생성 ${live?`지금 ${r.parallel.generate_now}개 (최대 ${r.parallel.generate})`:`최대 ${r.parallel.generate}개`} · 검토 ${live?`지금 ${r.parallel.review_now}개 (최대 ${r.parallel.review})`:`최대 ${r.parallel.review}개`}${r.parallel.overlap?" · 생성된 요청부터 바로 검토":""}${live?" · 속도 제한에 맞춰 자동 조절":""}</span>`:""}</div>
-  <div class="muted" style="font-size:12px;margin-top:4px">%·남은 시간은 이번 실행에서 실제로 요청이 끝나는 간격(동시 처리 반영)으로 계산합니다 (응답 해석 실패·재시도가 많으면 늘어남). 토큰은 성공한 요청 기준.</div>`}`}
+  <div class="muted" style="font-size:12px;margin-top:4px">%·남은 시간은 이번 실행에서 실제로 요청이 끝나는 간격(동시 처리 반영)과 지난 실행의 준비·마무리 단계 시간으로 계산합니다 (응답 해석 실패·재시도가 많으면 늘어남). 토큰은 성공한 요청 기준.</div>`}`}
 function genBody(extra){return Object.assign({set:$("gSet").value,max_requests:+$("gN").value,date:$("gDate").value,generator:$("gGen").value.trim(),reviewer:$("gRev").value.trim()},extra)}
 function dur(sec){if(sec<3600)return `약 ${Math.max(1,Math.round(sec/60))}분`;const h=sec/3600;return h<48?`약 ${h.toFixed(1)}시간`:`약 ${(h/24).toFixed(1)}일 (${fmt(Math.round(h))}시간)`}
 function estimate(){const el=$("genEst");if(!P){el.textContent="예상: 진행 현황을 불러오는 중…";return}
@@ -1604,9 +1686,12 @@ function estimate(){const el=$("genEst");if(!P){el.textContent="예상: 진행 �
  // 동시 처리: 생성은 pg 개씩, 검토는 pr 개씩. 함께 진행하면 생성된 요청부터 바로 검토 → 늦게 끝나는 쪽 기준
  const par=(S&&S.settings)||{generate:1,review:1,overlap:false},g1=av.generate_seconds||0,r1=av.review_seconds||0;
  const tg=Math.ceil(n/par.generate)*g1,tr=Math.ceil(n/par.review)*r1,sec=!n?0:par.overlap?Math.max(tg+r1,g1+tr):tg+tr;
+ // 준비·마무리: 지난 실행 기록 (증강은 요청 수에 비례). 아직 생성을 돌리지 않은 입력 날짜면 기존 로그 대조·요청 파일 만들기로 준비가 길다
+ const ss=(S&&S.step_seconds)||{},day=$("gDate").value||((S&&S.input_dates)||[]).slice(-1)[0],first=(ss.first_dates||[]).includes(day);
+ const prep=!n?0:first?(ss.prep_first??1240):(ss.prep??60),fin=!n?0:(ss.augment_per_request??0.6)*n+(ss.post??40);
  const gi=n*(av.generator_input_tokens||0),go=n*(av.generator_output_tokens||0),ri=n*(av.reviewer_input_tokens||0),ro=n*(av.reviewer_output_tokens||0);
  const gm=(S&&S.models["생성"])||"생성 모델",rm=(S&&S.models["검토"])||"검토 모델";
- el.innerHTML=`<b>예상</b> 요청 ${fmt(n)}개${all?" (남은 전부)":""} → 시간 <b>${dur(sec)}</b> <span class="muted">(+ 준비 1~2분 · 동시 최대 생성 ${par.generate}개·검토 ${par.review}개${par.overlap?" · 생성·검토 함께":""}, 하나씩이면 ${dur(n*(g1+r1))} · API 속도 제한에 걸리면 더 걸림)</span><br>토큰 합계 <b>${fmt(gi+go+ri+ro)}</b> = 생성 ${esc(gm)} <b>${fmt(gi+go)}</b> (입력 ${fmt(gi)} / 출력 ${fmt(go)}) + 검토 ${esc(rm)} <b>${fmt(ri+ro)}</b> (입력 ${fmt(ri)} / 출력 ${fmt(ro)})<div class="muted">지금까지 생성 ${av.generated_requests}건·검토 ${av.reviewed_requests}건의 실제 평균(재시도 포함, 요청 1개 생성 ${Math.round(g1)}초·검토 ${Math.round(r1)}초) 기준 · 이 세트의 남은 요청 ${fmt(left)}개${!all&&asked>left?" (입력한 수가 남은 요청보다 많아 남은 수로 계산)":""}</div>`}
+ el.innerHTML=`<b>예상</b> 요청 ${fmt(n)}개${all?" (남은 전부)":""} → 시간 <b>${dur(sec+prep+fin)}</b> <span class="muted">(생성·검토 ${dur(sec)} + 준비 ${dur(prep)}${first?" (이 입력 날짜의 첫 실행 - 기존 데이터 대조·요청 파일 만들기)":""} + 마무리 ${dur(fin)} · 동시 최대 생성 ${par.generate}개·검토 ${par.review}개${par.overlap?" · 생성·검토 함께":""}, 하나씩이면 ${dur(n*(g1+r1))} · API 속도 제한에 걸리면 더 걸림)</span><br>토큰 합계 <b>${fmt(gi+go+ri+ro)}</b> = 생성 ${esc(gm)} <b>${fmt(gi+go)}</b> (입력 ${fmt(gi)} / 출력 ${fmt(go)}) + 검토 ${esc(rm)} <b>${fmt(ri+ro)}</b> (입력 ${fmt(ri)} / 출력 ${fmt(ro)})<div class="muted">지금까지 생성 ${av.generated_requests}건·검토 ${av.reviewed_requests}건의 실제 평균(재시도 포함, 요청 1개 생성 ${Math.round(g1)}초·검토 ${Math.round(r1)}초) 기준 · 이 세트의 남은 요청 ${fmt(left)}개${!all&&asked>left?" (입력한 수가 남은 요청보다 많아 남은 수로 계산)":""}</div>`}
 $("gN").oninput=estimate;$("gSet").onchange=estimate;
 async function act(msgId,fn){try{const r=await fn();$(msgId).textContent="요청함 "+(r.pid?`(PID ${r.pid})`:"");setTimeout(loadState,800)}catch(e){$(msgId).textContent="실패: "+e.message}}
 $("bDry").onclick=()=>act("genMsg",()=>post("/api/generation/start",genBody({dry_run:true})));
