@@ -36,7 +36,7 @@ from pydantic import ValidationError
 from st_click_detector import click_detector
 
 import concept_ui
-from core import concept, llm_factory, stock_calc
+from core import concept, llm_factory, stock_calc, verification
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
 from core.config import (
@@ -446,8 +446,11 @@ def render_verification(step: AgentAnswer) -> None:
         return
     marks = []
     if step.critic:
-        ok = not step.critic.logical_leaps and not step.critic.rule_violations
-        marks.append(f"⚖️ 비평 {step.critic.score}/5 {'통과' if ok else '지적'}")
+        # 워크플로우와 같은 합격 기준 (점수 + 심각한 지적 여부, config/verification.yaml 의 fail_on)
+        cfg = verification.critic_settings(verification_cfg, team.verification)
+        ok = verification.critic_passed(step.critic, cfg["min_score"], cfg["fail_on"])
+        noted = " · 지적 있음" if ok and (step.critic.logical_leaps or step.critic.rule_violations) else ""
+        marks.append(f"⚖️ 비평 {step.critic.score}/5 {'통과' if ok else '불합격'}{noted}")
     if step.harness:
         marks.append("🧪 하네스 " + ("통과" if all(h.passed for h in step.harness) else "실패"))
     with st.expander("검증 기록 · " + (" · ".join(marks) if marks else "상세")):
@@ -616,7 +619,7 @@ def render_agent_panel(node_id: str, run: dict | None) -> None:
                 st.markdown(f"<span class='ao-badge ao-b-working'>{html.escape(run['activity'][node_id])}{DOTS}</span>",
                             unsafe_allow_html=True)
             my_steps = [s for s in run["steps"] if s.node_id == node_id]
-            drafting = run["drafting"]["node"] == node_id
+            drafting = run["drafting"].get(node_id)  # 이 에이전트가 지금 쓰고 있는 초안 (형제들도 동시에 씀)
             if my_steps or drafting:
                 # 자세한 내용은 고정 높이 상자 안에서 스크롤
                 with st.container(height=380):
@@ -626,7 +629,7 @@ def render_agent_panel(node_id: str, run: dict | None) -> None:
                         st.divider()
                     if drafting:
                         st.markdown("**✍️ 지금 작성 중인 초안**")
-                        st.markdown(run["drafting"]["text"] + "▌")
+                        st.markdown(drafting + "▌")
             elif node_id not in {n.id for n in subtree(org, run["root_id"]).walk()}:
                 st.caption("이번 업무의 문의 대상 아래에 있지 않은 에이전트입니다.")
             elif not run["done"]:
@@ -976,10 +979,10 @@ def render_live() -> None:
             st.markdown(f"**Q.** {run['question']}")
             for step in run["steps"]:
                 render_step(step, run["root_id"])
-            if run["drafting"]["node"]:
-                nid = run["drafting"]["node"]
+            # 동시에 작성 중인 실무자 모두 (백그라운드 스레드가 바꾸는 중이므로 복사본으로 순회)
+            for nid, text in list(run["drafting"].items()):
                 with st.chat_message("assistant", avatar=avatar_for_chat(nid, working=True)):
-                    st.markdown(f"**{name_of(nid)}** · ✍️ 작성 중\n\n{run['drafting']['text']}▌")
+                    st.markdown(f"**{name_of(nid)}** · ✍️ 작성 중\n\n{text}▌")
         with tab_ctx, st.container(height=560):
             render_brief(run.get("brief"))
             render_tools(run.get("tools") or [])

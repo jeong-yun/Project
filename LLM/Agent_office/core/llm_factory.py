@@ -9,7 +9,10 @@
 import os
 import re
 import socket
+import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -125,6 +128,54 @@ def sleep(seconds: float) -> None:
     """재시도 대기 (테스트에서 0 초로 바꿀 수 있게 함수로 분리)."""
     time.sleep(seconds)
 
+
+# ─── provider 별 동시 호출 제한 ──────────────────────────────────────
+# 형제 에이전트·자료 조사가 동시에 진행되므로, 무료 티어(분당 토큰·요청 한도, 429)가 한꺼번에 터지지 않게
+# provider 마다 '동시에 진행 중인 LLM 호출 수'를 세마포어로 제한한다. 값은 settings.yaml 의 llm_concurrency.
+# 자리는 호출 1회 동안만 잡는다 — 재시도 대기(sleep) 중에는 자리를 비워 다른 에이전트가 쓰게 한다.
+DEFAULT_CONCURRENCY = 4
+_concurrency: dict[str, int] | None = None  # None = 아직 settings.yaml 을 읽지 않음
+_slots: dict[str, threading.BoundedSemaphore] = {}
+_slots_lock = threading.Lock()
+
+
+def set_concurrency(limits: dict | None) -> None:
+    """동시 호출 제한을 바꾼다 ({"default": 4, "freellm": 2, …}, 0 이하 = 제한 없음). 값이 같으면 그대로 둔다."""
+    global _concurrency
+    limits = {k: int(v) for k, v in (limits or {}).items()}
+    with _slots_lock:
+        if limits != _concurrency:
+            _concurrency = limits
+            _slots.clear()  # 진행 중인 호출은 예전 세마포어를 그대로 놓고 나간다
+
+
+def concurrency_limit(provider: str) -> int:
+    global _concurrency
+    if _concurrency is None:
+        from core.config import load_settings  # 순환 import 를 피하려고 필요할 때 읽는다
+
+        try:
+            set_concurrency(load_settings().get("llm_concurrency"))
+        except (OSError, ValueError):
+            set_concurrency({})
+    limits = _concurrency or {}
+    return limits.get(provider, limits.get("default", DEFAULT_CONCURRENCY))
+
+
+@contextmanager
+def provider_slot(provider: str) -> Iterator[None]:
+    """provider 의 동시 호출 자리 하나를 잡는다 (자리가 없으면 빌 때까지 기다림)."""
+    limit = concurrency_limit(provider)
+    if limit <= 0:
+        yield
+        return
+    with _slots_lock:
+        slot = _slots.get(provider)
+        if slot is None:
+            slot = _slots[provider] = threading.BoundedSemaphore(limit)
+    with slot:
+        yield
+
 # Upstage Solar 는 OpenAI 호환 API 를 제공하므로 별도 패키지 없이 ChatOpenAI 로 호출한다.
 UPSTAGE_BASE_URL = "https://api.upstage.ai/v1"
 # langchain-anthropic 의 기본 max_tokens(1024)는 긴 답변에 부족하다.
@@ -187,15 +238,20 @@ class _RoleFixTransport:
 
 
 _freellm_client = None
+_freellm_client_lock = threading.Lock()
 
 
 def freellm_http_client():
-    """FreeLLMAPI 전용 HTTP 클라이언트 (한 번 만들어 재사용 — 매번 만들면 SSL 인증서를 다시 읽어 느려짐)."""
-    global _freellm_client
-    if _freellm_client is None:
-        import httpx
+    """FreeLLMAPI 전용 HTTP 클라이언트 (한 번 만들어 재사용 — 매번 만들면 SSL 인증서를 다시 읽어 느려짐).
 
-        _freellm_client = httpx.Client(transport=_RoleFixTransport(), timeout=180)
+    여러 에이전트가 동시에 처음 부를 수 있으므로 잠금 안에서 한 번만 만든다 (httpx.Client 는 스레드 간 공유 가능).
+    """
+    global _freellm_client
+    with _freellm_client_lock:
+        if _freellm_client is None:
+            import httpx
+
+            _freellm_client = httpx.Client(transport=_RoleFixTransport(), timeout=180)
     return _freellm_client
 
 
@@ -337,9 +393,10 @@ def invoke_structured(
             started = time.perf_counter()
             try:
                 llm = create_chat_model(spec, models)
-                out = llm.with_structured_output(schema, include_raw=True, **structured_output_kwargs(spec)).invoke(
-                    messages
-                )
+                structured = llm.with_structured_output(schema, include_raw=True, **structured_output_kwargs(spec))
+                with provider_slot(spec.provider):  # 동시 호출 제한 — 자리가 빌 때까지 기다린 시간은 빼고 잰다
+                    started = time.perf_counter()
+                    out = structured.invoke(messages)
                 if out.get("parsed") is None:
                     raise ValueError(f"구조화 출력 파싱 실패: {out.get('parsing_error')}")
                 break

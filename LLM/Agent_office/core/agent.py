@@ -291,11 +291,13 @@ class AnswerStream:
                     llm = llm_factory.create_chat_model(spec, self.agent.models)
                     # tags: LangGraph 스트림에서 '이 토큰은 누구의 초안인지' 알아보는 표시
                     config = {"tags": [self.tag]} if self.tag else None
-                    for chunk in llm.stream(self.messages, config=config):
-                        full = chunk if full is None else full + chunk
-                        text = chunk_text(chunk.content)
-                        if text:
-                            yield text
+                    with llm_factory.provider_slot(spec.provider):  # provider 별 동시 호출 제한 (재시도 대기 중엔 자리를 비움)
+                        started = time.perf_counter()
+                        for chunk in llm.stream(self.messages, config=config):
+                            full = chunk if full is None else full + chunk
+                            text = chunk_text(chunk.content)
+                            if text:
+                                yield text
                     if full is None or not chunk_text(full.content).strip():
                         # 조각 0개·공백뿐인 응답은 '성공'이 아니다 → 빈 초안이 위로 올라가지 않게 다음 후보로
                         raise EmptyResponseError("모델이 빈 응답을 반환했습니다 (스트림 조각 0개 또는 공백뿐)")

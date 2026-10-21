@@ -16,9 +16,9 @@ PLAN = search.SearchPlan(need_search=True, queries=["HBF High Bandwidth Flash", 
 def test_research_uses_planned_queries_and_dedupes(models, use_script, no_network_search):
     use_script(Script(SearchPlan=PLAN))
     ctx = search.research("HBF 알려줘", models, SETTINGS)
-    assert no_network_search == ["HBF High Bandwidth Flash", "HBF 메모리"]
+    assert sorted(no_network_search) == sorted(["HBF High Bandwidth Flash", "HBF 메모리"])  # 동시에 검색 → 순서 무관
     assert len(ctx.results) == 3  # 4개 중 중복 1개 제거 → 3개 (max_total_results=3)
-    assert "[1] HBF High Bandwidth Flash 결과" in ctx.as_prompt()
+    assert "[1] HBF High Bandwidth Flash 결과" in ctx.as_prompt()  # 합칠 때는 검색어 순서 → 번호가 항상 같다
 
 
 def test_research_skips_when_not_needed(models, use_script, no_network_search):
