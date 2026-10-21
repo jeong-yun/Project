@@ -224,7 +224,11 @@ def test_floorplan_validator():
 def test_design_team_config():
     team = next(t for t in list_teams() if t.id == "design")
     assert team.features == ["floorplan_render"] and team.tools == ["floorplan_input"]
-    assert "json_keys" in team.harness.final_only and [n.id for n in team.org.walk()] == ["lead", "gm_review", "am_check", "dgm_layout"]
+    # 직급이 높을수록 위 — 대리(방 프로그램) → 차장(JSON) → 부장(평면 검토) → 팀장(최종)
+    assert [(n.id, n.rank) for n in team.org.walk()] == [
+        ("lead", "team_lead"), ("gm_review", "gm"), ("dgm_layout", "deputy_gm"), ("am_program", "assistant_manager")
+    ]
+    assert "json_keys" in team.harness.final_only and team.harness.also_at == {"json_keys": ["dgm_layout"]}
     edit = next(t for t in team.tasks if t.id == "edit")
     assert next(f for f in edit.fields if f.key == "attachment").type == "file"
 
@@ -522,8 +526,10 @@ def test_design_workflow_tool_harness_and_final_json(ranks, models, use_script, 
     old = tmp_path / "old_layout.json"
     old.write_text(dump_layout(check(parse_layout(SAMPLE))[0]), encoding="utf-8")
     bad = {"outline": {"w": 12, "h": 9}, "floors": [{"rooms": [rect_room("a", "living", 0, 0, 14, 9)]}]}
-    # 차장 초안: 처음엔 외곽을 벗어난 JSON → 하네스 피드백 → 고친 JSON. 검토자들은 그대로 승인
-    script = use_script(Script(text=[answer_with(bad), answer_with(SAMPLE)], ReviewResult=make_review("approve", 9)))
+    # 대리: 방 프로그램표(JSON 없음) → 차장: 처음엔 외곽을 벗어난 JSON → 하네스 피드백 → 고친 JSON → 부장·팀장: 그대로
+    program = "| 층 | 방 | 목표 면적 |\n|---|---|---|\n| 2 | 안방 | 24㎡ |"
+    reviews = [make_review("revise", 8, answer_with(bad)), make_review("revise", 8, answer_with(SAMPLE)), make_review("approve", 9)]
+    script = use_script(Script(text=program, ReviewResult=reviews))
     edit = next(t for t in team.tasks if t.id == "edit")
     req = build_request(edit, {"attachment": str(old), "attachment_name": "우리집.json", "change": "안방을 넓게"})
     org = team_org(team, ranks)
@@ -535,10 +541,42 @@ def test_design_workflow_tool_harness_and_final_json(ranks, models, use_script, 
     assert tools[0].tool == "floorplan_input" and "정확" in tools[0].title
     first_prompt = script.prompts("text")[0]
     assert "첨부 도면의 레이아웃 JSON" in first_prompt and "레이아웃 JSON 쓰기" in first_prompt  # 툴 결과 + 스킬
-    assert "외곽을 벗어난다" in script.prompts("text")[1]  # 하네스 에러가 그대로 다시 쓰기 지시로
+    assert "외곽을 벗어난다" in script.prompts("ReviewResult")[1]  # 하네스 에러가 그대로 다시 쓰기 지시로
     steps = [p for k, p in events if k == "step"]
-    draft = next(s for s in steps if s.node_id == "dgm_layout")
-    assert draft.attempts == 2 and all(h.passed for h in draft.harness)
-    assert {h.validator for h in draft.harness} == {"floorplan"}  # json_keys 는 최종 답변에만
+    program_step = next(s for s in steps if s.node_id == "am_program")
+    assert {h.validator for h in program_step.harness} == {"floorplan"}  # 대리는 JSON 을 쓰지 않으므로 json_keys 없음
+    layout = next(s for s in steps if s.node_id == "dgm_layout")
+    assert layout.attempts == 2 and all(h.passed for h in layout.harness)
+    assert {h.validator for h in layout.harness} == {"floorplan", "json_keys"}  # also_at: 차장 단계부터 JSON 필수
     final = next(s for s in steps if s.node_id == "lead")
     assert {h.validator for h in final.harness} == {"floorplan", "json_keys"} and all(h.passed for h in final.harness)
+
+
+def test_layout_designer_cannot_pass_program_without_json(ranks, models, use_script):
+    """차장이 대리의 방 프로그램을 '승인'만 하고 넘기면 JSON 이 없다 → also_at 의 json_keys 가 걸러 다시 쓰게 한다."""
+    from core.config import team_org
+    from core.workflow import build_office_graph, stream_office
+    from tests.fakes import Script, make_review
+
+    team = next(t for t in list_teams() if t.id == "design")
+    reviews = [make_review("approve", 9), make_review("revise", 8, answer_with(SAMPLE)), make_review("approve", 9)]
+    script = use_script(Script(text="| 층 | 방 | 목표 면적 |\n|---|---|---|\n| 1 | 거실 | 30㎡ |", ReviewResult=reviews))
+    plan = next(t for t in team.tasks if t.id == "plan")
+    req = build_request(plan, {"request": "4인 가족 2층 주택", "floors": "2층", "print_scale": "1:100"})
+    org = team_org(team, ranks)
+    graph = build_office_graph(org, ranks, team, models, {}, {"critic": {"enabled": False}})
+    steps = [p for k, p in stream_office(graph, org, req.question, "lead", brief=req.brief, auto_brief=False,
+                                         tool_inputs=req.tool_inputs, extra_validators=req.validators,
+                                         harness_options=req.harness_options) if k == "step"]
+    layout = next(s for s in steps if s.node_id == "dgm_layout")
+    assert layout.attempts == 2 and "```json" in layout.content
+    assert "JSON 블록이 없다" in script.prompts("ReviewResult")[1]  # json_keys 실패 문장이 다시 쓰기 지시로
+
+
+def test_also_at_must_name_final_only_validator_and_known_agent():
+    from core.config import ConfigError, load_ranks, load_models, validate_config
+
+    team = next(t for t in list_teams() if t.id == "design")
+    broken = team.model_copy(update={"harness": team.harness.model_copy(update={"also_at": {"json_keys": ["nobody"]}})})
+    with pytest.raises(ConfigError, match="also_at"):
+        validate_config(load_ranks(), load_models(), [broken])

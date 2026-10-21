@@ -12,16 +12,21 @@
 #   - json_keys : 최종 답변에 floors 를 가진 JSON 블록이 꼭 있는지 (최종 답변에만)
 # 추가 기능: floorplan_render — 최종 JSON 으로 도면(+요청 시 3D)을 그려 화면에 보여 주고, 채택 시 results/design/ 에 저장
 #
-# 조직도는 '검토 사슬'이다: 차장이 JSON 을 쓰고 → 대리가 치수·체크리스트를 검토 → 부장이 동선·채광·프라이버시를 검토
-# → 팀장이 요구사항과 대조해 최종본을 낸다. (하위가 한 명이면 업무 분배 LLM 호출 없이 그대로 넘긴다)
+# 조직도는 아래에서 위로 올라가는 사슬이다 — 직급이 높을수록 어렵고 넓은 판단을 맡는다.
+#   대리·방프로그램 : 요구사항 → 방 프로그램표(층·방 종류·이름·목표 면적·구역·이웃 관계·가정). 좌표·JSON 은 쓰지 않는다
+#   차장·배치설계   : 대리의 방 프로그램을 레이아웃 JSON 으로 옮긴다 (이 단계부터 JSON 필수 — harness.also_at)
+#   부장·평면검토   : 동선·채광·프라이버시 검토
+#   팀장·요구사항   : 요구사항과 대조해 최종본 (가정 명시)
+# 요구사항 정리(위상)와 좌표·구조 설계를 나눈 것은 ProCAD·Text2BIM 의 흐름과 같다. 치수·면적·최소 크기는 하네스 코드가 검사한다.
+# (하위가 한 명이면 업무 분배 LLM 호출 없이 그대로 넘긴다)
 
 id: design
 name: 📐 설계 팀
 description: 집·건물 배치를 한국어로 설명하면 2D 평면도(DXF·PNG)를 만들고, 요청하면 3D 모델도 만든다. 기존 도면 수정·층 추가도 한다.
 
 personas:
-  deputy_gm: 당신은 주거 평면 설계 실무 15년차 건축 설계자입니다. 요구사항을 방 프로그램(종류·면적·순서·구역)으로 옮겨 레이아웃 JSON 을 정확히 씁니다.
-  assistant_manager: 당신은 꼼꼼한 치수·도면 검토 담당입니다. 방 최소 치수, 면적 합, 계단·복도 폭, 문·창 위치를 체크리스트로 하나씩 확인합니다.
+  deputy_gm: 당신은 주거 평면 설계 실무 15년차 건축 설계자입니다. 대리가 정리한 방 프로그램을 받아 방 순서·구역·문 연결을 정하고 레이아웃 JSON 을 정확히 씁니다. 검토 단계에서도 승인으로 넘기지 말고 항상 JSON 을 포함한 완성 답변을 씁니다.
+  assistant_manager: 당신은 꼼꼼한 설계 요구사항 정리 담당입니다. 의뢰인의 요청을 층별 방 프로그램표(방 종류·이름·목표 면적·앞/뒤 구역·이웃해야 할 방)로 옮기고, 면적 합과 최소 치수 기준을 맞추며, 없는 정보는 가정으로 적습니다. 좌표나 JSON 은 쓰지 않습니다.
   gm: 당신은 주거 계획 책임 건축가입니다. 동선(현관→공용→개인), 채광(남향 거실), 프라이버시(침실·욕실 위치)를 기준으로 평면을 검토합니다.
   team_lead: 당신은 설계 사무소 소장입니다. 의뢰인의 요구사항을 빠짐없이 반영했는지 확인하고, 정보가 없는 부분은 합리적인 가정으로 명시해 최종안을 냅니다.
 
@@ -36,15 +41,15 @@ org:
       name: 부장·평면검토
       specialty: 동선·채광·프라이버시 검토
       children:
-        - id: am_check
-          rank: assistant_manager
-          name: 대리·치수검토
-          specialty: 치수·면적 합·최소 크기 체크리스트 검토
+        - id: dgm_layout
+          rank: deputy_gm
+          name: 차장·배치설계
+          specialty: 방 프로그램 → 레이아웃 JSON (순서·구역·문 연결)
           children:
-            - id: dgm_layout
-              rank: deputy_gm
-              name: 차장·배치설계
-              specialty: 레이아웃 JSON 작성 (방 프로그램·순서·구역·문 연결)
+            - id: am_program
+              rank: assistant_manager
+              name: 대리·방프로그램
+              specialty: 요구사항 → 층별 방 프로그램표 (방·목표 면적·구역·이웃 관계·가정)
 
 review_criteria:
   - 의뢰인의 요구(층수·방 개수·특별 요청)를 모두 반영했는가, 빠진 정보는 가정(assumptions)으로 적었는가
@@ -62,6 +67,8 @@ features: [floorplan_render]
 harness:
   validators: [floorplan, json_keys]
   final_only: [json_keys]
+  also_at:
+    json_keys: [dgm_layout]  # 차장 단계부터 JSON 필수 — 대리(방 프로그램)는 JSON 을 쓰지 않는다
   max_retries: 2
   options:
     required_keys: [floors]

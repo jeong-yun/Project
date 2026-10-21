@@ -148,11 +148,12 @@ def build_office_graph(
     def harness_plan(state: OfficeState, node_id: str | None = None) -> tuple[list[str], dict]:
         """이번 실행에서 돌릴 검증기와 옵션 = 팀 기본 + 업무 양식 추가분 + 툴이 계산한 값.
 
-        node_id 가 최종 답변자(root)가 아니면 final_only 검증기는 뺀다.
+        node_id 가 최종 답변자(root)가 아니면 final_only 검증기는 뺀다 (harness.also_at 에 적힌 에이전트는 예외).
         """
         validators = list(dict.fromkeys([*team.harness.validators, *(state.get("extra_validators") or [])]))
         if node_id is not None and node_id != state["root_id"]:
-            validators = [v for v in validators if v not in team.harness.final_only]
+            also = team.harness.also_at
+            validators = [v for v in validators if v not in team.harness.final_only or node_id in also.get(v, [])]
         options = {**team.harness.options, **(state.get("harness_options") or {})}
         for t in state.get("tool_results") or []:
             options = {**t.harness_options, **options}

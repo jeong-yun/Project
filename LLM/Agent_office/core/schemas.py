@@ -100,6 +100,9 @@ class HarnessConfig(BaseModel):
     options: dict = Field(default_factory=dict)  # 검증기별 옵션 (예: sql_schema 파일 경로)
     # 최종 답변(문의 대상 에이전트의 결과)에만 돌릴 검증기 — 하위 실무자는 업무의 일부만 맡으므로 전체 형식을 요구하지 않는다
     final_only: list[str] = Field(default_factory=list)
+    # final_only 검증기를 최종 답변 외에 이 에이전트들의 결과에도 적용 — {검증기: [에이전트 id]}
+    # 예: 설계 팀 {json_keys: [dgm_layout]} → 방 프로그램을 받아 JSON 을 쓰는 차장 단계부터 JSON 필수
+    also_at: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class TaskField(BaseModel):

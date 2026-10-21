@@ -209,7 +209,7 @@ class FloorplanValidator(Validator):
         except floorplan.LayoutParseError as e:
             return self.fail(f"{e} — 같은 형식의 ```json 블록으로 다시 써라.")
         if layout is None:
-            # 하위 실무자(예: 치수 체크리스트 담당)는 JSON 을 쓰지 않을 수 있다 — 최종 답변의 JSON 유무는 json_keys(final_only)가 본다
+            # 하위 실무자(대리·방프로그램)는 JSON 을 쓰지 않는다 — JSON 유무는 json_keys(final_only + also_at)가 본다
             return self.ok("검사할 레이아웃 JSON 없음")
         tolerance = options.get("area_tolerance")
         _, report = floorplan.check(layout, float(tolerance) if tolerance is not None else None)

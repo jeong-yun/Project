@@ -163,6 +163,11 @@ def validate_config(ranks: list[Rank], models: ModelsConfig, teams: list[Team]) 
         from core.harness import REGISTRY  # 순환 import 방지를 위해 여기서 import
         from core.tools import TOOLS
 
+        bad_also = {v: ids for v, ids in team.harness.also_at.items() if v not in team.harness.final_only or set(ids) - set(node_ids)}
+        if bad_also:
+            raise ConfigError(
+                f"teams/{team.id}/team.yaml harness.also_at 오류: {bad_also} — 검증기는 final_only 에 있어야 하고 에이전트 id 는 조직도에 있어야 함"
+            )
         used_validators = set(team.harness.validators) | set(team.harness.final_only) | {v for t in team.tasks for v in t.validators}
         unknown_validators = used_validators - REGISTRY.keys()
         if unknown_validators:
