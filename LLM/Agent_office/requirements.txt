@@ -33,5 +33,14 @@ yfinance>=1.7,<2
 # 웹 검색 (DuckDuckGo, API 키 불필요)
 ddgs>=9.16,<10
 
+# 음악 팀 (teams/music) — Gemini Lyria 생성 (interactions API, 2.11 에서 검증)
+google-genai>=2.11,<3
+# 음원 편집 (CPU, ffmpeg 불필요): pedalboard = MP3 읽기/쓰기(LAME)·템포/키(Rubber Band)·EQ·리버브·컴프레서,
+# pyloudnorm = 라우드니스(LUFS), mutagen = MP3 길이, scipy = 피크 리미터
+pedalboard>=0.9.26,<1
+pyloudnorm>=0.1.1
+mutagen>=1.47
+scipy>=1.11
+
 # (선택) LangSmith 추적
 langsmith>=0.3

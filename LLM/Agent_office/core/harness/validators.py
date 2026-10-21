@@ -7,6 +7,7 @@
   itinerary_days: 여행 일정이 1일차~마지막 날까지 모든 날을 다루는지 검사 (일수는 코드가 계산)
   stock_plan    : 주식 점수표·매매 계획 JSON 을 코드로 검산 (core/stock_calc.py)
   concept_entry : 개념 카탈로그 결과 형식 검사 (core/concept.py)
+  music_prompt  : 음악 팀 가사·Lyria 프롬프트 형식 검사 (core/music.py)
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -178,3 +179,17 @@ class ConceptEntryValidator(Validator):
         if problems:
             return self.fail("개념 결과 형식 오류: " + " / ".join(problems) + " — 이 부분을 고쳐 같은 형식으로 다시 작성하라.")
         return self.ok("개념 결과 형식 통과")
+
+
+@register
+class MusicPromptValidator(Validator):
+    name = "music_prompt"
+    description = "음악 결과 형식 검사 (가사·Lyria 블록, 반주 문구, 섹션 태그·분량, 아티스트 이름, 시간표 길이)"
+
+    def check(self, answer: str, options: dict):
+        from core.music import check_answer  # music 이 harness.base 를 쓰므로 늦게 불러온다
+
+        problems = check_answer(answer, options)
+        if problems:
+            return self.fail("음악 결과 형식 오류: " + " / ".join(problems) + " — 이 부분을 고쳐 같은 블록 형식으로 다시 작성하라.")
+        return self.ok("음악 결과 형식 통과")

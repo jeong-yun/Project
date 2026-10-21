@@ -44,3 +44,19 @@ concept:
   # 상대 경로는 이 프로젝트 폴더(Agent_office) 기준. 다른 PC 에서는 clone 한 위치로 바꾼다.
   catalog_dir: ../../../CS/Term/Every_day
   related_limit: 6          # 함께 비교할 관련 기존 항목 수 (무료 모델은 토큰 한도가 작아 6개 이하 권장)
+
+music:
+  # 🎵 음악 팀 (teams/music, features: music_track) — Google Gemini Lyria 로 MP3 생성 (GOOGLE_API_KEY 필요, 유료)
+  auto_generate: true        # 워크플로우가 끝나면 자동으로 곡을 만든다 (false 면 화면의 '🎵 곡 만들기' 버튼으로)
+  clip_model: lyria-3-clip-preview   # 30초 고정 클립
+  song_model: lyria-3.5              # 전체 곡 (길이는 프롬프트로 정한다)
+  clip_seconds: 30           # 이 길이 이하 요청은 클립 모델로 만든다
+  cost_usd:                  # 화면에 보여 줄 예상 비용 (1회 생성당, 대략값 — 실제 요금은 Google 가격표 기준)
+    lyria-3-clip-preview: 0.04
+    lyria-3.5: 0.08
+  grade: true                # 만든 곡을 Gemini 가 듣고 브리프와 비교해 1~5점 채점
+  grade_model: gemini-3.5-flash
+  grade_threshold: 3         # 이 점수 미만이면 다시 생성
+  max_regenerations: 1       # 채점이 낮을 때 자동으로 다시 만드는 최대 횟수 (0 이면 안 함 — 비용 주의)
+  duration_tolerance: 0.25   # 요청 길이와 ±25% 이상 다르면 화면에 '편집으로 맞추기' 안내
+  edit_high_quality: false   # 템포·키 변경 고품질 모드 (3분 곡 약 30초 → 90초, CPU)

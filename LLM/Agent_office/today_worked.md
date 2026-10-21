@@ -142,6 +142,22 @@
 - 성과: 테스트 6건 추가(후속 대화) — 결정 전에 사람이 직접 고쳐 쓰지 않고도 결과를 다듬을 수 있음
 - 다음 할 일: 실제 업무에서 수정 요청 횟수·채택률 측정
 
+**🎵 음악 팀 — Gemini Lyria 노래·반주 생성 + CPU 편집**
+- 작업
+  - 팀 추가(teams/music): 팀장·음악PD(브리프) → 부장·검수 → 대리·작사가(섹션 태그 가사) / 차장·작곡편곡(Lyria 스타일 프롬프트·시간표). 업무 🎤 노래 만들기(보컬·한국어 가사, 직접 쓴 가사 다듬기) / 🎼 반주 만들기
+  - 하네스 `music_prompt`: ```lyrics·```lyria 블록, 반주의 'Instrumental only, no vocals.', 가사 섹션 태그·곡 길이별 줄 수·음절 수(한글 글자·영어 모음 묶음), 실존 아티스트 이름 휴리스틱, `[m:ss - m:ss]` 시간표 겹침·빈틈·길이 초과/부족을 코드로 검사
+  - 생성(core/music.py): google-genai interactions API 로 30초는 lyria-3-clip-preview, 그 이상은 lyria-3.5 → mutagen 으로 길이 확인 → Gemini 가 곡을 듣고 브리프와 비교해 채점 → 기준 미만이면 최대 1번(설정) 자동 재생성 후 최고점 곡 사용. 예상 비용 누적 표시, 서버 재시작 후에는 만든 곡을 다시 불러와 재과금 방지
+  - 편집(core/audio_edit.py): 편집 요청 → 보조 모델 구조화 출력으로 편집 계획(JSON, 연산 11종 화이트리스트) → 값 범위·구간 코드 검사 → pedalboard·numpy·pyloudnorm 으로 실행 → 결과 파일의 길이·LUFS 를 다시 재서 계획과 비교. 버전 기록(v1→v2…, 되돌리기·다시 하기, 이전/지금 플레이어 비교). 가사·멜로디 변경은 규칙+모델 판단으로 '다시 생성 필요(Lyria 재실행 또는 GPU 모델 ACE-Step 1.5)' 안내, 보컬/반주 분리 요청은 Demucs 미설치 안내
+  - 화면·저장: route_map 과 같은 후처리 흐름(워크플로우 종료 → 백그라운드 생성 → st.audio·받기), 채택 시 지금 버전 MP3 를 .md 옆에 저장(exporter), 사이드바에서 .mp3 받기
+- 기술: Google Gemini Lyria(interactions API), Gemini 오디오 이해(구조화 출력 채점), pedalboard(LAME MP3 입출력·Rubber Band 템포/키·EQ·리버브·컴프레서), pyloudnorm(ITU-R BS.1770 LUFS), 미리보기 피크 리미터(scipy 최소값→평균 필터), mutagen, Streamlit AppTest
+- 성과/결정
+  - 이 PC 에 ffmpeg·rubberband 가 없어 pydub·pyrubberband 대신 pedalboard 로 전부 처리 → 추가 설치 없이 pip 만으로 동작
+  - pedalboard Limiter 가 출력에 보정 이득(+4.75dB)을 더해 라우드니스 목표(-10 LUFS)를 -5.7 로 넘기는 문제를 측정으로 발견 → 직접 만든 피크 리미터 + 2회 보정으로 목표 ±1.5 LUFS 이내
+  - 템포·키 변경 고품질 모드는 30초에 14초 → 기본은 빠른 모드(4.7초), 설정으로 선택
+  - Demucs(보컬/반주 분리)는 torch·torchaudio·ffmpeg 가 필요해 이번에 넣지 않고 README 에 나중 단계로 정리
+- 테스트: 64건 추가 (총 222건) — 가짜 Lyria·가짜 Gemini(네트워크·비용 없음), 하네스 위반 유형별, 생성·재생성 상한, base64 디코딩, 연산 11종을 사인파 MP3 로 측정(길이·주파수·LUFS·피크), 버전 기록, 채택 저장, AppTest(음악 팀 화면·되살린 업무의 곡 불러오기 → 편집 → 되돌리기). 실제 유료 Lyria 호출은 아직 하지 않음
+- 다음 할 일: 사용자 확인 후 실제 Lyria 1회 생성(클립 약 $0.04)으로 프롬프트·채점 기준 실측, Demucs 스템 분리(설치 환경 준비 후)
+
 ---
 
 ## JD / 이력서용 요약 (누적)

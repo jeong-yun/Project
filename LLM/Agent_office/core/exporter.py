@@ -1,4 +1,4 @@
-"""채택한 결과를 파일로 저장 — results/<팀>/<날짜-시각>_<질문>.md (+ 여행 지도 .html).
+"""채택한 결과를 파일로 저장 — results/<팀>/<날짜-시각>_<질문>.md (+ 여행 지도 .html, 음악 팀은 .mp3).
 
 사람이 '채택'한 내용만 저장한다 (반려·버리기는 저장하지 않음).
 파일에는 나중에 봐도 맥락을 알 수 있도록 질문·업무 브리프·최종 답변·사람의 결정·근거 자료 목록을 함께 적는다.
@@ -7,10 +7,14 @@
 """
 
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
 from core.schemas import HumanDecision
+
+RESULT_SUFFIXES = (".md", ".html", ".mp3")
+MIME = {".md": "text/markdown", ".html": "text/html", ".mp3": "audio/mpeg"}
 
 
 def slugify(text: str, limit: int = 40) -> str:
@@ -20,7 +24,13 @@ def slugify(text: str, limit: int = 40) -> str:
 
 
 def result_markdown(
-    run: dict, decision: HumanDecision, team_name: str, names: dict[str, str], disclaimer: str = "", appendix: str = ""
+    run: dict,
+    decision: HumanDecision,
+    team_name: str,
+    names: dict[str, str],
+    disclaimer: str = "",
+    appendix: str = "",
+    appendix_title: str = "코드 검산 (점수·평균가·손익비)",
 ) -> str:
     """저장할 마크다운 본문."""
     brief = run.get("brief")
@@ -42,7 +52,7 @@ def result_markdown(
         lines += [f"- [제약] {c}" for c in brief.constraints]
     lines += ["", "## 최종 결과", "", decision.final_answer.strip()]
     if appendix:
-        lines += ["", "## 코드 검산 (점수·평균가·손익비)", "", appendix]
+        lines += ["", f"## {appendix_title}", "", appendix]
     if disclaimer:
         lines += ["", f"> {disclaimer}"]
 
@@ -67,18 +77,24 @@ def export_adopted(
     disclaimer: str = "",
     map_html: str | None = None,
     appendix: str = "",
+    audio_path: Path | None = None,
+    appendix_title: str = "코드 검산 (점수·평균가·손익비)",
 ) -> list[Path]:
-    """채택 결과를 파일로 저장하고, 저장한 파일 경로 목록을 돌려준다."""
+    """채택 결과를 파일로 저장하고, 저장한 파일 경로 목록을 돌려준다. audio_path 가 있으면 같은 이름의 .mp3 로 복사한다."""
     folder = results_root / team_id
     folder.mkdir(parents=True, exist_ok=True)
     stem = f"{datetime.now():%Y%m%d-%H%M%S}_{slugify(run['question'])}"
     md_path = folder / f"{stem}.md"
-    md_path.write_text(result_markdown(run, decision, team_name, names, disclaimer, appendix), encoding="utf-8")
+    md_path.write_text(result_markdown(run, decision, team_name, names, disclaimer, appendix, appendix_title), encoding="utf-8")
     paths = [md_path]
     if map_html:
         map_path = folder / f"{stem}_지도.html"
         map_path.write_text(map_html, encoding="utf-8")
         paths.append(map_path)
+    if audio_path:
+        audio_out = folder / f"{stem}{Path(audio_path).suffix or '.mp3'}"
+        shutil.copyfile(audio_path, audio_out)
+        paths.append(audio_out)
     return paths
 
 
@@ -87,5 +103,5 @@ def list_results(results_root: Path, team_id: str, limit: int = 20) -> list[Path
     folder = results_root / team_id
     if not folder.exists():
         return []
-    files = [p for p in folder.iterdir() if p.suffix in (".md", ".html")]
+    files = [p for p in folder.iterdir() if p.suffix in RESULT_SUFFIXES]
     return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
