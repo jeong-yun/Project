@@ -36,7 +36,8 @@ from pydantic import ValidationError
 from st_click_detector import click_detector
 
 import concept_ui
-from core import concept, llm_factory, stock_calc, verification
+from core import concept, followup, llm_factory, stock_calc, verification
+from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
 from core.config import (
@@ -44,6 +45,7 @@ from core.config import (
     ConfigError,
     list_teams,
     load_env,
+    load_skills,
     load_models,
     load_ranks,
     load_settings,
@@ -56,6 +58,7 @@ from core.config import (
     validate_config,
 )
 from core.harness import REGISTRY as HARNESS_REGISTRY
+from core.llm_factory import NoAvailableModelError
 from core.live import KIND_LABELS, STAGES, new_run, restore_run, stage_of, start_run
 from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTemplate, ToolResult
 from core.search import WebContext
@@ -650,6 +653,95 @@ def adoptable_steps(run: dict) -> list[AgentAnswer]:
     return ([final] if final else []) + others
 
 
+def revisions(run: dict) -> list[tuple[followup.FollowupTurn, AgentAnswer]]:
+    """결정 전 수정 요청으로 만든 수정본들 (v1, v2 … 순서). 채택 후보와 같은 AgentAnswer 모양으로 바꿔 둔다."""
+    final = final_answer(run)
+    out = []
+    for t in run.get("followups") or []:
+        if t.revised and final:
+            out.append((t, AgentAnswer(
+                node_id=final.node_id, rank_id=final.rank_id, kind=final.kind, content=t.content,
+                model=t.model or final.model, harness=t.harness, verification_log=t.log, elapsed_sec=t.elapsed_sec,
+            )))
+    return out
+
+
+def current_result(run: dict) -> tuple[AgentAnswer | None, str]:
+    """지금 화면에 보여 줄 최종 결과 = 가장 최근 수정본, 없으면 워크플로우의 최종 결과. (결과, 표시 이름)"""
+    revs = revisions(run)
+    if revs:
+        turn, answer = revs[-1]
+        return answer, f"✏️ 수정본 v{turn.version}"
+    return final_answer(run), ""
+
+
+def decision_candidates(run: dict) -> list[tuple[str, AgentAnswer]]:
+    """(라벨, 안) — 수정본(최신 먼저) → 원래 최종 → 다른 에이전트 결과."""
+    revs = revisions(run)
+    items = [(f"✏️ 수정본 v{t.version}" + (" (최신)" if i == 0 else ""), a) for i, (t, a) in enumerate(reversed(revs))]
+    for i, step in enumerate(adoptable_steps(run)):
+        tail = (" (원래 최종)" if revs else " (최종)") if i == 0 else ""
+        items.append((f"{name_of(step.node_id)} {KIND_LABELS[step.kind]}{tail}", step))
+    return items
+
+
+def followup_evidence(run: dict) -> str:
+    """후속 대화에 넘길 근거 자료 (데이터 툴 + 웹 검색) — 비평가와 같은 글자 예산."""
+    parts = [f"## {t.title}\n{t.content}" for t in run.get("tools") or [] if t.content]
+    web = run.get("web")
+    if web and web.results:
+        parts.append("## 🌐 웹 검색 결과\n" + web.as_prompt())
+    budget = verification.critic_settings(verification_cfg, team.verification).get("evidence_chars", 6000)
+    return verification.trim_evidence(parts, budget)
+
+
+def render_followup(run: dict) -> None:
+    """💬 결정 전에 결과에 대해 묻거나 고쳐 달라고 한다 — 최종 답변자(supervisor)가 답하거나 수정본을 만든다."""
+    root = run["root_id"]
+    turns: list[followup.FollowupTurn] = run.setdefault("followups", [])
+    st.markdown("#### 💬 결과에 대해 묻기 · 수정 요청")
+    st.caption(f"궁금한 점을 묻거나 고칠 점을 말하면 **{name_of(root)}**이(가) 답하거나 수정본을 만듭니다. "
+               "질문인지 수정인지는 에이전트가 판단하고, 수정본은 아래 '채택할 안'에 추가됩니다.")
+    for t in turns:
+        with st.chat_message("user"):
+            st.markdown(t.request)
+        with st.chat_message("assistant", avatar=avatar_for_chat(root)):
+            st.markdown(t.reply or "(답변 없음)")
+            if t.revised:
+                checks = ""
+                if t.harness:
+                    checks = " · 🧪 형식 검사 " + ("통과" if all(h.passed for h in t.harness) else "실패 — 채택 전에 확인")
+                st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
+            meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
+            st.caption(meta + "".join(f" · {x}" for x in t.log))
+    with st.form(f"followup_{run['run_id']}", clear_on_submit=True):
+        text = st.text_area("요청", height=80, label_visibility="collapsed",
+                            placeholder="예: 3번 근거가 뭐야? / 정의를 두 문장으로 줄여줘 / 비교 표에 항목 하나 추가해줘")
+        send = st.form_submit_button("💬 보내기")
+    if not (send and text.strip()):
+        return
+    node = nodes[root]
+    agent = OrgAgent(node, ranks_by_id[node.rank], team, models, names={n: name_of(n) for n in nodes},
+                     skills=load_skills(team_id))
+    current, _ = current_result(run)
+    validators = list(dict.fromkeys([*team.harness.validators, *(run.get("extra_validators") or [])]))
+    try:
+        with st.spinner(f"{name_of(root)}이(가) 답하는 중… (수정이면 30초~1분)"):
+            turn = followup.respond(
+                agent, run["question"], current.content, text.strip(), turns, followup_evidence(run),
+                storage.recent_lessons(team_id, root, settings.get("feedback", {}).get("max_lessons_in_prompt", 5)),
+                validators, {**team.harness.options, **check_options(run)}, team.harness.max_retries,
+            )
+    except NoAvailableModelError as e:
+        st.error(f"답할 수 있는 모델이 없습니다: {e}")
+        return
+    except Exception as e:  # noqa: BLE001
+        st.error(f"답변 중 오류: {type(e).__name__}: {e}")
+        return
+    turns.append(turn)
+    st.rerun()
+
+
 def check_options(run: dict) -> dict:
     """검산 옵션 = 데이터 툴이 계산한 값(현재가·보유 수량 등) + 업무 양식 옵션(stock_checks 등)."""
     options: dict = {}
@@ -702,9 +794,11 @@ def submit_decision(run: dict, decision: HumanDecision) -> None:
 
 
 def render_final_and_decision(run: dict, run_key: tuple) -> None:
-    final = final_answer(run)
+    final, version = current_result(run)  # 결정 전에 수정을 요청했으면 가장 최근 수정본
+    if final and run["status"] in DECIDED:
+        final, version = final_answer(run), ""
     if final:
-        st.markdown(f"#### 📌 최종 결과 — {name_of(final.node_id)}")
+        st.markdown(f"#### 📌 최종 결과 — {name_of(final.node_id)}" + (f" · {version}" if version else ""))
         if is_concept:
             concept_ui.result_tabs(final.content, run)  # 최종본·검증 로그·GitHub 요약·적용 계획
         else:
@@ -720,9 +814,14 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         if team.disclaimer:
             st.caption(f"ℹ️ {team.disclaimer}")
 
+    if run["status"] == "awaiting_human":
+        render_followup(run)
+
     st.markdown("#### 👤 최종 결정")
     if run["status"] == "awaiting_human":
-        candidates = adoptable_steps(run)
+        options = decision_candidates(run)
+        candidates = [a for _, a in options]
+        n_rev = len(revisions(run))  # 수정본이 늘면 선택·입력칸을 새 후보 기준으로 다시 채운다
         st.caption(
             "채택할 안을 고르고 필요하면 직접 수정하세요. 결정 내용은 참여한 모든 에이전트에게 교훈으로 피드백됩니다. "
             "결정하지 않고 '결과 버리기'를 누르거나 새 업무를 맡기면 이 결과는 저장되지 않습니다."
@@ -731,19 +830,18 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         idx = st.radio(
             "채택할 안",
             list(range(len(candidates))),
-            format_func=lambda i: f"{name_of(candidates[i].node_id)} {KIND_LABELS[candidates[i].kind]}"
-            + (" (최종)" if i == 0 else ""),
+            format_func=lambda i: options[i][0],
             horizontal=True,
-            key=f"pick_{run['run_id']}",
+            key=f"pick_{run['run_id']}_{n_rev}",
         )
         chosen = candidates[idx]
         with st.form(f"decide_{run['run_id']}"):
             if is_concept:  # 개념 편집 팀: 카탈로그에 들어갈 최종본과 적용 계획을 나눠서 고친다
-                concept_entry, concept_plan = concept_ui.decision_fields(chosen.content, f"{run['run_id']}_{idx}")
+                concept_entry, concept_plan = concept_ui.decision_fields(chosen.content, f"{run['run_id']}_{n_rev}_{idx}")
                 edited = chosen.content
             else:
                 edited = st.text_area("최종 답변 (필요하면 직접 수정)", value=chosen.content, height=260,
-                                      key=f"final_{run['run_id']}_{idx}")
+                                      key=f"final_{run['run_id']}_{n_rev}_{idx}")
             score = st.slider("만족도", 1, 5, 4)
             comment = st.text_input("코멘트 (에이전트들에게 전달할 피드백, 선택)")
             c1, c2, c3 = st.columns(3)
@@ -768,7 +866,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
                 final_answer=edited.strip() if adopt else "",
                 edited=bool(adopt and edited.strip() != chosen.content.strip()),
                 score=score,
-                comment=comment.strip(),
+                # 결정 전에 주고받은 문의·수정 요청도 교훈 생성에 쓰이도록 코멘트에 붙인다
+                comment="\n\n".join(x for x in (comment.strip(), followup.decision_note(run.get("followups") or [])) if x),
             )
             try:
                 submit_decision(run, decision)
@@ -1207,6 +1306,7 @@ if request:
         run = new_run(uuid.uuid4().hex, request["question"], target, team_id)
         run["trip_start"] = request["tool_inputs"].get("start_date")  # 지도 재생 시각용
         run["harness_options"] = request["harness_options"]  # 화면 검산표용 (주식 업무의 stock_checks 등)
+        run["extra_validators"] = request["extra_validators"]  # 결정 전 수정본도 같은 검증기로 검사
         run["concept"] = request.get("concept")  # 개념 편집 팀: 자동 판정(추가/수정)·대상 항목
         # 지도 기능이 있는 팀은 처음부터 '후처리 예정'으로 표시 — 워크플로우가 끝난 뒤 지도까지 다 만들 때까지 화면이 자동 갱신된다
         run["post_busy"] = ROUTE_MAP in team.features

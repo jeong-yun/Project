@@ -112,7 +112,10 @@ def test_sibling_drafts_overlap_and_parent_waits_for_all(org, ranks, team, model
 def test_independent_subtrees_do_not_wait_for_each_other(org, ranks, team, models, use_script):
     """실행 부장 쪽(staff_case)은 리서치 쪽 초안이 끝나기를 기다리지 않고, 그 위 검토도 먼저 끝낼 수 있다."""
     timeline = Timeline()
-    use_script(tree_script(org, timeline, {"am_fact": 0.3, "staff_draft": 0.3, "staff_case": 0.05}))
+    # 실행 쪽 초안은 바로 시작하고, 리서치 쪽 초안은 차장의 업무 분배 뒤에 시작한다.
+    # PC 가 바쁠 때(다른 테스트 동시 실행 등)도 둘이 겹치고 순서 판단에 여유가 있게 시간을 넉넉히 둔다.
+    slow, fast = 1.0, 0.4
+    use_script(tree_script(org, timeline, {"am_fact": slow, "staff_draft": slow, "staff_case": fast}))
     started = time.perf_counter()
     steps = [p for k, p in run_events(org, ranks, team, models, "lead") if k == "step"]
     elapsed = time.perf_counter() - started
@@ -124,7 +127,7 @@ def test_independent_subtrees_do_not_wait_for_each_other(org, ranks, team, model
     assert order[-1] == ("lead", "integrate")
     lead_start = timeline.spans["review:lead"][0]
     assert all(end <= lead_start for name, (_, end) in timeline.spans.items() if name != "review:lead")  # 팀장은 모두 끝난 뒤 통합
-    assert elapsed < 0.3 + 0.3 + 0.05 + 0.6  # 초안 세 개를 차례로 썼다면 최소 0.65초 + 검토들
+    assert elapsed < slow + slow + fast  # 초안 세 개를 차례로 썼다면 이것만으로도 최소 2.4초
 
 
 # ─── 한 하위의 오류 ────────────────────────────────────────────────────
