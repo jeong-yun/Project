@@ -110,6 +110,21 @@
 
 ---
 
+## 2026-10-21
+
+**검증 정확도 개선 (실행 기록 분석 반영)**
+- 배경: data/runs.db 실측 — 비평가 불합격률 75%, 개념 실행에서 자가 교정이 비평 점수를 4 → 2 로 떨어뜨렸는데 나쁜 쪽이 최종 답변으로 나감, 비평가가 근거 자료 없이 '숫자에는 출처·기준일' 규칙을 판정
+- 작업
+  - 자가 교정: 시도마다 비평 점수를 남겨 최종 불합격이면 가장 점수가 높은 답변을 유지, 검증 기록에 시도별 점수와 "최종 비평가 여전히 불합격" 기록
+  - 비평 합격 기준: 지적이 하나라도 있으면 불합격 → 점수 ≥ min_score 이면 합격, severity=severe 일 때만 불합격 (`critic.fail_on`, 이전 동작은 `any`)
+  - 비평가에게 데이터 툴·웹 검색 근거 자료 전달 (`critic.evidence_chars` 예산 안에서 묶음마다 고르게 줄임)
+  - 빈 초안 감지: 공백뿐인 스트림 응답을 실패로 보고 다음 후보 모델로 재작성
+- 기술: LLM-as-a-Judge 심각도 등급, Best-of-N 선택, 근거 자료 예산 분배
+- 성과: 테스트 13건 추가(총 138건, API 키 없이 모의 모델로 검증). 실제 실행에서의 불합격률 변화는 다음 실행에서 측정
+- 다음 할 일: 화면의 비평 '통과/지적' 표시(app.py)를 새 합격 기준(severity)에 맞추기, 실측으로 불합격률 재측정
+
+---
+
 ## JD / 이력서용 요약 (누적)
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph, LangChain, Human-in-the-loop, LLM-as-a-Judge, Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration (OpenAI · Anthropic · Google · Upstage), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, 설정 기반(Config-driven) 설계

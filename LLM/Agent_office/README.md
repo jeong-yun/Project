@@ -194,8 +194,10 @@ streamlit run app.py
 | 퓨샷 루브릭 | 점수 기준 + 실제 고득점/저득점 예시(HBF≠HBM)로 채점 영점 조정 | `config/verification.yaml` `review_rubric` (팀별: team.yaml `rubric`) |
 | 구조화 단계 분할 | 분배(Delegation) → 검토(ReviewResult) → 비평(CriticResult) 을 JSON 키로 분리 | `core/schemas.py` |
 | 적대적 리뷰어 | 검토자가 결과를 믿지 않고 취약점·논리 오류·완료 기준 미충족부터 찾음 | `core/agent.py`, 스킬 `adversarial_review.md` |
-| 비평가 (LLM-as-a-Judge) | 검토자의 '지적 → 수정' 중간 과정의 논리 비약만 따로 채점 | `config/verification.yaml` `critic` |
-| 자가 교정 | 비평 불합격 시 "A 부분이 B 규칙에 어긋난다. 수정하라" 를 체인 중간에 넣어 재작성 | `critic.max_self_corrections` |
+| 비평가 (LLM-as-a-Judge) | 검토자의 '지적 → 수정' 중간 과정의 논리 비약만 따로 채점. 데이터 툴·웹 검색 근거 자료도 함께 받아 숫자·출처·기준일을 대조 | `config/verification.yaml` `critic` (`evidence_chars`: 근거 자료 글자 예산) |
+| 비평 합격 기준 | 점수 ≥ `min_score` 이면 합격. 지적마다 심각도(severity: none/minor/severe)를 매겨 **severe**(사실 오류·근거와 다른 숫자·올바른 사실 누락)일 때만 불합격 | `critic.fail_on` (`severe` 기본 / `any` = 지적이 하나라도 있으면 불합격, 이전 동작) |
+| 자가 교정 | 비평 불합격 시 "A 부분이 B 규칙에 어긋난다. 수정하라" 를 체인 중간에 넣어 재작성. 교정본이 더 나빠지면 **비평 점수가 가장 높은 답변을 유지**하고, 끝까지 불합격이면 검증 기록에 "최종 비평가 여전히 불합격"과 시도별 점수를 남김 | `critic.max_self_corrections` |
+| 빈 초안 감지 | 모델이 오류 없이 빈 응답(조각 0개·공백뿐)을 주면 실패로 보고 같은 업무를 다음 후보 모델로 다시 씀 | `core/agent.py` |
 | 하네스 (RLVR 응용) | 코드·SQL·JSON 을 실제 인터프리터/샌드박스로 검증 → 실패 시 0점 + 에러 로그를 돌려줘 재작성 | team.yaml `harness` |
 | 단계별 평가 하네스 | 검색·분배·초안·검토·최종 단계마다 유닛 테스트 → 어느 노드에서 실패했는지 추적 (PRM vs ORM) | `evals/` |
 

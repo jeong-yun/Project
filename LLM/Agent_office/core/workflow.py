@@ -121,13 +121,17 @@ def build_office_graph(
     def lessons_for(node_id: str) -> list[str] | None:
         return storage.recent_lessons(team.id, node_id, max_lessons) if storage else None
 
-    def web_text(state: OfficeState) -> str:
-        """에이전트에게 줄 근거 자료 = 데이터 툴 결과(사실 수치) + 웹 검색 결과."""
+    def evidence_parts(state: OfficeState) -> list[str]:
+        """근거 자료 묶음 = 데이터 툴 결과(사실 수치)마다 1개 + 웹 검색 결과 1개."""
         parts = [f"## {t.title}\n{t.content}" for t in state.get("tool_results") or [] if t.content]
         web = state.get("web")
         if web and web.results:
             parts.append("## 🌐 웹 검색 결과\n" + web.as_prompt())
-        return "\n\n".join(parts)
+        return parts
+
+    def web_text(state: OfficeState) -> str:
+        """에이전트에게 줄 근거 자료 = 데이터 툴 결과(사실 수치) + 웹 검색 결과."""
+        return "\n\n".join(evidence_parts(state))
 
     def emit(event: dict) -> None:
         """화면에 '누가 지금 무엇을 하는지' 알린다 (stream_mode='custom' 이벤트)."""
@@ -172,6 +176,25 @@ def build_office_graph(
         if not harness.all_passed(results):
             answer.verification_log.append("하네스 재시도 한도 초과 — 검증 실패 상태로 진행")
         return answer
+
+    def keep_best_attempt(tried: list[AgentAnswer], passed: bool) -> AgentAnswer:
+        """자가 교정이 끝난 뒤 내보낼 답변. 마지막 교정본이 불합격이면 비평 점수가 가장 높은 답변을 유지한다.
+
+        교정본이 원본보다 나빠질 수 있다 (실측: 개념 실행에서 4/5 → 교정 후 2/5 인데 2/5 가 나감).
+        """
+        last = tried[-1]
+        if passed:
+            if len(tried) > 1 and last.critic:
+                last.verification_log.append(f"자가 교정 후 비평가 통과({last.critic.score}/5)")
+            return last
+        best = tried[verification.best_attempt([a.critic for a in tried])]
+        scores = " → ".join(f"{a.critic.score}/5" if a.critic else "-" for a in tried)
+        note = f"최종 비평가 여전히 불합격 (비평 점수 {scores})"
+        if best is not last:
+            note += f" → 교정본이 나아지지 않아 {tried.index(best) + 1}번째 답변을 유지"
+        best.verification_log = [*last.verification_log, note]
+        best.attempts = last.attempts
+        return best
 
     # ── 노드 ────────────────────────────────────────────────────
 
@@ -293,16 +316,21 @@ def build_office_graph(
             use_critic = critic_cfg["enabled"] and (critic_cfg["scope"] == "all" or node_id == state["root_id"])
             if use_critic:
                 reviewed_input = "\n\n".join(c.content for c in children)
+                # 비평가도 근거 자료를 봐야 '숫자에는 출처·기준일' 같은 규칙을 실제로 대조할 수 있다 (길이는 예산 안으로)
+                evidence = verification.trim_evidence(evidence_parts(state), critic_cfg["evidence_chars"])
+                tried: list[AgentAnswer] = []  # 비평을 받은 답변들 (원본 → 교정본 순)
                 for round_ in range(critic_cfg["max_self_corrections"] + 1):
                     emit({"type": "start", "node": node_id, "kind": "critic"})
                     critic, errs = verification.critique(
                         # 채점 기준 = 팀 검토 기준 + 브리프의 완료 기준
                         question, reviewed_input, answer.review, [*team.review_criteria, *brief.success_criteria], models,
-                        critic_cfg.get("rules"),
+                        critic_cfg.get("rules"), evidence,
                     )
                     answer.critic = critic
                     answer.verification_log += errs
-                    if verification.critic_passed(critic, critic_cfg["min_score"]) or round_ == critic_cfg["max_self_corrections"]:
+                    tried.append(answer)
+                    passed = verification.critic_passed(critic, critic_cfg["min_score"], critic_cfg["fail_on"])
+                    if passed or round_ == critic_cfg["max_self_corrections"]:
                         break
                     emit({"type": "retry", "node": node_id, "reason": "critic"})
                     previous = answer
@@ -316,6 +344,7 @@ def build_office_graph(
                         *previous.verification_log,
                         f"비평가 불합격({critic.score}/5) → 자가 교정 {round_ + 1}회",
                     ]
+                answer = keep_best_attempt(tried, passed)
 
             def redo_review(feedback: str, previous: AgentAnswer) -> AgentAnswer:
                 return agent.review(with_feedback(messages, previous.review.model_dump_json(), feedback), children, rewrite_answer)

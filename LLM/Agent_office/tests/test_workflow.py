@@ -1,5 +1,7 @@
 """조직도(트리) 워크플로우 테스트 — 위→아래 분배, 아래→위 검토·통합, 브리프, 비평가·자가 교정, 하네스."""
 
+import pytest
+
 from core.brief import DesiredState
 from core.schemas import Team
 from core.workflow import build_office_graph, stream_office
@@ -138,3 +140,113 @@ def test_harness_failure_feeds_error_back_and_retries(org, ranks, team, models, 
     assert draft.content == good and draft.attempts == 2 and draft.harness[0].passed
     assert ("retry", "harness") in [(k, p["reason"]) for k, p in events if k == "retry"]
     assert "문법 오류" in script.prompts("text")[-1]  # 에러 로그가 다시 쓰기 프롬프트에 들어감
+
+
+# ─── 정확도 개선: 최고 시도 유지 · 통과 규칙 · 근거 자료 · 빈 초안 ─────────────
+
+CRITIC_ON = {"critic": {"enabled": True, "scope": "final", "min_score": 4, "max_self_corrections": 1}}
+
+
+def test_self_correction_keeps_best_attempt_when_correction_is_worse(org, ranks, team, models, use_script):
+    script = use_script(full_script())
+    script.outputs["CriticResult"] = [make_critic(3, leaps=["비약"]), make_critic(2, leaps=["더 큰 비약"])]
+    script.outputs["ReviewResult"] = [make_review(answer="원본"), make_review(answer="더 나쁜 교정본")]
+    _, steps = run(org, ranks, team, models, root="am_action", verification=CRITIC_ON)
+
+    final = steps[-1]
+    assert final.content == "원본" and final.critic.score == 3  # 교정본(2/5) 대신 원본(3/5)
+    assert final.attempts == 2
+    assert any("최종 비평가 여전히 불합격" in log and "3/5 → 2/5" in log for log in final.verification_log)
+    assert any("1번째 답변을 유지" in log for log in final.verification_log)
+
+
+def test_self_correction_still_failing_is_logged_when_last_is_best(org, ranks, team, models, use_script):
+    script = use_script(full_script())
+    script.outputs["CriticResult"] = [make_critic(2, leaps=["비약"]), make_critic(3, leaps=["작은 비약"])]
+    script.outputs["ReviewResult"] = [make_review(answer="원본"), make_review(answer="조금 나은 교정본")]
+    _, steps = run(org, ranks, team, models, root="am_action", verification=CRITIC_ON)
+
+    final = steps[-1]
+    assert final.content == "조금 나은 교정본" and final.critic.score == 3
+    assert any("최종 비평가 여전히 불합격" in log for log in final.verification_log)
+    assert not any("번째 답변을 유지" in log for log in final.verification_log)
+
+
+def test_minor_violation_with_good_score_passes_without_correction(org, ranks, team, models, use_script):
+    script = use_script(full_script(CriticResult=make_critic(4, violations=["표현이 장황함"], severity="minor")))
+    events, steps = run(org, ranks, team, models, root="am_action", verification=CRITIC_ON)
+    assert len(script.prompts("ReviewResult")) == 1  # 자가 교정 없음
+    assert ("retry", "critic") not in [(k, p["reason"]) for k, p in events if k == "retry"]
+    assert steps[-1].attempts == 1
+
+
+def test_severe_violation_fails_even_with_high_score(org, ranks, team, models, use_script):
+    script = use_script(full_script())
+    script.outputs["CriticResult"] = [make_critic(5, violations=["숫자가 근거와 다름"], severity="severe"), make_critic(5)]
+    script.outputs["ReviewResult"] = [make_review(answer="1차"), make_review(answer="교정본")]
+    _, steps = run(org, ranks, team, models, root="am_action", verification=CRITIC_ON)
+    assert steps[-1].content == "교정본"
+    assert any("자가 교정 후 비평가 통과(5/5)" in log for log in steps[-1].verification_log)
+
+
+def test_fail_on_any_keeps_strict_rule(org, ranks, team, models, use_script):
+    script = use_script(full_script())
+    script.outputs["CriticResult"] = [make_critic(4, violations=["사소함"], severity="minor"), make_critic(5)]
+    script.outputs["ReviewResult"] = [make_review(answer="1차"), make_review(answer="교정본")]
+    cfg = {"critic": {**CRITIC_ON["critic"], "fail_on": "any"}}
+    _, steps = run(org, ranks, team, models, root="am_action", verification=cfg)
+    assert steps[-1].content == "교정본"
+
+
+def _team_with_tool(team, monkeypatch, content):
+    import core.workflow as workflow
+    from core.schemas import ToolResult
+
+    monkeypatch.setattr(
+        workflow, "run_tools", lambda *a, **k: [ToolResult(tool="fake", title="📈 시장 데이터", content=content)]
+    )
+    return Team(**{**team.model_dump(), "tools": ["fake"]})
+
+
+def test_critic_receives_tool_evidence(org, ranks, team, models, use_script, monkeypatch):
+    script = use_script(full_script(CriticResult=make_critic(5)))
+    tool_team = _team_with_tool(team, monkeypatch, "종가 71,200원 (기준일 2026-10-20)")
+    run(org, ranks, tool_team, models, root="am_action", verification=CRITIC_ON)
+    critic_prompt = script.prompts("CriticResult")[0]
+    assert "[근거 자료" in critic_prompt and "종가 71,200원 (기준일 2026-10-20)" in critic_prompt
+    assert "출처·기준일" in critic_prompt  # 대조 지시
+
+
+def test_critic_evidence_is_trimmed_to_budget(org, ranks, team, models, use_script, monkeypatch):
+    script = use_script(full_script(CriticResult=make_critic(5)))
+    tool_team = _team_with_tool(team, monkeypatch, "가" * 5000)
+    cfg = {"critic": {**CRITIC_ON["critic"], "evidence_chars": 500}}
+    run(org, ranks, tool_team, models, root="am_action", verification=cfg)
+    critic_prompt = script.prompts("CriticResult")[0]
+    assert "가" * 400 in critic_prompt and "가" * 600 not in critic_prompt
+    assert "생략" in critic_prompt
+    assert "가" * 5000 in script.prompts("text")[0]  # 실무자에게는 그대로 간다
+
+
+@pytest.mark.parametrize(
+    "empty, error",
+    [
+        ("", "No generation chunks"),  # 조각 0개 — langchain 이 ValueError 로 알려 준다
+        (" \n", "EmptyResponseError"),  # 조각은 왔지만 공백뿐 — 예전에는 content="" 로 그대로 통과했다
+    ],
+)
+def test_empty_draft_falls_back_to_next_model(org, ranks, team, models, use_script, empty, error):
+    script = use_script(full_script())
+    script.outputs["text"] = [empty, "초안"]  # 첫 후보는 빈 응답 → 다음 후보
+    _, steps = run(org, ranks, team, models, root="am_action")
+    draft = next(s for s in steps if s.kind == "draft")
+    assert draft.content == "초안" and draft.is_fallback
+    assert any(error in e for e in draft.errors), draft.errors
+
+
+def test_all_empty_drafts_mark_agent_failed(org, ranks, team, models, use_script):
+    script = use_script(full_script())
+    script.outputs["text"] = ["   "]  # 공백뿐인 응답도 실패
+    _, steps = run(org, ranks, team, models, root="am_action")
+    draft = next(s for s in steps if s.kind == "draft")
+    assert "초안을 작성하지 못했습니다" in draft.content

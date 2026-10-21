@@ -11,7 +11,7 @@ pydantic BaseModel 을 쓰면 (a) 타입 검증, (b) dict/JSON 변환, (c) LLM �
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 # freellm = FreeLLMAPI 프록시 (무료 티어 모델 모음, OpenAI 호환) — 유료 키를 쓸 수 없을 때의 무료 대안
 Provider = Literal["openai", "anthropic", "google", "upstage", "freellm"]
@@ -205,7 +205,22 @@ class CriticResult(BaseModel):
     rule_violations: list[str] = Field(
         description="어긴 규칙과 위치를 'A 부분이 B 규칙에 어긋남' 형식으로. 없으면 빈 목록"
     )
+    severity: Literal["none", "minor", "severe"] = Field(
+        description=(
+            "위 지적 중 가장 심각한 것의 등급. none: 지적 없음 / minor: 표현·형식·사소한 누락 (결론은 그대로 유효) / "
+            "severe: 사실 오류, 근거 자료와 어긋나는 숫자, 하위 결과의 올바른 사실을 버림, 결론을 뒤집는 비약"
+        )
+    )
     score: int = Field(description="중간 과정 논리의 완결성 (1~5, 5=비약 없음). 위 분석에 근거해 마지막에 매긴다")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_severity(cls, data):
+        # severity 가 생기기 전에 저장된 실행 기록(runs.db)·모델이 빠뜨린 경우 — 지적이 있으면 minor, 없으면 none.
+        # (기본값 대신 여기서 채운다: 기본값이 있으면 OpenAI strict 구조화 출력이 필드를 required 로 못 받는다)
+        if isinstance(data, dict) and not data.get("severity"):
+            data = {**data, "severity": "minor" if data.get("logical_leaps") or data.get("rule_violations") else "none"}
+        return data
 
 
 class Lesson(BaseModel):
