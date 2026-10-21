@@ -20,7 +20,11 @@ from core.llm_factory import NoAvailableModelError
 from core.schemas import AgentAnswer, Delegation, ModelsConfig, ModelSpec, OrgNode, Rank, ReviewResult, Team
 from core.verification import rubric_text
 
-__all__ = ["NoAvailableModelError", "OrgAgent", "AnswerStream", "chunk_text", "with_feedback"]
+__all__ = ["EmptyResponseError", "NoAvailableModelError", "OrgAgent", "AnswerStream", "chunk_text", "with_feedback"]
+
+
+class EmptyResponseError(RuntimeError):
+    """모델 호출은 오류 없이 끝났지만 내용이 비어 있음 — 실패로 보고 다음 후보 모델로 넘어간다."""
 
 
 def chunk_text(content) -> str:
@@ -265,6 +269,7 @@ class AnswerStream:
       - 그 밖의 오류 : 다음 후보(대안 모델)로
       - 쓰는 도중 끊김: 반쯤 쓴 초안은 버리고 처음부터 다시 쓴다 → on_restart() 로 화면의 미리보기를 지우게 알린다
         (yield 된 조각에는 버려진 초안이 섞일 수 있으므로, 최종 답변은 항상 .result 를 쓴다)
+      - 빈 응답      : 오류 없이 끝났어도 내용이 없으면 실패로 보고 다음 후보로 (EmptyResponseError)
     """
 
     def __init__(self, agent: OrgAgent, messages: list[BaseMessage], tag: str = "", on_restart=None):
@@ -291,6 +296,9 @@ class AnswerStream:
                         text = chunk_text(chunk.content)
                         if text:
                             yield text
+                    if full is None or not chunk_text(full.content).strip():
+                        # 조각 0개·공백뿐인 응답은 '성공'이 아니다 → 빈 초안이 위로 올라가지 않게 다음 후보로
+                        raise EmptyResponseError("모델이 빈 응답을 반환했습니다 (스트림 조각 0개 또는 공백뿐)")
                 except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
                     # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
                     started_writing = full is not None and bool(chunk_text(full.content))
@@ -307,12 +315,12 @@ class AnswerStream:
                         continue
                     break  # 영구 오류이거나 재시도를 다 썼으면 다음 후보로
 
-                usage = (full.usage_metadata or {}) if full is not None else {}
+                usage = full.usage_metadata or {}
                 self.result = AgentAnswer(
                     node_id=self.agent.node.id,
                     rank_id=self.agent.rank.id,
                     kind="draft",
-                    content=chunk_text(full.content) if full is not None else "",
+                    content=chunk_text(full.content),
                     model=spec,
                     is_fallback=is_fallback,  # 후보 순서로 판단 (같은 모델 재시도 성공은 대안이 아님)
                     elapsed_sec=round(time.perf_counter() - started, 2),

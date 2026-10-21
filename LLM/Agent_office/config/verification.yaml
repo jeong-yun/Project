@@ -28,5 +28,8 @@ review_rubric:
 critic:
   enabled: true
   scope: final            # final: 최상위(supervisor) 통합 단계만 / all: 모든 검토·통합 단계 (호출 수 증가)
-  min_score: 4            # 이 점수 미만이거나 논리 비약·규칙 위반이 있으면 불합격 → 자가 교정
-  max_self_corrections: 1 # 자가 교정 최대 횟수
+  min_score: 4            # 이 점수 미만이면 불합격 → 자가 교정
+  fail_on: severe         # severe: 비평가가 severe(사실 오류·근거와 다른 숫자 등)로 표시한 위반이 있을 때만 불합격
+                          # any   : 논리 비약·규칙 위반이 하나라도 있으면 불합격 (이전 동작 — 실측 불합격률 75%)
+  max_self_corrections: 1 # 자가 교정 최대 횟수. 교정본이 더 나빠지면 비평 점수가 가장 높은 답변을 유지한다
+  evidence_chars: 6000    # 비평가에게 넘기는 근거 자료(데이터 툴·웹 검색) 최대 글자 수 (0 = 넘기지 않음)

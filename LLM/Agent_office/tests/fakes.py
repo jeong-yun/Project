@@ -71,5 +71,9 @@ def make_delegation(*child_ids: str):
     return Delegation(analysis="분석", assignments=[Assignment(child_id=c, subtask=f"{c} 업무") for c in child_ids])
 
 
-def make_critic(score=5, leaps=None, violations=None):
-    return CriticResult(analysis="논리 점검", logical_leaps=leaps or [], rule_violations=violations or [], score=score)
+def make_critic(score=5, leaps=None, violations=None, severity=None):
+    """severity 를 안 주면 지적이 있을 때 minor, 없을 때 none."""
+    severity = severity or ("minor" if leaps or violations else "none")
+    return CriticResult(
+        analysis="논리 점검", logical_leaps=leaps or [], rule_violations=violations or [], severity=severity, score=score
+    )

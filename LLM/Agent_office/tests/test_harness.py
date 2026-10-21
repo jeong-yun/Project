@@ -88,3 +88,49 @@ def test_evaluation_pinpoints_failing_step():
     assert not report.orm_passed
     assert report.first_failure.step == "draft"  # 최종보다 앞선 '초안' 단계에서 이미 틀렸다
     assert report.prm_score == 0.75
+
+
+# ─── 비평가 통과 규칙 · 최고 시도 선택 · 근거 자료 예산 (core/verification.py) ─────
+
+
+def test_critic_passed_ignores_minor_violations_by_default():
+    from core.verification import critic_passed
+    from tests.fakes import make_critic
+
+    minor = make_critic(4, violations=["표현"], severity="minor")
+    assert critic_passed(minor, 4)
+    assert not critic_passed(minor, 4, fail_on="any")  # 이전 동작
+    assert not critic_passed(make_critic(5, violations=["숫자 오류"], severity="severe"), 4)
+    assert not critic_passed(make_critic(3), 4)
+    assert critic_passed(None, 4)
+
+
+def test_best_attempt_prefers_score_then_non_severe_then_latest():
+    from core.verification import best_attempt
+    from tests.fakes import make_critic
+
+    assert best_attempt([make_critic(4), make_critic(2)]) == 0
+    assert best_attempt([make_critic(3), make_critic(3)]) == 1
+    assert best_attempt([make_critic(3, severity="minor"), make_critic(3, severity="severe")]) == 0
+
+
+def test_trim_evidence_keeps_every_source_within_budget():
+    from core.verification import trim_evidence
+
+    short, long_ = "## 툴\n짧은 데이터", "## 🌐 웹 검색 결과\n" + "x" * 5000
+    assert trim_evidence([short], 1000) == short
+    text = trim_evidence([long_, short], 300)
+    assert short in text  # 짧은 묶음은 통째로
+    assert "## 🌐 웹 검색 결과" in text and "x" * 400 not in text
+    assert "생략" in text
+    assert trim_evidence([short], 0) == "" and trim_evidence([], 100) == ""
+
+
+def test_old_critic_record_without_severity_still_loads():
+    from core.schemas import CriticResult
+
+    schema = CriticResult.model_json_schema()
+    assert "severity" in schema["required"]  # 모델에게는 필수 필드 (OpenAI strict 호환)
+    old = {"analysis": "a", "logical_leaps": ["비약"], "rule_violations": [], "score": 3}  # severity 추가 전 runs.db 기록
+    assert CriticResult(**old).severity == "minor"
+    assert CriticResult(**{**old, "logical_leaps": []}).severity == "none"
