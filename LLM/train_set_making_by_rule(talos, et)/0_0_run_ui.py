@@ -26,6 +26,7 @@
 
 import argparse
 import csv
+import hashlib
 import importlib.util
 import io
 import json
@@ -58,6 +59,7 @@ JOBS = {   # 이름: (스크립트, 잠금 이름)
     "generation": ("3_0_run_generation.py", "generation"),
     "collect": ("1_0_run_daily.py", "collect"),
     "agent": ("1_0_run_daily.py", "agent"),
+    "dataset": ("1_4_build_dataset.py", "dataset"),    # 학습데이터 화면의 '학습 로그에 반영' (수정·삭제 적용)
 }
 PROGRESS_FILE = BASE / "07_llm_output" / "_progress" / "progress.json"
 RULES_FILE = BASE / "07_llm_output" / "_progress" / "rule_status.jsonl"
@@ -585,7 +587,7 @@ def rules_page(q):
 _files = {}          # 경로 → (mtime, size, 줄 시작 위치 array)
 _labels = {}         # label 파일 경로 → (mtime, label bytearray(1=anomalies), 룰 번호 array, 룰 id 목록)
 _filters = {}        # (파일, 조건) → 맞는 줄 번호 목록 (최근 것만)
-_check = {"in_dir": None, "rules": {}, "cross": None, "C": None}
+_check = {"in_dir": None, "rules": {}, "cross": None, "C": None, "seen": 0.0}
 
 
 def dataset_dates():
@@ -725,11 +727,15 @@ def select_rows(dates, dev, label, rule, text, offset, limit, cons=""):
 
 
 def checker():
-    """현재 룰(05_llm_input 최신 rules_all)과 normal 교차 검사 함수 (처음 한 번 불러 둠)."""
+    """현재 룰(05_llm_input 최신 rules_all)과 normal 교차 검사 함수 (처음 한 번 불러 둠).
+    새 입력 날짜는 5초에 한 번만 확인한다 (폴더 찾기가 한 번에 8ms 라 줄마다 하면 전체 검증이 3배 가까이 느려짐)."""
     with _lock:
         if _check["C"] is None:
             _check["C"] = _load("llm_common_ui", "3_0a_common.py")
         C = _check["C"]
+        if time.monotonic() - _check["seen"] < 5:
+            return C, _check["rules"], _check["cross"]
+        _check["seen"] = time.monotonic()
         in_dir = C.latest_input_dir()
         if in_dir is not None and _check["in_dir"] != in_dir.name:
             _check["rules"] = {r["id"]: r for r in C.read_jsonl(in_dir / "rules_all.jsonl")}
@@ -794,8 +800,9 @@ def feature_engine():
     return _feat
 
 
-def analyze(payload, label, meta):
+def analyze(payload, label, meta, ctx=None):
     """데이터 프레임 한 줄 → label 사유, 검증 결과, label 정합성(+사유), 탐지 피처.
+    ctx = (C, rules, cross, feature_engine 결과): 전체 검증처럼 많은 줄을 볼 때 한 번 정해 넘긴다 (도중에 새 입력 날짜가 와도 같은 룰로).
 
     label 정합성 (라벨이 증거와 맞는지):
       OK    정합           anomalies: 룰 조건 모두 일치 + 범용 공격 흔적이나 다른 공격 룰도 공격으로 봄
@@ -805,8 +812,7 @@ def analyze(payload, label, meta):
       BAD   불일치         anomalies 인데 룰 조건 불일치 / normal 인데 룰에 탐지되거나 공격 흔적·공격 룰이 있음
     탐지 피처: 4.1 의 피처 중 이 payload 에서 켜지는 것 (공격 흔적 k_, 공격 룰 ra_, 이 룰의 개별 룰·정규식 r_)
     """
-    C, rules, cross = checker()
-    fe = feature_engine()
+    C, rules, cross, fe = ctx or (*checker(), feature_engine())
     F = fe["F"]
     rid = meta.get("id", "")
     rule = rules.get(rid)
@@ -1035,13 +1041,40 @@ def feature_counts(dev):
 
 
 # ── 전체 검증 (파일의 모든 줄의 label 정합성) ────────────────────────────
+# 검증 안 한 데이터만 (mode "new"): 이미 확인한 줄은 그 결과를 그대로 쓰고 나머지만 새로 확인한다.
+#   이미 확인한 줄 = 이 장비의 줄별 결과(로그가 그대로면 줄 순서대로, 다시 만들어졌으면 내용이 같은 줄), 중지할 때 저장한 결과,
+#   다른 장비의 결과(IPS·WAF 로그는 같은 샘플). 새 생성 실행으로 로그가 다시 만들어져도 새로 생긴 줄만 확인한다.
+#   수집으로 룰 입력 날짜가 바뀌어도 예전 결과를 그대로 쓴다 (줄마다 확인한 룰 입력 날짜를 남기고 화면에 보여 줌).
+# 전체 검증 (mode "all"): 모든 줄을 지금 룰로 새로 확인한다 (최신 룰로 다시 볼 때).
+# 줄별 결과(<장비>_frame.jsonl)의 줄마다 내용 지문(k)·룰 입력 날짜(in)를 적는다. 중지하면 확인한 줄은 <장비>_frame.partial.jsonl.
 
 _verify = {}
+_stopped = {}        # (날짜, 장비) → 중지한 검증 (화면 표시)
+_saved = {}          # verify.json → (수정 시각, 내용)
 CODE_NUM = {"OK": "1", "RULE": "2", "CHECK": "3", "BAD": "4"}
+MS_PER_LINE = 12.0   # 검증 기록이 없을 때 새로 확인하는 줄 1개의 시간 (데이터에 따라 8~30ms)
+REUSE_SEC = 0.0003   # 이미 확인한 결과를 그대로 쓰는 줄 1개의 시간
+ROW_HEAD = re.compile(rb'^\{"k": "([0-9a-f]+)", "in": "([^"]*)"')
+
+
+class _Stop(Exception):
+    """검증 중지: 중지 요청, 또는 검증 중에 로그가 다시 만들어짐."""
 
 
 def _verify_file(date, dev):
     return DATASET_DIR / date / f"{dev}_verify.json"
+
+
+def _frame_file(date, dev):
+    return DATASET_DIR / date / f"{dev}_frame.jsonl"
+
+
+def _partial_file(date, dev):
+    return DATASET_DIR / date / f"{dev}_frame.partial.jsonl"
+
+
+def _other(dev):
+    return "waf" if dev == "ips" else "ips"
 
 
 def verify_state(date, dev):
@@ -1062,100 +1095,505 @@ def verify_state(date, dev):
     return {"status": "none"}
 
 
-def start_verify(date, dev):
+def _saved_verify(date, dev):
+    """저장된 verify.json (로그가 바뀌어 무효여도): 지난 검증의 줄당 시간 → 예상 시간."""
+    p = _verify_file(date, dev)
+    try:
+        mt = p.stat().st_mtime
+        if _saved.get(p, (None,))[0] != mt:
+            _saved[p] = (mt, json.loads(p.read_text(encoding="utf-8")))
+        return _saved[p][1]
+    except (OSError, ValueError):
+        return {}
+
+
+def _ms_per_line(date, dev):
+    """새로 확인하는 줄 1개의 시간(ms): 같은 날짜의 지난 검증 기록, 없으면 기본값."""
+    for d in (dev, _other(dev)):
+        ms = _saved_verify(date, d).get("ms_per_line")
+        if ms:
+            return ms
+    return MS_PER_LINE
+
+
+def _meta_key(meta):
+    """analyze 가 보는 줄 정보 (장비마다 다른 method 는 빼고)."""
+    return tuple(str(meta.get(k) or "") for k in ("id", "note", "origin", "local_check", "review", "attack_type"))
+
+
+def _row_key(payload, label, meta):
+    """줄 내용 지문: payload·label·줄 정보가 같으면 확인 결과도 같다 (IPS·WAF 의 같은 샘플, 다시 만든 로그의 같은 줄)."""
+    return hashlib.sha1("\x00".join((payload, label) + _meta_key(meta)).encode("utf-8", "replace")).hexdigest()[:20]
+
+
+def _known_rows(date, dev, in_dir):
+    """이미 확인한 줄 → ({내용 지문: (파일 번호, 위치, 룰 입력 날짜)}, [파일]). 같은 줄이 여러 번 있으면 지금 룰 입력의 결과를 쓴다.
+    다른 장비가 검증 중이면 그쪽 파일은 쓰지 않는다 (끝날 때 그 파일을 바꿔야 하므로)."""
+    known, files, want = {}, [], in_dir.encode()
+    for d in (dev, _other(dev)):
+        if d != dev and _verify.get((date, d), {}).get("status") == "running":
+            continue
+        for p in (_frame_file(date, d), _partial_file(date, d)):
+            try:
+                with open(p, "rb") as f:
+                    no, pos = len(files), 0
+                    for line in f:
+                        m = ROW_HEAD.match(line)
+                        if m:
+                            k = m.group(1).decode()
+                            if k not in known or (m.group(2) == want and known[k][2] != want):
+                                known[k] = (no, pos, m.group(2))
+                        pos += len(line)
+            except OSError:
+                continue
+            files.append(p)
+    return known, files
+
+
+def _all_verified(date, dev):
+    """새로 확인할 줄이 없음: 지금 로그·룰 입력으로 끝난 검증이 있고 줄별 결과에 내용 지문이 있음."""
+    p = frame_cache(date, dev)
+    if p is None:
+        return False
+    with open(p, "rb") as f:
+        return bool(ROW_HEAD.match(f.readline()))
+
+
+def start_verify(date, dev, mode="all"):
+    """mode: new = 검증 안 한 데이터만, all = 전체. → "started" | "running"(이미 도는 중) | "done"(새로 확인할 줄 없음)."""
     path = _log_path(date, dev)
     with _lock:
         if _verify.get((date, dev), {}).get("status") == "running":
-            return False
+            return "running"
+        if mode == "new" and _all_verified(date, dev):
+            return "done"
         st = path.stat()
-        v = _verify[(date, dev)] = {"status": "running", "done": 0, "total": len(line_index(path)),
-                                    "mtime": st.st_mtime, "size": st.st_size, "started_at": RT.now_iso()}
+        v = _verify[(date, dev)] = {"status": "running", "mode": mode, "phase": "start", "done": 0,
+                                    "total": len(line_index(path)), "todo": None, "analyzed": 0, "reused": 0,
+                                    "eta_s": None, "ms": _ms_per_line(date, dev), "mtime": st.st_mtime,
+                                    "size": st.st_size, "started_at": RT.now_iso()}
+        _stopped.pop((date, dev), None)
+    threading.Thread(target=_verify_work, args=(date, dev, mode, path, v), daemon=True).start()
+    return "started"
 
-    def work():
-        frame = _frame_file(date, dev)
-        tmp = frame.with_name(f"{frame.name}.{os.getpid()}.tmp")
-        try:
-            li = label_info(path)
-            codes, summ, feats, labels = [], {}, {}, {"anomalies": 0, "normal": 0}
-            with open(tmp, "w", encoding="utf-8", newline="\n") as out:
-                for s in range(0, v["total"], 200):
-                    idx = list(range(s, min(v["total"], s + 200)))
-                    metas = read_label_lines(li[4], idx) if li else [{}] * len(idx)
-                    for line, meta in zip(read_lines(path, idx), metas):
-                        f = line.split("|||")
-                        payload, lab = (f[6], f[7]) if len(f) == 8 else (line, "")
-                        a = analyze(payload, lab, meta)
-                        out.write(json.dumps(a, ensure_ascii=False) + "\n")   # 줄별 결과: 데이터 프레임·내려받기가 다시 씀
-                        codes.append(CODE_NUM[a["cons"]])
-                        summ[a["cons"]] = summ.get(a["cons"], 0) + 1
-                        if lab in labels:                   # 피처별로 켜진 줄 수 (피처 페이지)
-                            labels[lab] += 1
-                            for name in {feature_key(x["name"]) for x in a["features"]}:
-                                feats.setdefault(name, [0, 0])[0 if lab == "anomalies" else 1] += 1
-                    v["done"] = len(codes)
-            for attempt in range(5):                    # 내려받는 중이라 잠깐 열려 있으면 (Windows) 조금 뒤 다시
-                try:
-                    tmp.replace(frame)
-                    break
-                except PermissionError:
-                    if attempt == 4:
-                        raise
-                    time.sleep(1)
-            v.update(status="done", codes="".join(codes), summary=summ, features=feats, labels=labels,
-                     frame_in_dir=_check["in_dir"], finished_at=RT.now_iso())
-            _verify_file(date, dev).write_text(json.dumps(
-                {k: v[k] for k in ("mtime", "size", "total", "codes", "summary", "features", "labels",
-                                   "frame_in_dir", "started_at", "finished_at")}, ensure_ascii=False), encoding="utf-8")
-        except Exception as e:
-            v.update(status="error", error=f"{type(e).__name__}: {e}")
+
+def stop_verify(date, dev):
+    """검증 중지 요청. 확인한 줄은 저장되어 '검증 안 한 데이터만' 으로 이어서 할 수 있다."""
+    v = _verify.get((date, dev))
+    if v and v.get("status") == "running":
+        v["stop"] = True
+        return True
+    return False
+
+
+def _verify_work(date, dev, mode, path, v):
+    frame, part = _frame_file(date, dev), _partial_file(date, dev)
+    tmp = frame.with_name(f"{frame.name}.{os.getpid()}.tmp")
+    for old in frame.parent.glob(f"{frame.name}.*.tmp"):        # 화면을 끄면서 남은 임시 파일 (그 프로세스가 없으면)
+        pid = old.name.split(".")[-2]
+        if pid != str(os.getpid()) and not RT.pid_alive(pid):
             try:
-                tmp.unlink()
+                old.unlink()
             except OSError:
                 pass
-    threading.Thread(target=work, daemon=True).start()
-    return True
+    srcs, out = [], None
+    try:
+        # WAF 는 IPS 검증 중이면 끝나기를 기다렸다 (같은 샘플이라) 그 결과를 쓴다. IPS 는 기다리지 않음 (서로 기다리지 않게)
+        while mode == "new" and dev == "waf" and _verify.get((date, "ips"), {}).get("status") == "running":
+            v["phase"] = "wait"
+            if v.get("stop"):
+                raise _Stop("중지 요청")
+            time.sleep(2)
+        v["phase"] = "prep"
+        ctx = (*checker(), dict(feature_engine()))      # 이번 검증은 한 룰 입력으로
+        in_dir = ctx[3]["in_dir"] or ""
+        li, n = label_info(path), v["total"]
+        cur = verify_state(date, dev)
+        # 이 장비의 줄별 결과가 지금 로그 그대로면 줄 순서대로 쓴다 (예전 형식이면 내용 지문만 붙임)
+        aligned = mode == "new" and cur.get("status") == "done" and frame.exists() and len(line_index(frame)) == n
+        old_in = cur.get("frame_in_dir") or ""
+        known, files = _known_rows(date, dev, in_dir) if mode == "new" and not aligned else ({}, [])
+        if aligned or not known:
+            v["todo"] = 0 if aligned else n
+        else:                                           # 새로 확인할 줄 수 (남은 시간 계산)
+            todo = 0
+            for s in range(0, n, 2000):
+                if v.get("stop"):
+                    raise _Stop("중지 요청")
+                idx = list(range(s, min(n, s + 2000)))
+                metas = read_label_lines(li[4], idx) if li else [{}] * len(idx)
+                for line, meta in zip(read_lines(path, idx), metas):
+                    f = line.split("|||")
+                    todo += _row_key(*((f[6], f[7]) if len(f) == 8 else (line, "")), meta) not in known
+            v["todo"] = todo
+        srcs = [open(p, "rb") for p in files]
+        codes, summ, feats, labels, ins = [], {}, {}, {"anomalies": 0, "normal": 0}, {}
+        v["eta_s"] = round(v["todo"] * v["ms"] / 1000 + (n - v["todo"]) * REUSE_SEC)
+        v["phase"], t_run = "run", time.monotonic()
+        win = [(t_run, 0)]
+        out = open(tmp, "w", encoding="utf-8", newline="\n")
+        for s in range(0, n, 200):
+            st = path.stat()
+            if v.get("stop") or st.st_mtime != v["mtime"] or st.st_size != v["size"]:
+                raise _Stop("중지 요청" if v.get("stop") else "검증 중에 로그가 다시 만들어짐 (새 생성 실행)")
+            idx = list(range(s, min(n, s + 200)))
+            metas = read_label_lines(li[4], idx) if li else [{}] * len(idx)
+            olds = read_lines(frame, idx) if aligned else None
+            for k, (line, meta) in enumerate(zip(read_lines(path, idx), metas)):
+                f = line.split("|||")
+                payload, lab = (f[6], f[7]) if len(f) == 8 else (line, "")
+                key = _row_key(payload, lab, meta)
+                if olds is not None or key in known:    # 이미 확인한 줄: 이 장비 줄 순서대로, 아니면 내용이 같은 줄
+                    if olds is not None:
+                        a = json.loads(olds[k])
+                    else:
+                        no, pos, _ = known[key]
+                        srcs[no].seek(pos)
+                        a = json.loads(srcs[no].readline())
+                    a.pop("k", None)
+                    row_in = a.pop("in", None) or old_in
+                    v["reused"] += 1
+                else:
+                    a, row_in = analyze(payload, lab, meta, ctx), in_dir
+                    v["analyzed"] += 1
+                out.write(json.dumps({"k": key, "in": row_in, **a}, ensure_ascii=False) + "\n")   # 데이터 프레임·내려받기가 다시 씀
+                ins[row_in] = ins.get(row_in, 0) + 1
+                codes.append(CODE_NUM[a["cons"]])
+                v["done"] += 1
+                summ[a["cons"]] = summ.get(a["cons"], 0) + 1
+                if lab in labels:                       # 피처별로 켜진 줄 수 (피처 페이지)
+                    labels[lab] += 1
+                    for name in {feature_key(x["name"]) for x in a["features"]}:
+                        feats.setdefault(name, [0, 0])[0 if lab == "anomalies" else 1] += 1
+            # 남은 시간: 최근 1분 동안 새로 확인한 속도 (20줄이 안 되면 지난 검증 기록)
+            now = time.monotonic()
+            win.append((now, v["analyzed"]))
+            while len(win) > 2 and now - win[0][0] > 60:
+                win.pop(0)
+            got = win[-1][1] - win[0][1]
+            per = (win[-1][0] - win[0][0]) / got if got >= 20 else v["ms"] / 1000
+            left = max(0, v["todo"] - v["analyzed"])
+            v["eta_s"] = round(left * per + max(0, n - v["done"] - left) * REUSE_SEC)
+        out.close()
+        for f in srcs:
+            f.close()
+        srcs = []
+        for attempt in range(1000):                     # 내려받기·같은 날짜의 다른 검증이 이 파일을 열고 있으면 (Windows) 기다렸다 다시
+            try:
+                tmp.replace(frame)
+                break
+            except PermissionError:
+                busy = any(x.get("status") == "running" for (d2, _), x in list(_verify.items()) if d2 == date and x is not v)
+                if attempt >= 4 and not busy:
+                    raise
+                time.sleep(2 if busy else 1)
+        try:
+            part.unlink()                               # 중지할 때 저장한 결과는 이제 줄별 결과에 다 들어감
+        except OSError:
+            pass
+        ms = 1000 * (time.monotonic() - t_run) / v["analyzed"] if v["analyzed"] >= 200 else v["ms"]
+        v.update(status="done", codes="".join(codes), summary=summ, features=feats, labels=labels, frame_in_dir=in_dir,
+                 rule_inputs=ins, ms_per_line=round(ms, 2), finished_at=RT.now_iso(), phase=None, eta_s=None)
+        _verify_file(date, dev).write_text(json.dumps(
+            {k: v[k] for k in ("mtime", "size", "total", "mode", "analyzed", "reused", "ms_per_line", "codes", "summary",
+                               "features", "labels", "frame_in_dir", "rule_inputs", "started_at", "finished_at")},
+            ensure_ascii=False), encoding="utf-8")
+    except _Stop as e:
+        saved = _keep_partial(out, srcs, tmp, part, v["done"])
+        with _lock:
+            if _verify.get((date, dev)) is v:
+                del _verify[(date, dev)]
+        _stopped[(date, dev)] = {"at": RT.now_iso(), "saved": saved, "why": str(e)}
+    except Exception as e:
+        _keep_partial(out, srcs, tmp, part, v["done"])
+        v.update(status="error", error=f"{type(e).__name__}: {e}", phase=None, eta_s=None)
 
 
-def _frame_file(date, dev):
-    return DATASET_DIR / date / f"{dev}_frame.jsonl"
+def _keep_partial(out, srcs, tmp, part, done):
+    """멈춘 검증의 임시 파일 정리. 확인한 줄이 있으면 '검증 안 한 데이터만' 이 이어서 쓰도록 저장 (예전에 저장한 것도 함께)."""
+    for f in [out] + srcs:
+        if f:
+            f.close()
+    saved = 0
+    try:
+        if done and tmp.exists():
+            if part.exists():
+                with open(tmp, "ab") as w, open(part, "rb") as r:
+                    for block in iter(lambda: r.read(1 << 20), b""):
+                        w.write(block)
+            tmp.replace(part)
+            saved = done
+    except OSError:
+        pass
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return saved
 
 
 def frame_cache(date, dev):
-    """'전체 검증' 때 저장한 줄별 확인 결과 파일. 로그와 룰 입력(05_llm_input 최신 날짜)이 그대로일 때만, 아니면 None."""
+    """검증 때 저장한 줄별 확인 결과 파일 (로그가 그대로일 때만, 아니면 None). 줄마다 확인한 룰 입력 날짜(in)가 있다."""
     v = verify_state(date, dev)
     p = _frame_file(date, dev)
-    if (v.get("status") != "done" or not v.get("frame_in_dir") or v["frame_in_dir"] != (input_dates() or [""])[-1]
-            or not p.exists()):
+    if v.get("status") != "done" or not p.exists():
         return None
     return p if len(line_index(p)) == v.get("total") else None
 
 
 def cached_rows(cache, idx):
     """줄 번호들의 저장된 확인 결과 (analyze 와 같은 모양)."""
-    return [json.loads(x) for x in read_lines(cache, idx)]
+    rows = [json.loads(x) for x in read_lines(cache, idx)]
+    for a in rows:
+        a.pop("k", None)
+        a.pop("in", None)
+    return rows
+
+
+def _est_new(date, dev, v, n):
+    """'검증 안 한 데이터만' 이 새로 확인할 줄 수 (대략 - 시작하면 정확히 셈) = 전체 - 이미 확인한 줄."""
+    if v.get("status") == "done":
+        return 0
+    known = 0
+    for d in (dev, _other(dev)):
+        for p in (_frame_file(date, d), _partial_file(date, d)):
+            try:
+                with open(p, "rb") as f:
+                    m = ROW_HEAD.match(f.readline())
+                if m:
+                    known = max(known, len(line_index(p)))
+            except OSError:
+                pass
+    return max(0, n - known)
 
 
 def verify_summary(date, dev):
     dates = [d["date"] for d in dataset_dates()] if date == "all" else [date]
-    out = {"status": "done", "done": 0, "total": 0, "summary": {}, "names": CONS, "finished_at": ""}
+    latest = (input_dates() or [""])[-1]
+    out = {"status": "done", "done": 0, "total": 0, "summary": {}, "names": CONS, "finished_at": "", "reused": 0,
+           "todo": 0, "analyzed": 0, "eta_s": None, "est_new": 0, "est_new_s": 0.0, "est_all_s": 0.0,
+           "rule_inputs": {}, "latest_input": latest}
+    run_etas, wait_etas, phases = [], [], set()
     for d in dates:
         v = verify_state(d, dev)
         st = v.get("status")
+        n = v.get("total", 0) or len(line_index(_log_path(d, dev)))
+        ms = _ms_per_line(d, dev)
+        out["total"] += n
+        out["est_all_s"] += n * ms / 1000
         if st == "running":
-            out["status"] = "running"
-            out["done"] += v.get("done", 0)
-        elif st == "done":
-            out["done"] += v.get("total", 0)
+            out["status"], out["mode"] = "running", v.get("mode")
+            out["stopping"] = out.get("stopping") or bool(v.get("stop"))
+            phases.add(v.get("phase"))
+            for k in ("done", "analyzed", "reused", "todo"):
+                out[k] += v.get(k) or 0
+            if v.get("phase") == "wait":                # IPS 가 끝난 뒤 그 결과를 이어받는 시간
+                wait_etas.append((_verify.get((d, "ips"), {}).get("eta_s") or 0) + n * REUSE_SEC)
+            elif v.get("eta_s") is not None:
+                run_etas.append(v["eta_s"])
+            continue
+        if st == "done":
+            out["done"] += n
+            out["reused"] += v.get("reused", 0)
             for k, c in v.get("summary", {}).items():
                 out["summary"][k] = out["summary"].get(k, 0) + c
             out["finished_at"] = max(out["finished_at"], v.get("finished_at", ""))
+            ri = v.get("rule_inputs") or ({v["frame_in_dir"]: n} if v.get("frame_in_dir") else {})
+            for k, c in ri.items():                     # 줄마다 확인한 룰 입력 날짜
+                out["rule_inputs"][k] = out["rule_inputs"].get(k, 0) + c
         elif out["status"] != "running":
             out["status"] = "error" if st == "error" else "none"
             out["error"] = v.get("error")
-        out["total"] += v.get("total", 0) or len(line_index(_log_path(d, dev)))
+        new = _est_new(d, dev, v, n)
+        out["est_new"] += new
+        out["est_new_s"] += new * ms / 1000
+        if (d, dev) in _stopped:
+            out["stopped"] = _stopped[(d, dev)]
+    if run_etas or wait_etas:
+        # 여러 날짜를 함께 검증하면 한 프로세스를 나눠 쓰므로 남은 시간의 합 ÷ 동시에 도는 수
+        out["eta_s"] = round(max([sum(run_etas) / max(1, len(run_etas))] + wait_etas))
+    out["old_rules"] = sum(c for k, c in out["rule_inputs"].items() if k != latest)
+    out["phase"] = ("run" if "run" in phases else "prep" if phases & {"prep", "start"} else "wait" if phases else None)
     # 저장된 줄별 결과가 모두 있으면 데이터 프레임 내려받기가 바로 된다
     out["frame_ready"] = out["status"] == "done" and all(frame_cache(d, dev) is not None for d in dates)
     return out
+
+
+# ── 학습데이터 수정·삭제 (화면에서 저장 → 1.4 가 학습 로그를 만들 때마다 적용) ──────────────
+# 08_dataset/<날짜>/edits.json = {sk: {"action": "delete" | "edit", "label", "http", "id", "orig_label", "why", "at"}}
+# sk = 1.4 가 label 파일에 적는 샘플 지문 (IPS·WAF 의 같은 샘플은 같은 sk → 두 로그에 함께 적용).
+# LLM 출력(07)은 그대로 두므로 되돌리면 원래 샘플로 돌아온다.
+
+_edit_lock = threading.Lock()
+_ds = {"M": None}
+
+
+def dataset_mod():
+    """1.4 (학습 로그 변환) 모듈 - 고친 payload 를 학습 로그와 똑같이 한 줄로 만들려고."""
+    if _ds["M"] is None:
+        _ds["M"] = _load("dataset_ui", "1_4_build_dataset.py")
+    return _ds["M"]
+
+
+def _edits_file(date):
+    return DATASET_DIR / date / "edits.json"
+
+
+def read_edits(date):
+    try:
+        return json.loads(_edits_file(date).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_edits(date, edits):
+    p = _edits_file(date)
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(edits, ensure_ascii=False, indent=1), encoding="utf-8")
+    for attempt in range(5):                            # 1.4 가 잠깐 읽고 있으면 (Windows) 조금 뒤 다시
+        try:
+            tmp.replace(p)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.5)
+
+
+def _raw_http(text):
+    """화면에서 고친 payload (줄바꿈은 실제 줄바꿈, 제어문자는 '\\x00' 표기) → LLM 출력과 같은 모양의 http."""
+    s = text.replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    return re.sub(r"\\x(0[0-9b-f]|1[0-9a-f]|7f)", lambda m: chr(int(m.group(1), 16)), s) + "\n"
+
+
+def _line_meta(date, dev, line):
+    """학습 로그의 한 줄과 그 줄의 label 정보."""
+    path = _log_path(date, dev)
+    li = label_info(path)
+    if li is None or not 0 <= line < len(line_index(path)):
+        raise ValueError("line")
+    return read_lines(path, [line])[0], read_label_lines(li[4], [line])[0]
+
+
+def check_edit(b):
+    """고친 label·payload 를 학습 로그와 똑같이 한 줄로 만들어 다시 검증 (저장하지 않음)."""
+    text, meta = _line_meta(b.get("date", ""), b.get("dev", "ips"), int(b.get("line", -1)))
+    f = text.split("|||")
+    label = b.get("label") if b.get("label") in ("anomalies", "normal") else (f[7] if len(f) == 8 else "")
+    payload = f[6] if len(f) == 8 else text
+    if b.get("payload") is not None:
+        M = dataset_mod()
+        st, _ = M.load_mapping()
+        payload = M.one_line(M.normalize_http(_raw_http(b["payload"])), st)
+        if M.SEP in payload:
+            raise ValueError("payload 에 구분자 '|||' 를 쓸 수 없습니다")
+    return dict(analyze(payload, label, dict(meta, label=label)), payload=payload, label=label)
+
+
+def save_edit(b):
+    """한 줄(샘플)의 수정·삭제 저장. action: edit | delete | undo. sk 를 주면 줄 대신 그 샘플 (목록의 되돌리기)."""
+    date, act, sk = b.get("date", ""), b.get("action"), b.get("sk")
+    if not DATE_RE.match(date) or act not in ("edit", "delete", "undo"):
+        raise ValueError("date/action")
+    text, meta = ("", {}) if sk else _line_meta(date, b.get("dev", "ips"), int(b.get("line", -1)))
+    sk = sk or meta.get("sk")
+    if not sk:
+        raise ValueError("이 날짜 학습 로그는 예전 형식이라 고칠 수 없습니다 - 먼저 '학습 로그에 반영'으로 다시 만드세요")
+    with _edit_lock:
+        edits = read_edits(date)
+        if act == "undo":
+            edits.pop(sk, None)
+        else:
+            e = {"action": act, "id": meta.get("id", ""), "orig_label": meta.get("label", ""),
+                 "why": str(b.get("why") or "")[:300], "at": RT.now_iso()}
+            if act == "edit":
+                if b.get("label") in ("anomalies", "normal") and b["label"] != meta.get("label"):
+                    e["label"] = b["label"]
+                if b.get("payload") is not None:
+                    if "|||" in b["payload"]:
+                        raise ValueError("payload 에 구분자 '|||' 를 쓸 수 없습니다")
+                    e["http"] = _raw_http(b["payload"])
+                if "label" not in e and "http" not in e:
+                    raise ValueError("바뀐 것이 없습니다")
+            edits[sk] = e
+        _write_edits(date, edits)
+    return {"ok": True, "saved": len(edits)}
+
+
+def delete_bad(date, dev):
+    """검증에서 '불일치' 인 줄을 모두 삭제로 저장 (사유 = 불일치 사유)."""
+    n = 0
+    for d in ([x["date"] for x in dataset_dates()] if date == "all" else [date]):
+        v = verify_state(d, dev)
+        idx = [i for i, c in enumerate(v.get("codes", "")) if c == CODE_NUM["BAD"]] if v.get("status") == "done" else []
+        if not idx:
+            continue
+        path = _log_path(d, dev)
+        metas = read_label_lines(label_info(path)[4], idx)
+        cache = frame_cache(d, dev)
+        why = [r.get("cons_reason", "") for r in cached_rows(cache, idx)] if cache else [""] * len(idx)
+        with _edit_lock:
+            edits = read_edits(d)
+            for meta, w in zip(metas, why):
+                if meta.get("sk"):
+                    edits[meta["sk"]] = {"action": "delete", "id": meta.get("id", ""), "orig_label": meta.get("label", ""),
+                                         "why": ("불일치: " + w)[:300], "at": RT.now_iso()}
+                    n += 1
+            _write_edits(d, edits)
+    return {"deleted": n}
+
+
+def dataset_job():
+    """화면에서 시작한 '학습 로그에 반영'(1.4) 상태."""
+    rec = _ui_record("dataset")
+    running = bool(rec.get("pid")) and RT.pid_alive(rec["pid"]) and time.time() - rec.get("t", 0) < 3600
+    out = {"running": running, "started_at": rec.get("started_at", "")}
+    if rec.get("out") and not running:
+        txt = tail(RT.RUN_DIR / rec["out"], 40)
+        out["result"] = "fail" if ("Traceback" in txt or "[ERROR]" in txt) else "done" if "[데이터셋]" in txt else ""
+    return out
+
+
+def edits_summary(date):
+    """저장한 수정·삭제와 학습 로그 반영 여부 (화면)."""
+    dates = [d["date"] for d in dataset_dates()] if date == "all" else [date]
+    out = {"saved": 0, "deleted": 0, "edited": 0, "pending": False, "old_format": [], "items": [], "rebuild": dataset_job()}
+    for d in dates:
+        edits = read_edits(d)
+        try:
+            summ = json.loads((DATASET_DIR / d / "summary.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            summ = {}
+        try:
+            mt = _edits_file(d).stat().st_mtime
+        except OSError:
+            mt = 0
+        out["saved"] += len(edits)
+        out["deleted"] += sum(1 for e in edits.values() if e.get("action") == "delete")
+        out["edited"] += sum(1 for e in edits.values() if e.get("action") == "edit")
+        out["pending"] |= summ.get("edits_mtime", 0) != mt        # 저장한 뒤 아직 학습 로그를 다시 만들지 않음
+        if summ.get("format", 1) < 2:
+            out["old_format"].append(d)
+        for sk, e in edits.items():
+            out["items"].append({"date": d, "sk": sk, "action": e.get("action"), "id": e.get("id", ""),
+                                 "orig_label": e.get("orig_label", ""), "label": e.get("label", ""),
+                                 "payload": bool(e.get("http")), "why": e.get("why", ""), "at": e.get("at", "")})
+    out["items"] = sorted(out["items"], key=lambda e: e["at"], reverse=True)[:300]
+    return out
+
+
+def start_rebuild(date):
+    """'학습 로그에 반영': 1.4 로 그 날짜 학습 로그를 다시 만든다 (API 비용 없음)."""
+    if date != "all" and date not in [d["date"] for d in dataset_dates()]:
+        raise ValueError("date")
+    for job in ("generation", "collect"):
+        if job_state(job)["running"]:
+            raise ValueError("학습데이터 생성·수집이 도는 중입니다 - 끝날 때 그 작업의 1.4 가 수정·삭제를 함께 반영합니다")
+    if dataset_job()["running"]:
+        raise ValueError("이미 학습 로그를 다시 만드는 중입니다")
+    if any(v.get("status") == "running" for (d, _), v in list(_verify.items()) if date in ("all", d)):
+        raise ValueError("검증이 도는 중입니다 - 끝나거나 중지한 뒤에 반영하세요")
+    return {"pid": spawn("dataset", [] if date == "all" else ["--date", date, "--force"])}
 
 
 def data_query(q):
@@ -1249,6 +1687,7 @@ def data_rows(q):
             metas = read_label_lines(li[4], [i for i, _ in items])
         cache = frame_cache(d, dev) if view == "frame" else None
         saved = cached_rows(cache, [i for i, _ in items]) if cache else None    # '전체 검증' 결과가 있으면 그대로
+        edits = read_edits(d) if view == "frame" else {}
         for k, ((i, g), line, meta) in enumerate(zip(items, lines, metas)):
             if view == "log":
                 rows.append({"index": g, "date": d, "line": line})
@@ -1256,7 +1695,10 @@ def data_rows(q):
             f = line.split("|||")
             payload, method, lab = (f[6], f[5], f[7]) if len(f) == 8 else (line, "", "")
             a = saved[k] if saved else analyze(payload, lab, meta)
-            rows.append(dict(a, index=g, date=d, payload=payload, method=method, label=lab, rule_id=meta.get("id", "")))
+            e = edits.get(meta.get("sk")) or {}
+            rows.append(dict(a, index=g, line=i, date=d, payload=payload, method=method, label=lab, rule_id=meta.get("id", ""),
+                             sk=meta.get("sk", ""), edited=meta.get("edited", ""),
+                             edit={"action": e["action"], "label": e.get("label", ""), "payload": bool(e.get("http"))} if e else None))
     rows.sort(key=lambda r: r["index"])
     return {"total": total, "offset": offset, "rows": rows}
 
@@ -1385,6 +1827,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, data_rows(q))
             if u.path == "/api/data/verify":
                 return self._send(200, verify_summary(_q(q, "date"), _q(q, "dev", "ips")))
+            if u.path == "/api/data/edits":
+                return self._send(200, edits_summary(_q(q, "date")))
             if u.path == "/api/features":
                 dev = _q(q, "dev", "ips")
                 if dev not in ("ips", "waf"):
@@ -1424,13 +1868,25 @@ class Handler(BaseHTTPRequestHandler):
     def route(self, path, b):
         if path == "/api/progress/refresh":
             return 200, {"started": refresh_progress()}
-        if path == "/api/data/verify":
-            dev = b.get("dev", "ips")
+        if path == "/api/data/edit":
+            return 200, save_edit(b)
+        if path == "/api/data/check":
+            return 200, check_edit(b)
+        if path == "/api/data/edit/bad":
+            return 200, delete_bad(b.get("date", ""), b.get("dev", "ips"))
+        if path == "/api/data/rebuild":
+            return 200, start_rebuild(b.get("date", ""))
+        if path in ("/api/data/verify", "/api/data/verify/stop"):
+            dev, mode = b.get("dev", "ips"), b.get("mode", "all")
             dates = [d["date"] for d in dataset_dates()]
             todo = dates if b.get("date") == "all" else [b.get("date")]
-            if not set(todo) <= set(dates):
-                raise ValueError("date")
-            return 200, {"started": [d for d in todo if start_verify(d, dev)]}
+            if not set(todo) <= set(dates) or mode not in ("new", "all"):
+                raise ValueError("date/mode")
+            if path.endswith("/stop"):
+                return 200, {"stopping": [d for d in todo if stop_verify(d, dev)]}
+            res = {d: start_verify(d, dev, mode) for d in todo}
+            return 200, {"started": [d for d, r in res.items() if r == "started"],
+                         "done": [d for d, r in res.items() if r == "done"]}
         if path == "/api/generation/start":
             if job_state("generation")["running"]:
                 return 409, {"error": "학습데이터 생성이 이미 실행 중입니다"}
@@ -1527,7 +1983,8 @@ tr.lv-bad td{background:rgba(214,69,69,.06)}.reason{font-size:12.5px;min-width:2
 .pager{display:flex;gap:8px;align-items:center;margin-top:10px}
 .est{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:13px;line-height:1.6}.est b{font-weight:600}
 .c-OK{background:#d7f3e3;color:#13633a}.c-RULE{background:#dde8fb;color:#1f4fa3}.c-CHECK{background:#fff0d1;color:#8a5a00}.c-BAD{background:#fde0e0;color:#a32424}
-.vsum{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:13px}.vsum .chip{cursor:pointer;font-size:12.5px;padding:2px 10px}
+.vsum{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:13px}button.sm{padding:2px 8px;font-size:12px;margin:0 2px 2px 0}td.act{min-width:130px}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:50;display:none;align-items:center;justify-content:center;padding:16px}.mbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;width:min(940px,100%);max-height:92vh;overflow:auto}.mbox h3{margin:0 0 10px;font-size:15px}.mbox textarea{width:100%;min-height:260px;font:12px/1.45 Consolas,monospace;padding:8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);margin-top:8px}#edRes{margin:8px 0;font-size:13px}#dEditList{margin-top:8px;max-height:360px;overflow:auto}.vsum .chip{cursor:pointer;font-size:12.5px;padding:2px 10px}
 .feat{font-size:12px;line-height:1.55;min-width:230px}.feat code{font:11.5px Consolas,monospace;background:var(--chip);border-radius:4px;padding:0 4px}
 .cons{min-width:230px;font-size:12.5px}.cons .chip{margin-bottom:3px}
 .pct{font-size:40px;font-weight:700;line-height:1;font-variant-numeric:tabular-nums;min-width:118px}
@@ -1598,12 +2055,19 @@ tr.hl td{background:rgba(47,111,222,.12)}.fgroup td{background:var(--bg);font-we
   <label>룰 id<input id="dRule" placeholder="예: et:1:2001044" style="width:150px"></label>
   <label>payload 검색<input id="dQ" style="width:200px"></label>
   <label>label 정합성<select id="dCons"><option value="">전체</option><option value="OK">정합</option><option value="RULE">정합 (룰 기준)</option><option value="CHECK">확인 필요</option><option value="BAD">불일치</option></select></label>
-  <button id="dGo">조회</button><button id="dVerify">전체 검증</button><a id="dDown" style="font-size:13px;align-self:center">로그 내려받기</a>
+  <button id="dGo">조회</button><button id="dVerifyNew">검증 안 한 데이터만 검증</button><button id="dVerify">전체 검증</button><button class="danger" id="dVerifyStop" style="display:none">검증 중지</button><a id="dDown" style="font-size:13px;align-self:center">로그 내려받기</a>
  </div>
  <div class="vsum" id="dVsum"></div>
+ <div class="vsum" id="dEdits"></div><div id="dEditList" style="display:none"></div>
  <div class="muted" style="margin-top:8px;font-size:12.5px" id="dHelp"></div>
  <div id="dBody" style="margin-top:10px;overflow-x:auto"></div>
  <div class="pager"><button id="dPrev">이전</button><span class="muted" id="dCount"></span><button id="dNext">다음</button></div></div></section>
+<div class="modal" id="edBox"><div class="mbox"><h3>학습데이터 수정 <span class="muted" id="edWhere" style="font-weight:400;font-size:13px"></span></h3>
+ <div class="row"><label>label<select id="edLabel"><option>anomalies</option><option>normal</option></select></label></div>
+ <textarea id="edPay" spellcheck="false"></textarea>
+ <div class="muted" style="font-size:12.5px">payload 는 줄바꿈을 그대로 입력합니다 (로그에는 두 글자 \n 으로 저장). '다시 확인' 으로 지금 룰로 검증해 본 뒤 저장하세요. 저장한 수정은 '학습 로그에 반영' 때 학습 로그에 들어가고, 목록에서 되돌릴 수 있습니다.</div>
+ <div id="edRes"></div>
+ <div class="row"><button id="edCheck">다시 확인</button><button class="primary" id="edSave">저장</button><button id="edCancel">취소</button></div></div></div>
 
 <!-- 5. 피처 -->
 <section class="page" id="p-features"><div class="card"><h2>피처 <span class="muted" style="font-weight:400" id="fSum"></span></h2>
@@ -1737,12 +2201,12 @@ async function loadRules(){const qs=new URLSearchParams({flag:$("rFlag").value,s
 let tm;$("rQ").oninput=()=>{clearTimeout(tm);tm=setTimeout(()=>{rOff=0;loadRules()},300)};$("rFlag").onchange=$("rSrc").onchange=()=>{rOff=0;loadRules()};
 $("rPrev").onclick=()=>{rOff=Math.max(0,rOff-50);loadRules()};$("rNext").onclick=()=>{rOff+=50;loadRules()};
 /* ── 4. 학습데이터 ── */
-let dView="frame",dOff=0,dInit=false,D=[],dTot=0,dReady=false;
+let dView="frame",dOff=0,dInit=false,D=[],dTot=0,dReady=false,dV=null,dVT=0,dRows=[],dE=null,dET=0,dERun=false,edX=null;
 function dLimit(){return dView==="log"?200:50}
 async function initData(){if(!dInit){const r=await get("/api/data/dates");D=r.dates;
   $("dDate").innerHTML=(D.length>1?'<option value="all">전체 (모든 날짜)</option>':"")+D.slice().reverse().map(d=>`<option value="${d.date}">${d.date} (${fmt(d.events)}건)</option>`).join("");
   if(D.length)$("dDate").value=D.at(-1).date;dInit=true}
- loadData();loadVerify();ensureFeat()}
+ loadData();loadVerify();loadEdits();ensureFeat()}
 function dSummary(){const v=$("dDate").value,ds=v==="all"?D:D.filter(d=>d.date===v);const a=ds.reduce((s,d)=>s+(d.label.anomalies||0),0),n=ds.reduce((s,d)=>s+(d.label.normal||0),0);
  $("dSum").textContent=`· ${v==="all"?"전체":v} · ${fmt(a+n)}건 (anomalies ${fmt(a)} / normal ${fmt(n)}) · 룰 ${fmt(ds.reduce((s,d)=>s+d.rules,0))}개`;
  const dl=$("dDown");   // log 보기 = 그 날짜의 로그 파일, 데이터 프레임 보기 = 지금 조건에 맞는 모든 줄을 표의 열 그대로 CSV
@@ -1751,26 +2215,76 @@ function dSummary(){const v=$("dDate").value,ds=v==="all"?D:D.filter(d=>d.date==
  else{dl.textContent="로그 내려받기";dl.href=v==="all"?"#":`/download/dataset?date=${v}&dev=${$("dDev").value}`;dl.style.visibility=v==="all"?"hidden":"visible"}
  $("dHelp").innerHTML=dView==="log"?"수집 시스템 형식(|||, 8필드) 로그 줄 그대로입니다. 앞의 번호는 index 입니다.":"<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>데이터 프레임 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다.";}
 async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=await get(`/api/data/verify?date=${v}&dev=${$("dDev").value}`)}catch(e){$("dVsum").textContent="";return}
- dReady=s.status==="done"&&!!s.frame_ready;
- if(s.status==="running"){$("dVsum").innerHTML=`<span class="muted">전체 검증 중… ${fmt(s.done)} / ${fmt(s.total)}</span>`;$("dVerify").disabled=true;setTimeout(()=>{loadVerify();},1500);return}
- $("dVerify").disabled=false;
- if(s.status!=="done"){$("dVsum").innerHTML=`<span class="muted">${s.status==="error"?"전체 검증 오류: "+esc(s.error):"전체 검증 전 — '전체 검증'을 누르면 모든 줄의 label 정합성을 확인하고 정합성으로 걸러 볼 수 있습니다."}</span>`;return}
+ dV=s;dReady=s.status==="done"&&!!s.frame_ready;
+ const run=s.status==="running";$("dVerifyStop").style.display=run?"":"none";$("dVerifyNew").disabled=$("dVerify").disabled=run;
+ if(run){const what=s.mode==="new"?"검증 안 한 데이터만 검증":"전체 검증",left=s.eta_s!=null?` · 남은 시간 <b>약 ${hms(s.eta_s)}</b> · <b>${clock(s.eta_s)}</b> 쯤 끝날 예상`:"";
+  const body=s.phase==="wait"?`${what} 대기 - IPS 검증이 끝나기를 기다리는 중 (같은 샘플이라 끝나면 그 결과를 그대로 씀)${left}`
+   :s.phase==="run"?`${what} 중… ${fmt(s.done)} / ${fmt(s.total)}줄${s.todo<s.total?` (새로 확인 ${fmt(s.analyzed)} / ${fmt(s.todo)}줄 · 이미 확인한 결과 그대로 ${fmt(s.reused)}줄)`:""}${left}`
+   :`${what} 준비 중 - 이미 확인한 줄과 새로 확인할 줄을 세는 중…`;
+  $("dVsum").innerHTML=`<span>${body}${s.stopping?" · <b>중지하는 중…</b>":""}</span>`;clearTimeout(dVT);dVT=setTimeout(loadVerify,1500);return}
+ const est=`<span class="muted">검증 안 한 데이터만: 새로 확인 약 ${fmt(s.est_new)}줄${s.est_new?` (약 ${hms(s.est_new_s)})`:""} · 전체 검증: ${fmt(s.total)}줄 (약 ${hms(s.est_all_s)})</span>`;
+ const stop=s.stopped?`<span class="muted">${s.stopped.at.slice(11,16)} 에 중지 (${esc(s.stopped.why)}) - 확인한 ${fmt(s.stopped.saved)}줄은 저장됨 → '검증 안 한 데이터만 검증' 으로 이어서</span>`:"";
+ if(s.status!=="done"){$("dVsum").innerHTML=(s.status==="error"?`<span class="muted">검증 오류: ${esc(s.error)}</span>`:`<span class="muted">검증 전 — 모든 줄의 label 정합성을 확인하면 정합성으로 걸러 볼 수 있습니다.</span>`)+stop+est;return}
  const tot=Object.values(s.summary).reduce((a,b)=>a+b,0);
- $("dVsum").innerHTML=`<b>label 정합성 (${fmt(tot)}줄)</b>`+["OK","RULE","CHECK","BAD"].map(k=>`<span class="chip c-${k}" data-c="${k}">${esc(s.names[k])} ${fmt(s.summary[k]||0)} (${tot?(100*(s.summary[k]||0)/tot).toFixed(1):0}%)</span>`).join("")+`<span class="muted">${s.finished_at.replace("T"," ")} 검증</span>`;
- $("dVsum").querySelectorAll("[data-c]").forEach(c=>c.onclick=()=>{$("dCons").value=c.dataset.c;dOff=0;loadData()});}
-$("dVerify").onclick=async()=>{try{await post("/api/data/verify",{date:$("dDate").value,dev:$("dDev").value});loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}};
+ $("dVsum").innerHTML=`<b>label 정합성 (${fmt(tot)}줄)</b>`+["OK","RULE","CHECK","BAD"].map(k=>`<span class="chip c-${k}" data-c="${k}">${esc(s.names[k])} ${fmt(s.summary[k]||0)} (${tot?(100*(s.summary[k]||0)/tot).toFixed(1):0}%)</span>`).join("")+`<span class="muted">${s.finished_at.replace("T"," ")} 검증${s.reused?` · 이미 확인한 결과 ${fmt(s.reused)}줄 그대로 씀`:""}${s.old_rules?` · ${fmt(s.old_rules)}줄은 이전 룰 입력(${esc(Object.keys(s.rule_inputs).filter(k=>k!==s.latest_input).sort().join(", "))}) 기준 - 최신 룰(${esc(s.latest_input)})로 다시 보려면 '전체 검증'`:""}</span>`+stop+(s.est_new?est:"");
+ $("dVsum").querySelectorAll("[data-c]").forEach(c=>c.onclick=()=>{$("dCons").value=c.dataset.c;dOff=0;loadData()});renderEdits();}
+async function startVerify(mode){try{const r=await post("/api/data/verify",{date:$("dDate").value,dev:$("dDev").value,mode});
+  if(!r.started.length&&r.done.length){$("dVsum").innerHTML='<span class="muted">새로 확인할 줄이 없습니다 - 이미 모두 검증했습니다.</span>';setTimeout(loadVerify,2500)}else loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}}
+$("dVerifyNew").onclick=()=>startVerify("new");
+$("dVerify").onclick=()=>{if(!dV||confirm(`모든 줄(${fmt(dV.total)}줄)을 지금 룰로 새로 확인합니다 (약 ${hms(dV.est_all_s)}). 진행할까요?`))startVerify("all")};
+$("dVerifyStop").onclick=async()=>{try{await post("/api/data/verify/stop",{date:$("dDate").value,dev:$("dDev").value});loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}};
 async function loadData(){dSummary();if(!D.length){$("dBody").innerHTML='<div class="muted">08_dataset 에 학습데이터가 없습니다.</div>';return}
  const qs=new URLSearchParams({view:dView,date:$("dDate").value,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,offset:dOff,limit:dLimit()});
  $("dBody").style.opacity=.5;let r;try{r=await get("/api/data/rows?"+qs)}catch(e){$("dBody").innerHTML=`<div class="muted">불러오지 못했습니다: ${esc(e.message)}</div>`;return}finally{$("dBody").style.opacity=1}
  const all=$("dDate").value==="all";
  if(dView==="log"){$("dBody").innerHTML=r.rows.map(x=>`<div class="logline"><span class="ix">${x.index}${all?" · "+x.date:""}</span>${esc(x.line)}</div>`).join("")||'<div class="muted">없음</div>'}
- else{$("dBody").innerHTML=`<table><thead><tr><th class="n">index</th><th>payload</th><th>method</th><th>label</th><th>label 사유</th><th>검증 결과</th><th>label 정합성</th><th>탐지 피처 <a href="#/features" style="font-weight:400">(설명)</a></th></tr></thead><tbody>${r.rows.map(x=>`<tr class="lv-${x.level}"><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td class="method">${esc(x.method)}</td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></td><td class="reason">${esc(x.reason)}</td><td class="chk">${x.checks.map(([s,t])=>`<div class="${s}">${s==="ok"?"✔":s==="warn"?"△":"✘"} ${esc(t)}</div>`).join("")}</td><td class="cons"><span class="chip c-${x.cons}">${esc(x.cons_text)}</span><div>${esc(x.cons_reason)}</div></td><td class="feat">${x.features.length?x.features.map(f=>`<div><code class="fn" data-f="${esc(f.name)}" data-d="${f.name.startsWith("k_")?"":esc(f.desc)}">${esc(f.name)}</code> = ${f.value} <span class="muted">${esc(f.desc)}</span></div>`).join("")+`<div class="muted">${x.label==="normal"?"✘ 정상인데 켜진 피처가 있음":`켜진 피처 ${x.features.length}개 → 모델이 공격으로 볼 근거`}</div>`:`<div class="muted">${x.label==="normal"?"켜진 피처 없음 → 정상으로 볼 근거":"켜진 피처 없음 → 이 피처로는 탐지 못 함"}</div>`}</td></tr>`).join("")}</tbody></table>`}
- dTot=r.total;$("dCount").textContent=`${fmt(r.total)}건 중 ${r.total?dOff+1:0}–${Math.min(dOff+dLimit(),r.total)}`;$("dPrev").disabled=dOff===0;$("dNext").disabled=dOff+dLimit()>=r.total;}
+ else{$("dBody").innerHTML=`<table><thead><tr><th class="n">index</th><th>payload</th><th>method</th><th>label</th><th>label 사유</th><th>검증 결과</th><th>label 정합성</th><th>탐지 피처 <a href="#/features" style="font-weight:400">(설명)</a></th><th>수정·삭제</th></tr></thead><tbody>${r.rows.map((x,k)=>`<tr class="lv-${x.level}"><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td class="method">${esc(x.method)}</td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></td><td class="reason">${esc(x.reason)}</td><td class="chk">${x.checks.map(([s,t])=>`<div class="${s}">${s==="ok"?"✔":s==="warn"?"△":"✘"} ${esc(t)}</div>`).join("")}</td><td class="cons"><span class="chip c-${x.cons}">${esc(x.cons_text)}</span><div>${esc(x.cons_reason)}</div></td><td class="feat">${x.features.length?x.features.map(f=>`<div><code class="fn" data-f="${esc(f.name)}" data-d="${f.name.startsWith("k_")?"":esc(f.desc)}">${esc(f.name)}</code> = ${f.value} <span class="muted">${esc(f.desc)}</span></div>`).join("")+`<div class="muted">${x.label==="normal"?"✘ 정상인데 켜진 피처가 있음":`켜진 피처 ${x.features.length}개 → 모델이 공격으로 볼 근거`}</div>`:`<div class="muted">${x.label==="normal"?"켜진 피처 없음 → 정상으로 볼 근거":"켜진 피처 없음 → 이 피처로는 탐지 못 함"}</div>`}</td><td class="act">${editCell(x,k)}</td></tr>`).join("")}</tbody></table>`}
+ dRows=r.rows;dTot=r.total;$("dCount").textContent=`${fmt(r.total)}건 중 ${r.total?dOff+1:0}–${Math.min(dOff+dLimit(),r.total)}`;$("dPrev").disabled=dOff===0;$("dNext").disabled=dOff+dLimit()>=r.total;}
 $("dDown").onclick=e=>{   // 저장된 '전체 검증' 결과가 없으면 줄마다 다시 확인하므로 오래 걸릴 수 있음
  if(dView==="frame"&&!dReady&&dTot>1000&&!confirm(`'전체 검증' 결과가 없어 ${fmt(dTot)}줄을 하나씩 다시 확인하며 CSV 를 만듭니다 (${dur(dTot*0.015)}).\n'전체 검증'을 먼저 하면 바로 받을 수 있습니다. 지금 받을까요?`))e.preventDefault()};
 $("vLog").onclick=()=>{dView="log";$("vLog").classList.add("on");$("vFrame").classList.remove("on");dOff=0;loadData()};
 $("vFrame").onclick=()=>{dView="frame";$("vFrame").classList.add("on");$("vLog").classList.remove("on");dOff=0;loadData()};
-for(const id of["dDate","dDev"])$(id).onchange=()=>{dOff=0;$("dCons").value="";loadData();loadVerify()};
+for(const id of["dDate","dDev"])$(id).onchange=()=>{dOff=0;$("dCons").value="";loadData();loadVerify();loadEdits()};
+/* 수정·삭제: 저장하면 '학습 로그에 반영'(1.4 다시 만들기) 때 학습 로그에 들어간다 */
+function editCell(x,k){if(!x.sk)return"";
+ if(x.edit)return x.edit.action==="delete"?`<span class="chip c-BAD">삭제 예정</span><div><button class="sm" data-a="undo" data-r="${k}">되돌리기</button></div>`
+  :`<span class="chip c-RULE">${x.edited?"수정됨":"수정 예정"}${x.edit.label?" → "+esc(x.edit.label):""}${x.edit.payload?" (payload)":""}</span><div><button class="sm" data-a="edit" data-r="${k}">수정</button><button class="sm" data-a="undo" data-r="${k}">되돌리기</button></div>`;
+ return(x.edited?`<span class="chip c-RULE">수정됨 (${esc(x.edited)})</span><br>`:"")+`<button class="sm" data-a="edit" data-r="${k}">수정</button><button class="sm danger" data-a="del" data-r="${k}">삭제</button>`}
+async function editPost(body){try{await post("/api/data/edit",body);loadData();loadEdits()}catch(e){alert("실패: "+e.message)}}
+$("dBody").addEventListener("click",e=>{const b=e.target.closest("button[data-a]");if(!b)return;const x=dRows[+b.dataset.r];if(!x)return;
+ const at={date:x.date,dev:$("dDev").value,line:x.line};
+ if(b.dataset.a==="edit")openEditor(x);
+ else if(b.dataset.a==="undo")editPost(Object.assign(at,{action:"undo"}));
+ else if(confirm(`index ${x.index} 줄 (룰 ${x.rule_id}, ${x.label}) 을 학습 로그에서 삭제합니다. '학습 로그에 반영' 때 적용되고 목록에서 되돌릴 수 있습니다. 진행할까요?`))
+  editPost(Object.assign(at,{action:"delete",why:x.cons==="BAD"?"불일치: "+x.cons_reason:""}))});
+function openEditor(x){edX=x;$("edWhere").textContent=`${x.date} · ${$("dDev").value.toUpperCase()} · index ${x.index} · 룰 ${x.rule_id}`;$("edLabel").value=x.label;
+ $("edPay").value=x.payload.replace(/\\n/g,"\n");$("edRes").innerHTML=`지금: <span class="chip c-${x.cons}">${esc(x.cons_text)}</span> <span class="muted">${esc(x.cons_reason)}</span>`;$("edBox").style.display="flex"}
+function edBody(){const b={date:edX.date,dev:$("dDev").value,line:edX.line,label:$("edLabel").value},p=$("edPay").value;if(p!==edX.payload.replace(/\\n/g,"\n"))b.payload=p;return b}
+$("edCheck").onclick=async()=>{$("edRes").textContent="확인 중…";try{const a=await post("/api/data/check",edBody());$("edRes").innerHTML=`고친 뒤: <span class="chip c-${a.cons}">${esc(a.cons_text)}</span> ${esc(a.cons_reason)}<div class="muted">${esc(a.reason)}</div>`}catch(e){$("edRes").textContent="실패: "+e.message}};
+$("edSave").onclick=async()=>{try{await post("/api/data/edit",Object.assign(edBody(),{action:"edit"}));$("edBox").style.display="none";loadData();loadEdits()}catch(e){$("edRes").textContent="실패: "+e.message}};
+$("edCancel").onclick=()=>{$("edBox").style.display="none"};
+async function loadEdits(){const v=$("dDate").value;if(!v)return;try{dE=await get(`/api/data/edits?date=${v}`)}catch(e){$("dEdits").textContent="";return}renderEdits();
+ const run=!!(dE.rebuild&&dE.rebuild.running);clearTimeout(dET);if(run)dET=setTimeout(loadEdits,3000);
+ if(dERun&&!run){D=(await get("/api/data/dates")).dates;loadData();loadVerify()}   // 다시 만든 뒤: 줄 수·검증 상태 새로
+ dERun=run}
+function renderEdits(){const s=dE;if(!s)return;const rb=s.rebuild||{},bad=(dV&&dV.status==="done"&&dV.summary&&dV.summary.BAD)||0;let h="";
+ if(rb.running)h+=`<span><b>학습 로그 다시 만드는 중…</b> <span class="muted">(${esc((rb.started_at||"").slice(11,16))} 시작, 큰 날짜는 4~5분. 끝나면 '검증 안 한 데이터만 검증' 으로 바뀐 줄만 확인)</span></span>`;
+ else if(rb.result==="fail")h+=`<span class="muted">학습 로그 다시 만들기 실패 - .run/dataset-*.out 을 확인하세요</span>`;
+ if(s.old_format.length)h+=`<span class="muted">${esc(s.old_format.join(", "))} 학습 로그는 예전 형식이라 줄을 고치려면 먼저 다시 만들어야 합니다</span>`;
+ if(s.saved)h+=`<span>수정·삭제 <b>${fmt(s.saved)}</b>건 (삭제 ${fmt(s.deleted)} · 수정 ${fmt(s.edited)})${s.pending?" - <b>학습 로그에 아직 반영 안 됨</b>":" - 학습 로그에 반영됨"}</span><button class="sm" data-e="list">목록</button>`;
+ if(!s.saved&&s.pending)h+=`<span>되돌린 수정·삭제가 학습 로그에 아직 반영 안 됨</span>`;
+ if((s.pending||s.old_format.length)&&!rb.running)h+=`<button class="sm primary" data-e="apply">학습 로그에 반영 (다시 만들기)</button>`;
+ if(bad&&!rb.running)h+=`<button class="sm danger" data-e="bad">불일치 ${fmt(bad)}줄 모두 삭제</button>`;
+ $("dEdits").innerHTML=h}
+function editList(){const s=dE,box=$("dEditList");if(!s||box.style.display!=="none"){box.style.display="none";return}
+ box.innerHTML=`<table><thead><tr><th>날짜</th><th>처리</th><th>룰 id</th><th>label</th><th>사유</th><th>저장 시각</th><th></th></tr></thead><tbody>${s.items.map((e,k)=>`<tr><td>${e.date}</td><td>${e.action==="delete"?"삭제":"수정"+(e.payload?" (payload)":"")}</td><td>${esc(e.id)}</td><td>${esc(e.orig_label)}${e.label?" → "+esc(e.label):""}</td><td class="reason">${esc(e.why)}</td><td>${esc(e.at.replace("T"," "))}</td><td><button class="sm" data-u="${k}">되돌리기</button></td></tr>`).join("")}</tbody></table>${s.saved>s.items.length?`<div class="muted">최근 ${s.items.length}건만 표시</div>`:""}`;box.style.display="block"}
+$("dEdits").addEventListener("click",async e=>{const b=e.target.closest("button[data-e]");if(!b)return;const a=b.dataset.e,v=$("dDate").value;
+ try{if(a==="list")return editList();
+  if(a==="bad"){const n=dV.summary.BAD;if(!confirm(`검증에서 '불일치' 인 ${fmt(n)}줄을 모두 삭제로 저장합니다. '학습 로그에 반영' 때 적용되고 목록에서 되돌릴 수 있습니다. 진행할까요?`))return;await post("/api/data/edit/bad",{date:v,dev:$("dDev").value});loadData()}
+  if(a==="apply"){if(!confirm("저장한 수정·삭제를 반영해 학습 로그를 다시 만듭니다 (1.4, API 비용 없음, 큰 날짜는 4~5분). 끝나면 '검증 안 한 데이터만 검증' 으로 바뀐 줄만 확인하세요. 진행할까요?"))return;await post("/api/data/rebuild",{date:v})}
+  loadEdits()}catch(err){alert("실패: "+err.message)}});
+$("dEditList").addEventListener("click",async e=>{const b=e.target.closest("button[data-u]");if(!b)return;const it=dE.items[+b.dataset.u];
+ try{await post("/api/data/edit",{date:it.date,sk:it.sk,action:"undo"});$("dEditList").style.display="none";loadEdits();loadData()}catch(err){alert("실패: "+err.message)}});
 for(const id of["dLabel","dCons"])$(id).onchange=()=>{dOff=0;loadData()};
 $("dGo").onclick=()=>{dOff=0;loadData()};for(const id of["dRule","dQ"])$(id).onkeydown=e=>{if(e.key==="Enter"){dOff=0;loadData()}};
 $("dPrev").onclick=()=>{dOff=Math.max(0,dOff-dLimit());loadData()};$("dNext").onclick=()=>{dOff+=dLimit();loadData()};
@@ -1797,7 +2311,7 @@ function renderFeatures(){const r=FC;if(!r)return;const g=$("fGroup").value,q=$(
    `<td>${i.pattern?`<details><summary>보기</summary><div class="pat">${esc(i.pattern)}</div></details>`:""}</td></tr>`}).join("")||'<tr><td colspan="9" class="muted">없음</td></tr>';
  if(fFocus){const el=document.getElementById("f-"+fFocus);if(el)el.scrollIntoView({block:"center"})}}
 let fTm;$("fQ").oninput=()=>{clearTimeout(fTm);fTm=setTimeout(()=>{fFocus="";renderFeatures()},200)};$("fGroup").onchange=()=>{fFocus="";renderFeatures()};$("fDev").onchange=()=>loadFeatures();
-$("fCount").onclick=async()=>{try{await post("/api/data/verify",{date:"all",dev:$("fDev").value});$("fCountMsg").textContent="켜진 줄 수 계산 중…";setTimeout(()=>loadFeatures(),1500)}catch(e){$("fCountMsg").textContent="실패: "+e.message}};
+$("fCount").onclick=async()=>{try{await post("/api/data/verify",{date:"all",dev:$("fDev").value,mode:"new"});$("fCountMsg").textContent="켜진 줄 수 계산 중…";setTimeout(()=>loadFeatures(),1500)}catch(e){$("fCountMsg").textContent="실패: "+e.message}};
 /* 피처 이름 말풍선 (4. 학습데이터의 '탐지 피처') */
 const tip=document.createElement("div");tip.className="tipbox";tip.hidden=true;document.body.appendChild(tip);let tipOn=null;
 function showTip(t){tipOn=t;const d=featDoc(t.dataset.f);

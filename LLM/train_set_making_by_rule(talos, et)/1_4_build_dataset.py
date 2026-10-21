@@ -9,11 +9,19 @@
     2026-01-01 00:13:40|||198.51.100.60|||60742|||192.168.10.30|||8080|||normal|||POST /login.php HTTP/1.1\nHost: ...|||normal
 
 [payload] HTTP 메시지를 한 줄로. 줄바꿈은 두 글자 '\\n' (기존 학습 로그와 같음. 매핑 md 에서 공백으로 바꿀 수 있음)
+  요청 줄(첫 줄)의 글자 역슬래시 뒤에 n 이나 제어문자 표기(x00~x1f, x7f)가 오면 역슬래시를 '%5C' 로 적는다
+  (그대로 두면 로그를 읽을 때 줄바꿈·제어문자로 읽혀 요청 줄이 잘림. 실제 로그에서도 URL 의 역슬래시는 흔히 %5C).
 
 [label]
   - IPS·WAF 모두 마지막 필드(reason)에 anomalies / normal 을 직접 쓴다.
   - 두 장비 모두 *_label.jsonl 에 줄별로 원본 룰 id·attack_type·method 와 생성 단계 검증 기록(origin: llm/augmented,
     review: 검토 판정, local_check: 코드 검사, note: 생성 메모)을 남긴다 (추적·화면의 학습데이터 페이지용).
+  - sk: 샘플 지문 (룰 id·샘플 번호·LLM 출력 http). 다시 변환해도 같은 샘플이면 같다 → 화면의 수정·삭제가 이것으로 샘플을 찾음.
+
+[수정·삭제] 화면(4. 학습데이터)에서 저장한 것을 08_dataset/<날짜>/edits.json 에서 읽어 변환할 때마다 적용한다.
+  {sk: {"action": "delete"}} = 학습 로그에서 뺌 (rejected.jsonl 에 '사용자 삭제'),
+  {sk: {"action": "edit", "label": ..., "http": ...}} = label·payload 를 바꿔서 씀 (label 파일의 edited 에 표시).
+  LLM 출력(07)은 그대로이므로 edits.json 에서 지우면 원래대로 돌아온다.
 
 [method]  docs/코드참조/method_매핑.md 의 'IPS method 방식' / 'WAF method 방식'
   - mapping   : 공격 유형 → 장비 탐지 이름 (매핑 표)
@@ -22,7 +30,7 @@
 
 [전체 흐름]
   1. 07_llm_output/<날짜>/*.jsonl (LLM 응답) 을 읽는다.
-  2. 샘플을 검사한다: label, 빈 http, '|||' 포함, attack_type 목록, 매핑 제외
+  2. 화면에서 저장한 수정·삭제(edits.json)를 적용하고, 샘플을 검사한다: label, 빈 http, '|||' 포함, attack_type 목록, 매핑 제외
   3. method_매핑.md 로 IPS·WAF method 를 정한다.
   4. 시각(하루에 고르게), 출발IP(공인 대역, 샘플마다 고정), 목적IP/포트(Host 헤더 또는 기본값)를 채운다.
   5. 08_dataset/<날짜>/ 에 IPS·WAF 로그와 label 파일을 쓴다.
@@ -33,12 +41,14 @@
      ├─ ips_<yymmdd>_snort_label.jsonl ← 줄별 정답·원본 룰 id
      ├─ waf_<yymmdd>_snort.log         ← WAF 파서 형식 (8필드)
      ├─ waf_<yymmdd>_snort_label.jsonl ← 줄별 정답·원본 룰 id
-     ├─ rejected.jsonl                 ← 검사에서 빠진 샘플과 이유
+     ├─ rejected.jsonl                 ← 검사에서 빠진 샘플과 이유 (화면에서 삭제한 샘플 포함)
+     ├─ edits.json                     ← 화면에서 저장한 수정·삭제 (1.4 는 읽기만)
      └─ summary.json
 
 [사용법]
     python 1_4_build_dataset.py                       # LLM 출력이 바뀐 날짜만 변환
     python 1_4_build_dataset.py --force               # 다시 변환
+    python 1_4_build_dataset.py --date 2026-10-20 --force   # 그 날짜만 (화면의 '학습 로그에 반영')
     python 1_4_build_dataset.py --llm-output 폴더 --out 폴더   # 다른 위치 (테스트용)
 """
 
@@ -66,6 +76,10 @@ LOG_DIR = BASE_DIR / "logs"
 
 SEP = "|||"
 LABELS = {"anomalies", "normal"}
+FORMAT = 2              # 출력 형식 판 (바뀌면 다음 실행에서 모든 날짜를 다시 변환). 2 = 요청 줄 역슬래시 %5C, sk, 수정·삭제
+EDITS_NAME = "edits.json"
+# 요청 줄에서 로그 표기(줄바꿈 '\n', 제어문자 '\x00')로 읽힐 글자 역슬래시
+AMBIG_BS = re.compile(r"\\(?=n|x(?:0[0-9b-f]|1[0-9a-f]|7f))")
 ATTACK_TYPES = {
     "sql_injection", "xss", "xxe", "ssrf", "deserialization", "code_injection", "command_injection",
     "file_inclusion", "path_traversal", "file_upload", "webshell", "auth_bypass", "rce", "buffer_overflow",
@@ -275,6 +289,21 @@ def same_verdict(old, new, label, conditions):
 
 # ── LLM 출력 읽기 ───────────────────────────────────────────────────────
 
+def load_edits(out_dir):
+    """화면에서 저장한 수정·삭제 {sk: {...}} (없으면 빈 dict)."""
+    try:
+        return json.loads((out_dir / EDITS_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def edits_mtime(out_dir):
+    try:
+        return (out_dir / EDITS_NAME).stat().st_mtime
+    except OSError:
+        return 0
+
+
 def read_llm_outputs(folder):
     """*.jsonl 을 읽어 룰 결과 목록을 돌려준다. ``` 줄, 빈 줄은 무시."""
     results, bad = [], []
@@ -319,18 +348,32 @@ def pick_method(mode, mapped, rule_name):
     return mode
 
 
-def collect_events(results, rejected, st, mapping, rules):
-    """LLM 결과 → 이벤트 목록. 잘못된 샘플은 rejected 에 이유와 함께 넣는다."""
-    events = []
+def collect_events(results, rejected, st, mapping, rules, edits=None):
+    """LLM 결과 → 이벤트 목록. 잘못된 샘플은 rejected 에 이유와 함께 넣는다. edits = 화면에서 저장한 수정·삭제."""
+    events, edits = [], edits or {}
     for fname, lineno, obj in results:
         rid = obj.get("id", "")
         rule = rules.get(rid, {})
         rule_type = obj.get("attack_type") or rule.get("attack_type", "other")
         for k, smp in enumerate(obj.get("samples", [])):
-            ref = {"file": fname, "line": lineno, "id": rid, "sample": k}
             label = (smp.get("label") or "").strip()
             http = smp.get("http") or ""
             atype = (smp.get("attack_type") or rule_type).strip()
+            seed = _h(rid, k, http)                     # 출발 IP·포트·주소 바꾸기의 씨앗 (LLM 출력 그대로 기준)
+            sk = f"{seed:040x}"[:16]                    # 샘플 지문: 화면의 수정·삭제가 이것으로 샘플을 찾는다
+            ref = {"file": fname, "line": lineno, "id": rid, "sample": k, "sk": sk}
+            edit, edited = edits.get(sk) or {}, []
+            if edit.get("action") == "delete":
+                rejected.append(dict(ref, reason="사용자 삭제" + (f": {edit['why']}" if edit.get("why") else ""))); continue
+            if edit.get("action") == "edit":
+                if edit.get("label") in LABELS and edit["label"] != label:
+                    label = edit["label"]
+                    edited.append("label")
+                    if label == "anomalies":                # normal 샘플의 attack_type 은 none → 룰의 공격 유형
+                        atype = (rule_type or "other").strip()
+                if edit.get("http") and edit["http"] != http:
+                    http = edit["http"]
+                    edited.append("payload")
             if label not in LABELS:
                 rejected.append(dict(ref, reason=f"label 오류: {label!r}")); continue
             if not http.strip():
@@ -351,15 +394,15 @@ def collect_events(results, rejected, st, mapping, rules):
             else:
                 atype = "none"
                 ev = {"ips_method": st["normal method"], "waf_method": st["normal method"]}
-            seed, http = _h(rid, k, http), normalize_http(http)
+            http = normalize_http(http)
             n_addr = 0
-            if st["문서용 주소 바꾸기"].strip() in ("예", "yes", "y", "true", "1"):
+            if "payload" not in edited and st["문서용 주소 바꾸기"].strip() in ("예", "yes", "y", "true", "1"):
                 new, n_addr = realistic_addresses(http, seed)
                 if n_addr and not same_verdict(http, new, label, rule.get("conditions", [])):
                     new, n_addr = http, -1                  # 바꾸면 룰 판정이 달라짐 → 원래대로 (표시만)
                 http = new
             ev.update(id=rid, label=label, attack_type=atype, http=http, addr_fixed=n_addr,
-                      conditions=rule.get("conditions", []), seed=seed,
+                      conditions=rule.get("conditions", []), seed=seed, sk=sk, edited="·".join(edited),
                       # 생성 단계의 검증 기록 (화면의 '학습데이터' 페이지가 label 사유·검증 결과로 보여 줌)
                       origin=smp.get("origin", ""), review=smp.get("review", ""),
                       local_check=smp.get("local_check", ""), note=str(smp.get("note", ""))[:300])
@@ -370,8 +413,11 @@ def collect_events(results, rejected, st, mapping, rules):
 def one_line(http, st):
     """HTTP 메시지를 한 줄 payload 로. 줄바꿈 표기는 매핑 md 의 'payload 줄바꿈' (기본 두 글자 '\\n')."""
     nl = " " if st["payload 줄바꿈"].lower() == "space" else "\\n"
+    # 요청 줄의 글자 역슬래시 + n·제어문자 표기 → %5C (그대로 두면 로그를 읽을 때 줄바꿈으로 읽혀 요청 줄이 잘림)
+    head, sep, rest = http.rstrip("\n").partition("\n")
+    s = AMBIG_BS.sub("%5C", head) + sep + rest
     # 줄바꿈 외 제어문자(바이너리 바이트)는 기존 학습 로그처럼 '\x00' 글자 표기로 (로그 한 줄이 깨지지 않게)
-    s = re.sub(r"[\x00-\x09\x0b-\x1f\x7f]", lambda m: f"\\x{ord(m.group()):02x}", http.rstrip("\n"))
+    s = re.sub(r"[\x00-\x09\x0b-\x1f\x7f]", lambda m: f"\\x{ord(m.group()):02x}", s)
     return s.replace("\n", nl)
 
 
@@ -398,12 +444,13 @@ def waf_line(ev, ts, st):
 
 def build(day_dir, out_dir, st, mapping, rules):
     results, rejected = read_llm_outputs(day_dir)
+    edits, e_mtime = load_edits(out_dir), edits_mtime(out_dir)
     try:
         day0 = dt.datetime.strptime(day_dir.name, "%Y-%m-%d")
     except ValueError:
         day0 = dt.datetime.combine(dt.date.today(), dt.time())
     yymmdd = day0.strftime("%y%m%d")
-    events = collect_events(results, rejected, st, mapping, rules)
+    events = collect_events(results, rejected, st, mapping, rules, edits)
 
     n = max(len(events), 1)
     for i, ev in enumerate(events):
@@ -436,7 +483,9 @@ def build(day_dir, out_dir, st, mapping, rules):
                 lf.write(text + "\n")
                 rec = {"line": line_no, "id": ev["id"], "label": ev["label"], "attack_type": ev["attack_type"],
                        "method": ev[mkey], "origin": ev["origin"], "review": ev["review"],
-                       "local_check": ev["local_check"], "note": ev["note"]}
+                       "local_check": ev["local_check"], "note": ev["note"], "sk": ev["sk"]}
+                if ev["edited"]:                            # 화면에서 고친 것 (label·payload)
+                    rec["edited"] = ev["edited"]
                 if ev["addr_fixed"]:                        # 문서용 주소를 바꾼 곳 수 (-1 = 룰 판정이 달라져 그대로 둠)
                     rec["addr_fixed"] = ev["addr_fixed"]
                 tf.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -451,7 +500,9 @@ def build(day_dir, out_dir, st, mapping, rules):
         "llm_output_dir": str(day_dir),
         "llm_output_files": sorted(p.name for p in day_dir.glob("*.jsonl")),
         "llm_output_mtime": max((p.stat().st_mtime for p in day_dir.glob("*.jsonl")), default=0),
-        "mapping_mtime": MAPPING_FILE.stat().st_mtime,
+        "mapping_mtime": MAPPING_FILE.stat().st_mtime, "format": FORMAT, "edits_mtime": e_mtime,
+        "edits": {"saved": len(edits), "deleted": sum(1 for r in rejected if r.get("reason", "").startswith("사용자 삭제")),
+                  "edited": sum(1 for e in events if e["edited"])},
         "rules": len(results), "events": len(events), "rejected": len(rejected),
         "label": dict(Counter(e["label"] for e in events)),
         "attack_type": dict(Counter(e["attack_type"] for e in events).most_common()),
@@ -473,6 +524,7 @@ def main(argv=None):
     parser.add_argument("--force", action="store_true", help="이미 변환한 날짜도 다시 변환")
     parser.add_argument("--llm-output", type=Path, default=LLM_OUTPUT_DIR, help="LLM 출력 폴더 (날짜 폴더들의 상위)")
     parser.add_argument("--out", type=Path, default=DATASET_DIR, help="데이터셋 출력 폴더")
+    parser.add_argument("--date", help="이 날짜 폴더만 (예: 2026-10-20)")
     args = parser.parse_args(argv)
     setup_logging()
 
@@ -484,7 +536,8 @@ def main(argv=None):
 
     # 날짜 폴더만 (07_llm_output/_progress 같은 진행 현황 폴더는 빼기)
     day_dirs = sorted(d for d in args.llm_output.glob("*") if d.is_dir()
-                      and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d.name) and any(d.glob("*.jsonl")))
+                      and re.fullmatch(r"\d{4}-\d{2}-\d{2}", d.name) and any(d.glob("*.jsonl"))
+                      and (not args.date or d.name == args.date))
     if not day_dirs:
         log.info("LLM 출력 없음 (%s/<날짜>/*.jsonl) - 건너뜀", args.llm_output)
         return 0
@@ -496,7 +549,8 @@ def main(argv=None):
             prev = json.loads((out / "summary.json").read_text(encoding="utf-8"))
         latest = max(p.stat().st_mtime for p in day.glob("*.jsonl"))
         if (not args.force and prev.get("llm_output_mtime") == latest
-                and prev.get("mapping_mtime") == MAPPING_FILE.stat().st_mtime):
+                and prev.get("mapping_mtime") == MAPPING_FILE.stat().st_mtime
+                and prev.get("format", 1) == FORMAT and prev.get("edits_mtime", 0) == edits_mtime(out)):
             log.info("[데이터셋] %s 변경 없음 - 건너뜀", day.name)
             continue
         build(day, out, st, mapping, rules)
