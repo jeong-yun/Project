@@ -20,6 +20,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable, Iterator
+from datetime import datetime
 
 from core.llm_factory import NoAvailableModelError
 from core.schemas import AgentAnswer
@@ -32,10 +33,35 @@ WORKING_LABELS = {
 RETRY_LABELS = {"critic": "🔁 자가 교정 중", "harness": "🧪 오류 수정 중", "model": "🔄 모델 오류 — 다시 작성 중"}
 KIND_LABELS = {"plan": "📋 업무 분배", "draft": "📝 초안", "review": "🔍 검토", "integrate": "🧩 통합"}
 
+# 화면 위쪽 진행 단계 표시 — 워크플로우가 지나가는 큰 단계 (마지막 '결정'은 사람 몫)
+STAGES = ["🎯 요청 정리", "🌐 자료 수집", "📋 업무 분배", "✍️ 작성", "🔍 검토·통합", "⚖️ 검증", "👤 결정"]
+_KIND_STAGE = {"brief": 0, "tools": 1, "research": 1, "plan": 2, "draft": 3, "review": 4, "integrate": 4, "critic": 5}
+_LABEL_STAGE = {
+    **{label: _KIND_STAGE[kind] for kind, label in WORKING_LABELS.items()},
+    RETRY_LABELS["critic"]: 5, RETRY_LABELS["harness"]: 5,
+}
 
-def new_run(run_id: str, question: str, root_id: str) -> dict:
+
+def stage_of(run: dict) -> int:
+    """지금 몇 번째 단계인지 (STAGES 의 위치). 결정까지 끝나면 len(STAGES).
+
+    여러 에이전트가 동시에 다른 단계에 있을 수 있으므로, 지금까지 도달한 가장 뒤 단계를 쓴다.
+    """
+    if run["status"] in ("adopted", "rejected"):
+        return len(STAGES)
+    if run["status"] == "awaiting_human":
+        return len(STAGES) - 1
+    reached = 1 if run.get("brief") is not None else 0
+    for step in run["steps"]:
+        reached = max(reached, _KIND_STAGE[step.kind])
+    for label in run["activity"].values():
+        reached = max(reached, _LABEL_STAGE.get(label, 0))
+    return reached
+
+
+def new_run(run_id: str, question: str, root_id: str, team_id: str = "") -> dict:
     return {
-        "run_id": run_id, "question": question, "root_id": root_id, "started_at": time.time(),
+        "run_id": run_id, "team_id": team_id, "question": question, "root_id": root_id, "started_at": time.time(),
         "status": "reviewing", "done": False, "error": None,
         "statuses": {root_id: ("working", WORKING_LABELS["brief"])}, "activity": {root_id: WORKING_LABELS["brief"]},
         "drafting": {"node": None, "text": ""},
@@ -46,6 +72,21 @@ def new_run(run_id: str, question: str, root_id: str) -> dict:
         "saved_files": [],  # 채택해서 저장한 결과 파일 경로
         "harness_options": {},  # 업무 양식의 검증 옵션 (주식 검산표 등)
     }
+
+
+def restore_run(row: dict) -> dict:
+    """저장소(runs.db)에 남은 '결정 대기' 실행을 화면용 run 으로 되살린다 (서버를 다시 켠 뒤).
+
+    LangGraph 체크포인트가 파일(checkpoints.db)에 남아 있으므로 사람 결정으로 이어서 재개할 수 있다.
+    브리프·근거 자료는 저장하지 않으므로 비어 있다.
+    """
+    run = new_run(row["id"], row["question"], row["root_id"], row["team_id"])
+    run.update(status=row["status"], done=True, steps=row["steps"], activity={}, decision=row.get("decision"),
+               started_at=datetime.fromisoformat(row["created_at"]).timestamp(), restored=True)
+    run["statuses"] = {s.node_id: step_status(s) for s in row["steps"]}
+    if row["status"] == "awaiting_human":
+        run["statuses"][row["root_id"]] = ("wait", "👤 결정 대기")
+    return run
 
 
 def step_status(step: AgentAnswer) -> tuple[str, str]:

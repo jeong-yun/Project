@@ -4,12 +4,17 @@
 
 화면 구성 (위 → 아래)
   ① 문의 대상  : 기본은 팀장(supervisor). 다른 칸을 고르면 그 에이전트가 supervisor 가 되어 그 아래 팀만 일한다
+  ④ 업무 맡기기 : 일이 없을 때는 맨 위에, 업무가 있으면 결과 아래에 둔다
+                 팀 업무 양식(예: 주가 전망 — 종목·기간 입력칸) 또는 자유 질문 + '원하는 최종 상태'
   ② 실시간 영역 (작업 중에는 1초마다 자동으로 다시 그림 — 작업은 백그라운드에서 계속된다)
      - 조직도   : 👤 사용자 ↔ supervisor → 전문가들. 칸을 **클릭**하면 그 에이전트를 아래 패널에서 본다
+     - 질문 카드 : 질문 + 진행 단계 줄(🎯 요청 정리 → … → 👤 결정)
      - 에이전트 패널 : 고른 에이전트의 상태·맡은 업무·작성 중인 초안·결과 (스크롤 상자), 🖼 이미지 바꾸기
      - 탭       : 📜 전체 진행(모든 단계, 스크롤) / 🎯 브리프·근거 자료(데이터·웹 검색)
   ③ 최종 결과·결정 : 사람이 채택(수정 가능)/반려 → 참여한 에이전트마다 교훈 저장 (결정 없이 버리면 삭제)
-  ④ 업무 맡기기 : 팀 업무 양식(예: 주가 전망 — 종목·기간 입력칸) 또는 자유 질문 + '원하는 최종 상태'
+
+진행 중인 업무는 서버에 하나만 있는 저장소(shared_runs)에 두므로 새로 고침·다른 팀 이동·브라우저를 다시 열어도
+그대로 보인다. 사이드바 '🔔 진행 중인 업무'에서 모든 팀의 업무를 보고 바로 이동할 수 있고, 끝나면 알림과 탭 제목으로 알려 준다.
 
 화면 로직만 여기 있고, 실제 일은 core/ 에서 한다.
   core/live.py      백그라운드 실행 + 진행 상태(run dict)
@@ -19,6 +24,7 @@
 
 import base64
 import html
+import json
 import os
 import time
 import uuid
@@ -50,7 +56,7 @@ from core.config import (
     validate_config,
 )
 from core.harness import REGISTRY as HARNESS_REGISTRY
-from core.live import KIND_LABELS, new_run, start_run
+from core.live import KIND_LABELS, STAGES, new_run, restore_run, stage_of, start_run
 from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTemplate, ToolResult
 from core.search import WebContext
 from core.storage import Storage
@@ -117,6 +123,28 @@ def get_storage() -> Storage:
 
 
 storage = get_storage()
+DECIDED = ("adopted", "rejected")
+
+
+@st.cache_resource
+def shared_runs() -> dict:
+    """{(팀 id, 문의 대상 id): run} — 브라우저 세션이 아니라 서버에 하나만 둔다.
+
+    그래서 새로 고침·브라우저 다시 열기·다른 탭에서도 진행 중인 업무가 그대로 보인다 (혼자 쓰는 로컬 앱 전제).
+    서버를 다시 켜면 저장소에 남은 '결정 대기' 실행을 되살린다 (체크포인트가 파일에 있어 결정으로 이어서 재개 가능).
+    """
+    runs = {}
+    for row in storage.list_runs(limit=200):  # 최신 순 → 같은 칸이면 최신 것만
+        if row["status"] == "awaiting_human":
+            runs.setdefault((row["team_id"], row["root_id"]), restore_run(row))
+    return runs
+
+
+runs = shared_runs()
+
+
+def is_running(run: dict | None) -> bool:
+    return bool(run and (not run["done"] or run.get("post_busy")))  # 지도 만드는 중에도 자동 갱신
 
 
 def discard_run(run: dict) -> None:
@@ -128,59 +156,99 @@ def discard_run(run: dict) -> None:
 # ════════════════════════════════════════════════════════════════════
 # 사이드바: 팀 / 모델 상태 / 검증 설정
 # ════════════════════════════════════════════════════════════════════
+team_names = {t.id: t.name for t in teams}
+TEAM_KEY, HISTORY_KEY = "team_pick", "history_open"
+
+
+def go_to_run(run: dict) -> None:
+    """사이드바 '진행 중인 업무'를 누르면 그 업무의 팀·문의 대상으로 이동 (위젯이 그려지기 전에 실행되는 콜백)."""
+    st.session_state[TEAM_KEY] = run["team_id"]
+    st.session_state[f"target_{run['team_id']}"] = run["root_id"]
+
+
+def short(text: str, n: int = 38) -> str:
+    text = " ".join(text.split())
+    return text if len(text) <= n else text[:n] + "…"
+
+
+def run_title(run: dict) -> str:
+    info = run.get("concept") or {}
+    return info.get("title") or run["question"]
+
+
 with st.sidebar:
     st.markdown("### 팀 선택")
     team_ids = [t.id for t in teams]
-    default_team = settings.get("default_team")
-    team_id = st.selectbox(
-        "팀",
-        team_ids,
-        index=team_ids.index(default_team) if default_team in team_ids else 0,
-        format_func=lambda tid: next(t.name for t in teams if t.id == tid),
-        label_visibility="collapsed",
-    )
+    if TEAM_KEY not in st.session_state:
+        # 주소창의 ?team= 을 먼저 본다 — 새로 고침해도 보던 팀이 그대로 열린다
+        wanted, default_team = st.query_params.get("team"), settings.get("default_team")
+        st.session_state[TEAM_KEY] = next(t for t in (wanted, default_team, team_ids[0]) if t in team_ids)
+    team_id = st.selectbox("팀", team_ids, format_func=team_names.get, label_visibility="collapsed", key=TEAM_KEY)
+    st.query_params["team"] = team_id
     team = next(t for t in teams if t.id == team_id)
     st.caption(team.description)
 
-    st.markdown("### 모델 provider 상태")
-    for provider, status in llm_factory.provider_status(models).items():
-        icon, text = PROVIDER_STATUS[status]
-        st.markdown(f"{icon} {provider} — {text}")
-    st.caption("사용할 수 없는 provider 는 config/models.yaml 의 대안(fallback) 모델로 대체됩니다. "
-               "유료 키가 모두 안 되면 마지막에 freellm(무료 모델)으로 넘어갑니다.")
+    # 모든 팀의 진행 중·결정 대기 업무 — 다른 팀을 보고 있어도 여기서 확인하고 바로 이동
+    open_runs = [r for r in runs.values() if r["status"] not in DECIDED and r["team_id"] in team_names]
+    if open_runs:
+        st.markdown("### 🔔 진행 중인 업무")
+        for r in sorted(open_runs, key=lambda r: r["started_at"], reverse=True):
+            state = "⏳ 진행 중" if not r["done"] else ("⚠️ 오류" if r["error"] else "👤 결정 대기")
+            st.button(f"{state} · {team_names[r['team_id']]}\n\n{short(run_title(r))}", key=f"go_{r['run_id']}",
+                      on_click=go_to_run, args=(r,), use_container_width=True)
+
     # 유료 키를 아끼거나 키가 없을 때: 유료 provider 를 모두 끄고 FreeLLMAPI 무료 모델만 쓴다
     if st.toggle("🆓 무료 모델만 사용", key="free_only", help="FreeLLMAPI(무료 티어) 모델만 사용합니다. 무료 모델은 하루 호출 한도가 작습니다."):
         models = llm_factory.free_only(models)
         if llm_factory.provider_status(models).get("freellm") != "ok":
             st.warning("FreeLLMAPI 가 꺼져 있거나 키가 없습니다. README 의 '무료 모델' 절을 확인하세요.")
 
-    st.markdown("### 검증 장치")
-    critic = verification_cfg.get("critic", {})
-    st.caption(
-        f"⚖️ 비평가: {'켜짐' if critic.get('enabled', True) else '꺼짐'} "
-        f"({'최종 통합만' if critic.get('scope', 'final') == 'final' else '모든 검토'}, 자가 교정 최대 {critic.get('max_self_corrections', 1)}회)"
-    )
-    validators = team.harness.validators
-    st.caption(
-        "🧪 하네스: " + (", ".join(f"{v}({HARNESS_REGISTRY[v].description})" for v in validators) if validators else "없음")
-    )
-    skills_dir = BASE_DIR / "teams" / team_id / "skills"
-    skill_files = sorted(p.stem for p in skills_dir.glob("*.md")) if skills_dir.exists() else []
-    st.caption("📚 팀 스킬: " + (", ".join(skill_files) if skill_files else "없음"))
-
     # 개념 편집 팀: 카탈로그(GitHub CS 저장소) 위치·git 상태
     is_concept = concept_ui.CONCEPT_FEATURE in team.features
     concept_ctx = concept_ui.sidebar(settings) if is_concept else None
 
+    # 지난 업무 (사람이 채택·반려한 것) — 누르면 내용·결정·교훈을 창으로 본다
+    history = [r for r in storage.list_runs(team_id, limit=30) if r["status"] in DECIDED][:10]
+    with st.expander(f"🕘 지난 업무 ({len(history)})"):
+        for r in history:
+            mark = "✅" if r["status"] == "adopted" else "❌"
+            if st.button(f"{mark} {r['created_at'][5:16].replace('T', ' ')} · {short(r['question'], 30)}",
+                         key=f"hist_{r['id']}", use_container_width=True):
+                st.session_state[HISTORY_KEY] = r["id"]
+        if not history:
+            st.caption("아직 결정한 업무가 없습니다.")
+
     # 채택해서 저장한 결과 파일 — 내려받기
     saved = list_results(RESULTS_DIR, team_id, limit=10)
-    st.markdown(f"### 📂 저장된 결과 ({len(saved)})")
-    st.caption(f"채택한 결과는 `{RESULTS_DIR.name}/{team_id}/` 폴더에 저장됩니다.")
-    for path in saved:
-        st.download_button(
-            ("🗺 " if path.suffix == ".html" else "📄 ") + path.stem[:34], data=path.read_bytes(), file_name=path.name,
-            mime="text/html" if path.suffix == ".html" else "text/markdown", key=f"dl_{path.name}", use_container_width=True,
+    with st.expander(f"📂 저장된 결과 파일 ({len(saved)})"):
+        st.caption(f"채택한 결과는 `{RESULTS_DIR.name}/{team_id}/` 폴더에 저장됩니다.")
+        for path in saved:
+            st.download_button(
+                ("🗺 " if path.suffix == ".html" else "📄 ") + path.stem[:34], data=path.read_bytes(), file_name=path.name,
+                mime="text/html" if path.suffix == ".html" else "text/markdown", key=f"dl_{path.name}", use_container_width=True,
+            )
+
+    # 모델·검증 설정 — 평소에는 접어 두고 한 줄 요약만
+    provider_states = llm_factory.provider_status(models)
+    usable = sum(s == "ok" for s in provider_states.values())
+    with st.expander(f"⚙️ 모델·검증 상태 (사용 가능 {usable}/{len(provider_states)})"):
+        for provider, status in provider_states.items():
+            icon, text = PROVIDER_STATUS[status]
+            st.markdown(f"{icon} {provider} — {text}")
+        st.caption("사용할 수 없는 provider 는 config/models.yaml 의 대안(fallback) 모델로 대체됩니다. "
+                   "유료 키가 모두 안 되면 마지막에 freellm(무료 모델)으로 넘어갑니다.")
+        critic = verification_cfg.get("critic", {})
+        st.caption(
+            f"⚖️ 비평가: {'켜짐' if critic.get('enabled', True) else '꺼짐'} "
+            f"({'최종 통합만' if critic.get('scope', 'final') == 'final' else '모든 검토'}, 자가 교정 최대 {critic.get('max_self_corrections', 1)}회)"
         )
+        validators = team.harness.validators
+        st.caption(
+            "🧪 하네스: " + (", ".join(f"{v}({HARNESS_REGISTRY[v].description})" for v in validators) if validators else "없음")
+        )
+        skills_dir = BASE_DIR / "teams" / team_id / "skills"
+        skill_files = sorted(p.stem for p in skills_dir.glob("*.md")) if skills_dir.exists() else []
+        st.caption("📚 팀 스킬: " + (", ".join(skill_files) if skill_files else "없음"))
 
 org = team_org(team, ranks)
 nodes = {n.id: n for n in org.walk()}
@@ -639,6 +707,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         else:
             with st.container(height=420, border=True):
                 st.markdown(final.content)
+            st.download_button("⬇ 최종 결과 받기 (.md)", data=final.content, file_name=f"{team_id}_{run['run_id'][:8]}.md",
+                               mime="text/markdown", key=f"dl_final_{run['run_id']}")
         report = calc_report(run, final.content)
         if report:
             # LLM 이 쓴 숫자를 코드로 다시 계산한 결과 — 판단 전에 꼭 확인할 값
@@ -679,7 +749,7 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             discard = c3.form_submit_button("🗑 결과 버리기 (저장 안 함)", use_container_width=True)
         if discard:
             discard_run(run)
-            del st.session_state["runs"][run_key]
+            runs.pop(run_key, None)
             st.rerun()
         plan = None
         if adopt and is_concept:
@@ -737,6 +807,72 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
     for lesson in run["lessons"]:
         icon = "👍" if lesson.kind == "praise" else "🔧"
         st.markdown(f"- **{name_of(lesson.agent_id)}** {icon} {lesson.lesson}")
+    # 결정까지 끝난 업무는 닫으면 화면이 처음 상태(입력칸이 맨 위)로 돌아간다 — 기록은 사이드바 '🕘 지난 업무'에 남는다
+    if st.button("✖ 이 결과 닫고 새 업무 시작", key=f"close_{run['run_id']}"):
+        runs.pop(run_key, None)
+        st.rerun()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 진행 단계 표시 · 지난 업무 창 · 브라우저 탭 제목
+# ════════════════════════════════════════════════════════════════════
+def render_stages(run: dict) -> None:
+    """🎯 요청 정리 → … → 👤 결정 — 지금 어디까지 왔는지 한 줄로."""
+    now = stage_of(run)
+    pills = []
+    for i, label in enumerate(STAGES):
+        state = "done" if i < now else ("now" if i == now and not run["error"] else "todo")
+        if i == now and run["error"]:
+            state, label = "fail", label + " ⚠️"
+        pills.append(f"<span class='ao-step ao-step-{state}'>{'✓ ' if state == 'done' else ''}{html.escape(label)}</span>")
+    st.markdown("<div class='ao-steps'>" + "<span class='ao-step-sep'>›</span>".join(pills) + "</div>",
+                unsafe_allow_html=True)
+
+
+def node_label(node_id: str) -> str:
+    """지금 조직도에 없는 에이전트(지난 기록)도 이름을 보여 준다."""
+    return name_of(node_id) if node_id in nodes else node_id
+
+
+@st.dialog("🕘 지난 업무", width="large")
+def history_dialog(run_id: str) -> None:
+    row = storage.get_run(run_id)
+    if row is None:
+        st.warning("기록을 찾지 못했습니다 (삭제됨).")
+        return
+    decision: HumanDecision | None = row["decision"]
+    st.caption(f"{row['created_at'].replace('T', ' ')} · 문의 대상 {node_label(row['root_id'])} · 단계 {len(row['steps'])}개")
+    st.markdown(f"**Q.** {row['question'] if len(row['question']) <= 600 else row['question'][:600] + '…'}")
+    if decision and decision.action == "adopt":
+        st.success(f"✅ {node_label(decision.adopted_node_id)} 안 채택" + (" · ✍️ 직접 수정" if decision.edited else "")
+                   + f" · 만족도 {decision.score}/5")
+        with st.container(height=380, border=True):
+            st.markdown(decision.final_answer)
+        st.download_button("⬇ 이 결과 받기 (.md)", data=decision.final_answer, file_name=f"{team_id}_{run_id[:8]}.md",
+                           mime="text/markdown", key=f"hist_dl_{run_id}")
+    elif decision:
+        st.warning(f"❌ 전체 반려 · 만족도 {decision.score}/5")
+    if decision and decision.comment:
+        st.caption(f"코멘트: {decision.comment}")
+    lessons = [l for l in storage.list_lessons(row["team_id"]) if l["run_id"] == run_id]
+    if lessons:
+        st.markdown("##### 📚 이 업무에서 생긴 교훈")
+        for l in lessons:
+            st.markdown(f"- **{node_label(l['agent_id'])}** {'👍' if l['kind'] == 'praise' else '🔧'} {l['lesson']}")
+
+
+def set_tab_title() -> None:
+    """브라우저 탭 제목에 진행 상황 표시 — 다른 탭에서 일하다가도 끝난 것을 알 수 있게."""
+    n_running = sum(is_running(r) for r in runs.values())
+    n_waiting = sum(r["done"] and r["status"] == "awaiting_human" for r in runs.values())
+    title = ("⏳ 진행 중 · " if n_running else "") + (f"🔔 결정 대기 {n_waiting} · " if n_waiting else "") + "Agent Office"
+    # Streamlit 이 다시 그릴 때마다 원래 제목으로 되돌리므로, 부모 창에서 1초마다 맞춰 준다
+    components.html(
+        "<script>const P = window.parent; P.__aoTitle = " + json.dumps(title) + ";"
+        "if (!P.__aoTimer) { P.__aoTimer = new P.Function('if (window.__aoTitle && document.title !== window.__aoTitle)"
+        " document.title = window.__aoTitle;'); P.setInterval(P.__aoTimer, 1000); } P.__aoTimer();</script>",
+        height=0,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -745,15 +881,15 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
 st.title("🏢 Agent Office")
 st.caption(f"현재 팀: **{team.name}** · 사용자는 맨 위 에이전트(supervisor)에게 일을 맡기고, supervisor 가 전문가들에게 나눠 줍니다.")
 
-st.session_state.setdefault("runs", {})  # {(team_id, 문의 대상 id): run dict}
-
+TARGET_KEY = f"target_{team_id}"
+if st.session_state.get(TARGET_KEY) not in nodes:
+    st.session_state[TARGET_KEY] = org.id  # 기본은 조직도 맨 위(supervisor)
 target = st.radio(
     "문의 대상 (고른 에이전트가 supervisor 가 되어 그 아래 팀이 일합니다)",
     options=[n.id for n in org.walk()],
-    index=0,  # 조직도 맨 위(supervisor)
     format_func=name_of,
     horizontal=True,
-    key=f"target_{team_id}",
+    key=TARGET_KEY,
 )
 active_ids = {n.id for n in subtree(org, target).walk()}
 run_key = (team_id, target)
@@ -770,7 +906,15 @@ st.markdown(
     ".ao-b-working{background:#FFF0B3;color:#7A5200;animation:ao-pulse 1.2s ease-in-out infinite}"
     ".ao-dots i{display:inline-block;width:5px;height:5px;margin-left:3px;border-radius:50%;background:currentColor;"
     "animation:ao-blink 1.4s infinite both}.ao-dots i:nth-child(2){animation-delay:.2s}.ao-dots i:nth-child(3){animation-delay:.4s}"
-    "@keyframes ao-pulse{0%,100%{opacity:1}50%{opacity:.55}}@keyframes ao-blink{0%,80%,100%{opacity:.2}40%{opacity:1}}</style>",
+    "@keyframes ao-pulse{0%,100%{opacity:1}50%{opacity:.55}}@keyframes ao-blink{0%,80%,100%{opacity:.2}40%{opacity:1}}"
+    # 진행 단계 줄 (render_stages) — 밝은/어두운 테마 모두에서 보이도록 반투명 색
+    ".ao-steps{display:flex;flex-wrap:wrap;align-items:center;gap:4px;margin:2px 0 6px}"
+    ".ao-step{padding:2px 10px;border-radius:999px;font-size:.8rem;white-space:nowrap}"
+    ".ao-step-done{background:rgba(54,179,126,.18);color:#1F845A}"
+    ".ao-step-now{background:#FFF0B3;color:#7A5200;font-weight:700;animation:ao-pulse 1.2s ease-in-out infinite}"
+    ".ao-step-todo{background:rgba(127,127,127,.12);color:rgba(127,127,127,.95)}"
+    ".ao-step-fail{background:rgba(222,53,11,.15);color:#DE350B;font-weight:700}"
+    ".ao-step-sep{color:rgba(127,127,127,.7)}</style>",
     unsafe_allow_html=True,
 )
 
@@ -779,7 +923,7 @@ st.markdown(
 # 본문 ② 실시간 영역 — 작업 중에는 1초마다 이 부분만 다시 그린다 (st.fragment)
 # ════════════════════════════════════════════════════════════════════
 def render_live() -> None:
-    run = st.session_state["runs"].get(run_key)
+    run = runs.get(run_key)
 
     # 조직도 — 칸을 누르면 그 에이전트로 포커스 이동
     clicked = click_detector(chart_html(run["statuses"] if run else {}, st.session_state[FOCUS_KEY], active_ids),
@@ -795,7 +939,12 @@ def render_live() -> None:
 
     if run:
         elapsed = int(time.time() - run["started_at"])
-        progress = f"⏳ 진행 중 ({elapsed}초)" if not run["done"] else "✅ 완료"
+        if not run["done"]:
+            progress = f"⏳ 진행 중 {elapsed // 60}분 {elapsed % 60}초" if elapsed >= 60 else f"⏳ 진행 중 {elapsed}초"
+        else:
+            progress = "⚠️ 오류로 멈춤" if run["error"] else ("👤 결정을 기다리는 중" if run["status"] == "awaiting_human" else "✅ 완료")
+        if run.get("restored"):
+            progress += " (서버를 다시 켜서 되살린 업무)"
         done_steps = len([s for s in run["steps"] if s.kind != "plan"])
         # 질문 요약 — 개념 편집 팀은 질문에 초안·관련 항목이 길게 들어가므로 개념명과 판정만 보여 준다
         info = run.get("concept")
@@ -806,7 +955,9 @@ def render_live() -> None:
             question = run["question"] if len(run["question"]) <= 300 else run["question"][:300] + "…"
         with st.container(border=True):
             st.markdown(f"**Q.** {question}")
-            st.caption(f"{progress} · 완료된 단계 {done_steps}개 — 조직도에서 에이전트를 누르면 그 에이전트가 한 일과 지금 작성 중인 내용을 볼 수 있습니다.")
+            render_stages(run)
+            st.caption(f"{progress} · 완료된 단계 {done_steps}개 — 조직도에서 에이전트를 누르면 그 에이전트가 한 일과 지금 작성 중인 내용을 볼 수 있습니다."
+                       + (" 새로 고침하거나 다른 팀을 봐도 작업은 계속됩니다." if not run["done"] else ""))
 
     if focus != NO_FOCUS:
         render_agent_panel(focus, run)
@@ -839,21 +990,29 @@ def render_live() -> None:
                         st.text(note[:500])
 
 
+NOTICE_KEY = "ao_notices"
+
+
 def watch_run_state() -> None:
-    """작업이 끝나거나(→ '최종 결정' 표시) 지도 만들기가 끝나면(→ 자동 갱신 멈춤) 화면 전체를 다시 그린다."""
-    run = st.session_state["runs"].get(run_key)
-    if run:
+    """어느 팀이든 업무가 끝나거나(→ '최종 결정' 표시·알림) 지도 만들기가 끝나면(→ 자동 갱신 멈춤) 화면 전체를 다시 그린다."""
+    changed = False
+    for run in list(runs.values()):
         state_key = f"live_state_{run['run_id']}"
         state_now = (run["done"], run.get("post_busy", False))
         previous_state = st.session_state.get(state_key)
         if previous_state != state_now:
             st.session_state[state_key] = state_now
             if previous_state is not None:
-                st.rerun()
+                changed = True
+                if state_now[0] and not previous_state[0]:
+                    st.session_state.setdefault(NOTICE_KEY, []).append(run["run_id"])
+    if changed:
+        st.rerun()
 
 
-current = st.session_state["runs"].get(run_key)
-running = bool(current and (not current["done"] or current.get("post_busy")))  # 지도 만드는 중에도 자동 갱신
+current = runs.get(run_key)
+running = is_running(current)
+any_running = any(is_running(r) for r in runs.values())  # 다른 팀 업무가 끝나는 것도 알아채도록
 
 
 def live_area() -> None:
@@ -861,26 +1020,11 @@ def live_area() -> None:
     watch_run_state()  # 전체 진행을 접어 둔 상태(render_live 가 일찍 끝남)에서도 완료를 감지해야 한다
 
 
-st.fragment(run_every=REFRESH_SEC if running else None)(live_area)()
-
-
-# ════════════════════════════════════════════════════════════════════
-# 본문 ③ 최종 결과·결정 (작업이 끝난 뒤)
-# ════════════════════════════════════════════════════════════════════
-if current and current["done"]:
-    if current["error"]:
-        st.error(current["error"])
-    elif current["steps"]:
-        render_final_and_decision(current, run_key)
-
-
 # ════════════════════════════════════════════════════════════════════
 # 본문 ④ 업무 맡기기 — 팀 업무 양식 또는 자유 질문
 # ════════════════════════════════════════════════════════════════════
-st.divider()
 FREE_FORM = "free"
 web_available = WEB_SEARCH_TOOL in team.tools
-request: dict = {}  # 이번 제출에서 워크플로우로 넘길 값 (업무 양식이든 자유 질문이든 여기에 모은다)
 
 
 def render_field(field: TaskField, key: str):
@@ -902,108 +1046,149 @@ def render_field(field: TaskField, key: str):
     return st.text_input(label, value=str(field.default or ""), key=key, placeholder=field.placeholder, help=field.help or None)
 
 
-st.markdown(f"#### 💬 {name_of(target)} 에게 업무 맡기기")
-# (안쪽에 '원하는 최종 상태' 접기 상자가 있어 바깥은 접기 상자가 아닌 테두리 상자로 둔다 — Streamlit 은 접기 상자 중첩 불가)
-with st.container(border=True):
-    task_ids = [t.id for t in team.tasks]
-    mode = (
-        st.selectbox(
-            "📋 업무 선택",
-            [*task_ids, FREE_FORM],
-            format_func=lambda tid: "💬 자유 질문" if tid == FREE_FORM else next(t.title for t in team.tasks if t.id == tid),
-            key=f"task_pick_{team_id}",
+def render_task_input() -> dict:
+    """업무 입력칸을 그리고, '맡기기'를 누른 경우 워크플로우로 넘길 요청(dict)을 돌려준다 (안 누르면 빈 dict)."""
+    request: dict = {}  # 업무 양식이든 자유 질문이든 여기에 모은다
+    st.markdown(f"#### 💬 {name_of(target)} 에게 업무 맡기기")
+    # (안쪽에 '원하는 최종 상태' 접기 상자가 있어 바깥은 접기 상자가 아닌 테두리 상자로 둔다 — Streamlit 은 접기 상자 중첩 불가)
+    with st.container(border=True):
+        task_ids = [t.id for t in team.tasks]
+        mode = (
+            st.selectbox(
+                "📋 업무 선택",
+                [*task_ids, FREE_FORM],
+                format_func=lambda tid: "💬 자유 질문" if tid == FREE_FORM else next(t.title for t in team.tasks if t.id == tid),
+                key=f"task_pick_{team_id}",
+            )
+            if team.tasks
+            else FREE_FORM
         )
-        if team.tasks
-        else FREE_FORM
-    )
-    task: TaskTemplate | None = next((t for t in team.tasks if t.id == mode), None)
+        task: TaskTemplate | None = next((t for t in team.tasks if t.id == mode), None)
 
-    if task and is_concept:
-        # ── 개념 편집 팀: ✍️ 작성(추가·수정 자동 판정) / 🗑 삭제 (concept_ui.py) ──
-        st.caption(task.description)
-        if concept_ctx is None:
-            st.warning("사이드바의 '📁 개념 카탈로그' 폴더를 먼저 맞춰 주세요.")
-        else:
-            request = concept_ui.input_form(concept_ctx, task.id, team_id, web_available, running,
-                                            settings.get("concept", {}).get("related_limit", 6)) or {}
-    elif task:
-        # ── 팀 업무 양식: 입력칸 → 질문·최종 상태 브리프 자동 생성 (core/tasks.py) ──
-        st.caption(task.description)
-        with st.form(f"task_form_{team_id}_{task.id}", clear_on_submit=False):
-            values = {}
-            cols = st.columns(2)
-            for i, field in enumerate(task.fields):
-                with cols[i % 2] if field.type != "textarea" else st.container():
-                    values[field.key] = render_field(field, key=f"tf_{team_id}_{task.id}_{field.key}")
-            extra = st.text_area("추가 요청 (선택)", key=f"tf_{team_id}_{task.id}__extra", height=68,
-                                 placeholder="예: 배당도 함께 고려해줘 / 아이가 걷기 힘들어해")
-            use_web = st.checkbox("🌐 웹 검색 사용 (최신 뉴스·자료)", value=web_available, disabled=not web_available)
-            submitted = st.form_submit_button("맡기기", type="primary")
-        if submitted:
-            try:
-                built = build_request(task, values, extra)
-            except TaskInputError as e:
-                st.warning(str(e))
+        if task and is_concept:
+            # ── 개념 편집 팀: ✍️ 작성(추가·수정 자동 판정) / 🗑 삭제 (concept_ui.py) ──
+            st.caption(task.description)
+            if concept_ctx is None:
+                st.warning("사이드바의 '📁 개념 카탈로그' 폴더를 먼저 맞춰 주세요.")
             else:
+                request = concept_ui.input_form(concept_ctx, task.id, team_id, web_available, running,
+                                                settings.get("concept", {}).get("related_limit", 6)) or {}
+        elif task:
+            # ── 팀 업무 양식: 입력칸 → 질문·최종 상태 브리프 자동 생성 (core/tasks.py) ──
+            st.caption(task.description)
+            with st.form(f"task_form_{team_id}_{task.id}", clear_on_submit=False):
+                values = {}
+                cols = st.columns(2)
+                for i, field in enumerate(task.fields):
+                    with cols[i % 2] if field.type != "textarea" else st.container():
+                        values[field.key] = render_field(field, key=f"tf_{team_id}_{task.id}_{field.key}")
+                extra = st.text_area("추가 요청 (선택)", key=f"tf_{team_id}_{task.id}__extra", height=68,
+                                     placeholder="예: 배당도 함께 고려해줘 / 아이가 걷기 힘들어해")
+                use_web = st.checkbox("🌐 웹 검색 사용 (최신 뉴스·자료)", value=web_available, disabled=not web_available)
+                submitted = st.form_submit_button("맡기기", type="primary")
+            if submitted:
+                try:
+                    built = build_request(task, values, extra)
+                except TaskInputError as e:
+                    st.warning(str(e))
+                else:
+                    request = {
+                        "question": built.question, "brief": built.brief, "auto_brief": False,
+                        "use_web": bool(use_web and web_available), "tool_inputs": built.tool_inputs,
+                        "extra_validators": built.validators, "harness_options": built.harness_options,
+                    }
+        else:
+            # ── 자유 질문 ──
+            def apply_example() -> None:
+                """예시를 고르면 질문·최종 상태 입력란을 채운다 (selectbox 의 on_change 콜백)."""
+                ex = next((e for e in EXAMPLES if e["title"] == st.session_state["example_pick"]), None)
+                if ex is None:
+                    return
+                st.session_state["q_text"] = ex["question"]
+                st.session_state["b_goal"] = ex["goal"]
+                st.session_state["b_criteria"] = "\n".join(ex["success_criteria"])
+                st.session_state["b_constraints"] = "\n".join(ex["constraints"])
+                st.session_state["b_format"] = ex["output_format"]
+
+            c1, c2 = st.columns([1, 1])
+            c1.selectbox("💡 질문 예시 (고르면 아래가 채워집니다)", ["(직접 입력)", *[e["title"] for e in EXAMPLES]],
+                         key="example_pick", on_change=apply_example)
+            with c2.popover("📝 좋은 질문 쓰는 법"):
+                st.markdown(
+                    """
+    - ❌ 과정 지시: "1) HBF 검색하고 2) 정리한 다음 3) 표로 만들어줘"
+    - ✅ 최종 상태: "**목표** 팀 회의에서 5분 안에 공유할 HBF 설명 자료 / **완료 기준** 정식 명칭·정의, HBM 과 비교 표, 사실마다 출처 / **제약** 비전공자용, A4 1장"
+    - 과정(누가 무엇을 조사할지)은 supervisor 가 스스로 나눕니다. 사람은 **무엇이 되면 끝인지**만 정하면 됩니다.
+    - 완료 기준은 검토자·비평가의 채점 기준이 됩니다 → 검증 가능한 문장으로 쓰세요.
+    - 결과는 그대로 믿지 말고, 최종 결정 전에 검토·비평 기록을 확인하세요.
+    """
+                )
+            with st.form("ask_form", clear_on_submit=False):
+                question = st.text_area("질문", placeholder="무엇을 원하는지 한두 문장으로", height=90, key="q_text")
+                with st.expander("🎯 원하는 최종 상태 (선택 — 비워 두면 AI 가 질문에서 정리합니다)", expanded=False):
+                    goal = st.text_input("최종 목표 — 결과물과 용도", key="b_goal", placeholder="예: 팀 회의에서 공유할 1장짜리 설명 자료")
+                    criteria = st.text_area("완료 기준 — 한 줄에 하나", key="b_criteria", height=90,
+                                            placeholder="예: 정식 명칭과 정의를 쓴다\n예: 사실마다 출처 번호를 단다")
+                    constraints = st.text_area("제약 — 한 줄에 하나", key="b_constraints", height=68, placeholder="예: 비전공자용, A4 1장")
+                    output_format = st.text_input("결과 형식", key="b_format", placeholder="예: 요약 → 비교 표 → 핵심 3개 → 출처")
+                o1, o2 = st.columns(2)
+                use_web = o1.checkbox("🌐 웹 검색 사용", value=web_available, disabled=not web_available)
+                auto_brief = o2.checkbox("🤖 빈 항목은 AI 가 정리", value=True)
+                submitted = st.form_submit_button("맡기기", type="primary")
+
+            def lines(text: str) -> list[str]:
+                return [x.strip() for x in text.splitlines() if x.strip()]
+
+            if submitted and not question.strip():
+                st.warning("질문을 입력하세요.")
+            elif submitted:
+                brief_input = DesiredState(
+                    goal=goal.strip(), context="", success_criteria=lines(criteria), constraints=lines(constraints),
+                    output_format=output_format.strip(), assumptions=[],
+                )
+                has_brief = not brief_input.is_empty() or brief_input.constraints or brief_input.output_format
                 request = {
-                    "question": built.question, "brief": built.brief, "auto_brief": False,
-                    "use_web": bool(use_web and web_available), "tool_inputs": built.tool_inputs,
-                    "extra_validators": built.validators, "harness_options": built.harness_options,
+                    "question": question.strip(), "brief": brief_input if has_brief else None, "auto_brief": auto_brief,
+                    "use_web": bool(use_web and web_available), "tool_inputs": {}, "extra_validators": [], "harness_options": {},
                 }
-    else:
-        # ── 자유 질문 ──
-        def apply_example() -> None:
-            """예시를 고르면 질문·최종 상태 입력란을 채운다 (selectbox 의 on_change 콜백)."""
-            ex = next((e for e in EXAMPLES if e["title"] == st.session_state["example_pick"]), None)
-            if ex is None:
-                return
-            st.session_state["q_text"] = ex["question"]
-            st.session_state["b_goal"] = ex["goal"]
-            st.session_state["b_criteria"] = "\n".join(ex["success_criteria"])
-            st.session_state["b_constraints"] = "\n".join(ex["constraints"])
-            st.session_state["b_format"] = ex["output_format"]
+    return request
 
-        c1, c2 = st.columns([1, 1])
-        c1.selectbox("💡 질문 예시 (고르면 아래가 채워집니다)", ["(직접 입력)", *[e["title"] for e in EXAMPLES]],
-                     key="example_pick", on_change=apply_example)
-        with c2.popover("📝 좋은 질문 쓰는 법"):
-            st.markdown(
-                """
-- ❌ 과정 지시: "1) HBF 검색하고 2) 정리한 다음 3) 표로 만들어줘"
-- ✅ 최종 상태: "**목표** 팀 회의에서 5분 안에 공유할 HBF 설명 자료 / **완료 기준** 정식 명칭·정의, HBM 과 비교 표, 사실마다 출처 / **제약** 비전공자용, A4 1장"
-- 과정(누가 무엇을 조사할지)은 supervisor 가 스스로 나눕니다. 사람은 **무엇이 되면 끝인지**만 정하면 됩니다.
-- 완료 기준은 검토자·비평가의 채점 기준이 됩니다 → 검증 가능한 문장으로 쓰세요.
-- 결과는 그대로 믿지 말고, 최종 결정 전에 검토·비평 기록을 확인하세요.
-"""
-            )
-        with st.form("ask_form", clear_on_submit=False):
-            question = st.text_area("질문", placeholder="무엇을 원하는지 한두 문장으로", height=90, key="q_text")
-            with st.expander("🎯 원하는 최종 상태 (선택 — 비워 두면 AI 가 질문에서 정리합니다)", expanded=False):
-                goal = st.text_input("최종 목표 — 결과물과 용도", key="b_goal", placeholder="예: 팀 회의에서 공유할 1장짜리 설명 자료")
-                criteria = st.text_area("완료 기준 — 한 줄에 하나", key="b_criteria", height=90,
-                                        placeholder="예: 정식 명칭과 정의를 쓴다\n예: 사실마다 출처 번호를 단다")
-                constraints = st.text_area("제약 — 한 줄에 하나", key="b_constraints", height=68, placeholder="예: 비전공자용, A4 1장")
-                output_format = st.text_input("결과 형식", key="b_format", placeholder="예: 요약 → 비교 표 → 핵심 3개 → 출처")
-            o1, o2 = st.columns(2)
-            use_web = o1.checkbox("🌐 웹 검색 사용", value=web_available, disabled=not web_available)
-            auto_brief = o2.checkbox("🤖 빈 항목은 AI 가 정리", value=True)
-            submitted = st.form_submit_button("맡기기", type="primary")
 
-        def lines(text: str) -> list[str]:
-            return [x.strip() for x in text.splitlines() if x.strip()]
+with st.sidebar:
+    set_tab_title()
 
-        if submitted and not question.strip():
-            st.warning("질문을 입력하세요.")
-        elif submitted:
-            brief_input = DesiredState(
-                goal=goal.strip(), context="", success_criteria=lines(criteria), constraints=lines(constraints),
-                output_format=output_format.strip(), assumptions=[],
-            )
-            has_brief = not brief_input.is_empty() or brief_input.constraints or brief_input.output_format
-            request = {
-                "question": question.strip(), "brief": brief_input if has_brief else None, "auto_brief": auto_brief,
-                "use_web": bool(use_web and web_available), "tool_inputs": {}, "extra_validators": [], "harness_options": {},
-            }
+# 끝난 업무 알림 (watch_run_state 가 모아 둔 것)
+for done_id in st.session_state.pop(NOTICE_KEY, []):
+    done_run = next((r for r in runs.values() if r["run_id"] == done_id), None)
+    if done_run:
+        where = team_names.get(done_run["team_id"], done_run["team_id"])
+        if done_run["error"]:
+            st.toast(f"⚠️ {where} 업무가 오류로 멈췄습니다: {short(run_title(done_run), 24)}", icon="⚠️")
+        else:
+            st.toast(f"🔔 {where} 업무가 끝났습니다 — 결과를 확인하고 결정해 주세요: {short(run_title(done_run), 24)}", icon="🔔")
+if st.session_state.get(HISTORY_KEY):
+    history_dialog(st.session_state.pop(HISTORY_KEY))
+
+# 일이 없을 때는 업무 입력칸을 맨 위에 — 질문하려고 조직도 아래까지 내려가지 않아도 된다
+idle = current is None
+if idle:
+    request = render_task_input()
+
+st.fragment(run_every=REFRESH_SEC if any_running else None)(live_area)()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 본문 ③ 최종 결과·결정 (작업이 끝난 뒤)
+# ════════════════════════════════════════════════════════════════════
+if current and current["done"]:
+    if current["error"]:
+        st.error(current["error"])
+    elif current["steps"]:
+        render_final_and_decision(current, run_key)
+
+if not idle:
+    st.divider()
+    request = render_task_input()
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1014,15 +1199,15 @@ if request:
         st.warning("진행 중인 업무가 있습니다. 끝난 뒤에 새 업무를 맡겨 주세요.")
     else:
         # 같은 대상에 대한 직전 결과가 결정 없이 남아 있으면 → 피드백 없는 불필요 기록이므로 삭제
-        if current and current["status"] not in ("adopted", "rejected"):
+        if current and current["status"] not in DECIDED:
             discard_run(current)
-        run = new_run(uuid.uuid4().hex, request["question"], target)
+        run = new_run(uuid.uuid4().hex, request["question"], target, team_id)
         run["trip_start"] = request["tool_inputs"].get("start_date")  # 지도 재생 시각용
         run["harness_options"] = request["harness_options"]  # 화면 검산표용 (주식 업무의 stock_checks 등)
         run["concept"] = request.get("concept")  # 개념 편집 팀: 자동 판정(추가/수정)·대상 항목
         # 지도 기능이 있는 팀은 처음부터 '후처리 예정'으로 표시 — 워크플로우가 끝난 뒤 지도까지 다 만들 때까지 화면이 자동 갱신된다
         run["post_busy"] = ROUTE_MAP in team.features
-        st.session_state["runs"][run_key] = run
+        runs[run_key] = run
         st.session_state[PENDING_FOCUS_KEY] = NO_FOCUS  # 새 업무는 조직도·질문만 보이는 상태로 시작 (에이전트를 누르면 펼침)
         storage.create_run(run["run_id"], team_id, target, run["question"])
         graph = make_graph()

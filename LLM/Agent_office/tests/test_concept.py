@@ -315,3 +315,44 @@ def test_replace_final_keeps_rest_of_answer():
     answer = answer_with(GOOD_ENTRY, PLAN)
     replaced = concept.replace_final(answer, "[Perf]새 제목 (작성일: 26.10.20)\n1. 정의 및 개념")
     assert "<final>\n[Perf]새 제목" in replaced and "<thought>" in replaced and "concept_plan" in replaced
+
+
+# ─── GitHub 정보 (사이드바 링크·올리지 않은 커밋) ──────────────────────────
+
+
+@pytest.mark.parametrize("remote", [
+    "https://github.com/jeong-yun/CS.git",
+    "https://github.com/jeong-yun/CS",
+    "git@github.com:jeong-yun/CS.git",
+    "ssh://git@github.com/jeong-yun/CS.git",
+    "https://token@github.com/jeong-yun/CS.git",
+])
+def test_web_url_from_remote(remote):
+    assert cat.web_url(remote) == "https://github.com/jeong-yun/CS"
+
+
+def test_repo_info_links_and_unpushed(tmp_path):
+    import subprocess
+
+    def run(*args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    origin, work = tmp_path / "origin.git", tmp_path / "work"
+    run("init", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+    run("clone", str(origin), str(work), cwd=tmp_path)
+    run("config", "user.email", "t@example.com", cwd=work)
+    run("config", "user.name", "t", cwd=work)
+    (work / "Term").mkdir()
+    (work / "Term" / "a.txt").write_text("a", encoding="utf-8")
+    run("add", ".", cwd=work)
+    run("commit", "-m", "첫 커밋", cwd=work)
+    run("push", "-u", "origin", "main", cwd=work)
+    (work / "Term" / "a.txt").write_text("b", encoding="utf-8")
+    run("commit", "-am", "둘째", cwd=work)
+
+    info = cat.repo_info(work, "Term")
+    assert info.unpushed == 1 and info.branch == "main" and "둘째" in info.last_commit
+    assert info.url is None  # 로컬 원격은 GitHub 주소가 아님
+    info.url = "https://github.com/jeong-yun/CS"
+    assert info.tree("Term") == "https://github.com/jeong-yun/CS/tree/main/Term"
+    assert info.commit(cat.head_sha(work)).startswith("https://github.com/jeong-yun/CS/commit/")

@@ -7,7 +7,8 @@ from PIL import Image
 
 from core import avatars
 from core.config import resolve_avatar, subtree
-from core.live import apply_event, consume, new_run, start_run
+from core.live import STAGES, apply_event, consume, new_run, restore_run, stage_of, start_run
+from core.storage import Storage
 from core.llm_factory import NoAvailableModelError
 from core.schemas import AgentAnswer, ModelSpec
 from core.workflow import build_office_graph, stream_office
@@ -43,6 +44,35 @@ def test_apply_event_tracks_status_activity_and_draft():
     apply_event(run, "step", step("lead", "integrate", make_review("revise", 8)))
     apply_event(run, "interrupt", None)
     assert run["status"] == "awaiting_human" and run["statuses"]["lead"] == ("wait", "👤 결정 대기")
+
+
+def test_stage_of_follows_furthest_stage():
+    run = new_run("r1", "질문", "lead")
+    assert STAGES[stage_of(run)] == "🎯 요청 정리"
+    apply_event(run, "brief", object())
+    apply_event(run, "start", {"node": "lead", "kind": "research"})
+    assert STAGES[stage_of(run)] == "🌐 자료 수집"
+    apply_event(run, "start", {"node": "a", "kind": "draft"})
+    apply_event(run, "start", {"node": "b", "kind": "plan"})  # 동시에 여러 단계 → 가장 뒤 단계
+    assert STAGES[stage_of(run)] == "✍️ 작성"
+    apply_event(run, "step", step("a"))
+    apply_event(run, "start", {"node": "lead", "kind": "critic"})
+    assert STAGES[stage_of(run)] == "⚖️ 검증"
+    apply_event(run, "interrupt", None)
+    assert STAGES[stage_of(run)] == "👤 결정"
+    run["status"] = "adopted"
+    assert stage_of(run) == len(STAGES)
+
+
+def test_restore_run_rebuilds_waiting_run_from_storage(tmp_path):
+    storage = Storage(tmp_path / "runs.db")
+    storage.create_run("r9", "stock", "lead", "삼성전자 전망")
+    storage.save_steps("r9", [step("a"), step("lead", "integrate", make_review("revise", 8))], "awaiting_human")
+    run = restore_run(storage.get_run("r9"))
+    assert run["team_id"] == "stock" and run["root_id"] == "lead" and run["done"] and run["restored"]
+    assert run["status"] == "awaiting_human" and len(run["steps"]) == 2
+    assert run["statuses"]["lead"] == ("wait", "👤 결정 대기") and run["statuses"]["a"][0] == "done"
+    assert stage_of(run) == len(STAGES) - 1
 
 
 def test_consume_marks_errors_without_raising():

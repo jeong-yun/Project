@@ -53,8 +53,20 @@ def sidebar(settings: dict) -> CatalogContext | None:
     if repo is None:
         st.warning("git 저장소가 아닙니다 — 반영은 되지만 커밋·푸시는 할 수 없습니다.")
     else:
+        info = cat.repo_info(repo, subdir)
+        link = info.tree(subdir)
+        if link:
+            st.markdown(f"🐙 [GitHub 에서 보기]({link})")
+        if info.last_commit:
+            st.caption(f"마지막 커밋: {info.last_commit}")
         status = cat.git_status(repo, subdir)
         st.caption("커밋 안 된 변경 없음" if not status else f"커밋 안 된 변경:\n```\n{status}\n```")
+        if info.unpushed > 0:
+            # 커밋만 하고 푸시하지 않은 채 남은 것 — GitHub 에는 아직 없다
+            st.warning(f"⬆️ GitHub 에 아직 올리지 않은 커밋 {info.unpushed}개")
+            if st.button("🚀 지금 푸시", use_container_width=True, key="concept_push_pending"):
+                ok, log = cat.git_push(repo)
+                (st.success if ok else st.error)(log[-500:] or "완료")
         if st.button("⬇️ 최신 받기 (git pull)", use_container_width=True, key="concept_pull"):
             ok, log = cat.git_pull(repo)
             (st.success if ok else st.error)(log[-500:] or "완료")
@@ -227,7 +239,8 @@ def git_panel(ctx: CatalogContext, key: str, message: str) -> None:
         elif "up-to-date" in log.lower() or "up to date" in log.lower():
             st.warning("올릴 새 커밋이 없습니다 (GitHub 와 이미 같음).")
         else:
-            st.success("GitHub 에 올렸습니다.\n\n" + log[-500:])
+            link = cat.repo_info(ctx.repo, ctx.subdir).commit(cat.head_sha(ctx.repo))
+            st.success("GitHub 에 올렸습니다." + (f" → [올린 커밋 보기]({link})" if link else "") + "\n\n" + log[-500:])
 
 
 def adopted_section(ctx: CatalogContext | None, run: dict) -> None:

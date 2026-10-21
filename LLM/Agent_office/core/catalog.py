@@ -505,3 +505,42 @@ def git_push(repo: Path) -> tuple[bool, str]:
 
 def git_pull(repo: Path) -> tuple[bool, str]:
     return git(repo, "pull", "--ff-only", timeout=120)
+
+
+def web_url(remote: str) -> str | None:
+    """git 원격 주소 → GitHub 웹 주소. (git@github.com:a/b.git · https://github.com/a/b.git → https://github.com/a/b)"""
+    m = re.match(r"^(?:https?://(?:[^@/]+@)?|git@|ssh://git@)([^/:]+)[/:](.+?)(?:\.git)?/?$", remote.strip())
+    return f"https://{m.group(1)}/{m.group(2)}" if m else None
+
+
+@dataclass
+class RepoInfo:
+    """사이드바·푸시 결과에 보여 줄 GitHub 정보."""
+    url: str | None  # https://github.com/<owner>/<repo>
+    branch: str
+    unpushed: int  # 아직 GitHub 에 올리지 않은 커밋 수 (원격 추적 브랜치가 없으면 -1)
+    last_commit: str  # 이 폴더의 마지막 커밋 "abc1234 메시지 (2 hours ago)"
+
+    def tree(self, subdir: str) -> str | None:
+        return f"{self.url}/tree/{self.branch}/{subdir}".rstrip("/") if self.url else None
+
+    def commit(self, sha: str) -> str | None:
+        return f"{self.url}/commit/{sha}" if self.url and sha else None
+
+
+def repo_info(repo: Path, subdir: str) -> RepoInfo:
+    remote = git(repo, "remote", "get-url", "origin")
+    branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")[1] or "main"
+    ahead = git(repo, "rev-list", "--count", "@{u}..HEAD")
+    last = git(repo, "log", "-1", "--format=%h %s (%cr)", "--", subdir)
+    return RepoInfo(
+        url=web_url(remote[1]) if remote[0] else None,
+        branch=branch,
+        unpushed=int(ahead[1]) if ahead[0] and ahead[1].isdigit() else -1,
+        last_commit=last[1] if last[0] else "",
+    )
+
+
+def head_sha(repo: Path) -> str:
+    ok, sha = git(repo, "rev-parse", "HEAD")
+    return sha if ok else ""
