@@ -27,23 +27,41 @@ def full_script(**extra):
     return Script(text="초안 [1]", Delegation=delegation, ReviewResult=make_review(answer="보완안"), **extra)
 
 
+TREE_ORDER = [
+    ("lead", "plan"),
+    ("dgm_research", "plan"),  # 부장·리서치는 하위가 1명 → 분배 LLM 생략
+    ("am_fact", "draft"),
+    ("staff_draft", "draft"),
+    ("dgm_research", "integrate"),
+    ("gm_research", "review"),
+    ("staff_case", "draft"),
+    ("am_action", "review"),
+    ("gm_action", "review"),
+    ("lead", "integrate"),
+]
+
+
 def test_tree_runs_top_down_then_bottom_up(org, ranks, team, models, use_script):
     use_script(full_script())
     _, steps = run(org, ranks, team, models)
     order = [(s.node_id, s.kind) for s in steps]
-    assert order == [
-        ("lead", "plan"),
-        ("dgm_research", "plan"),  # 부장·리서치는 하위가 1명 → 분배 LLM 생략
-        ("am_fact", "draft"),
-        ("staff_draft", "draft"),
-        ("dgm_research", "integrate"),
-        ("gm_research", "review"),
-        ("staff_case", "draft"),
-        ("am_action", "review"),
-        ("gm_action", "review"),
-        ("lead", "integrate"),
-    ]
-    assert steps[-1].content == "보완안"
+    # 화면에는 끝난 순서대로 온다 (형제는 동시에 진행) → 순서는 '분배 → 하위 → 상사 통합' 인과 관계만 지키면 된다
+    assert sorted(order) == sorted(TREE_ORDER)
+    before = lambda a, b: order.index(a) < order.index(b)  # noqa: E731
+    assert before(("lead", "plan"), ("dgm_research", "plan"))
+    assert before(("dgm_research", "plan"), ("am_fact", "draft")) and before(("dgm_research", "plan"), ("staff_draft", "draft"))
+    assert before(("am_fact", "draft"), ("dgm_research", "integrate")) and before(("staff_draft", "draft"), ("dgm_research", "integrate"))
+    assert before(("dgm_research", "integrate"), ("gm_research", "review"))
+    assert before(("staff_case", "draft"), ("am_action", "review")) and before(("am_action", "review"), ("gm_action", "review"))
+    assert order[-1] == ("lead", "integrate") and steps[-1].content == "보완안"
+
+
+def test_state_steps_keep_depth_first_order(org, ranks, team, models, use_script):
+    """그래프 상태(저장·교훈 생성에 쓰임)의 steps 는 실행마다 같은 순서(깊이 우선)."""
+    use_script(full_script())
+    graph = build_office_graph(org, ranks, team, models, SETTINGS, NO_CRITIC)
+    state = graph.invoke({"question": "질문", "root_id": "lead", "brief_input": BRIEF, "steps": []}, {"recursion_limit": 25})
+    assert [(s.node_id, s.kind) for s in state["steps"]] == TREE_ORDER
 
 
 def test_supervisor_only_assigns_needed_children(org, ranks, team, models, use_script):

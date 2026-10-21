@@ -286,11 +286,13 @@ class AnswerStream:
                     llm = llm_factory.create_chat_model(spec, self.agent.models)
                     # tags: LangGraph 스트림에서 '이 토큰은 누구의 초안인지' 알아보는 표시
                     config = {"tags": [self.tag]} if self.tag else None
-                    for chunk in llm.stream(self.messages, config=config):
-                        full = chunk if full is None else full + chunk
-                        text = chunk_text(chunk.content)
-                        if text:
-                            yield text
+                    with llm_factory.provider_slot(spec.provider):  # provider 별 동시 호출 제한 (재시도 대기 중엔 자리를 비움)
+                        started = time.perf_counter()
+                        for chunk in llm.stream(self.messages, config=config):
+                            full = chunk if full is None else full + chunk
+                            text = chunk_text(chunk.content)
+                            if text:
+                                yield text
                 except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
                     # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
                     started_writing = full is not None and bool(chunk_text(full.content))

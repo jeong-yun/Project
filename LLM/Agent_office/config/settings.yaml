@@ -23,6 +23,14 @@ avatar:
   allowed_ext: [png, jpg, jpeg, webp]
   size: 256                # 업로드 시 정사각형으로 리사이즈
 
+llm_concurrency:
+  # 형제 에이전트(서로 독립인 하위 업무)와 자료 조사가 동시에 진행되므로 provider 별 '동시 LLM 호출 수'를 제한한다.
+  # 무료 티어의 분당 토큰·요청 한도(Groq 8천 TPM, Gemini 429)가 한꺼번에 터지지 않게 낮게 둔다. 0 이하면 제한 없음.
+  default: 4               # 아래에 없는 provider
+  freellm: 2               # FreeLLMAPI (Groq·Gemini 무료 티어 묶음)
+  google: 3
+  openai: 4
+
 web_search:
   # 팀 team.yaml 의 tools 에 web_search 가 있고, 질문 화면의 '🌐 웹 검색' 이 켜져 있을 때 사용
   provider: duckduckgo     # 현재 지원: duckduckgo (API 키 불필요)

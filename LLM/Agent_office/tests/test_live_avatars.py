@@ -34,11 +34,11 @@ def test_apply_event_tracks_status_activity_and_draft():
     apply_event(run, "start", {"node": "a", "kind": "draft"})
     apply_event(run, "token", ("a", "안녕"))
     apply_event(run, "token", ("a", "하세요"))
-    assert run["activity"]["a"] == "✍️ 작성 중" and run["drafting"] == {"node": "a", "text": "안녕하세요"}
+    assert run["activity"]["a"] == "✍️ 작성 중" and run["drafting"] == {"a": "안녕하세요"}
 
     apply_event(run, "step", step("a"))
     assert run["statuses"]["a"] == ("done", "📝 초안 완료")
-    assert "a" not in run["activity"] and run["drafting"]["node"] is None  # 완료되면 작성 중 표시 정리
+    assert "a" not in run["activity"] and "a" not in run["drafting"]  # 완료되면 작성 중 표시 정리
 
     apply_event(run, "step", step("lead", "integrate", make_review("revise", 8)))
     apply_event(run, "interrupt", None)

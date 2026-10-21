@@ -3,7 +3,7 @@
 1) 보조(utility) 모델이 질문을 보고 검색 필요 여부와 검색어를 정한다 (SearchPlan).
    - 약어·고유명사·최신 정보는 반드시 검색, 모호한 약어는 풀어 쓴 검색어를 함께 만든다.
      예) "HBF 알려줘" → "HBF" 만 검색하면 가구 회사가 나오므로 "HBF High Bandwidth Flash memory" 로 검색
-2) 검색어마다 웹 검색을 하고, 중복을 뺀 결과를 번호를 붙여 모든 직급의 프롬프트에 넣는다.
+2) 검색어들을 동시에 웹 검색하고(스레드), 검색어 순서대로 합쳐 중복을 뺀 결과에 번호를 붙여 모든 직급의 프롬프트에 넣는다.
    → 답변자는 근거로 쓰고 [번호]로 출처를 표시, 검토자는 사실관계 검증에 사용한다.
 
 3) team.yaml 의 search.exclude_domains 에 적힌 사이트(블로그·커뮤니티 등)는 근거에서 뺀다.
@@ -13,6 +13,7 @@
 """
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -158,17 +159,25 @@ def research(question: str, models: ModelsConfig, settings: dict) -> WebContext:
         context.notes.append(f"알 수 없는 검색 엔진: {provider}")
         return context
 
-    seen: set[str] = set()
-    exclude = cfg.get("exclude_domains") or []
-    dropped = 0
-    for query in plan.queries:
+    def fetch(query: str) -> list[SearchResult] | Exception:
         try:
-            results = backend(
+            return backend(
                 query, max_results, region,
                 text_timelimit=cfg.get("text_timelimit"), news_timelimit=cfg.get("news_timelimit"),
             )
         except Exception as e:  # noqa: BLE001 — 네트워크·검색 엔진 오류는 답변을 막지 않는다
-            context.notes.append(f"검색 실패 ({query}): {type(e).__name__}: {str(e)[:200]}")
+            return e
+
+    # 검색어들을 동시에 검색하고, 합치는 것은 검색어 순서대로 → 결과 번호([1], [2]…)가 실행마다 같다
+    with ThreadPoolExecutor(max_workers=len(plan.queries)) as pool:
+        fetched = list(pool.map(fetch, plan.queries))
+
+    seen: set[str] = set()
+    exclude = cfg.get("exclude_domains") or []
+    dropped = 0
+    for query, results in zip(plan.queries, fetched):
+        if isinstance(results, Exception):
+            context.notes.append(f"검색 실패 ({query}): {type(results).__name__}: {str(results)[:200]}")
             continue
         for r in results:
             if exclude and excluded(r.url, exclude):

@@ -11,7 +11,7 @@ run(dict) 의 주요 키
   done       스레드 종료 여부 (True 가 되면 화면이 '사람 결정' 단계를 보여 준다)
   statuses   {에이전트 id: (상태, 표시 문구)}  — 조직도 배지 (working / wait / done / revise)
   activity   {에이전트 id: 지금 하는 일}        — 에이전트 패널의 '진행 중' 표시
-  drafting   {"node", "text"}                   — 실무자가 지금 쓰고 있는 초안 (토큰 단위로 늘어남)
+  drafting   {에이전트 id: 지금 쓰고 있는 초안}  — 토큰 단위로 늘어남. 형제 실무자들이 동시에 쓰므로 에이전트별로 따로 모은다
   steps      완료된 단계(AgentAnswer) 목록      — 타임라인
   brief / tools / web / notes / error
 """
@@ -38,7 +38,7 @@ def new_run(run_id: str, question: str, root_id: str) -> dict:
         "run_id": run_id, "question": question, "root_id": root_id, "started_at": time.time(),
         "status": "reviewing", "done": False, "error": None,
         "statuses": {root_id: ("working", WORKING_LABELS["brief"])}, "activity": {root_id: WORKING_LABELS["brief"]},
-        "drafting": {"node": None, "text": ""},
+        "drafting": {},
         "steps": [], "brief": None, "tools": [], "web": None, "notes": [],
         "decision": None, "lessons": [],
         # 후처리(여행 지도 등): post_busy=True 인 동안 화면이 계속 자동 갱신된다
@@ -76,18 +76,15 @@ def apply_event(run: dict, kind: str, payload) -> None:
         label = RETRY_LABELS[payload["reason"]]
         statuses[payload["node"]] = ("working", label)
         activity[payload["node"]] = label
-        run["drafting"] = {"node": None, "text": ""}
+        run["drafting"].pop(payload["node"], None)  # 다시 쓰는 에이전트의 미리보기만 비운다 (다른 실무자는 계속 작성 중)
     elif kind == "token":
         node, text = payload
-        if run["drafting"]["node"] != node:
-            run["drafting"] = {"node": node, "text": ""}
-        run["drafting"]["text"] += text
+        run["drafting"][node] = run["drafting"].get(node, "") + text
     elif kind == "step":
         run["steps"].append(payload)
         statuses[payload.node_id] = step_status(payload)
         activity.pop(payload.node_id, None)
-        if run["drafting"]["node"] == payload.node_id:
-            run["drafting"] = {"node": None, "text": ""}
+        run["drafting"].pop(payload.node_id, None)
     elif kind == "brief":
         run["brief"] = payload
     elif kind == "tools":
@@ -115,7 +112,7 @@ def consume(run: dict, events: Iterator[tuple[str, object]], on_step: Callable[[
         run["notes"].append(traceback.format_exc()[-1500:])
     finally:
         run["activity"].clear()
-        run["drafting"] = {"node": None, "text": ""}
+        run["drafting"] = {}
         run["done"] = True
 
 

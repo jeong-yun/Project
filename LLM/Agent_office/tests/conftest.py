@@ -29,7 +29,7 @@ def clear_model_cooldown():
 
 @pytest.fixture(autouse=True)
 def no_network_search(monkeypatch):
-    """테스트 중 실제 웹 검색을 막는다. 호출된 검색어는 반환값 리스트에 기록된다."""
+    """테스트 중 실제 웹 검색을 막는다. 호출된 검색어는 반환값 리스트에 기록된다 (검색어들은 동시에 검색되므로 기록 순서는 달라질 수 있음)."""
     from core import search
 
     calls: list[str] = []
@@ -37,7 +37,7 @@ def no_network_search(monkeypatch):
     def fake_backend(query, max_results, region, **kwargs):
         calls.append(query)
         return [
-            search.SearchResult(title=f"{query} 결과", url=f"https://example.com/{len(calls)}", snippet="요약"),
+            search.SearchResult(title=f"{query} 결과", url=f"https://example.com/{query}", snippet="요약"),
             search.SearchResult(title="중복", url="https://example.com/dup", snippet="중복 결과"),
         ]
 
