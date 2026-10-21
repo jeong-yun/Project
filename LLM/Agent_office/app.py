@@ -26,6 +26,7 @@ import base64
 import html
 import json
 import os
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -36,7 +37,7 @@ from pydantic import ValidationError
 from st_click_detector import click_detector
 
 import concept_ui
-from core import concept, llm_factory, stock_calc, verification
+from core import audio_edit, concept, llm_factory, music, stock_calc, verification
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
 from core.config import (
@@ -61,7 +62,7 @@ from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTem
 from core.search import WebContext
 from core.storage import Storage
 from core.tasks import TaskInputError, build_request
-from core.exporter import export_adopted, list_results
+from core.exporter import MIME, export_adopted, list_results
 from core.route import CATEGORIES, RouteResult, build_route, map_html
 from core.workflow import WEB_SEARCH_TOOL, build_office_graph, make_checkpointer, resume_with_decision, stream_office
 
@@ -93,6 +94,8 @@ DATA_DIR = Path(os.getenv("AGENT_OFFICE_DATA_DIR") or BASE_DIR / settings.get("s
 # 채택한 결과 파일 저장 폴더 (results/<팀>/). AGENT_OFFICE_RESULTS_DIR 로 바꿀 수 있다
 RESULTS_DIR = Path(os.getenv("AGENT_OFFICE_RESULTS_DIR") or BASE_DIR / settings.get("storage", {}).get("results_dir", "results"))
 ROUTE_MAP = "route_map"  # team.yaml features 에 있으면 여행 경로 지도를 만든다
+MUSIC_TRACK = "music_track"  # team.yaml features 에 있으면 끝난 뒤 Lyria 로 곡을 만들고 편집할 수 있다
+MUSIC_CFG = music.music_settings(settings)  # settings.yaml 의 music: (모델·가격·채점·자동 재생성)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -151,6 +154,7 @@ def discard_run(run: dict) -> None:
     """피드백 없이 버리는 실행 — 저장소와 체크포인트에서 삭제."""
     storage.delete_run(run["run_id"])
     delete_thread(run["run_id"])
+    shutil.rmtree(DATA_DIR / "music" / run["run_id"], ignore_errors=True)  # 음악 팀: 채택 전 만든 곡·편집 버전
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -224,8 +228,8 @@ with st.sidebar:
         st.caption(f"채택한 결과는 `{RESULTS_DIR.name}/{team_id}/` 폴더에 저장됩니다.")
         for path in saved:
             st.download_button(
-                ("🗺 " if path.suffix == ".html" else "📄 ") + path.stem[:34], data=path.read_bytes(), file_name=path.name,
-                mime="text/html" if path.suffix == ".html" else "text/markdown", key=f"dl_{path.name}", use_container_width=True,
+                {".html": "🗺 ", ".mp3": "🎵 "}.get(path.suffix, "📄 ") + path.stem[:34], data=path.read_bytes(), file_name=path.name,
+                mime=MIME.get(path.suffix, "text/markdown"), key=f"dl_{path.name}", use_container_width=True,
             )
 
     # 모델·검증 설정 — 평소에는 접어 두고 한 줄 요약만
@@ -594,6 +598,170 @@ def render_route_tab(run: dict) -> None:
                 st.text(note[:300])
 
 
+def build_music(r: dict, answer: str) -> None:
+    """최종 답변의 가사·Lyria 블록으로 곡을 만들어 r['music'] 에 둔다 (유료). 편집 버전 기록(v1 = 원본)도 여기서 시작한다.
+
+    백그라운드 스레드(on_finish)와 화면 버튼 양쪽에서 부른다. 다시 만들면 gen2, gen3 … 폴더에 따로 둔다.
+    """
+    opts = r.get("harness_options") or {}
+    previous = r.get("music") or {}
+    gen = previous.get("gen", 0) + 1
+    brief = r.get("brief")
+    brief_text = r["question"] + (f"\n목표: {brief.goal}" if brief else "")
+    track = music.make_track(
+        answer, DATA_DIR / "music" / r["run_id"] / f"gen{gen}", MUSIC_CFG, kind=opts.get("music_kind"),
+        length=opts.get("music_length"), brief=brief_text,
+    )
+    r["music"] = {"track": track, "history": audio_edit.start_history(track.best.path), "gen": gen,
+                  "cost": round(previous.get("cost", 0.0) + track.cost_usd, 2), "last_edit": None}
+    r.pop("music_error", None)
+
+
+def recover_music(run: dict, answer: str) -> dict | None:
+    """서버를 다시 켜 되살린 업무: 이미 만든 곡 파일이 있으면 다시 생성(유료)하지 않고 불러온다."""
+    folders = sorted((DATA_DIR / "music" / run["run_id"]).glob("gen*"), key=lambda p: int(p.name[3:] or 0))
+    opts = run.get("harness_options") or {}
+    track = music.recover_track(folders[-1], answer, MUSIC_CFG, opts.get("music_kind"), opts.get("music_length")) if folders else None
+    if track is None:
+        return None
+    run["music"] = {"track": track, "history": audio_edit.start_history(track.best.path), "gen": len(folders),
+                    "cost": track.cost_usd, "last_edit": None}
+    return run["music"]
+
+
+def music_report(run: dict) -> str:
+    """채택 파일(.md)에 붙일 음원 정보 — 모델·길이·비용·편집 기록·Lyria 입력."""
+    state = run["music"]
+    track: music.MusicTrack = state["track"]
+    history: audio_edit.History = state["history"]
+    now = history.now
+    lines = [
+        f"- 모델: {track.model} · {'반주' if track.kind == music.INSTRUMENTAL else '노래(보컬)'}"
+        + (f" · 요청 길이 {music.fmt_time(track.length_sec)}" if track.length_sec else ""),
+        f"- 저장한 버전: {now.label} · 길이 {music.fmt_time(now.duration)}" + (f" · {now.lufs:.1f} LUFS" if now.lufs is not None else ""),
+        f"- 예상 비용(누적): 약 ${state['cost']:.2f} · 생성 {len(track.takes)}회" + (f" (다시 만들기 포함 {state['gen']}차)" if state["gen"] > 1 else ""),
+    ]
+    if track.best.grade:
+        lines.append(f"- Gemini 채점: {track.best.grade.score}/5 — {track.best.grade.heard[:200]}")
+    edits = [v for v in history.versions[1: history.current + 1]]
+    if edits:
+        lines += ["", "편집 기록 (CPU 후처리):"] + [f"- {v.label}: {v.note}" for v in edits]
+    lines += ["", "Lyria 입력:", "", "```text", track.lyria_input, "```"]
+    return "\n".join(lines)
+
+
+def render_music_section(run: dict) -> None:
+    """🎵 음원 — 듣기·받기·예상 비용·채점, 다시 만들기, ✂️ 편집(버전 기록·되돌리기·전후 비교)."""
+    rid = run["run_id"]
+    st.markdown("#### 🎵 음원 (Gemini Lyria)")
+    if run.get("post_busy"):
+        st.info("🎵 Lyria 로 곡 만드는 중… 보통 30초~2분 걸립니다. 그동안 위의 가사·프롬프트를 보고 결정할 수 있습니다.")
+        return
+    final = final_answer(run)
+    blocks = music.extract_blocks(final.content) if final else music.MusicBlocks("", "")
+    opts = run.get("harness_options") or {}
+    model = music.pick_model(music.parse_length(opts.get("music_length")), MUSIC_CFG)
+    price = music.estimate_cost(model, MUSIC_CFG)
+    state = run.get("music")
+    if state is None and final and blocks.prompt:
+        state = recover_music(run, final.content)
+
+    if state is None:
+        if run.get("music_error"):
+            st.warning(f"곡을 만들지 못했습니다: {run['music_error'][:300]}")
+        if not blocks.prompt:
+            st.caption("최종 답변에 ```lyria 블록이 없어 곡을 만들 수 없습니다.")
+            return
+        if st.button(f"🎵 곡 만들기 ({model} · 유료 약 ${price:.2f})", key=f"mkmusic_{rid}", type="primary"):
+            with st.spinner("Lyria 로 곡 만드는 중… (30초~2분)"):
+                try:
+                    build_music(run, final.content)
+                except Exception as e:  # noqa: BLE001
+                    run["music_error"] = f"{type(e).__name__}: {e}"
+            st.rerun()
+        return
+
+    track: music.MusicTrack = state["track"]
+    history: audio_edit.History = state["history"]
+    now = history.now
+    st.audio(now.path.read_bytes(), format="audio/mpeg")
+    grade = track.best.grade
+    st.caption(
+        f"{now.label} · {music.fmt_time(now.duration)}"
+        + (f" (요청 {music.fmt_time(track.length_sec)})" if track.length_sec else "")
+        + (f" · {now.lufs:.1f} LUFS" if now.lufs is not None else "")
+        + f" · {track.model} · 예상 비용 누적 약 ${state['cost']:.2f} (생성 {len(track.takes)}회)"
+        + (f" · Gemini 채점 {grade.score}/5" if grade else "")
+        + " · SynthID 워터마크 포함"
+    )
+    c1, c2 = st.columns(2)
+    c1.download_button("⬇ MP3 받기", data=now.path.read_bytes(), file_name=f"{team_id}_{rid[:8]}_{now.label}.mp3",
+                       mime="audio/mpeg", key=f"dl_mp3_{rid}_{now.label}", use_container_width=True)
+    if c2.button(f"🔁 Lyria 로 다시 만들기 (유료 약 ${price:.2f}, 편집 기록은 새로 시작)", key=f"regen_{rid}",
+                 use_container_width=True):
+        with st.spinner("Lyria 로 다시 만드는 중…"):
+            try:
+                build_music(run, final.content if final else "")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"다시 만들기 실패: {type(e).__name__}: {e}")
+                return
+        st.rerun()
+    for note in track.notes:
+        st.caption(f"ℹ️ {note}")
+    with st.expander("Lyria 에 보낸 입력 · 생성·채점 기록"):
+        st.code(track.lyria_input, language="text")
+        for i, take in enumerate(track.takes):
+            mark = " ← 사용" if i == track.chosen else ""
+            g = take.grade
+            st.markdown(f"**{i + 1}번째 생성**{mark} · {music.fmt_time(take.duration)}"
+                        + (f" · 채점 {g.score}/5 — {g.heard[:200]}" + (f" / 문제: {'; '.join(g.issues)}" if g.issues else "") if g else ""))
+
+    # ── ✂️ 편집: 요청 → 편집 계획(JSON) → CPU 처리 → 길이·라우드니스 재측정 → 새 버전 ──
+    st.markdown("##### ✂️ 편집 (CPU 후처리 — 추가 비용 없음)")
+    st.caption("예: 30초로 줄여 · 키 한 음 낮춰 · 템포 10% 빠르게 · 끝에 페이드아웃 · 리버브 조금 · 음량 맞춰. "
+               "가사·멜로디·장르 변경은 후처리로 안 되고 다시 생성해야 합니다.")
+    with st.form(f"edit_form_{rid}", clear_on_submit=True):
+        request = st.text_input("편집 요청", placeholder="예: 끝에 3초 페이드아웃하고 음량 맞춰")
+        submitted = st.form_submit_button("✂️ 편집 적용", type="primary")
+    if submitted and request.strip():
+        with st.spinner("편집 계획을 세우고 오디오를 처리하는 중… (템포·키 변경은 30초 이상 걸릴 수 있음)"):
+            try:
+                plan, result = audio_edit.plan_and_apply(history, request, models, now.path.parent,
+                                                         high_quality=bool(MUSIC_CFG.get("edit_high_quality")))
+            except Exception as e:  # noqa: BLE001 — 모델 없음·디코딩 실패 등
+                plan, result = None, audio_edit.EditResult(None, [], [f"{type(e).__name__}: {str(e)[:300]}"])
+        state["last_edit"] = {"request": request.strip(), "plan": plan, "result": result}
+        st.rerun()
+
+    last = state.get("last_edit")
+    if last:
+        result: audio_edit.EditResult = last["result"]
+        if result.version:
+            st.success(f"'{last['request']}' → {result.version.label} 만듦 · " + " · ".join(result.checks))
+        for problem in result.problems:
+            (st.warning if result.version else st.error)(problem)
+        if last["plan"] is not None:
+            with st.expander("편집 계획 (JSON)"):
+                st.json(last["plan"].model_dump())
+
+    u1, u2, u3 = st.columns(3)
+    if u1.button("↩ 되돌리기", key=f"undo_{rid}", disabled=history.current <= 0, use_container_width=True):
+        history.undo()
+        state["last_edit"] = None
+        st.rerun()
+    if u2.button("↪ 다시 하기", key=f"redo_{rid}", disabled=history.current >= len(history.versions) - 1, use_container_width=True):
+        history.redo()
+        state["last_edit"] = None
+        st.rerun()
+    u3.caption("버전: " + " → ".join(f"**{v.label}**" if i == history.current else v.label for i, v in enumerate(history.versions)))
+    if history.previous:
+        b1, b2 = st.columns(2)
+        b1.caption(f"이전 {history.previous.label} · {music.fmt_time(history.previous.duration)} — {history.previous.note[:40]}")
+        b1.audio(history.previous.path.read_bytes(), format="audio/mpeg")
+        b2.caption(f"지금 {now.label} · {music.fmt_time(now.duration)} — {now.note[:40]}")
+        b2.audio(now.path.read_bytes(), format="audio/mpeg")
+
+
 def render_agent_panel(node_id: str, run: dict | None) -> None:
     node = nodes[node_id]
     rank = ranks_by_id[node.rank]
@@ -678,7 +846,12 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
             html_text = map_html(route, trip_start=run.get("trip_start")) if route else None
         names = {nid: name_of(nid) for nid in nodes}
         appendix = calc_report(run, decision.final_answer)  # 채택한(수정한) 내용 기준으로 다시 검산
-        paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text, appendix)
+        audio_path, title = None, "코드 검산 (점수·평균가·손익비)"
+        if MUSIC_TRACK in team.features and run.get("music"):
+            # 음악 팀: 지금 고른 버전(편집본)의 MP3 를 .md 옆에 저장 — 곡은 다시 만들지 않는다 (유료·매번 다름)
+            audio_path, appendix, title = run["music"]["history"].now.path, music_report(run), "음원 (Gemini Lyria)"
+        paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text, appendix,
+                               audio_path=audio_path, appendix_title=title)
         return [str(p) for p in paths]
     except Exception as e:  # noqa: BLE001
         run["notes"].append(f"결과 파일 저장 실패: {type(e).__name__}: {e}")
@@ -712,6 +885,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
                 st.markdown(final.content)
             st.download_button("⬇ 최종 결과 받기 (.md)", data=final.content, file_name=f"{team_id}_{run['run_id'][:8]}.md",
                                mime="text/markdown", key=f"dl_final_{run['run_id']}")
+        if MUSIC_TRACK in team.features:
+            render_music_section(run)
         report = calc_report(run, final.content)
         if report:
             # LLM 이 쓴 숫자를 코드로 다시 계산한 결과 — 판단 전에 꼭 확인할 값
@@ -805,7 +980,7 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         c1.caption(f"📁 저장됨: `{path.relative_to(BASE_DIR) if path.is_relative_to(BASE_DIR) else path}`")
         if path.exists():
             c2.download_button("⬇ 받기", data=path.read_bytes(), file_name=path.name, key=f"dl_now_{path.name}",
-                               mime="text/html" if path.suffix == ".html" else "text/markdown", use_container_width=True)
+                               mime=MIME.get(path.suffix, "text/markdown"), use_container_width=True)
     st.markdown("##### 📚 에이전트별 피드백 (다음 업무부터 프롬프트에 반영)")
     for lesson in run["lessons"]:
         icon = "👍" if lesson.kind == "praise" else "🔧"
@@ -1209,7 +1384,8 @@ if request:
         run["harness_options"] = request["harness_options"]  # 화면 검산표용 (주식 업무의 stock_checks 등)
         run["concept"] = request.get("concept")  # 개념 편집 팀: 자동 판정(추가/수정)·대상 항목
         # 지도 기능이 있는 팀은 처음부터 '후처리 예정'으로 표시 — 워크플로우가 끝난 뒤 지도까지 다 만들 때까지 화면이 자동 갱신된다
-        run["post_busy"] = ROUTE_MAP in team.features
+        features = set(team.features)  # 백그라운드 스레드에서 쓸 값은 미리 잡아 둔다
+        run["post_busy"] = ROUTE_MAP in features or (MUSIC_TRACK in features and MUSIC_CFG["auto_generate"])
         runs[run_key] = run
         st.session_state[PENDING_FOCUS_KEY] = NO_FOCUS  # 새 업무는 조직도·질문만 보이는 상태로 시작 (에이전트를 누르면 펼침)
         storage.create_run(run["run_id"], team_id, target, run["question"])
@@ -1230,13 +1406,20 @@ if request:
                     return
                 storage.save_steps(r["run_id"], r["steps"], r["status"])
                 final = final_answer(r)
-                if r["post_busy"] and final:
+                if r["post_busy"] and final and ROUTE_MAP in features:
                     # 여행 팀: 최종 계획서로 경로 지도 만들기 (사람은 그동안 결과를 보고 결정할 수 있다)
                     r["activity"][r["root_id"]] = "🗺 지도 만드는 중"
                     try:
                         r["route"] = build_route(final.content, models, cache_path=DATA_DIR / "geocode_cache.json")
                     except Exception as e:  # noqa: BLE001 — 지도 실패가 결과를 막지 않게
                         r["route_error"] = f"{type(e).__name__}: {e}"
+                if r["post_busy"] and final and MUSIC_TRACK in features:
+                    # 음악 팀: 최종 답변의 가사·Lyria 블록으로 곡 만들기 (유료) → 길이 확인 → 듣고 채점 → 낮으면 다시
+                    r["activity"][r["root_id"]] = "🎵 곡 만드는 중 (Lyria)"
+                    try:
+                        build_music(r, final.content)
+                    except Exception as e:  # noqa: BLE001 — 곡 생성 실패가 결과·결정을 막지 않게
+                        r["music_error"] = f"{type(e).__name__}: {e}"
             finally:
                 r["activity"].pop(r["root_id"], None)
                 r["post_busy"] = False  # 화면 자동 갱신을 멈춰도 된다는 신호

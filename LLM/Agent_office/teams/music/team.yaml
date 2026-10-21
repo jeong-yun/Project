@@ -1,0 +1,150 @@
+# 음악 팀 — 주제·길이·장르를 입력하면 Google Gemini Lyria 로 노래(보컬·한국어 가사 가능) 또는 반주를 만든다
+#
+# 흐름: 팀장(음악 PD)이 브리프를 정하고 → 작사가·작곡편곡가가 가사와 Lyria 프롬프트를 쓰고 → 부장이 검수 →
+#       최종 답변의 ```lyrics / ```lyria 블록으로 워크플로우가 끝난 뒤 Lyria 를 불러 MP3 를 만든다 (features: music_track)
+# 하네스: music_prompt — 블록 존재, 반주의 'Instrumental only, no vocals', 가사 섹션 태그·줄 수·음절 수,
+#         아티스트 이름 금지, 타임스탬프 구간이 길이에 맞는지를 코드로 검사 (core/music.py)
+# 편집: Lyria 는 한 번에 만들기만 하므로(수정 불가) 자르기·템포·키·페이드·리버브·음량은 CPU 후처리로 한다 (core/audio_edit.py)
+
+id: music
+name: 🎵 음악 팀
+description: 주제·길이·장르·분위기를 받아 가사(섹션 태그)와 Lyria 프롬프트를 쓰고, Gemini Lyria 로 노래(보컬 포함) 또는 반주 MP3 를 만든다. 만든 곡은 자르기·템포·키·페이드·리버브·음량을 편집할 수 있다.
+
+personas:
+  assistant_manager: 당신은 대중가요 작사가입니다. 한국어 운율과 발음을 살려, 멜로디에 실어 부르기 쉬운 가사를 [Verse]/[Chorus] 섹션으로 씁니다.
+  deputy_gm: 당신은 작곡·편곡가입니다. 장르·BPM·조성·악기·구간별 전개를 시간표로 설계해 음악 생성 모델이 그대로 따를 수 있는 영어 프롬프트를 씁니다.
+  gm: 당신은 음반 제작 부장입니다. 길이·구성·가사 분량이 맞는지, 아티스트 모방이나 저작권 문제가 없는지 검수합니다.
+  team_lead: 당신은 음악 PD 입니다. 용도·길이·분위기·보컬 여부·가사 언어를 브리프로 정하고, 가사와 Lyria 프롬프트를 정해진 블록 형식으로 최종 정리합니다.
+
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장·음악PD
+  specialty: 브리프(용도·길이·분위기·보컬 여부·언어) 결정, 최종 가사·Lyria 프롬프트 정리
+  children:
+    - id: gm_review
+      rank: gm
+      name: 부장·검수
+      specialty: 길이·구성·가사 분량 검수, 아티스트 모방·저작권 위험 점검
+      children:
+        - id: lyricist
+          rank: assistant_manager
+          name: 대리·작사가
+          specialty: "섹션 태그([Verse]/[Pre-Chorus]/[Chorus]/[Bridge]/[Outro])가 붙은 가사 — 노래 업무에서만"
+        - id: composer
+          rank: deputy_gm
+          name: 차장·작곡편곡
+          specialty: Lyria 스타일 프롬프트 — 장르·BPM·조성·악기·보컬 톤, [m:ss - m:ss] 시간표 구간
+
+review_criteria:
+  - "최종 답변에 ```lyria 블록이 있고, 노래면 ```lyrics 블록도 있는가"
+  - 반주 업무면 Lyria 프롬프트에 'Instrumental only, no vocals.' 가 있고 가사가 없는가
+  - 가사에 [Verse]·[Chorus] 등 섹션 태그가 있고, 곡 길이에 비해 줄 수·음절 수가 너무 많거나 적지 않은가
+  - "[m:ss - m:ss] 시간표 구간이 요청한 곡 길이 안에서 겹치지 않고 끝까지 이어지는가"
+  - 장르·BPM·조성·악기·분위기가 구체적인가 (막연한 형용사만 늘어놓지 않았는가)
+  - 실존 가수·밴드 이름이나 기존 곡 가사를 쓰지 않았는가 (Lyria 가 거부함)
+
+output_format: markdown
+
+tools: []
+
+# 추가 기능: music_track — 워크플로우가 끝나면 최종 답변의 블록으로 Lyria 를 불러 MP3 를 만들고(유료),
+#            화면에서 듣기·받기·편집(버전 기록·되돌리기)을 할 수 있다. 채택하면 .md 옆에 .mp3 도 저장한다.
+features: [music_track]
+
+harness:
+  validators: [music_prompt]
+  final_only: [music_prompt]   # 작사가·작곡가는 일부만 쓰므로 전체 형식은 최종 답변에서만 검사
+  max_retries: 2
+
+tasks:
+  - id: song
+    title: 🎤 노래 만들기
+    description: 주제·언어·길이·장르·분위기를 넣으면 섹션 태그가 붙은 가사와 Lyria 프롬프트를 쓰고, 끝나면 보컬이 있는 곡을 만듭니다. 가사를 직접 넣으면 다듬어서 씁니다.
+    fields:
+      - {key: theme, label: 주제·용도, required: true, placeholder: "예: 퇴근길 위로, 친구 결혼식 축가, 회사 송년회 오프닝"}
+      - {key: language, label: 가사 언어, type: select, options: [한국어, 영어, 한국어+영어, 일본어], default: 한국어}
+      - {key: length, label: 길이, type: select, options: [30초 (클립), 1분, 1분 30초, 2분, 2분 30초, 3분], default: 2분, help: "30초는 lyria-3-clip-preview(약 $0.04), 그 이상은 lyria-3.5(약 $0.08)"}
+      - {key: genre, label: 장르, placeholder: "예: 시티팝, 어쿠스틱 발라드, 로파이 힙합"}
+      - {key: mood, label: 분위기, placeholder: "예: 따뜻하고 희망찬, 쓸쓸하지만 담담한"}
+      - {key: vocal, label: 보컬, type: select, options: [여성 보컬, 남성 보컬, 남녀 듀엣, 상관없음], default: 상관없음}
+      - {key: lyrics, label: 다듬을 가사 (선택), type: textarea, placeholder: "직접 쓴 가사가 있으면 붙여 넣으세요. 섹션 태그가 없어도 됩니다."}
+    question: |
+      '{theme}' 를 주제로 {length} 길이의 {language} 노래(보컬 포함)를 만들 가사와 Lyria 프롬프트를 써줘.
+      장르: {genre}
+      분위기: {mood}
+      보컬: {vocal}
+      다듬어서 쓸 가사(사용자 제공):
+      {lyrics}
+    goal: "Gemini Lyria 로 바로 생성할 수 있는 {length} 길이 {language} 노래의 가사(섹션 태그)와 Lyria 프롬프트"
+    success_criteria:
+      - "```lyrics 블록에 [Verse]·[Chorus] 등 섹션 태그가 붙은 {language} 가사를 쓴다 (사용자 가사가 있으면 뜻을 살려 다듬는다)"
+      - "가사 분량이 {length} 에 맞는다 (30초면 4~12줄, 3분이면 16~48줄 정도, 한 줄은 부르기 쉬운 길이)"
+      - "```lyria 블록에 장르·BPM·조성·악기·보컬 톤·분위기를 영어로 구체적으로 쓴다"
+      - "```lyria 블록에 [0:00 - 0:15] 처럼 시간표 구간을 {length} 안에서 처음부터 끝까지 쓴다"
+      - "실존 가수·밴드 이름, 기존 곡 제목·가사를 쓰지 않는다"
+    constraints:
+      - "장르: {genre}"
+      - "분위기: {mood}"
+      - "보컬: {vocal}"
+    output_format: "한 줄 콘셉트 → ### 🎤 가사 (```lyrics 블록) → ### 🎼 Lyria 프롬프트 (```lyria 블록) → 제작 메모(구성·의도)"
+    instructions: |
+      최종 답변에는 아래 두 블록을 반드시 이 이름 그대로 넣는다 (코드가 블록을 뽑아 Lyria 에 보낸다).
+      ```lyrics
+      [Verse 1]
+      (가사)
+      [Chorus]
+      (가사)
+      ```
+      ```lyria
+      A warm Korean city-pop song, 102 BPM, key of D major, female vocal, ...
+      [0:00 - 0:10] Intro: ...
+      [0:10 - 0:40] Verse 1: ...
+      ```
+      - 가사는 ```lyrics 블록에만 쓰고 ```lyria 블록에는 다시 쓰지 않는다 (생성할 때 코드가 합친다).
+      - 가사 언어는 {language}. Lyria 는 프롬프트 언어를 따라 발음하므로 가사는 그 언어로만 쓴다.
+    harness_options:
+      music_kind: song
+      music_length: "{length}"
+
+  - id: instrumental
+    title: 🎼 반주 만들기
+    description: 용도·길이·장르·분위기를 넣으면 보컬 없는 반주(BGM)용 Lyria 프롬프트를 쓰고, 끝나면 곡을 만듭니다.
+    fields:
+      - {key: theme, label: 용도·장면, required: true, placeholder: "예: 유튜브 브이로그 BGM, 발표 오프닝, 공부할 때 듣는 음악"}
+      - {key: length, label: 길이, type: select, options: [30초 (클립), 1분, 1분 30초, 2분, 2분 30초, 3분], default: 1분, help: "30초는 lyria-3-clip-preview(약 $0.04), 그 이상은 lyria-3.5(약 $0.08)"}
+      - {key: genre, label: 장르, placeholder: "예: 로파이, 시네마틱 오케스트라, 신스웨이브"}
+      - {key: mood, label: 분위기, placeholder: "예: 차분하고 집중되는, 신나고 경쾌한"}
+      - {key: instruments, label: 원하는 악기 (선택), placeholder: "예: 피아노, 첼로, 부드러운 드럼"}
+      - {key: bpm, label: 빠르기 BPM (선택), placeholder: "예: 90"}
+    question: |
+      '{theme}' 에 쓸 {length} 길이의 반주(보컬 없음)를 만들 Lyria 프롬프트를 써줘.
+      장르: {genre}
+      분위기: {mood}
+      악기: {instruments}
+      BPM: {bpm}
+    goal: "Gemini Lyria 로 바로 생성할 수 있는 {length} 길이 반주(보컬 없음)의 Lyria 프롬프트"
+    success_criteria:
+      - "```lyria 블록 첫 줄 근처에 'Instrumental only, no vocals.' 를 쓴다"
+      - "```lyria 블록에 장르·BPM·조성·악기·분위기를 영어로 구체적으로 쓴다"
+      - "```lyria 블록에 [0:00 - 0:15] 처럼 시간표 구간을 {length} 안에서 처음부터 끝까지 쓴다"
+      - "가사 블록을 쓰지 않는다. 실존 아티스트 이름, 기존 곡 제목을 쓰지 않는다"
+    constraints:
+      - "장르: {genre}"
+      - "분위기: {mood}"
+      - "악기: {instruments}"
+      - "BPM: {bpm}"
+    output_format: "한 줄 콘셉트 → ### 🎼 Lyria 프롬프트 (```lyria 블록) → 제작 메모(구성·의도)"
+    instructions: |
+      최종 답변에는 아래 블록을 반드시 이 이름 그대로 넣는다 (코드가 블록을 뽑아 Lyria 에 보낸다). 가사 블록은 쓰지 않는다.
+      ```lyria
+      Instrumental only, no vocals. A calm lo-fi hip hop track, 80 BPM, key of A minor, ...
+      [0:00 - 0:08] Intro: ...
+      [0:08 - 0:40] Main groove: ...
+      ```
+      - 작사가에게는 일을 맡기지 않는다 (반주에는 가사가 없다).
+    harness_options:
+      music_kind: instrumental
+      music_length: "{length}"
+
+disclaimer: "Lyria 생성 음원은 유료(곡당 약 $0.04~0.08)이고, 같은 프롬프트라도 매번 결과가 다르며 SynthID 워터마크가 들어갑니다. 실존 가수 목소리·기존 곡 가사는 생성이 거부됩니다."
