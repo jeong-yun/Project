@@ -28,6 +28,7 @@ import json
 import mimetypes
 import os
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -623,6 +624,29 @@ def build_music(r: dict, answer: str) -> None:
     r.pop("music_error", None)
 
 
+def start_music(run: dict, answer: str) -> None:
+    """버튼으로 곡 만들기·다시 만들기 — 백그라운드 스레드에서 (여행 지도와 같은 방식).
+
+    화면 스크립트 안에서 기다리면 그동안 화면이 멈추고 새로 고침하면 끊긴다.
+    post_busy 동안 화면이 1초마다 갱신되다가 끝나면 watch_run_state 가 전체를 다시 그려 플레이어를 보여 준다.
+    """
+    run["post_busy"] = True
+    run["music_started"] = time.time()
+    run.pop("music_error", None)
+    run["activity"][run["root_id"]] = "🎵 곡 만드는 중 (Lyria)"
+
+    def work() -> None:
+        try:
+            build_music(run, answer)
+        except Exception as e:  # noqa: BLE001 — 실패해도 결과·결정은 막지 않는다
+            run["music_error"] = f"{type(e).__name__}: {e}"
+        finally:
+            run["activity"].pop(run["root_id"], None)
+            run["post_busy"] = False
+
+    threading.Thread(target=work, name=f"music-{run['run_id'][:8]}", daemon=True).start()
+
+
 def recover_music(run: dict, answer: str) -> dict | None:
     """서버를 다시 켜 되살린 업무: 이미 만든 곡 파일이 있으면 다시 생성(유료)하지 않고 불러온다."""
     folders = sorted((DATA_DIR / "music" / run["run_id"]).glob("gen*"), key=lambda p: int(p.name[3:] or 0))
@@ -661,7 +685,9 @@ def render_music_section(run: dict) -> None:
     rid = run["run_id"]
     st.markdown("#### 🎵 음원 (Gemini Lyria)")
     if run.get("post_busy"):
-        st.info("🎵 Lyria 로 곡 만드는 중… 보통 30초~2분 걸립니다. 그동안 위의 가사·프롬프트를 보고 결정할 수 있습니다.")
+        waited = int(time.time() - run.get("music_started", time.time()))
+        st.info(f"🎵 Lyria 로 곡 만드는 중… ({waited}초째, 보통 30초~2분 · 최대 {music.LYRIA_TIMEOUT_SEC // 60}분이면 오류로 끝납니다). "
+                "새로 고침하거나 다른 팀을 봐도 계속 만들고, 끝나면 여기에 플레이어가 나옵니다.")
         return
     final = final_answer(run)
     blocks = music.extract_blocks(final.content) if final else music.MusicBlocks("", "")
@@ -679,11 +705,7 @@ def render_music_section(run: dict) -> None:
             st.caption("최종 답변에 ```lyria 블록이 없어 곡을 만들 수 없습니다.")
             return
         if st.button(f"🎵 곡 만들기 ({model} · 유료 약 ${price:.2f})", key=f"mkmusic_{rid}", type="primary"):
-            with st.spinner("Lyria 로 곡 만드는 중… (30초~2분)"):
-                try:
-                    build_music(run, final.content)
-                except Exception as e:  # noqa: BLE001
-                    run["music_error"] = f"{type(e).__name__}: {e}"
+            start_music(run, final.content)
             st.rerun()
         return
 
@@ -705,13 +727,10 @@ def render_music_section(run: dict) -> None:
                        mime="audio/mpeg", key=f"dl_mp3_{rid}_{now.label}", use_container_width=True)
     if c2.button(f"🔁 Lyria 로 다시 만들기 (유료 약 ${price:.2f}, 편집 기록은 새로 시작)", key=f"regen_{rid}",
                  use_container_width=True):
-        with st.spinner("Lyria 로 다시 만드는 중…"):
-            try:
-                build_music(run, final.content if final else "")
-            except Exception as e:  # noqa: BLE001
-                st.error(f"다시 만들기 실패: {type(e).__name__}: {e}")
-                return
+        start_music(run, final.content if final else "")
         st.rerun()
+    if run.get("music_error"):  # 다시 만들기가 실패하면 이전 곡은 그대로 두고 이유만 보여 준다
+        st.warning(f"다시 만들지 못했습니다 (이전 곡 유지): {run['music_error'][:300]}")
     for note in track.notes:
         st.caption(f"ℹ️ {note}")
     with st.expander("Lyria 에 보낸 입력 · 생성·채점 기록"):

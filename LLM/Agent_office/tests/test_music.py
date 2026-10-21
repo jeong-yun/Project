@@ -283,12 +283,12 @@ def test_call_lyria_decodes_base64_from_interactions(monkeypatch, tmp_path):
         seen.update(model=model, input=input)
         return SimpleNamespace(output_audio=SimpleNamespace(data=base64.b64encode(raw).decode()), output_text="[Verse] ...")
 
-    monkeypatch.setattr(music, "_genai_client", lambda: SimpleNamespace(interactions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(music, "_genai_client", lambda timeout_sec: SimpleNamespace(interactions=SimpleNamespace(create=create)))
     out = music.call_lyria("lyria-3.5", "prompt")
     assert out.audio == raw and out.text == "[Verse] ..." and seen == {"model": "lyria-3.5", "input": "prompt"}
 
     blocked = SimpleNamespace(interactions=SimpleNamespace(create=lambda model, input: SimpleNamespace(output_audio=None, output_text="blocked")))
-    monkeypatch.setattr(music, "_genai_client", lambda: blocked)
+    monkeypatch.setattr(music, "_genai_client", lambda timeout_sec: blocked)
     with pytest.raises(music.MusicError, match="blocked"):
         music.call_lyria("lyria-3.5", "in the style of someone")
 
@@ -301,7 +301,7 @@ def test_call_gemini_audio_sends_audio_part(monkeypatch):
         seen.update(model=model, contents=contents, config=config)
         return SimpleNamespace(parsed=grade, text="")
 
-    monkeypatch.setattr(music, "_genai_client", lambda: SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
+    monkeypatch.setattr(music, "_genai_client", lambda timeout_sec: SimpleNamespace(models=SimpleNamespace(generate_content=generate_content)))
     assert music.call_gemini_audio("gemini-x", b"mp3", "채점해") is grade
     part = seen["contents"][0]
     assert part.inline_data.mime_type == "audio/mp3" and part.inline_data.data == b"mp3" and seen["contents"][1] == "채점해"
@@ -407,5 +407,98 @@ def test_app_music_section_recovers_track_and_edits(tmp_path, monkeypatch):
 
         next(b for b in at.button if b.label == "↩ 되돌리기").click().run()
         assert any("**v1** → v2" in c.value for c in at.caption)
+    finally:
+        st.cache_resource.clear()
+
+
+# ─── 실제 SDK 호출 경로 (가짜 google-genai Client) ─────────────────────────
+
+
+class FakeGenaiClient:
+    """google-genai Client 흉내 — 실제 SDK 처럼 Client 가 사라지면(__del__) 연결을 닫는다."""
+
+    def __init__(self, audio: bytes, log: list):
+        self.closed, self.log = False, log
+        client = self
+
+        class Interactions:
+            def create(self, model, input):
+                if client.closed:
+                    raise RuntimeError("Cannot send a request, as the client has been closed.")
+                log.append(("lyria", model))
+                return type("I", (), {"output_audio": type("A", (), {"data": base64.b64encode(audio).decode()})(),
+                                      "output_text": ""})()
+
+        class Models:
+            def generate_content(self, model, contents, config):
+                if client.closed:
+                    raise RuntimeError("Cannot send a request, as the client has been closed.")
+                log.append(("grade", model))
+                grade = music.TrackGrade(heard="국악 타악 반주", vocals_present=False, matches_brief=True, issues=[], score=4)
+                return type("R", (), {"parsed": grade, "text": grade.model_dump_json()})()
+
+        self._interactions, self._models = Interactions(), Models()
+
+    @property
+    def interactions(self):
+        # 실제 SDK 처럼 하위 객체는 Client 를 붙잡지 않는다 → Client 를 변수에 잡아 두지 않으면 곧바로 닫힘
+        return self._interactions
+
+    @property
+    def models(self):
+        return self._models
+
+    def __del__(self):
+        self.closed = True
+
+
+def test_lyria_and_grade_keep_client_alive(tmp_path, monkeypatch):
+    """회귀: `_genai_client().interactions.create(...)` 처럼 임시 Client 를 쓰면 요청 전에 닫혀 'client has been closed'."""
+    log: list = []
+    audio = sine_mp3_bytes(tmp_path, 1.0)
+    monkeypatch.setattr(music, "_genai_client", lambda timeout_sec: FakeGenaiClient(audio, log))
+    out = music.call_lyria("lyria-3.5", "Instrumental only, no vocals.")
+    assert out.audio == audio
+    grade = music.call_gemini_audio("gemini-3.5-flash", audio, "채점")
+    assert grade.score == 4 and log == [("lyria", "lyria-3.5"), ("grade", "gemini-3.5-flash")]
+
+
+def test_app_music_button_generates_in_background(tmp_path, monkeypatch):
+    """'🎵 곡 만들기' → 백그라운드에서 생성(화면은 멈추지 않음) → 끝나면 플레이어. 실제 SDK 경로를 가짜 Client 로."""
+    import time
+
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    from core.schemas import AgentAnswer, ModelSpec
+    from core.storage import Storage
+
+    data = tmp_path / "data"
+    storage = Storage(data / "runs.db")
+    storage.create_run("m2", "music", "lead", "러닝용 반주")
+    final = AgentAnswer(node_id="lead", rank_id="team_lead", kind="integrate", content=SONG_ANSWER,
+                        model=ModelSpec(provider="openai", model="fake"))
+    storage.save_steps("m2", [final], "awaiting_human")
+    log: list = []
+    monkeypatch.setattr(music, "_genai_client", lambda timeout_sec: FakeGenaiClient(sine_mp3_bytes(tmp_path, 2.0), log))
+    monkeypatch.setenv("AGENT_OFFICE_DATA_DIR", str(data))
+    monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path / "results"))
+    st.cache_resource.clear()
+    try:
+        at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
+        at.session_state["team_pick"] = "music"
+        at.run()
+        button = next(b for b in at.button if b.label.startswith("🎵 곡 만들기"))
+        button.click().run()
+        assert not at.exception
+        deadline = time.time() + 60
+        while not list((data / "music" / "m2").glob("gen1/take1.mp3")) and time.time() < deadline:
+            time.sleep(0.2)
+        time.sleep(0.5)  # 스레드가 post_busy 를 내릴 시간
+        at.run()
+        assert not at.exception
+        assert ("lyria", "lyria-3.5") in log
+        assert not [w for w in at.warning if "만들지 못했습니다" in w.value]
+        assert any("생성 1회" in c.value for c in at.caption)  # 플레이어 아래 줄: 모델·예상 비용·생성 횟수
     finally:
         st.cache_resource.clear()

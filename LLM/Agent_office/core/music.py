@@ -286,18 +286,26 @@ class LyriaOutput:
     text: str = ""  # 모델이 함께 돌려준 글 (가사·구성 설명)
 
 
-def _genai_client():
+LYRIA_TIMEOUT_SEC = 300  # 곡 1개 생성 최대 대기 — 넘으면 오류로 끝낸다 (화면이 '진행 중'에 멈추지 않게)
+GRADE_TIMEOUT_SEC = 120  # 채점(Gemini 가 듣기) 최대 대기
+
+
+def _genai_client(timeout_sec: float = LYRIA_TIMEOUT_SEC):
     key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
     if not key:
         raise MusicError("GOOGLE_API_KEY 가 없어 Lyria 를 부를 수 없습니다 (.env 확인)")
     from google import genai
+    from google.genai import types
 
-    return genai.Client(api_key=key)
+    return genai.Client(api_key=key, http_options=types.HttpOptions(timeout=int(timeout_sec * 1000)))
 
 
 def call_lyria(model: str, prompt: str) -> LyriaOutput:
     """Lyria 1회 호출 (유료). 테스트에서는 가짜 함수로 바꾼다."""
-    interaction = _genai_client().interactions.create(model=model, input=prompt)
+    # 클라이언트를 변수에 잡아 둔다 — `_genai_client().interactions.create(...)` 처럼 임시 객체로 쓰면
+    # google-genai 가 Client 가 사라질 때(__del__) 연결을 닫아 'client has been closed' 로 요청이 나가지도 못한다
+    client = _genai_client(LYRIA_TIMEOUT_SEC)
+    interaction = client.interactions.create(model=model, input=prompt)
     audio = interaction.output_audio
     text = interaction.output_text or ""
     if audio is None or not audio.data:
@@ -341,7 +349,8 @@ def call_gemini_audio(model: str, audio: bytes, prompt: str) -> TrackGrade:
     """오디오 + 지시문 → TrackGrade (구조화 출력). 테스트에서는 가짜 함수로 바꾼다."""
     from google.genai import types
 
-    response = _genai_client().models.generate_content(
+    client = _genai_client(GRADE_TIMEOUT_SEC)  # 변수에 잡아 둔다 (call_lyria 주석 참고)
+    response = client.models.generate_content(
         model=model,
         contents=[types.Part.from_bytes(data=audio, mime_type="audio/mp3"), prompt],
         config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=TrackGrade, temperature=0.2),
