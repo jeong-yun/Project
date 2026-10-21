@@ -47,7 +47,7 @@ concept:
 
 music:
   # 🎵 음악 팀 (teams/music, features: music_track) — Google Gemini Lyria 로 MP3 생성 (GOOGLE_API_KEY 필요, 유료)
-  auto_generate: true        # 워크플로우가 끝나면 자동으로 곡을 만든다 (false 면 화면의 '🎵 곡 만들기' 버튼으로)
+  auto_generate: false       # false: 화면의 '🎵 곡 만들기' 버튼을 눌렀을 때만 만든다 / true: 워크플로우가 끝나면 자동으로 (유료)
   clip_model: lyria-3-clip-preview   # 30초 고정 클립
   song_model: lyria-3.5              # 전체 곡 (길이는 프롬프트로 정한다)
   clip_seconds: 30           # 이 길이 이하 요청은 클립 모델로 만든다
@@ -57,6 +57,6 @@ music:
   grade: true                # 만든 곡을 Gemini 가 듣고 브리프와 비교해 1~5점 채점
   grade_model: gemini-3.5-flash
   grade_threshold: 3         # 이 점수 미만이면 다시 생성
-  max_regenerations: 1       # 채점이 낮을 때 자동으로 다시 만드는 최대 횟수 (0 이면 안 함 — 비용 주의)
+  max_regenerations: 0       # 채점이 낮을 때 자동으로 다시 만드는 최대 횟수 (0 이면 안 함 — 1 이상은 1회마다 추가 과금)
   duration_tolerance: 0.25   # 요청 길이와 ±25% 이상 다르면 화면에 '편집으로 맞추기' 안내
   edit_high_quality: false   # 템포·키 변경 고품질 모드 (3분 곡 약 30초 → 90초, CPU)

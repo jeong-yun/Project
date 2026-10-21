@@ -365,11 +365,11 @@ tasks:
 | 결과 형식 | 최종 답변에 ```` ```lyrics ```` (가사, `[Verse]`·`[Chorus]` 태그) 와 ```` ```lyria ```` (영어 스타일 프롬프트, `[0:00 - 0:15]` 시간표) 블록 |
 | 하네스 `music_prompt` | 블록이 있는지, 반주는 `Instrumental only, no vocals.` 가 있고 가사가 없는지, 노래는 섹션 태그·곡 길이에 맞는 줄 수·음절 수, 실존 아티스트 이름·'in the style of' 표현, 시간표 구간이 길이 안에서 겹치지 않고 끝까지 가는지 → 틀리면 재작성 |
 | 생성 | 30초 = `lyria-3-clip-preview`(약 $0.04), 그 이상 = `lyria-3.5`(약 $0.08). 가사는 프롬프트 뒤에 `Lyrics:` 로 붙여 보냄 (`core/music.py`) |
-| 길이 확인·채점 | mutagen 으로 실제 길이를 재고, Gemini 가 곡을 **듣고** 브리프와 비교해 1~5점 채점 → 기준 미만이면 **최대 1번** 자동으로 다시 생성(가장 점수가 높은 곡 사용) |
+| 길이 확인·채점 | mutagen 으로 실제 길이를 재고, Gemini 가 곡을 **듣고** 브리프와 비교해 1~5점 채점 → 점수를 화면에 표시 (`max_regenerations` 를 1 이상으로 두면 기준 미만일 때 자동으로 다시 생성 — 기본 0, 다시 만들 때마다 과금) |
 | 편집 (CPU) | 편집 요청 → 보조 모델이 정해진 연산(`trim`·`loop`·`fade`·`concat`·`tempo`·`pitch_shift`·`gain`·`eq`·`reverb`·`compress`·`normalize`)만으로 편집 계획(JSON) → 코드가 값 범위 검사 → 실행 → 결과 파일의 길이·라우드니스(LUFS)를 다시 재서 계획과 비교 (`core/audio_edit.py`) |
 | 버전 | v1(원본) → v2 → … ↩ 되돌리기 / ↪ 다시 하기, 이전·지금 두 플레이어로 비교. 채택 시 **지금 버전**을 저장 |
 
-설정은 `config/settings.yaml` 의 `music:` — 자동 생성 여부(`auto_generate`), 모델·가격(`cost_usd`), 채점(`grade`, `grade_model`, `grade_threshold`),
+설정은 `config/settings.yaml` 의 `music:` — 자동 생성 여부(`auto_generate`, **기본 false: '🎵 곡 만들기' 버튼을 눌렀을 때만 생성**), 모델·가격(`cost_usd`), 채점(`grade`, `grade_model`, `grade_threshold`),
 자동 재생성 횟수(`max_regenerations`, 0 이면 안 함), 템포·키 고품질 모드(`edit_high_quality`, 3분 곡 약 30초 → 90초).
 
 **한계 (꼭 알아 두기)**
