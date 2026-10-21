@@ -25,6 +25,7 @@
 import base64
 import html
 import json
+import mimetypes
 import os
 import shutil
 import time
@@ -37,6 +38,7 @@ from pydantic import ValidationError
 from st_click_detector import click_detector
 
 import concept_ui
+import design_ui
 from core import audio_edit, concept, followup, llm_factory, music, stock_calc, verification
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -64,7 +66,7 @@ from core.live import KIND_LABELS, STAGES, new_run, restore_run, stage_of, start
 from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTemplate, ToolResult
 from core.search import WebContext
 from core.storage import Storage
-from core.tasks import TaskInputError, build_request
+from core.tasks import TaskInputError, build_request, store_uploads
 from core.exporter import MIME, export_adopted, list_results
 from core.route import CATEGORIES, RouteResult, build_route, map_html
 from core.workflow import WEB_SEARCH_TOOL, build_office_graph, make_checkpointer, resume_with_decision, stream_office
@@ -213,6 +215,7 @@ with st.sidebar:
     # 개념 편집 팀: 카탈로그(GitHub CS 저장소) 위치·git 상태
     is_concept = concept_ui.CONCEPT_FEATURE in team.features
     concept_ctx = concept_ui.sidebar(settings) if is_concept else None
+    is_design = design_ui.FEATURE in team.features  # 설계 팀: 최종 JSON → 도면(+3D) (design_ui.py)
 
     # 지난 업무 (사람이 채택·반려한 것) — 누르면 내용·결정·교훈을 창으로 본다
     history = [r for r in storage.list_runs(team_id, limit=30) if r["status"] in DECIDED][:10]
@@ -925,7 +928,7 @@ def calc_report(run: dict, answer: str) -> str:
 
 
 def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
-    """채택한 결과를 results/<팀>/ 에 파일로 저장 (여행 팀은 지도 .html 도). 실패해도 결정은 유지된다."""
+    """채택한 결과를 results/<팀>/ 에 파일로 저장 (여행 팀은 지도 .html, 설계 팀은 도면·3D 도). 실패해도 결정은 유지된다."""
     try:
         html_text = None
         if ROUTE_MAP in team.features:
@@ -942,8 +945,9 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
         if MUSIC_TRACK in team.features and run.get("music"):
             # 음악 팀: 지금 고른 버전(편집본)의 MP3 를 .md 옆에 저장 — 곡은 다시 만들지 않는다 (유료·매번 다름)
             audio_path, appendix, title = run["music"]["history"].now.path, music_report(run), "음원 (Gemini Lyria)"
+        extra = design_ui.adopted_files(run, decision) if is_design else None  # 레이아웃 JSON·DXF·PNG·3D
         paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text, appendix,
-                               audio_path=audio_path, appendix_title=title)
+                               audio_path=audio_path, appendix_title=title, extra_files=extra)
         return [str(p) for p in paths]
     except Exception as e:  # noqa: BLE001
         run["notes"].append(f"결과 파일 저장 실패: {type(e).__name__}: {e}")
@@ -986,6 +990,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             # LLM 이 쓴 숫자를 코드로 다시 계산한 결과 — 판단 전에 꼭 확인할 값
             with st.expander("🧮 코드 검산 — 점수·평균 매수가·손익비·평단 (LLM 이 아닌 코드 계산)", expanded=True):
                 st.markdown(report)
+        if is_design:
+            design_ui.preview(run, final.content)  # 📐 층별 평면도·검증·3D 뷰어·내려받기
         if team.disclaimer:
             st.caption(f"ℹ️ {team.disclaimer}")
 
@@ -1079,7 +1085,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         c1.caption(f"📁 저장됨: `{path.relative_to(BASE_DIR) if path.is_relative_to(BASE_DIR) else path}`")
         if path.exists():
             c2.download_button("⬇ 받기", data=path.read_bytes(), file_name=path.name, key=f"dl_now_{path.name}",
-                               mime=MIME.get(path.suffix, "text/markdown"), use_container_width=True)
+                               mime=MIME.get(path.suffix) or mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+                               use_container_width=True)
     st.markdown("##### 📚 에이전트별 피드백 (다음 업무부터 프롬프트에 반영)")
     for lesson in run["lessons"]:
         icon = "👍" if lesson.kind == "praise" else "🔧"
@@ -1320,6 +1327,11 @@ def render_field(field: TaskField, key: str):
     if field.type == "textarea":
         return st.text_area(label, value=str(field.default or ""), key=key, height=80,
                             placeholder=field.placeholder, help=field.help or None)
+    if field.type == "checkbox":
+        return st.checkbox(field.label, value=bool(field.default), key=key, help=field.help or None)
+    if field.type == "file":
+        # 값 = 업로드한 파일 객체 → '맡기기'를 누르면 store_uploads 가 data/uploads/ 에 저장하고 경로로 바꾼다
+        return st.file_uploader(label, type=field.options or None, key=key, help=field.help or None)
     return st.text_input(label, value=str(field.default or ""), key=key, placeholder=field.placeholder, help=field.help or None)
 
 
@@ -1357,7 +1369,7 @@ def render_task_input() -> dict:
                 values = {}
                 cols = st.columns(2)
                 for i, field in enumerate(task.fields):
-                    with cols[i % 2] if field.type != "textarea" else st.container():
+                    with cols[i % 2] if field.type not in ("textarea", "file") else st.container():
                         values[field.key] = render_field(field, key=f"tf_{team_id}_{task.id}_{field.key}")
                 extra = st.text_area("추가 요청 (선택)", key=f"tf_{team_id}_{task.id}__extra", height=68,
                                      placeholder="예: 배당도 함께 고려해줘 / 아이가 걷기 힘들어해")
@@ -1365,6 +1377,7 @@ def render_task_input() -> dict:
                 submitted = st.form_submit_button("맡기기", type="primary")
             if submitted:
                 try:
+                    values = store_uploads(values, DATA_DIR / "uploads")  # 첨부 파일 → 저장 경로 (+ {key}_name)
                     built = build_request(task, values, extra)
                 except TaskInputError as e:
                     st.warning(str(e))
@@ -1485,7 +1498,9 @@ if request:
         run["concept"] = request.get("concept")  # 개념 편집 팀: 자동 판정(추가/수정)·대상 항목
         # 지도 기능이 있는 팀은 처음부터 '후처리 예정'으로 표시 — 워크플로우가 끝난 뒤 지도까지 다 만들 때까지 화면이 자동 갱신된다
         features = set(team.features)  # 백그라운드 스레드에서 쓸 값은 미리 잡아 둔다
-        run["post_busy"] = ROUTE_MAP in features or (MUSIC_TRACK in features and MUSIC_CFG["auto_generate"])
+        design = design_ui.FEATURE in features
+        run["post_busy"] = ROUTE_MAP in features or design or (MUSIC_TRACK in features and MUSIC_CFG["auto_generate"])
+        run["design_opts"] = design_ui.options_from_inputs(request["tool_inputs"]) if design else None
         runs[run_key] = run
         st.session_state[PENDING_FOCUS_KEY] = NO_FOCUS  # 새 업무는 조직도·질문만 보이는 상태로 시작 (에이전트를 누르면 펼침)
         storage.create_run(run["run_id"], team_id, target, run["question"])
@@ -1506,7 +1521,11 @@ if request:
                     return
                 storage.save_steps(r["run_id"], r["steps"], r["status"])
                 final = final_answer(r)
-                if r["post_busy"] and final and ROUTE_MAP in features:
+                if r["post_busy"] and final and design:
+                    # 설계 팀: 최종 레이아웃 JSON 으로 도면(+요청 시 3D) 그리기
+                    r["activity"][r["root_id"]] = "📐 도면 그리는 중"
+                    design_ui.post_process(r, final.content)
+                elif r["post_busy"] and final and ROUTE_MAP in features:
                     # 여행 팀: 최종 계획서로 경로 지도 만들기 (사람은 그동안 결과를 보고 결정할 수 있다)
                     r["activity"][r["root_id"]] = "🗺 지도 만드는 중"
                     try:

@@ -8,6 +8,7 @@
   stock_plan    : 주식 점수표·매매 계획 JSON 을 코드로 검산 (core/stock_calc.py)
   concept_entry : 개념 카탈로그 결과 형식 검사 (core/concept.py)
   music_prompt  : 음악 팀 가사·Lyria 프롬프트 형식 검사 (core/music.py)
+  floorplan     : 설계 팀 레이아웃 JSON 을 코드로 완성·검증 (겹침·외곽·면적·동선·계단·최소 치수, core/floorplan.py)
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -193,3 +194,32 @@ class MusicPromptValidator(Validator):
         if problems:
             return self.fail("음악 결과 형식 오류: " + " / ".join(problems) + " — 이 부분을 고쳐 같은 블록 형식으로 다시 작성하라.")
         return self.ok("음악 결과 형식 통과")
+
+
+@register
+class FloorplanValidator(Validator):
+    name = "floorplan"
+    description = "설계 팀 레이아웃 JSON 검증 (방 겹침·외곽 이탈·목표 면적·문으로 도달·층간 계단·최소 치수)"
+
+    def check(self, answer: str, options: dict):
+        from core import floorplan  # shapely 를 쓰는 팀에서만 불러온다
+
+        try:
+            layout = floorplan.layout_from_text(answer)
+        except floorplan.LayoutParseError as e:
+            return self.fail(f"{e} — 같은 형식의 ```json 블록으로 다시 써라.")
+        if layout is None:
+            # 하위 실무자(예: 치수 체크리스트 담당)는 JSON 을 쓰지 않을 수 있다 — 최종 답변의 JSON 유무는 json_keys(final_only)가 본다
+            return self.ok("검사할 레이아웃 JSON 없음")
+        tolerance = options.get("area_tolerance")
+        _, report = floorplan.check(layout, float(tolerance) if tolerance is not None else None)
+        if not report.ok:
+            hints = [n for n in report.notes if "zone" in n or "목표 면적 합" in n][:3]
+            return self.fail(
+                "레이아웃 검증 실패: " + " / ".join(report.errors[:8])
+                + (" (참고: " + " / ".join(hints) + ")" if hints else "")
+                + " — 좌표를 직접 고치기 어렵다면 그 층의 rect 를 모두 빼고 방 목록·목표 면적·순서·zone 만 써서 코드가 나누게 하라."
+            )
+        floors = len(layout.floors)
+        rooms = sum(len(f.rooms) for f in layout.floors)
+        return self.ok(f"레이아웃 검증 통과: {floors}개 층, 방 {rooms}개" + (f", 경고 {len(report.warnings)}건" if report.warnings else ""))

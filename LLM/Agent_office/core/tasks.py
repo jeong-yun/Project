@@ -12,8 +12,10 @@ team.yaml 의 tasks 에 업무를 정의하면 화면에 입력 양식이 자동
 """
 
 import re
+import uuid
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 
 from core.brief import DesiredState
 from core.schemas import TaskTemplate
@@ -35,11 +37,14 @@ class TaskRequest:
 
 
 def _is_empty(value) -> bool:
-    return value is None or (isinstance(value, str) and not value.strip())
+    # 꺼진 체크박스(False)도 '비어 있음' — 그 값이 들어간 줄은 빠진다
+    return value is None or value is False or (isinstance(value, str) and not value.strip())
 
 
 def _fmt(value) -> str:
-    """숫자는 천 단위 쉼표, 정수로 떨어지는 실수는 정수로 (10.0 → 10)."""
+    """숫자는 천 단위 쉼표, 정수로 떨어지는 실수는 정수로 (10.0 → 10). 켜진 체크박스는 '예'."""
+    if value is True:
+        return "예"
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if isinstance(value, int):
@@ -60,6 +65,24 @@ def render(template: str, values: dict) -> str:
 
 def render_list(items: list[str], values: dict) -> list[str]:
     return [text for text in (render(item, values) for item in items) if text]
+
+
+def store_uploads(values: dict, folder: Path) -> dict:
+    """업로드한 파일 객체(name·getvalue 를 가진 것, 예: Streamlit UploadedFile)를 folder 에 저장하고 경로로 바꾼다.
+
+    값은 저장한 경로(문자열), {key}_name 에는 원래 파일 이름이 들어간다 → 질문 템플릿에 {key}_name 으로 쓸 수 있고,
+    데이터 툴은 경로로 파일을 읽는다 (워크플로우 상태·체크포인트에는 파일 내용이 아니라 경로만 들어간다).
+    """
+    out = dict(values)
+    for key, value in values.items():
+        if hasattr(value, "getvalue") and hasattr(value, "name"):
+            folder.mkdir(parents=True, exist_ok=True)
+            safe = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", Path(value.name).name)[-80:]
+            path = folder / f"{uuid.uuid4().hex[:8]}_{safe}"
+            path.write_bytes(value.getvalue())
+            out[key] = str(path)
+            out[f"{key}_name"] = value.name
+    return out
 
 
 def derive_values(values: dict) -> dict:

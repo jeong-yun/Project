@@ -29,6 +29,7 @@
 | 📈 주식 팀 | ① 분야별 종목 추천(1~5점 매력도) ② 종목 판단(7개 항목 → 매수·보유·매도) ③ 주가 전망 ④ 매매 전략(분할 매수·목표가·손절가·손익비) ⑤ 보유 종목 추가 매매(물타기·불타기·익절·손절) ⑥ 포트폴리오 구성 | **시세 데이터**(Yahoo Finance: 현재가·이동평균·재무 지표·컨센서스·평가손익·평단 시뮬레이션을 코드로 계산) + 최근 1개월 공시·리포트·뉴스 (블로그·커뮤니티 제외) + **코드 검산**(가중 점수·평균가·손익비) |
 | ✈️ 여행 팀 | 여행 계획서 (국내/해외, 출발·도착일, 인원, 예산, 스타일) + **🗺 움직이는 경로 지도** | **여행 달력**(N박 M일·날짜별 요일을 코드로 계산) + 목적지 날씨·행사·교통 검색 |
 | 🎵 음악 팀 | ① 🎤 노래 만들기(보컬·한국어 가사 가능) ② 🎼 반주 만들기 + **Gemini Lyria 로 MP3 생성 · ✂️ 편집(자르기·템포·키·페이드·리버브·음량, 버전 되돌리기)** | **하네스**(가사 섹션 태그·분량, 반주 문구, 아티스트 이름, 시간표 길이를 코드로 검사) + Gemini 가 곡을 듣고 채점 (7-4 참고, 유료) |
+| 📐 설계 팀 | ① 평면도 만들기(한국어 설명 → 2D 평면도, 선택 시 3D) ② 도면 수정·층 추가(JSON·DXF·그림·PDF 첨부) ③ 3D 만들기(GLB·OBJ·STL·IFC, 프린팅 축척) | **첨부 도면 → 레이아웃 JSON**(코드 변환·검증) + 방 최소 치수 기준표 + **코드 검증**(겹침·외곽·면적·동선·계단) — 7-5 참고 |
 
 > 진행 상황은 [today_worked.md](today_worked.md), 초기 계획은 [PLAN.md](PLAN.md) 참고.
 
@@ -227,6 +228,7 @@ streamlit run app.py
 | `itinerary_days` | 여행 일정이 1일차~마지막 날까지 모든 날을 다루는지 검사 (일수는 여행 달력 툴이 계산해 전달) |
 | `stock_plan` | 주식 답변 끝 ```json 요약의 가중 점수·결정 밴드·분할 매수 평균가·손익비·손절폭·물타기 평단·추가 매수 한도를 코드로 다시 계산 → 틀리면 정답 값과 함께 재작성 (`core/stock_calc.py`) |
 | `music_prompt` | 음악 팀 ```lyrics·```lyria 블록 존재, 반주의 `Instrumental only, no vocals.`, 가사 섹션 태그·곡 길이에 맞는 줄 수·음절 수, 실존 아티스트 이름, `[m:ss - m:ss]` 시간표가 길이에 맞는지 (`core/music.py`) |
+| `floorplan` | 설계 팀 레이아웃 JSON 을 코드로 완성(자동 분할·문/창 배치)한 뒤 방 겹침·외곽 이탈·목표 면적(±20%)·문으로 도달·층간 계단 위치·방 종류별 최소 치수를 검사 → 한국어 오류 문장을 그대로 돌려줘 재작성 (`core/floorplan.py`). JSON 이 없는 답변은 통과 (최종 답변의 JSON 유무는 `json_keys` final_only 로) |
 
 `harness.final_only` 에 적은 검증기는 최종 답변(문의 대상 에이전트)에만 돌립니다 — 하위 실무자는 업무 일부만 쓰므로 전체 형식을 요구하지 않습니다.
 team.yaml `verification.critic` 으로 팀별 비평 설정을 덮어쓸 수 있습니다 (주식 팀: 모든 검토 단계 비평, 자가 교정 최대 2회, 점수-분석 불일치·근거 없는 수치 규칙).
@@ -285,7 +287,7 @@ python -m evals.run_eval evals/cases/travel.yaml    # 여행 팀 (오사카 3박
 tasks:
   - id: forecast
     title: 2) 주가 전망
-    fields:                                  # type: text | textarea | number | date | select
+    fields:                                  # type: text | textarea | number | date | select | checkbox | file
       - {key: stock, label: 종목 이름 또는 코드, required: true}
       - {key: horizon, label: 전망 기간, type: select, options: [1주, 1개월, 3개월]}
     question: "{stock} 종목의 향후 {horizon} 주가를 전망해줘."   # {key} = 입력값, 빈 값이 든 줄은 자동 삭제
@@ -297,11 +299,14 @@ tasks:
     harness_options: {required_terms: [시나리오, 확률]}   # 문자열 값의 {key} 도 입력값으로 바뀜
 ```
 `start_date`·`end_date` 입력칸이 있으면 `{nights}`·`{days}` 가 자동으로 계산되어 템플릿에서 쓸 수 있습니다.
+- `checkbox`: 켜면 `{key}` 가 '예', 끄면 빈 값(그 줄은 빠짐). `default: true` 로 켜 둘 수 있습니다.
+- `file`: 파일 첨부 (`options` = 받을 확장자). '맡기기'를 누르면 `data/uploads/` 에 저장되고, 값은 저장 경로(데이터 툴이 읽음),
+  `{key}_name` 은 원래 파일 이름(질문 템플릿용)입니다. 워크플로우 상태에는 파일 내용이 아니라 경로만 들어갑니다.
 
 ### 데이터 툴 추가 (team.yaml `tools`)
 `core/tools/` 에 `run(question, inputs, models) -> ToolResult | None` 함수를 만들고 `core/tools/__init__.py` 의 `TOOLS` 에 등록합니다.
 `inputs` 는 업무 양식의 입력값입니다. 결과는 모든 에이전트의 근거 자료와 화면 타임라인에 들어갑니다.
-현재 툴: `stock_data`(주가·재무 지표·컨센서스·평가손익·추가 매수 한도), `travel_calendar`(여행 날짜·요일). 팀별 검색 요령·기간은 team.yaml `search`(`hint`, `news_timelimit` 등).
+현재 툴: `stock_data`(주가·재무 지표·컨센서스·평가손익·추가 매수 한도), `travel_calendar`(여행 날짜·요일), `floorplan_input`(첨부 도면 → 레이아웃 JSON·면적표·검증, 방 최소 치수 기준표). 팀별 검색 요령·기간은 team.yaml `search`(`hint`, `news_timelimit` 등).
 
 ## 7-1. 주식 팀 — 판단을 돕는 장치
 
@@ -385,11 +390,59 @@ tasks:
 넣지 않았습니다. 지금 '보컬 크게', '반주만' 같은 요청은 화면에서 이유를 안내합니다. 넣을 때는 `pip install demucs` + ffmpeg 설치 후
 `audio_edit.py` 에 `separate` 연산(보컬/반주 스템 → 음량 조절 → 다시 섞기)을 추가하면 됩니다 (CPU 로 3분 곡 약 2~5분 예상).
 
+## 7-5. 📐 설계 팀 (평면도·3D)
+
+한국어로 집·건물 배치를 설명하면 **2D 평면도**(DXF·PNG·SVG)를 만들고, 요청할 때만 **3D 모델**을 만듭니다. 기존 도면을 첨부해 고치거나 층을 추가할 수 있습니다.
+모두 CPU 로 동작합니다 (GPU 불필요).
+
+**역할 분담** — 연구(AI-Architect, Text-to-Layout, Text2BIM, ProCAD)의 공통 결론대로 LLM 은 좌표를 그리지 않습니다.
+
+| 누가 | 하는 일 |
+|---|---|
+| LLM (차장·배치설계) | **레이아웃 JSON** 작성 — 방 목록(종류·이름·목표 면적)·순서·앞/뒤 구역(zone)·층. 좌표(rect)는 선택 |
+| 대리·치수검토 → 부장·평면검토 → 팀장·요구사항 | 치수·면적 합 체크리스트 → 동선·채광·프라이버시 → 요구사항 대조·가정 명시 (검토 사슬) |
+| 코드 `core/floorplan.py` | 좌표가 없으면 직사각형으로 나눔(앞 구역 / 복도 / 뒤 구역, 여러 층이면 같은 자리에 계단, 현관은 복도 끝 외벽), 문·창 자동 배치, 검증 |
+| 코드 `core/floorplan_render.py` | DXF(레이어 A-WALL·A-DOOR·A-GLAZ·A-ROOM·A-TEXT·A-DIMS, 층별 시트) · PNG/SVG(방 이름·면적·치수, 층마다 한 장) |
+| 코드 `core/floorplan_3d.py` | 벽을 세운 3D(문·창 자리 뚫림) → GLB·OBJ, 프린팅용 STL(1:50/100/200, 하나로 합친 watertight 덩어리, 최소 벽 두께 1mm 검사·보강), IFC(ifcopenshell), 화면 3D 뷰어(plotly) |
+
+**업무**
+
+| 업무 | 입력 | 결과 |
+|---|---|---|
+| 📐 평면도 만들기 | 설명(필수)·크기·층수·방 구성, ☑ 3D 모델도 만들기, 프린팅 축척 | 층별 평면도 + 검증 결과 (+ 3D) |
+| ✏️ 도면 수정·층 추가 | 첨부(JSON·DXF·PNG·JPG·PDF·DWG) 또는 ☑ 최근 저장한 설계안, 바꿀 내용(필수) | 요청한 부분만 고친 평면도 |
+| 🧊 3D 만들기 | 레이아웃 JSON·DXF 첨부 또는 최근 저장한 설계안, 반영할 변경, 프린팅 축척 | 3D 모델(GLB·OBJ·STL·IFC) + 뷰어 |
+
+**첨부 파일 읽기** (워크플로우 전에 `floorplan_input` 툴이 JSON 텍스트로 바꿔 에이전트에게 줍니다)
+
+| 형식 | 방법 | 정확도 |
+|---|---|---|
+| 레이아웃 JSON (이전 결과 `*_layout.json`) | 그대로 | 정확 |
+| DXF — 이 앱이 만든 것 | DXF 안(XRECORD)에 넣어 둔 원본 JSON | 정확 |
+| DXF — 다른 프로그램 | 닫힌 폴리선 = 방, 안의 글자 = 방 이름(종류 추정), mm·cm 단위 자동 추정, 한 층만 | 근사 |
+| PNG·JPG·PDF | 비전 모델(OpenAI·Google 키 필요)이 방 배치를 추정. PDF 는 첫 쪽을 그림으로 바꿔 읽음 | **근사 — 치수 '확인 필요'** 표시 |
+| DWG | 읽지 않음 → 무료 **ODA File Converter** 로 DXF 로 변환해 다시 올리도록 안내 (변환기는 직접 설치) | - |
+
+- 결과 화면: 최종 결과 아래 **📐 도면** 상자 — 층별 탭, 검증 결과(오류·경고·자동 분할 기록), 가정·확인 필요, 🧊 3D 탭(돌려 보기), 파일별 ⬇ 내려받기.
+  3D 를 요청하지 않았으면 **🧊 3D 만들기** 버튼으로 그 자리에서 만들 수 있습니다.
+- 채택하면 `results/design/` 에 `.md` 와 함께 `_layout.json`·`_평면도.dxf`·`_1층.png`·`_1층.svg`…(3D 를 만들었으면 `_3d.glb`·`_3d.obj`·`_3d_1-100.stl`·`_3d.ifc`)를 저장합니다.
+  다음에 고칠 때는 `_layout.json`(또는 DXF)을 첨부하거나 '최근 저장한 설계안 사용'을 켭니다 — DXF 를 다시 해석하지 않고 원본 JSON 을 고칩니다.
+- 하네스: `floorplan`(모든 단계) + `json_keys`(최종 답변에 floors JSON 필수). 검증 오류 문장은 그대로 LLM 에게 돌아가 다시 쓰게 합니다
+  (예: "1층: '침실2' 이 건물 외곽을 벗어난다 … 외곽 x 0~12m, y 0~9m 안으로 옮겨라").
+
+**한계 — 꼭 읽어 주세요**
+- **개념·참고용 도면**입니다. 건축 허가·시공용 도면이 아니며 구조·설비·법규(건폐율·용적률·일조·피난·주차)를 검토하지 않습니다. 실제 설계는 건축사 검토가 필요합니다.
+- 자동 분할은 직사각형 외곽 + 직사각형 방만 만듭니다 (ㄱ자 외곽은 방 좌표를 직접 쓰면 검증·그리기는 됩니다). 치수는 벽 중심선 기준입니다.
+- **DWG 는 직접 읽지 못합니다** — ODA File Converter 로 DXF 로 바꿔 주세요.
+- **그림·PDF 읽기는 근사**입니다. 치수가 적혀 있지 않으면 일반적인 방 크기로 추정하므로 결과의 '확인 필요' 항목을 꼭 확인하세요.
+- IFC 는 층·벽·바닥·방(IfcSpace)만 넣습니다 (문·창은 생략). ifcopenshell 이 설치되지 않은 PC 에서는 IFC 만 건너뜁니다.
+- 3D 는 지붕 없는 모형(위에서 안을 봄)입니다.
+
 ## 8. 저장 정책
 
 | 결과 | 처리 |
 |---|---|
-| 사람이 **채택**한 결과 | `data/runs.db` 기록 + 교훈 저장 + **`results/<팀>/<날짜-시각>_<질문>.md` 파일** (여행 팀은 `_지도.html`, 음악 팀은 같은 이름의 `.mp3` 도) — 화면의 ⬇ 받기, 사이드바 📂 저장된 결과에서 내려받기 |
+| 사람이 **채택**한 결과 | `data/runs.db` 기록 + 교훈 저장 + **`results/<팀>/<날짜-시각>_<질문>.md` 파일** (여행 팀은 `_지도.html`, 음악 팀은 같은 이름의 `.mp3`, 설계 팀은 `_layout.json`·DXF·PNG·SVG·3D 도) — 화면의 ⬇ 받기, 사이드바 📂 저장된 결과에서 내려받기 |
 | 사람이 **반려**한 결과 | `data/runs.db` 기록 + 교훈 저장 (파일은 만들지 않음) |
 | 결정 없이 **결과 버리기** | 즉시 삭제 (체크포인트, 음악 팀이 만든 곡·편집 버전 `data/music/<실행>/` 포함) |
 | 결정 없이 같은 대상에게 **새 질문** | 직전 결과 삭제 |
@@ -402,6 +455,7 @@ tasks:
 Agent_office/
 ├── app.py                  ⑥ 화면 (클릭형 조직도·에이전트 패널·탭·결정·업무 양식) — Streamlit
 ├── concept_ui.py           개념 편집 팀 화면 조각 (카탈로그 사이드바·작성/삭제 입력·결과 탭·채택 후 반영 → 커밋 → 푸시)
+├── design_ui.py            설계 팀 화면 조각 (도면 미리보기·3D 뷰어·내려받기·채택 시 저장 파일)
 ├── core/
 │   ├── schemas.py          ① 모든 데이터 형식 (설정·LLM 출력·실행 결과) — 여기부터 읽기
 │   ├── config.py           ② 설정 읽기·검증, 조직도·아바타·스킬
@@ -411,7 +465,11 @@ Agent_office/
 │   ├── brief.py            요청 정리(최종 상태 정의) + 질문 예시
 │   ├── live.py             백그라운드 실행 + 실시간 진행 상태 (화면이 1초마다 읽어 그림)
 │   ├── avatars.py          에이전트 이미지 저장·자동 '작업 중' 이미지·되돌리기
-│   ├── exporter.py         채택 결과 → results/<팀>/ 파일 (.md, 지도 .html, 음원 .mp3)
+│   ├── exporter.py         채택 결과 → results/<팀>/ 파일 (.md, 지도 .html, 음원 .mp3, 도면·3D 파일)
+│   ├── floorplan.py        설계 팀 레이아웃 JSON 스키마·자동 분할·문/창 배치·벽 형상·검증
+│   ├── floorplan_render.py 레이아웃 → DXF(레이어·층별 시트·원본 JSON 보관) · PNG · SVG
+│   ├── floorplan_3d.py     레이아웃 → 3D (GLB·OBJ·프린팅용 STL·IFC) + plotly 뷰어
+│   ├── floorplan_import.py 첨부 도면(JSON·DXF·그림·PDF) → 레이아웃 JSON, DWG 안내
 │   ├── route.py            여행 계획서 → 방문지 → OSM 좌표 → 움직이는 지도(folium)
 │   ├── music.py            음악 팀: 가사·Lyria 블록 → 형식 검사 → Lyria 생성(MP3) → 길이 확인 → Gemini 듣고 채점
 │   ├── audio_edit.py       음악 팀 편집: 요청 → 편집 계획(JSON) → CPU 처리(pedalboard·pyloudnorm) → 측정 검증 → 버전 기록
@@ -419,7 +477,7 @@ Agent_office/
 │   ├── stock_calc.py       주식 숫자 검산 (가중 점수·결정 밴드·평균가·손익비·평단)
 │   ├── catalog.py          IT 개념 카탈로그(CS 저장소) 읽기·관련 항목 찾기·반영·git
 │   ├── concept.py          개념 작성 요청·결과 나누기·형식 검사
-│   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력)
+│   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력), floorplan_input(첨부 도면)
 │   ├── search.py           웹 검색(검색어 생성 → 검색어들을 동시에 DuckDuckGo 웹+뉴스)
 │   ├── verification.py     루브릭·비평가·자가 교정
 │   ├── feedback.py         사람 결정 → 에이전트별 교훈
@@ -427,14 +485,14 @@ Agent_office/
 │   └── harness/            결정론적 검증기(validators) + 단계별 평가(evaluation)
 ├── config/                 ranks / models / settings / verification (.yaml)
 ├── teams/                  팀별 team.yaml (조직도·업무 양식) + skills/ + avatars/
-│                           (general = 기본, stock = 주식, travel = 여행, concept = 개념 편집, _template = 템플릿)
+│                           (general = 기본, stock = 주식, travel = 여행, concept = 개념 편집, design = 설계, _template = 템플릿)
 ├── evals/                  단계별 평가 실행기 + 케이스
 ├── results/                채택한 결과 파일 (git 제외 — 개인 정보 보호. 올리려면 .gitignore 에서 results/ 삭제)
 ├── assets/avatars/         공용 에이전트 이미지 (+ _working 이미지)
 ├── scripts/                기본 아바타 생성
 ├── GIT_GUIDE.md            Git/GitHub 에 올리기 단계별 가이드
 ├── tests/                  모의 LLM 테스트 (API 키·비용 없이 실행)
-└── data/                   runs.db · checkpoints.db · evals/ (git 제외, 자동 생성)
+└── data/                   runs.db · checkpoints.db · evals/ · uploads/(첨부 파일) (git 제외, 자동 생성)
 ```
 
 ## 10. 테스트

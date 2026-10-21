@@ -1,4 +1,4 @@
-"""채택한 결과를 파일로 저장 — results/<팀>/<날짜-시각>_<질문>.md (+ 여행 지도 .html, 음악 팀은 .mp3).
+"""채택한 결과를 파일로 저장 — results/<팀>/<날짜-시각>_<질문>.md (+ 여행 지도 .html, 음악 팀은 .mp3, 설계 도면·3D 파일).
 
 사람이 '채택'한 내용만 저장한다 (반려·버리기는 저장하지 않음).
 파일에는 나중에 봐도 맥락을 알 수 있도록 질문·업무 브리프·최종 답변·사람의 결정·근거 자료 목록을 함께 적는다.
@@ -79,8 +79,13 @@ def export_adopted(
     appendix: str = "",
     audio_path: Path | None = None,
     appendix_title: str = "코드 검산 (점수·평균가·손익비)",
+    extra_files: dict[str, bytes] | None = None,
 ) -> list[Path]:
-    """채택 결과를 파일로 저장하고, 저장한 파일 경로 목록을 돌려준다. audio_path 가 있으면 같은 이름의 .mp3 로 복사한다."""
+    """채택 결과를 파일로 저장하고, 저장한 파일 경로 목록을 돌려준다.
+
+    audio_path : 있으면 같은 이름의 .mp3 로 복사 (음악 팀)
+    extra_files: {"이름.확장자": 내용} — 같은 이름 앞부분으로 함께 저장 (예: 설계 팀 layout.json → <stem>_layout.json)
+    """
     folder = results_root / team_id
     folder.mkdir(parents=True, exist_ok=True)
     stem = f"{datetime.now():%Y%m%d-%H%M%S}_{slugify(run['question'])}"
@@ -95,6 +100,10 @@ def export_adopted(
         audio_out = folder / f"{stem}{Path(audio_path).suffix or '.mp3'}"
         shutil.copyfile(audio_path, audio_out)
         paths.append(audio_out)
+    for name, data in (extra_files or {}).items():
+        path = folder / f"{stem}_{name}"
+        path.write_bytes(data)
+        paths.append(path)
     return paths
 
 

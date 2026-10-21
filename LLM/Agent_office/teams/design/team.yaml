@@ -1,0 +1,160 @@
+# 설계 팀 — 한국어로 집·건물 배치를 설명하면 2D 평면도(DXF·PNG·SVG)를 만들고, 요청하면 3D(GLB·OBJ·STL·IFC)도 만든다.
+#
+# 역할 분담 (연구: AI-Architect, Text-to-Layout, Text2BIM, ProCAD 의 공통 결론)
+#   LLM  : 구조화된 '레이아웃 JSON' 만 쓴다 — 방 목록(종류·이름·목표 면적)·순서·앞/뒤 구역(zone)·연결(문) = 위상
+#   코드 : 좌표가 없으면 방을 나누고(core/floorplan.py partition), 문·창을 놓고, 검증하고, 그린다
+#          (core/floorplan_render.py · core/floorplan_3d.py). 결과마다 레이아웃 JSON 을 함께 저장해 다음 수정의 원본으로 쓴다.
+#
+# 근거 자료
+#   - floorplan_input 툴: 첨부 도면(JSON·DXF·그림·PDF)을 레이아웃 JSON 으로 바꾸고 면적표·검증 결과를 준다 + 방 최소 치수 기준표
+# 하네스
+#   - floorplan : 답변의 레이아웃 JSON 을 코드로 완성·검증 (겹침·외곽 이탈·목표 면적·문으로 도달·층간 계단·최소 치수)
+#   - json_keys : 최종 답변에 floors 를 가진 JSON 블록이 꼭 있는지 (최종 답변에만)
+# 추가 기능: floorplan_render — 최종 JSON 으로 도면(+요청 시 3D)을 그려 화면에 보여 주고, 채택 시 results/design/ 에 저장
+#
+# 조직도는 '검토 사슬'이다: 차장이 JSON 을 쓰고 → 대리가 치수·체크리스트를 검토 → 부장이 동선·채광·프라이버시를 검토
+# → 팀장이 요구사항과 대조해 최종본을 낸다. (하위가 한 명이면 업무 분배 LLM 호출 없이 그대로 넘긴다)
+
+id: design
+name: 📐 설계 팀
+description: 집·건물 배치를 한국어로 설명하면 2D 평면도(DXF·PNG)를 만들고, 요청하면 3D 모델도 만든다. 기존 도면 수정·층 추가도 한다.
+
+personas:
+  deputy_gm: 당신은 주거 평면 설계 실무 15년차 건축 설계자입니다. 요구사항을 방 프로그램(종류·면적·순서·구역)으로 옮겨 레이아웃 JSON 을 정확히 씁니다.
+  assistant_manager: 당신은 꼼꼼한 치수·도면 검토 담당입니다. 방 최소 치수, 면적 합, 계단·복도 폭, 문·창 위치를 체크리스트로 하나씩 확인합니다.
+  gm: 당신은 주거 계획 책임 건축가입니다. 동선(현관→공용→개인), 채광(남향 거실), 프라이버시(침실·욕실 위치)를 기준으로 평면을 검토합니다.
+  team_lead: 당신은 설계 사무소 소장입니다. 의뢰인의 요구사항을 빠짐없이 반영했는지 확인하고, 정보가 없는 부분은 합리적인 가정으로 명시해 최종안을 냅니다.
+
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장·요구사항
+  specialty: 요구사항 정리·최종안 — 빠진 정보(대지·층수·방 구성)는 가정으로 명시
+  children:
+    - id: gm_review
+      rank: gm
+      name: 부장·평면검토
+      specialty: 동선·채광·프라이버시 검토
+      children:
+        - id: am_check
+          rank: assistant_manager
+          name: 대리·치수검토
+          specialty: 치수·면적 합·최소 크기 체크리스트 검토
+          children:
+            - id: dgm_layout
+              rank: deputy_gm
+              name: 차장·배치설계
+              specialty: 레이아웃 JSON 작성 (방 프로그램·순서·구역·문 연결)
+
+review_criteria:
+  - 의뢰인의 요구(층수·방 개수·특별 요청)를 모두 반영했는가, 빠진 정보는 가정(assumptions)으로 적었는가
+  - 레이아웃 JSON 이 코드 검증을 통과하는가 (겹침·외곽 이탈·면적·도달·계단·최소 치수)
+  - 동선이 자연스러운가 (현관 → 거실·주방 → 복도 → 침실, 욕실은 복도에서 바로)
+  - 채광·프라이버시 (거실·안방 남향/외벽 창, 침실이 현관·거실에서 바로 보이지 않음)
+  - 목표 면적 합이 외곽 면적(복도·계단 약 15% 제외)과 맞는가
+
+output_format: markdown
+
+tools: [floorplan_input]
+
+features: [floorplan_render]
+
+harness:
+  validators: [floorplan, json_keys]
+  final_only: [json_keys]
+  max_retries: 2
+  options:
+    required_keys: [floors]
+
+verification:
+  critic:
+    scope: final
+    max_self_corrections: 1
+    rules:
+      - "코드 검증 결과(하네스·근거 자료의 검증표)와 다른 면적·치수를 본문에 쓰면 '검증 결과 불일치' 위반이다"
+      - "의뢰인이 요구한 방·층을 JSON 에서 빠뜨리면 '요구사항 누락' 위반이다"
+      - "가정한 값(대지 크기·층고 등)을 사실처럼 쓰고 assumptions 에 적지 않으면 '가정 미표시' 위반이다"
+      - "수정 업무에서 요청하지 않은 방·층을 바꾸면 '요청 외 변경' 위반이다"
+
+tasks:
+  - id: plan
+    title: 📐 평면도 만들기
+    description: 원하는 집·건물을 한국어로 설명하면 2D 평면도(DXF·PNG)를 만듭니다. '3D 모델도 만들기'를 켜면 3D 도 함께 만듭니다.
+    fields:
+      - {key: request, label: 어떤 집·건물인가요, type: textarea, required: true, placeholder: "예: 4인 가족 2층 단독주택. 1층은 거실·주방·손님방, 2층은 침실 3개. 거실은 남향으로 넓게"}
+      - {key: size, label: 대지·건물 크기, placeholder: "예: 건물 12×9m / 대지 200㎡ (비우면 가정)"}
+      - {key: floors, label: 층수, type: select, options: [자동, 1층, 2층, 3층]}
+      - {key: rooms, label: 방 구성 (선택), type: textarea, placeholder: "예: 침실 3(안방 18㎡), 욕실 2, 다용도실, 드레스룸"}
+      - {key: want_3d, label: 🧊 3D 모델도 만들기, type: checkbox}
+      - {key: print_scale, label: 3D 프린팅 축척, type: select, options: ["1:100", "1:50", "1:200"]}
+    question: |
+      다음 조건의 건물 평면을 설계해줘.
+      요청: {request}
+      크기: {size}
+      층수: {floors}
+      방 구성: {rooms}
+      3D 모델도 필요: {want_3d}
+    goal: "의뢰인 요청을 반영하고 코드 검증을 통과한 레이아웃 JSON 과 설계 설명"
+    success_criteria:
+      - "답변 마지막에 floors 를 가진 레이아웃 JSON 을 ```json 블록 하나로 쓴다 (스킬의 형식)"
+      - "요청한 층·방을 모두 넣는다. 크기·층수 정보가 없으면 합리적인 값을 가정하고 assumptions 에 적는다"
+      - "목표 면적 합이 외곽 면적에서 복도·계단(약 15%)을 뺀 값과 비슷하다"
+      - "본문에 방 구성표(층·방·면적)와 동선·채광·프라이버시 설계 의도를 쓴다"
+    constraints:
+      - "크기: {size}"
+      - "층수: {floors}"
+    output_format: "요약(가정 포함) → 층별 방 구성표 → 설계 의도(동선·채광·프라이버시) → 레이아웃 JSON"
+    instructions: |
+      3D 모델이 필요하면 JSON 의 "three_d" 를 true 로 쓴다: {want_3d}
+      층수가 '자동'이면 방 구성과 크기로 정한다.
+
+  - id: edit
+    title: ✏️ 도면 수정·층 추가
+    description: 기존 도면(이전 결과의 레이아웃 JSON, DXF, 그림·PDF)을 첨부하고 바꿀 내용을 쓰면 수정한 평면도를 만듭니다. DWG 는 DXF 로 변환해 올려 주세요.
+    fields:
+      - {key: attachment, label: 기존 도면 첨부, type: file, options: [json, dxf, png, jpg, jpeg, pdf, dwg], help: "레이아웃 JSON 이 가장 정확합니다. 그림·PDF 는 비전 모델이 읽어 치수가 근사입니다."}
+      - {key: use_previous, label: 첨부 대신 최근 저장한 설계안 사용, type: checkbox}
+      - {key: change, label: 바꿀 내용, type: textarea, required: true, placeholder: "예: 2층을 하나 더 올려 침실 2개와 욕실 추가 / 주방을 거실 옆으로 / 안방을 더 넓게"}
+      - {key: want_3d, label: 🧊 3D 모델도 만들기, type: checkbox}
+      - {key: print_scale, label: 3D 프린팅 축척, type: select, options: ["1:100", "1:50", "1:200"]}
+    question: |
+      첨부한 도면을 다음과 같이 수정해줘.
+      첨부 파일: {attachment_name}
+      바꿀 내용: {change}
+      3D 모델도 필요: {want_3d}
+    goal: "첨부 도면에서 요청한 부분만 바꾸고 코드 검증을 통과한 레이아웃 JSON"
+    success_criteria:
+      - "근거 자료의 '첨부 도면의 레이아웃 JSON' 을 출발점으로, 요청한 부분만 바꾼다 (나머지 방·좌표는 그대로)"
+      - "층을 추가하면 계단을 아래층과 같은 자리(같은 rect)에 두고, 새 층은 rect 없이 방 목록만 써도 된다"
+      - "답변 마지막에 수정한 전체 레이아웃 JSON 을 ```json 블록 하나로 쓴다"
+      - "본문에 바뀐 점(전/후)과 확인 필요 사항을 쓴다"
+    constraints:
+      - "바꿀 내용: {change}"
+    output_format: "바뀐 점 요약 → 층별 방 구성표 → 확인 필요 사항 → 레이아웃 JSON (전체)"
+    instructions: |
+      첨부 도면을 읽지 못했으면(근거 자료에 '읽기 실패') 요청 문장으로 새로 설계하고 그 사실을 assumptions 에 적는다.
+      그림·PDF 에서 읽은 도면은 치수가 근사이므로 needs_check 를 지우지 말고 유지한다.
+      3D 모델이 필요하면 JSON 의 "three_d" 를 true 로 쓴다: {want_3d}
+
+  - id: model3d
+    title: 🧊 3D 만들기
+    description: 레이아웃 JSON(또는 이 앱이 만든 DXF)이나 최근 저장한 설계안으로 3D 모델(GLB·OBJ·STL·IFC)을 만듭니다. 3D 프린팅 축척을 고를 수 있습니다.
+    fields:
+      - {key: attachment, label: 레이아웃 JSON·DXF 첨부, type: file, options: [json, dxf]}
+      - {key: use_previous, label: 첨부 대신 최근 저장한 설계안 사용, type: checkbox, default: true}
+      - {key: change, label: 3D 에 반영할 변경 (선택), type: textarea, placeholder: "예: 층고 3m, 외벽 0.3m"}
+      - {key: print_scale, label: 3D 프린팅 축척, type: select, options: ["1:100", "1:50", "1:200"]}
+      - {key: want_3d, label: 🧊 3D 모델 만들기, type: checkbox, default: true}
+    question: |
+      첨부한 설계안으로 3D 모델을 만들어줘.
+      첨부 파일: {attachment_name}
+      반영할 변경: {change}
+      프린팅 축척: {print_scale}
+    goal: "3D 로 만들 레이아웃 JSON (three_d: true) 과 3D 모형 안내"
+    success_criteria:
+      - "근거 자료의 레이아웃 JSON 을 그대로 쓰고, 요청한 변경(층고·벽 두께 등)만 반영한다"
+      - "JSON 의 three_d 를 true 로 쓴다"
+      - "답변 마지막에 레이아웃 JSON 을 ```json 블록 하나로 쓴다"
+    output_format: "모형 요약(층·높이·벽 두께) → 프린팅 안내 → 레이아웃 JSON"
+
+disclaimer: "개념·참고용 도면입니다 (건축 허가·시공용 도면이 아님). 구조·법규(건폐율·용적률·일조·피난)는 건축사 검토가 필요합니다."
