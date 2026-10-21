@@ -132,6 +132,22 @@
 - 성과: 테스트 13건 추가(총 138건, API 키 없이 모의 모델로 검증). 실제 실행에서의 불합격률 변화는 다음 실행에서 측정
 - 다음 할 일: 화면의 비평 '통과/지적' 표시(app.py)를 새 합격 기준(severity)에 맞추기, 실측으로 불합격률 재측정
 
+**📐 설계 팀 — 텍스트 → 2D 평면도, 요청 시 3D, 첨부 도면 수정·층 추가**
+- 작업
+  - 레이아웃 JSON 스키마(외곽·층·방·문/창(벽 참조+오프셋+폭)·계단·벽 두께·가정·확인 필요)와 shapely 검증(외곽 이탈·겹침·목표 면적 ±20%·문으로 도달·층간 계단 정렬·방 종류별 최소 치수) — 오류를 한국어 문장으로 돌려줘 하네스 피드백으로 사용 (`core/floorplan.py`)
+  - 자동 분할 도우미: 방 프로그램(종류·목표 면적·순서·앞/뒤 구역) → 직사각형 배치(앞 구역/복도/뒤 구역, 작은 방 쌓기, 여러 층이면 같은 자리 계단, 현관은 복도 끝 외벽) + 문(우선순위 너비 우선 연결)·창 자동 배치 → LLM 은 좌표 대신 위상만 쓴다
+  - 렌더링: ezdxf DXF(레이어 6종·치수·층별 종이 시트·원본 JSON 을 XRECORD 로 보관), matplotlib PNG/SVG(방 이름·면적·치수·방위) (`core/floorplan_render.py`)
+  - 3D(요청 시만): 높이 구간별 벽 압출(문·창 자리 뚫림)·바닥판 → GLB·OBJ, 프린팅용 STL(1:N 축척, manifold3d 로 합친 watertight 덩어리, 최소 벽 두께 검사·보강), IFC(ifcopenshell — 층·벽·바닥·IfcSpace), plotly 3D 뷰어 (`core/floorplan_3d.py`)
+  - 첨부 가져오기: JSON(정확) / 이 앱의 DXF(정확, 내장 JSON) / 다른 DXF(닫힌 폴리선·글자, 단위 추정) / PNG·JPG·PDF(비전 모델 구조화 출력, 치수 '확인 필요') / DWG(ODA File Converter 안내) — 워크플로우 전 데이터 툴 `floorplan_input` 으로 에이전트에게 JSON 텍스트 전달
+  - 업무 양식에 범용 `file`(업로드 → data/uploads 경로 + `{key}_name`)·`checkbox` 칸 추가 (`core/schemas.py`, `core/tasks.py`, `app.py`)
+  - 팀 구성: 팀장·요구사항 → 부장·평면검토 → 대리·치수검토 → 차장·배치설계(JSON 작성) 검토 사슬, 스킬 `floorplan_prompt.md`, 하네스 `floorplan` + `json_keys`(final_only), 업무 3종(평면도 만들기·도면 수정·층 추가·3D 만들기)
+  - 후처리 기능 `floorplan_render`: 최종 JSON → 도면(+3D) 미리보기·내려받기, 채택 시 results/design/ 에 JSON·DXF·PNG·SVG·3D 저장 (`design_ui.py` — app.py 변경은 연결부만)
+- 기술: shapely 2, ezdxf, matplotlib(Agg, pyplot 미사용 — 백그라운드 스레드 안전), trimesh + manifold3d, ifcopenshell 0.9, plotly Mesh3d, pypdfium2, LangChain 멀티모달 구조화 출력, Streamlit AppTest
+- 성과: 가짜 레이아웃 샘플(4인 가족 2층 12×9m)에서 검증 통과 → DXF(1층·2층 시트)·PNG·SVG·GLB·OBJ·STL(122×92×57mm @1:100, watertight)·IFC(층 2·벽 53·공간 16) 생성. 3D 압출 watertight 문제(earcut 이 한 직선 위 점을 빼먹음·모서리 한 점 접촉)를 찾아 manifold3d 압출 + 0.5mm 보정으로 해결
+- 테스트: 38건 추가(스키마·겹침·외곽·도달 불가·계단 불일치·최소 치수·자동 분할·DXF 레이어/왕복·STL watertight·비전/PDF 가짜 모델·툴·하네스·file 칸·가짜 모델 워크플로우·AppTest 연기 테스트) — 전체 196건 통과, 네트워크 없음
+- 한계: 개념·참고용(허가·시공 도면 아님), 자동 분할은 직사각형만, DWG 는 변환 필요, 그림 읽기는 근사
+- 다음 할 일: 실제 API 로 평면도 업무 실측(하네스 재시도 횟수·통과율), ㄱ자 외곽 자동 분할, IFC 에 문·창(IfcOpeningElement) 추가
+
 ---
 
 ## JD / 이력서용 요약 (누적)

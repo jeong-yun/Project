@@ -107,10 +107,12 @@ class TaskField(BaseModel):
 
     key: str  # 템플릿에서 {key} 로 쓰는 이름
     label: str
-    type: Literal["text", "textarea", "number", "date", "select"] = "text"
+    # file: 파일 첨부 (options = 받을 확장자, 예: [json, dxf, png]) — 저장한 파일 경로가 값이 되고 {key}_name 에 원래 파일 이름
+    # checkbox: 켜면 True ("예"), 끄면 빈 값 → 그 {key} 가 들어간 줄은 빠진다
+    type: Literal["text", "textarea", "number", "date", "select", "file", "checkbox"] = "text"
     required: bool = False
-    options: list[str] = Field(default_factory=list)  # select 일 때 선택지
-    default: str | float | int | None = None
+    options: list[str] = Field(default_factory=list)  # select 일 때 선택지 / file 일 때 받을 확장자
+    default: bool | str | float | int | None = None  # checkbox 는 true/false
     placeholder: str = ""
     help: str = ""
 
