@@ -199,7 +199,8 @@ class MusicPromptValidator(Validator):
 @register
 class FloorplanValidator(Validator):
     name = "floorplan"
-    description = "설계 팀 레이아웃 JSON 검증 (방 겹침·외곽 이탈·목표 면적·문으로 도달·층간 계단·최소 치수)"
+    description = ("설계 팀 레이아웃 JSON 검증 (방 겹침·외곽 이탈·목표 면적·문으로 도달·층간 계단·최소 치수 "
+                   "+ 설계 품질: 장단변비·복도 몫·필수 이웃·채광·물 쓰는 곳 모으기)")
 
     def check(self, answer: str, options: dict):
         from core import floorplan  # shapely 를 쓰는 팀에서만 불러온다
@@ -213,13 +214,16 @@ class FloorplanValidator(Validator):
             return self.ok("검사할 레이아웃 JSON 없음")
         tolerance = options.get("area_tolerance")
         _, report = floorplan.check(layout, float(tolerance) if tolerance is not None else None)
+        metrics = [n for n in report.notes if n.startswith("설계 지표")]
         if not report.ok:
-            hints = [n for n in report.notes if "zone" in n or "목표 면적 합" in n][:3]
+            hints = [n for n in report.notes if "zone" in n or "목표 면적 합" in n or "단순 분할" in n][:3]
             return self.fail(
                 "레이아웃 검증 실패: " + " / ".join(report.errors[:8])
-                + (" (참고: " + " / ".join(hints) + ")" if hints else "")
-                + " — 좌표를 직접 고치기 어렵다면 그 층의 rect 를 모두 빼고 방 목록·목표 면적·순서·zone 만 써서 코드가 나누게 하라."
+                + (" (참고: " + " / ".join(hints + metrics) + ")" if hints or metrics else "")
+                + " — 좌표를 직접 고치기 어렵다면 그 층의 rect 를 모두 빼고 방 목록·목표 면적·구역(zone)·이웃(adjacent)·typology 만 써서 "
+                "코드(배치 엔진)가 배치하게 하라."
             )
         floors = len(layout.floors)
         rooms = sum(len(f.rooms) for f in layout.floors)
-        return self.ok(f"레이아웃 검증 통과: {floors}개 층, 방 {rooms}개" + (f", 경고 {len(report.warnings)}건" if report.warnings else ""))
+        warn = f", 경고 {len(report.warnings)}건: " + " / ".join(report.warnings[:4]) if report.warnings else ""
+        return self.ok(f"레이아웃 검증 통과: {floors}개 층, 방 {rooms}개{warn}" + (" · " + " · ".join(metrics) if metrics else ""))
