@@ -28,6 +28,17 @@ def clear_model_cooldown():
 
 
 @pytest.fixture(autouse=True)
+def no_claude_cli(monkeypatch):
+    """실제 claude CLI(구독)를 부르지 않는다 — 기본은 '설치 안 됨'. claude_cli 테스트는 가짜 실행 파일로 바꿔 쓴다."""
+    from core import claude_cli
+
+    monkeypatch.setattr(claude_cli, "find_executable", lambda: None)
+    claude_cli._status_cache.clear()
+    yield
+    claude_cli._status_cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def no_usage_sink():
     """사용량 기록 연결을 테스트마다 끊는다 — app.py(AppTest)가 연결한 저장소가 다음 테스트로 새지 않게."""
     from core import usage

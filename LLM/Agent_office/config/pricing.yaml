@@ -8,7 +8,7 @@
 # - source: official = 각 사 공식 가격 페이지, third_party = 가격 비교 사이트 (공식 확인 필요). 확인일 2026-10-22
 # - 모델 이름은 provider 사이에 겹치지 않으므로 모델 이름만으로 찾는다.
 
-free_providers: [freellm]   # FreeLLMAPI 무료 모델 — 비용 0
+free_providers: [freellm, claude_cli]   # FreeLLMAPI 무료 모델, Claude 구독(claude -p) — 추가 청구 없음, 비용 0
 
 models:
   # OpenAI

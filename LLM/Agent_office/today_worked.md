@@ -274,6 +274,12 @@
 - 테스트: 31건 추가(`tests/test_feeds.py` — URL 정규화·중복 합치기, 과장 규칙 양성 9·음성 4(실측 오탐 포함), GitHub 검증·실패 소스 격리, 토큰·한도·대기 후 재시도, 느린 소스·멈춘 소스 시간 제한, 검색어 하나 실패, 선택 소스(키 있을 때만, 인증 헤더), 끈 소스, 제외 낱말, 프롬프트 주입이 데이터 구역 안에만 있고 표시선 위조 불가, 출력 검증(없는 번호·파일 경로·과장 이어받기·이미 한 작업), 수집→요약→저장·사용량 기록·TTL·전부 실패 시 이전 결과 유지, 모델 없음, 카드 상태 유지·관심 카드만 내보내기, 메인 화면 AppTest 2건(패널·관심 버튼·작업 요청·수집 버튼, TTL 지나면 한 번만 자동 수집)). `conftest.py` 에 수집 네트워크·백그라운드 수집 차단 fixture
 - 한계/다음 할 일: Reddit·네이버·Threads 는 키가 없어 가짜 응답으로만 검증(키를 넣으면 실측 필요), 브리핑은 DuckDuckGo 뉴스 품질에 좌우(같은 사건 중복 기사), 수집은 앱 프로세스 안 스레드라 앱을 끄면 멈춤(주 2~3회 정해진 시각 수집이 필요하면 예약 작업으로), 카드 '이미 했나'는 제목 수준 비교라 대략적
 
+**팀장 모델 — Claude 구독(claude -p) provider 추가**
+- 작업: Anthropic API 크레딧 없이도 팀장이 Claude Opus 5.5 를 쓰도록, 이 PC 의 Claude 구독 로그인을 쓰는 `claude_cli` provider 추가 (`core/claude_cli.py` — Claude Code CLI 를 LangChain ChatModel 로 감쌈). 팀장 순서를 claude_cli Opus 5.5 → GPT-5.5 → GPT-5.4 → … 로 변경(다른 직급 그대로), 동시 호출 1개, 사이드바 상태(🔑 로그인 필요·⚪ CLI 없음), 메인 화면 요금 칸 '구독 (청구 없음)' + 'API 로 했다면' 참고 추정치. Anthropic API Opus 대안의 temperature 제거(현재 Claude 는 sampling 인자를 주면 400)
+- 기술: subprocess + Claude Code headless(`-p`, `stream-json` text_delta 스트리밍, `--json-schema` → structured_output), 도구·hooks·MCP·CLAUDE.md 를 끈 '답만 하는' 실행(`--tools ""`·`--safe-mode`·`dontAsk`·빈 임시 폴더), 자식 환경에서 API 키 제거(구독으로만 과금), 오류 분류(로그인 안 됨 → 사용 불가 캐시 / 구독 한도 → 30분 쿨다운 / 과부하 → 재시도 / 시간 초과 → 대안), 상태 확인 백그라운드 갱신
+- 성과: 가짜 CLI 프로세스로 테스트 17건 추가(메시지 변환·명령 플래그·환경 정리·json/stream-json 해석·구조화 출력·로그인 오류·한도 쿨다운·시간 초과·대안 전환·사용량 '구독' 기록). 실제 CLI(2.1.304)로 플래그 조합·Windows 파이프·오류 분류까지 확인 — CLI 시작 오버헤드 약 5~7초 실측
+- 다음 할 일: 구독 로그인 후 실제 팀장 호출 지연·품질을 GPT-5.5 와 비교, 구독 한도 소진 빈도 관찰
+
 ---
 
 ## JD / 이력서용 요약 (누적)

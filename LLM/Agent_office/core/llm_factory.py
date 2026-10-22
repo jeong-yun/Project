@@ -4,6 +4,8 @@
   1) core/schemas.py 의 Provider 에 이름 추가
   2) config/models.yaml 의 providers 에 .env 키 이름 추가
   3) 아래 create_chat_model 에 분기 추가
+
+claude_cli(Claude 구독)는 API 키 대신 'CLI 설치·로그인'으로 사용 가능 여부를 정한다 — core/claude_cli.py
 """
 
 import os
@@ -90,6 +92,8 @@ def retry_delay(error: Exception, attempt: int) -> float | None:
 
 
 def is_quota_exhausted(error: Exception) -> bool:
+    if getattr(error, "quota_exhausted", False):
+        return True  # 예외가 직접 알려 줌 (claude_cli 구독 한도)
     reset = reset_seconds(error)
     if (reset is not None and reset <= SHORT_RESET_MAX) or (reset is None and _unknown_reset(error)):
         return False  # 곧 풀리는(또는 시간이 안 적힌) 분당 한도 — 쿨다운하지 않고 잠깐 기다렸다 다시
@@ -103,6 +107,8 @@ def is_quota_exhausted(error: Exception) -> bool:
 
 def is_transient(error: Exception) -> bool:
     """잠시 뒤 다시 하면 될 가능성이 높은 오류인가 (provider 마다 예외 종류가 달라 이름·메시지로 판단)."""
+    if getattr(error, "transient", None) is not None:
+        return bool(error.transient)  # 예외가 직접 알려 줌 (claude_cli: 로그인 안 됨·시간 초과는 False, 과부하는 True)
     if is_quota_exhausted(error):
         return False  # 무료 할당량 소진·크레딧 부족 — 기다려도 안 됨
     text = f"{type(error).__name__} {error}".lower()
@@ -118,7 +124,8 @@ def _model_key(spec: ModelSpec) -> str:
 def note_failure(spec: ModelSpec, error: Exception) -> None:
     """호출 실패 기록 — 할당량 소진이면 잠시 후보에서 뺀다."""
     if is_quota_exhausted(error):
-        _cooldown[_model_key(spec)] = time.monotonic() + QUOTA_COOLDOWN_SEC
+        seconds = getattr(error, "cooldown_sec", None) or QUOTA_COOLDOWN_SEC  # 구독 한도는 더 오래 쉰다
+        _cooldown[_model_key(spec)] = time.monotonic() + seconds
 
 
 def cooling_down(spec: ModelSpec) -> bool:
@@ -184,8 +191,17 @@ ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
 
 
 def has_key(provider: str, models: ModelsConfig) -> bool:
+    if provider == "claude_cli":
+        return claude_cli_status() == "ok"  # API 키 대신 'CLI 가 있고 구독 로그인이 되어 있음'
     env_key = models.providers.get(provider)
     return bool(env_key and os.getenv(env_key))
+
+
+def claude_cli_status() -> str:
+    """Claude 구독 CLI 상태: ok | not_installed | logged_out (5분 캐시 — core/claude_cli.py)."""
+    from core import claude_cli
+
+    return claude_cli.cli_status()
 
 
 # ─── FreeLLMAPI (무료 모델 프록시) ─────────────────────────────────────
@@ -273,17 +289,19 @@ def freellm_reachable() -> bool:
 
 
 def is_available(provider: str, models: ModelsConfig) -> bool:
-    """키가 있고 disabled_providers 에 없으면 사용 가능 (freellm 은 서버가 켜져 있어야 함)."""
-    if not has_key(provider, models) or provider in models.disabled_providers:
+    """키가 있고 disabled_providers 에 없으면 사용 가능 (freellm 은 서버가 켜져 있어야 함, claude_cli 는 CLI 로그인)."""
+    if provider in models.disabled_providers or not has_key(provider, models):
         return False
     return freellm_reachable() if provider == "freellm" else True
 
 
 def provider_status(models: ModelsConfig) -> dict[str, str]:
-    """provider 별 상태: ok | disabled | no_key | offline (키 값은 노출하지 않는다)."""
+    """provider 별 상태: ok | disabled | no_key | offline | not_installed | logged_out (키 값은 노출하지 않는다)."""
     def status(provider: str) -> str:
         if provider in models.disabled_providers:
             return "disabled"
+        if provider == "claude_cli":
+            return claude_cli_status()
         if not has_key(provider, models):
             return "no_key"
         if provider == "freellm" and not freellm_reachable():
@@ -293,8 +311,21 @@ def provider_status(models: ModelsConfig) -> dict[str, str]:
     return {provider: status(provider) for provider in models.providers}
 
 
+def claude_cli_settings() -> dict:
+    """settings.yaml 의 claude_cli (timeout_sec, effort). 못 읽으면 기본값."""
+    from core.config import load_settings  # 순환 import 를 피하려고 필요할 때 읽는다
+
+    try:
+        return load_settings().get("claude_cli") or {}
+    except (OSError, ValueError):
+        return {}
+
+
 def free_only(models: ModelsConfig) -> ModelsConfig:
-    """무료 모델만 쓰는 설정 (유료 provider 를 모두 끈 사본) — 화면의 '🆓 무료 모델만 사용'."""
+    """무료 모델만 쓰는 설정 (유료 provider 를 모두 끈 사본) — 화면의 '🆓 무료 모델만 사용'.
+
+    claude_cli(구독)도 끈다 — 청구는 없지만 사람이 쓰는 Claude 와 한도를 나눠 쓰므로 'FreeLLMAPI 만'이라는 뜻을 지킨다.
+    """
     paid = [p for p in models.providers if p != "freellm"]
     return models.model_copy(update={"disabled_providers": sorted(set(models.disabled_providers) | set(paid))})
 
@@ -310,6 +341,15 @@ def available_candidates(rank_models: RankModels, models: ModelsConfig) -> list[
 
 def create_chat_model(spec: ModelSpec, models: ModelsConfig) -> BaseChatModel:
     """ModelSpec 으로 ChatModel 을 만든다. provider 패키지는 필요할 때만 import 한다."""
+    if spec.provider == "claude_cli":
+        # 구독 호출 — API 키 없음, 토큰은 기록하되 비용은 0 (pricing.yaml free_providers → 메인 화면 '구독')
+        from core.claude_cli import ClaudeCLIChatModel
+
+        options = claude_cli_settings()
+        return ClaudeCLIChatModel(
+            model=spec.model, timeout=options.get("timeout_sec") or ClaudeCLIChatModel.model_fields["timeout"].default,
+            effort=options.get("effort") or None, callbacks=[usage.UsageCallback(spec.provider, spec.model, None)],
+        )
     api_key = os.getenv(models.providers[spec.provider])
     # 호출이 끝날 때마다 토큰·추정 비용을 기록한다 (메인 화면 🏠 — core/usage.py). 기록 실패는 호출을 막지 않는다
     kwargs = {"model": spec.model, "callbacks": [usage.UsageCallback(spec.provider, spec.model, api_key)]}
@@ -353,6 +393,7 @@ def structured_output_kwargs(spec: ModelSpec) -> dict:
     - upstage  : OpenAI 호환 API 의 json_schema 지원이 불확실 → function_calling
     - freellm  : json_schema (2026-10-20 실측: gpt-oss-20b·Gemini 계열은 function_calling 이 실패하고 json_schema 는 성공)
     - anthropic/google : 기본값(tool calling). google 은 추가 인자를 받지 않는다.
+    - claude_cli : 추가 인자 없음 — ClaudeCLIChatModel.with_structured_output 이 claude -p --json-schema 로 처리
     """
     if spec.provider == "upstage":
         return {"method": "function_calling"}
