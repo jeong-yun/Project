@@ -167,7 +167,7 @@ streamlit run app.py
 | 항목 | 내용 | 다른 PC 로 옮기는 방법 |
 |---|---|---|
 | `.env` | API 키 | 새로 만들어 키 입력 (메신저·메일로 키 파일을 보내지 않는 것을 권장) |
-| `data/runs.db` | 에이전트별 **교훈**·채택/반려 기록 | 이 파일을 USB·클라우드 드라이브로 같은 위치에 복사 → 교훈이 그대로 이어짐 |
+| `data/runs.db` | 에이전트별 **교훈**·채택/반려 기록 (질문·답변 원문 포함) | **교훈은 `knowledge/` 로 git 에 함께 올라가** 새 PC 에서 앱을 켜면 자동으로 들어옴 (아래 8-1). 질문·답변 원문까지 옮기려면 이 파일을 USB·클라우드 드라이브로 복사 |
 | `data/geocode_cache.json` | 여행 지도 좌표 캐시 | 선택 (없으면 처음 한 번 다시 검색) |
 | `results/` | 채택해서 저장한 결과 파일(.md, 지도 .html) | 폴더째 복사 |
 | `.venv/` | 가상환경 | 옮기지 말고 PC 마다 새로 만들기 (2~3단계) |
@@ -630,6 +630,23 @@ A 는 하네스가 검증한 기본 배치, 처음에는 검증을 통과한 안
 | 오류로 중단된 결과 | 저장하지 않음 |
 | 앱 시작 시 남아 있는 미결정 결과 | `settings.yaml` `storage.purge_undecided_after_hours`(기본 1시간)보다 오래된 것 삭제 |
 
+## 8-1. 피드백(교훈·결정 요약)을 GitHub 에 올리기 — `knowledge/`
+
+`data/` 는 `.gitignore` 라 GitHub 에 올라가지 않습니다. 그중 **다음 업무를 더 잘하게 만드는 학습**만 텍스트로 꺼내 `knowledge/` 에 둡니다 (`core/feedback_sync.py`).
+저장소가 **공개**이므로 개인 정보가 들어갈 수 있는 원문은 올리지 않습니다.
+
+| 파일 | 내용 |
+|---|---|
+| `knowledge/lessons.jsonl` | 에이전트별 교훈 (팀·에이전트·👍/🔧·문장·켜짐 여부·작성 시각) |
+| `knowledge/decisions.jsonl` | 결정 요약 (팀·문의 대상·채택/반려·채택한 에이전트·직접 수정 여부·만족도·코멘트 유무·시각) |
+| `knowledge/교훈.md` | GitHub 에서 읽기 좋게 팀 → 에이전트별로 묶은 교훈 + 팀별 결정 수·평균 만족도 |
+
+- **올리지 않는 것**: 질문·최종 답변·코멘트 원문(보유 종목·매수가·여행 일정 등), 교훈 끝에 붙는 `(사람 코멘트: …)`, 사용량·API 키 정보, `results/` 결과 파일
+- **자동**: 실행용 `Agent_Office_실행.bat` 이 `AGENT_OFFICE_KNOWLEDGE_DIR` 를 `Project\LLM\Agent_office\knowledge` 로 지정 → 채택·반려·교훈 수정 때마다 파일을 다시 씁니다(내용이 같으면 그대로).
+  그다음 평소처럼 `git add` → `git commit` → `git push` 하면 피드백도 올라갑니다. 테스트·개발용 실행은 이 변수가 없어 파일을 건드리지 않습니다.
+- **새 PC**: `git clone` 후 앱을 켜면(변수 지정 시) `knowledge/lessons.jsonl` 의 교훈 중 DB 에 없는 것을 가져옵니다 → 에이전트가 같은 교훈으로 일합니다. 같은 교훈은 두 번 넣지 않습니다.
+- **수동**: `python scripts/sync_feedback.py` (내보내기) · `python scripts/sync_feedback.py import` (가져온 뒤 내보내기)
+
 ## 9. 폴더 구조와 코드 읽는 순서
 
 ```
@@ -665,6 +682,7 @@ Agent_office/
 │   ├── feeds.py            🏠 AI 뉴스·GitHub·HN(+키 있으면 Reddit·네이버·Threads) 수집 → 보조 모델 1회로 브리핑·아이디어 카드, 과장 표시, 캐시
 │   ├── verification.py     루브릭·비평가·자가 교정
 │   ├── feedback.py         사람 결정 → 에이전트별 교훈
+│   ├── feedback_sync.py    교훈·결정 요약 ↔ knowledge/ (GitHub 에 올릴 피드백 — 개인 정보 원문 제외)
 │   ├── storage.py          SQLite (실행 이력·교훈, 미결정 삭제, 사용량·API 키 이름·가격 덮어쓰기)
 │   ├── memo.py             파일 지문(수정 시각·크기) 캐시 — 화면을 다시 그릴 때 같은 파일을 다시 읽지 않게
 │   ├── usage.py            모델 호출마다 토큰·추정 비용 기록 (LangChain 콜백·키 지문·팀/실행 태그·가격 계산)

@@ -101,6 +101,13 @@ class Storage:
             # WAL 모드면 쓰기가 -wal 파일에 먼저 쌓이므로 그 파일도 지문에 넣는다 (기본 모드는 DB 파일만 보면 된다)
             wal = conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         self._extra_sig_files = (f"{self.db_path}-wal",) if wal else ()
+        # 교훈·결정 요약을 knowledge/ 와 맞춘다 (AGENT_OFFICE_KNOWLEDGE_DIR 가 있을 때만 — core/feedback_sync.py)
+        self._sync_feedback(pull=True)
+
+    def _sync_feedback(self, pull: bool = False) -> None:
+        from core import feedback_sync  # 순환 import 방지
+
+        self.last_feedback_sync = feedback_sync.sync(self, pull=pull)
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -155,6 +162,7 @@ class Storage:
             "UPDATE runs SET decision=?, status=?, decided_at=? WHERE id=?",
             (decision.model_dump_json(), status, _now(), run_id),
         )
+        self._sync_feedback()
 
     def get_run(self, run_id: str) -> dict | None:
         rows = self._execute("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -201,6 +209,16 @@ class Storage:
                 "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, created_at) VALUES (?,?,?,?,?,?)",
                 [(team_id, l.agent_id, run_id, l.kind, l.lesson, now) for l in lessons],
             )
+        self._sync_feedback()
+
+    def insert_lessons_raw(self, items: list[dict]) -> None:
+        """knowledge/ 에서 가져온 교훈을 그대로 넣는다 (작성 시각·켜짐 여부 보존, 동기화는 부르지 않음)."""
+        with closing(self._connect()) as conn, conn:
+            conn.executemany(
+                "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, active, created_at) VALUES (?,?,?,?,?,?,?)",
+                [(i["team_id"], i["agent_id"], i.get("run_id") or None, i["kind"], i["lesson"], int(i.get("active", True)),
+                  i["created_at"]) for i in items],
+            )
 
     def recent_lessons(self, team_id: str, agent_id: str, limit: int) -> list[str]:
         """프롬프트에 주입할 최근 활성 교훈 (오래된 것 → 최신 순)."""
@@ -230,9 +248,11 @@ class Storage:
             self._execute("UPDATE lessons SET lesson=? WHERE id=?", (lesson, lesson_id))
         if active is not None:
             self._execute("UPDATE lessons SET active=? WHERE id=?", (int(active), lesson_id))
+        self._sync_feedback()
 
     def delete_lesson(self, lesson_id: int) -> None:
         self._execute("DELETE FROM lessons WHERE id=?", (lesson_id,))
+        self._sync_feedback()
 
     # ─── 사용량·비용 (core/usage.py 가 호출마다 record_usage 로 넘긴다) ───────────
 
