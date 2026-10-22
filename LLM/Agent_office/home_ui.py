@@ -1,16 +1,22 @@
-"""🏠 메인 화면 — 모델별 토큰 사용량·추정 비용, API 키별 내역(이름 붙이기), 이전 키, 가격표.
+"""🏠 메인 화면 — 📰 AI 브리핑·💡 개선 아이디어 카드·🔥 주목 저장소, 모델별 토큰 사용량·추정 비용,
+API 키별 내역(이름 붙이기), 이전 키, 가격표.
+
+AI 브리핑·카드는 core/feeds.py 가 모아 data/feeds/ 에 저장한 것을 읽는다 (수집은 버튼이나 TTL 이 지났을 때 백그라운드로).
 
 데이터는 core/usage.py 가 모델 호출마다 기록한 data/runs.db 의 usage·api_keys 테이블에서 읽는다.
 API 키 원문은 저장하지 않고 지문(sha256 앞 12자리)과 '앞 3자…뒤 4자'만 쓴다 → 사람이 키마다 이름을 붙여 구분한다.
 """
 
 import os
+import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
 
 import streamlit as st
 
-from core import usage
+from core import feeds, usage
 from core.storage import Storage
 
 PERIODS = {"오늘": 1, "7일": 7, "30일": 30, "전체": None}  # 최근 며칠
@@ -56,11 +62,15 @@ def fmt_day(ts: float | None) -> str:
     return datetime.fromtimestamp(ts).strftime("%Y-%m-%d") if ts else "-"
 
 
-def render(storage: Storage, models, open_runs: list[dict], team_names: dict, go_to_team) -> None:
+def render(storage: Storage, models, open_runs: list[dict], team_names: dict, go_to_team,
+           settings: dict | None = None, data_dir: Path | None = None) -> None:
     st.title("🏠 Agent Office")
-    st.caption("모델별 토큰 사용량과 추정 비용, API 키별 사용 내역을 봅니다. 팀 업무는 왼쪽 '화면'에서 🏢 팀 업무를 고르세요.")
+    st.caption("AI 소식·이 앱 개선 아이디어, 모델별 토큰 사용량과 추정 비용, API 키별 사용 내역을 봅니다. "
+               "팀 업무는 왼쪽 '화면'에서 🏢 팀 업무를 고르세요.")
 
     _team_shortcuts(open_runs, team_names, go_to_team)
+    if settings is not None and data_dir is not None:
+        _feeds(settings, models, Path(data_dir), list(team_names.values()))
 
     now_keys = current_keys(models)
     for key_id, (provider, masked) in now_keys.items():  # 아직 호출 전이어도 이름을 미리 붙일 수 있게
@@ -87,6 +97,191 @@ def _team_shortcuts(open_runs: list[dict], team_names: dict, go_to_team) -> None
         busy = sum(1 for r in open_runs if r["team_id"] == tid)
         cols[i % len(cols)].button(name + (f" · 🔔{busy}" if busy else ""), key=f"home_team_{tid}",
                                    on_click=go_to_team, args=(tid,), use_container_width=True)
+
+
+# ─── 📰 AI 브리핑 · 🔥 주목 저장소 · 💡 아이디어 카드 (core/feeds.py) ─────────────────
+
+
+def _md(text: str) -> str:
+    """모델·외부 글을 마크다운에 넣을 때 — 링크 문법·수식($)이 먹지 않게."""
+    return (text or "").replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]").replace("$", "\\$")
+
+
+def _ago(ts: float | None) -> str:
+    if not ts:
+        return "-"
+    sec = max(time.time() - ts, 0)
+    rel = f"{int(sec // 60)}분 전" if sec < 3600 else f"{int(sec // 3600)}시간 전" if sec < 86400 else f"{int(sec // 86400)}일 전"
+    return f"{datetime.fromtimestamp(ts):%Y-%m-%d %H:%M} ({rel})"
+
+
+def _link_md(link: dict) -> str:
+    host = (urlparse(link["url"]).hostname or "").removeprefix("www.")
+    label = feeds.SOURCE_LABELS.get(link["source"], link["source"]).split(" ", 1)[-1]
+    return f"[{label} · {_md(host)}]({link['url'].replace(')', '%29').replace(' ', '%20')})"
+
+
+def _feeds(settings: dict, models, data_dir: Path, teams: list[str]) -> None:
+    cfg = feeds.feed_settings(settings)
+    snap = feeds.load_snapshot(data_dir)
+    running = feeds.collecting(data_dir)
+    # TTL 이 지났으면 화면을 열 때 한 번 백그라운드로 (같은 브라우저 세션에서는 한 번만 — 실패해도 되풀이하지 않게)
+    if (not running and cfg["auto_collect"] and feeds.is_stale(snap, cfg["ttl_hours"])
+            and not st.session_state.get("feeds_auto_started")):
+        st.session_state["feeds_auto_started"] = True
+        if feeds.start_collect(settings, models, data_dir, teams):
+            running = time.time()
+
+    head, button = st.columns([5, 1])
+    head.markdown("#### 📰 오늘의 AI 브리핑")
+    if button.button("🔄 지금 수집", key="feeds_collect", disabled=bool(running), use_container_width=True,
+                     help="뉴스·GitHub·Hacker News(+키가 있는 Reddit·네이버·Threads)를 모아 보조 모델 1회로 요약합니다."):
+        feeds.start_collect(settings, models, data_dir, teams)
+        st.rerun()
+    _feed_status(snap, running, data_dir, cfg)
+    if not snap or not snap.get("items"):
+        if not running:
+            st.info("아직 모은 소식이 없습니다. '🔄 지금 수집'을 누르면 1~2분 안에 채워집니다 (보조 모델 1회 비용).")
+        return
+
+    left, right = st.columns([3, 2])
+    with left:
+        if snap.get("briefing"):
+            for point in snap["briefing"]:
+                badge = f" ⚠️ _주장 — {_md(', '.join(point['hype']))}_" if point.get("hype") else ""
+                st.markdown(f"- {_md(point['text'])}{badge}  \n  {' · '.join(_link_md(l) for l in point['links'])}")
+        else:
+            errors = (snap.get("llm") or {}).get("errors") or []
+            st.warning("요약을 만들지 못했습니다 — 아래 '모은 글'에서 원문을 보세요." + (f"\n\n{errors[-1][:300]}" if errors else ""))
+    with right:
+        _top_repos(snap)
+    _collected_items(snap)
+    _idea_cards(snap, data_dir)
+
+
+def _feed_status(snap: dict | None, running: float | None, data_dir: Path, cfg: dict) -> None:
+    if running:
+        _wait_for_collect(data_dir)
+    if err := feeds.last_error(data_dir):
+        st.warning(f"지난 수집이 실패했습니다: {err}")
+    if not snap:
+        return
+    if snap.get("attempt_error") and (snap.get("attempted_at") or 0) > (snap.get("collected_at") or 0):
+        st.warning(f"{_ago(snap['attempted_at'])} 수집: {snap['attempt_error']}")
+    if not snap.get("collected_at"):
+        return
+    llm = snap.get("llm") or {}
+    cost = llm.get("cost_usd")
+    cost_text = ("비용 미상 (가격표에 없는 모델)" if cost is None and llm.get("model")
+                 else "요약 실패 (비용 없음)" if cost is None else money(cost))
+    tokens = f", 입력 {llm.get('input_tokens') or 0:,}·출력 {llm.get('output_tokens') or 0:,} 토큰" if llm.get("model") else ""
+    next_auto = (f" · 다음 자동 수집: {_ago(snap['collected_at'] + cfg['ttl_hours'] * 3600).split(' (')[0]} 이후"
+                 if cfg["auto_collect"] else " · 자동 수집 꺼짐")
+    st.caption(f"마지막 수집 {_ago(snap['collected_at'])} · 글 {len(snap.get('items') or [])}건 · "
+               f"이번 수집 비용 {cost_text}" + (f" ({llm['model']}{tokens})" if llm.get("model") else "") + next_auto)
+
+
+@st.fragment(run_every=2)
+def _wait_for_collect(data_dir: Path) -> None:
+    """수집 스레드가 끝나면 화면 전체를 다시 그린다."""
+    started = feeds.collecting(data_dir)
+    if not started:
+        st.rerun()
+    st.info(f"⏳ 소식을 모으는 중… ({int(time.time() - started)}초) — 끝나면 자동으로 새로 고칩니다. 다른 화면을 봐도 계속 모읍니다.")
+
+
+def _top_repos(snap: dict) -> None:
+    st.markdown("##### 🔥 주목 저장소")
+    repos = sorted((i for i in snap["items"] if i["source"] == "github"), key=lambda i: -(i.get("score") or 0))[:6]
+    if not repos:
+        status = (snap.get("sources") or {}).get("github") or {}
+        st.caption("GitHub 결과 없음" + (f" — {status.get('note')}" if status.get("note") else ""))
+        return
+    for r in repos:
+        lic = r["extra"].get("license", "없음")
+        lic = "⚠️ 라이선스 없음" if lic == "없음" else lic
+        stars = r.get("score") or 0
+        st.markdown(f"**[{_md(r['title'])}]({r['url']})** ★{stars / 1000:.1f}k" if stars >= 1000 else
+                    f"**[{_md(r['title'])}]({r['url']})** ★{stars}")
+        st.caption(f"push {r['extra'].get('pushed_at', '-')} · {lic} · {r['extra'].get('language') or '-'}"
+                   + (f" — {r['snippet'][:90]}" if r.get("snippet") else ""))
+
+
+def _collected_items(snap: dict) -> None:
+    items = snap["items"]
+    hype = sum(1 for i in items if i.get("hype"))
+    with st.expander(f"🗞 모은 글 {len(items)}건" + (f" · ⚠️ 과장·광고 의심 {hype}건" if hype else "") + " · 소스 상태"):
+        st.caption("인터넷에서 모은 글입니다 — 사실 확인 전의 자료이고, ⚠️ 표시는 '주장'(수익·강의 판매·제휴 링크 등)입니다.")
+        rows = [{"소스": feeds.SOURCE_LABELS.get(s, s), "상태": {"ok": "✅", "error": "❌", "skipped": "⚪ 건너뜀",
+                                                                "off": "⛔ 끔"}.get(v["state"], v["state"]),
+                 "건수": v["count"], "메모": v.get("note", "")} for s, v in (snap.get("sources") or {}).items()]
+        if rows:
+            st.dataframe(rows, hide_index=True, use_container_width=True)
+        st.dataframe(
+            [{"소스": feeds.SOURCE_LABELS.get(i["source"], i["source"]), "제목": i["title"], "날짜": i.get("published") or "",
+              "점수": i.get("score"), "⚠️": ", ".join(i.get("hype") or []), "링크": i["url"]} for i in items],
+            hide_index=True, use_container_width=True,
+            column_config={"링크": st.column_config.LinkColumn("링크", display_text="열기")},
+        )
+
+
+def _idea_cards(snap: dict, data_dir: Path) -> None:
+    st.markdown("#### 💡 개선 아이디어 카드")
+    cards = feeds.all_cards(snap, feeds.card_states(data_dir))
+    if not cards:
+        st.caption("이번 수집에서 이 앱과 관련 있는 아이디어가 나오지 않았습니다.")
+        return
+    c1, c2 = st.columns([3, 2])
+    kinds = c1.multiselect("종류", list(feeds.KINDS), default=list(feeds.KINDS), format_func=feeds.KINDS.get, key="cards_kind")
+    states = {"": "🆕 새 카드", **feeds.STATES, "all": "전체"}
+    state = c2.radio("상태", list(states), format_func=states.get, horizontal=True, key="cards_state")
+    shown = [c for c in cards if c["kind"] in kinds and (state == "all" or c["state"] == state)]
+    counts = {s: sum(1 for c in cards if c["state"] == s) for s in states if s != "all"}
+    st.caption(" · ".join(f"{states[s]} {n}" for s, n in counts.items()) + " — ⭐ 관심 카드만 작업 요청으로 내보낼 수 있습니다.")
+    cols = st.columns(2)
+    for n, card in enumerate(shown):
+        with cols[n % 2].container(border=True):
+            _card(card, data_dir)
+    if not shown:
+        st.caption("조건에 맞는 카드가 없습니다.")
+
+    request = feeds.work_request(cards)
+    approved = counts.get("interested", 0)
+    with st.expander(f"📤 작업 요청 만들기 (⭐ 관심 카드 {approved}개)"):
+        if request:
+            st.caption("오른쪽 위 복사 버튼으로 복사해 Claude 에게 붙여 넣으면 별도 worktree 에서 구현합니다.")
+            st.code(request, language="markdown")
+        else:
+            st.caption("카드에서 ⭐ 관심을 누른 것만 작업 요청으로 내보낼 수 있습니다.")
+
+
+def _card(card: dict, data_dir: Path) -> None:
+    head = f"{feeds.KINDS.get(card['kind'], card['kind'])} · 작업 {feeds.EFFORTS.get(card['effort'], card['effort'])}"
+    if card["state"]:
+        head += f" · {feeds.STATES[card['state']]}"
+    if not card.get("new"):
+        head += " · 지난 수집"
+    st.caption(head)
+    st.markdown(f"**{_md(card['title'])}**" + ("  ⚠️ **과장·광고 의심**" if card.get("hype") else ""))
+    if card.get("hype"):
+        st.markdown(f"📢 _주장(확인 안 됨)_: {_md(card['summary'])}")
+        st.caption("⚠️ " + _md(", ".join(card.get("hype_reasons") or [])))
+    else:
+        st.markdown(_md(card["summary"]))
+    st.caption(f"관련성 {'●' * card['relevance_score']}{'○' * (5 - card['relevance_score'])} {_md(card['relevance'])}")
+    if card.get("files"):
+        st.caption("고칠 파일: " + ", ".join(f"`{f}`" for f in card["files"]))
+    if card.get("done"):
+        st.caption(f"✔ 이미 한 작업과 비슷: {_md(card['done'])} (today_worked.md)")
+    st.caption("출처: " + " · ".join(_link_md(l) for l in card["links"]))
+    plain = {k: v for k, v in card.items() if k not in ("state", "new")}
+    buttons = st.columns(4)
+    for col, (state, label) in zip(buttons, feeds.STATES.items()):
+        col.button(label, key=f"card_{state}_{card['id']}", disabled=card["state"] == state, use_container_width=True,
+                   on_click=feeds.set_card_state, args=(data_dir, plain, state))
+    if card["state"]:
+        buttons[3].button("↩", key=f"card_reset_{card['id']}", help="상태 지우기", use_container_width=True,
+                          on_click=feeds.set_card_state, args=(data_dir, plain, None))
 
 
 # ─── 요약 ────────────────────────────────────────────────────────────────

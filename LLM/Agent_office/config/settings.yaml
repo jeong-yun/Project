@@ -60,3 +60,42 @@ music:
   max_regenerations: 0       # 채점이 낮을 때 자동으로 다시 만드는 최대 횟수 (0 이면 안 함 — 1 이상은 1회마다 추가 과금)
   duration_tolerance: 0.25   # 요청 길이와 ±25% 이상 다르면 화면에 '편집으로 맞추기' 안내
   edit_high_quality: false   # 템포·키 변경 고품질 모드 (3분 곡 약 30초 → 90초, CPU)
+
+feeds:
+  # 🏠 메인 화면의 📰 AI 브리핑 · 💡 개선 아이디어 카드 · 🔥 주목 저장소 (core/feeds.py)
+  # 공식·무료 API 만 쓴다. 로그인이 필요한 사이트(인스타그램·링크드인·페이스북 그룹)는 긁지 않는다.
+  # 수집 1회 = 소스별 검색 몇 번 + 보조 모델(models.yaml utility) 1회 → 🏠 사용량에 '뉴스·SNS 수집'으로 기록
+  ttl_hours: 24              # 마지막 수집이 이보다 오래됐으면 메인 화면을 열 때 백그라운드로 다시 모은다 (주 2~3회면 48~72)
+  auto_collect: true         # false: '🔄 지금 수집' 버튼을 눌렀을 때만
+  source_timeout_sec: 40     # 소스마다 이 시간이 지나면 새 검색어를 멈추고 받은 것만 쓴다 (검색어 하나가 실패해도 나머지는 계속)
+  request_timeout_sec: 10    # HTTP 요청 하나의 읽기 시간 제한
+  max_items_for_llm: 40      # 모델에 넘기는 글 수 (소스를 돌아가며 골고루) — 많을수록 입력 토큰↑
+  max_cards: 8               # 아이디어 카드 최대 수
+  exclude_words: [nsfw, porn, hentai, casino, gambling, 성인, 도박, 카지노]   # 제목·설명·URL 에 있으면 뺀다
+  news:                      # DuckDuckGo 뉴스 (키 불필요)
+    keywords: [AI 에이전트, LLM, Claude, Gemini, OpenAI]
+    per_keyword: 4
+    region: kr-kr
+    timelimit: w             # d(하루)·w(1주)·m(1개월)
+  github:                    # GitHub 검색 API — .env GITHUB_TOKEN 이 있으면 한도↑ (없어도 동작, 10회/분)
+    queries: [llm agent, ai agent framework, claude code, mcp server]
+    created_days: 60         # 이 기간 안에 만들어지고
+    pushed_days: 7           # 이 기간 안에 커밋(push)된 저장소만
+    min_stars: 100
+    per_query: 8
+  hackernews:                # Hacker News Algolia API (키 불필요)
+    queries: [LLM agent, Claude, AI coding, multi-agent]
+    days: 7
+    min_points: 30
+    per_query: 8
+  reddit:                    # REDDIT_CLIENT_ID·REDDIT_CLIENT_SECRET 이 .env 에 있을 때만
+    subreddits: [LocalLLaMA, ClaudeAI, LangChain, ChatGPTCoding]
+    period: week
+    per_sub: 8
+  naver:                     # NAVER_CLIENT_ID·NAVER_CLIENT_SECRET 이 .env 에 있을 때만
+    queries: [AI 에이전트 활용, Claude 활용 후기, LLM 업무 자동화]
+    types: [news, blog]
+    per_query: 5
+  threads:                   # THREADS_ACCESS_TOKEN 이 .env 에 있을 때만
+    queries: [Claude Code, AI agent]
+    per_query: 5

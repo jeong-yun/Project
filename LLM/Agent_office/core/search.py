@@ -94,6 +94,19 @@ SEARCH_BACKENDS: dict[str, Callable[[str, int, str], list[SearchResult]]] = {
 }
 
 
+def news_search(query: str, max_results: int = 5, region: str = "kr-kr", timelimit: str | None = "w") -> list[dict]:
+    """DuckDuckGo 뉴스 검색만 — 🏠 메인 화면 AI 브리핑(core/feeds.py)용. [{title, url, snippet, date, source}]"""
+    from ddgs import DDGS
+
+    rows = DDGS().news(query, max_results=max_results, region=region, timelimit=timelimit) or []
+    return [
+        {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("body", ""),
+         "date": (r.get("date") or "")[:10], "source": r.get("source", "")}
+        for r in rows
+        if r.get("url")
+    ]
+
+
 def plan_queries(question: str, models: ModelsConfig, max_queries: int, hint: str = "") -> tuple[SearchPlan, list[str]]:
     """검색어 계획. 모델 호출이 실패하면 질문 자체를 검색어로 쓴다. hint = 팀별 검색 요령 (team.yaml search.hint)."""
     messages = [

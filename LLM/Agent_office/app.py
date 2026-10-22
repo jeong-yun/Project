@@ -211,7 +211,7 @@ with st.sidebar:
 st.query_params["view"] = view
 if view == HOME:
     home_open = [r for r in runs.values() if r["status"] not in DECIDED and r["team_id"] in team_names]
-    home_ui.render(storage, models, home_open, team_names, go_to_team)
+    home_ui.render(storage, models, home_open, team_names, go_to_team, settings=settings, data_dir=DATA_DIR)
     st.stop()
 
 with st.sidebar:
