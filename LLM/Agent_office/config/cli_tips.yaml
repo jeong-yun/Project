@@ -1,0 +1,34 @@
+# 📺 전체 화면 보드의 '오늘의 CLI 팁' (board_ui.py) — 20초마다 하나씩 돌아간다.
+# 명령 하나 + 설명 한 줄만 쓴다 (멀리서 읽는 화면이라 표·긴 글은 읽히지 않는다).
+# 확인일 2026-10-22 — P_test 'AI 브리핑 보드' 시안의 조사 내용 기준. 도구가 바뀌면 이 파일만 고친다.
+tips:
+  - tool: Claude Code
+    cmd: 'claude -p "이 로그 3줄 요약"'
+    why: 대화창 없이 한 번 실행하고 답만 출력합니다. 스크립트나 예약 작업에 넣기 좋습니다.
+    install: irm https://claude.ai/install.ps1 | iex
+    file: CLAUDE.md
+    url: https://code.claude.com/docs/en/headless
+  - tool: Claude Code
+    cmd: 'claude -p "요약" --output-format json'
+    why: 답과 함께 토큰·추정 비용이 JSON 으로 나옵니다. 이 앱의 팀장(구독 Claude)이 이 방식입니다.
+    install: irm https://claude.ai/install.ps1 | iex
+    file: CLAUDE.md
+    url: https://code.claude.com/docs/en/headless
+  - tool: Codex CLI
+    cmd: 'codex exec "실패한 테스트 고쳐줘"'
+    why: 묻지 않고 작업을 끝까지 실행합니다. CI 파이프라인에서 쓰기 좋습니다.
+    install: npm i -g @openai/codex
+    file: AGENTS.md
+    url: https://github.com/openai/codex
+  - tool: Antigravity CLI
+    cmd: agy plugin import gemini
+    why: Gemini CLI 에서 쓰던 확장을 Antigravity 플러그인으로 옮깁니다.
+    install: irm https://antigravity.google/cli/install.ps1 | iex
+    file: GEMINI.md · AGENTS.md
+    url: https://antigravity.google/
+  - tool: GitHub Copilot CLI
+    cmd: copilot
+    why: 지금 폴더에서 Copilot 에이전트를 엽니다. Node 22 이상이 필요합니다.
+    install: npm install -g @github/copilot
+    file: .github/copilot-instructions.md
+    url: https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli

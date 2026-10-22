@@ -38,6 +38,7 @@ import streamlit.components.v1 as components
 from pydantic import ValidationError
 from st_click_detector import click_detector
 
+import board_ui
 import concept_ui
 import design_ui
 import home_ui
@@ -206,6 +207,10 @@ def run_title(run: dict) -> str:
 # ════════════════════════════════════════════════════════════════════
 # 🏠 메인 화면 (모델별 토큰·추정 비용, API 키별 내역) ↔ 🏢 팀 업무 화면
 # ════════════════════════════════════════════════════════════════════
+if st.query_params.get("view") == board_ui.BOARD_VIEW:
+    # 📺 전체 화면 보드 (TV·키오스크) — 사이드바·메뉴 없이 보드만 (board_ui.py)
+    board_ui.render_board_page(models, settings, DATA_DIR)
+    st.stop()
 if VIEW_KEY not in st.session_state:  # 주소창의 ?view= 를 먼저 본다 (기본은 메인)
     st.session_state[VIEW_KEY] = TEAM_VIEW if st.query_params.get("view") == TEAM_VIEW else HOME
 with st.sidebar:
