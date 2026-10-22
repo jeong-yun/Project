@@ -25,7 +25,6 @@ from shapely.ops import unary_union
 
 from core import llm_factory
 from core.floorplan import ROOM_TYPES, Floor, Layout, LayoutParseError, Rect, Room, parse_layout
-from core.floorplan_render import XRECORD_KEY
 from core.schemas import ModelsConfig, RankModels
 
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
@@ -85,6 +84,8 @@ def from_json(data: bytes) -> ImportResult:
 
 
 def _embedded_layout(doc) -> Layout | None:
+    from core.floorplan_render import XRECORD_KEY  # 도면 모듈(matplotlib·ezdxf)은 무거워 DXF 를 읽을 때만 불러온다
+
     if XRECORD_KEY not in doc.rootdict:
         return None
     xrec = doc.rootdict[XRECORD_KEY]

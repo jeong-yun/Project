@@ -647,6 +647,7 @@ Agent_office/
 │   ├── verification.py     루브릭·비평가·자가 교정
 │   ├── feedback.py         사람 결정 → 에이전트별 교훈
 │   ├── storage.py          SQLite (실행 이력·교훈, 미결정 삭제, 사용량·API 키 이름·가격 덮어쓰기)
+│   ├── memo.py             파일 지문(수정 시각·크기) 캐시 — 화면을 다시 그릴 때 같은 파일을 다시 읽지 않게
 │   ├── usage.py            모델 호출마다 토큰·추정 비용 기록 (LangChain 콜백·키 지문·팀/실행 태그·가격 계산)
 │   └── harness/            결정론적 검증기(validators) + 단계별 평가(evaluation)
 ├── config/                 ranks / models / settings / verification (.yaml)
@@ -655,7 +656,7 @@ Agent_office/
 ├── evals/                  단계별 평가 실행기 + 케이스
 ├── results/                채택한 결과 파일 (git 제외 — 개인 정보 보호. 올리려면 .gitignore 에서 results/ 삭제)
 ├── assets/avatars/         공용 에이전트 이미지 (+ _working 이미지)
-├── scripts/                기본 아바타 생성
+├── scripts/                기본 아바타 생성, 화면 속도 측정(bench_ui.py)
 ├── GIT_GUIDE.md            Git/GitHub 에 올리기 단계별 가이드
 ├── tests/                  모의 LLM 테스트 (API 키·비용 없이 실행)
 └── data/                   runs.db · checkpoints.db · evals/ · uploads/(첨부 파일) · feeds/(AI 브리핑·카드 상태) (git 제외, 자동 생성)
@@ -669,6 +670,23 @@ python -m pytest -q
 ```
 
 테스트는 가짜 모델·가짜 검색을 쓰므로 API 키·비용·인터넷 없이 실행됩니다.
+
+### 성능 (화면 전환 속도)
+
+Streamlit 은 클릭할 때마다 `app.py` 전체를 다시 실행하므로, 그때마다 하는 일을 줄여 두었습니다.
+
+- **설정 YAML·SQLite 조회·아바타 폴더**: 파일의 (수정 시각, 크기)가 그대로면 직전에 읽은 결과를 씁니다 (`core/memo.py`). 파일을 고치거나 DB 에 기록이 생기면 바로 다시 읽고, 방금(2초 안) 바뀐 파일은 캐시하지 않습니다 — 그래서 업무가 진행 중일 때는 DB 를 매번 새로 읽습니다.
+- **개념 팀 사이드바**: git 정보(원격·브랜치·안 올린 커밋·마지막 커밋·status)와 카탈로그 파싱을 캐시합니다. 카탈로그 파일·`.git` 의 HEAD·index 등이 바뀌거나 30초가 지나면 다시 읽고, 커밋·푸시·pull 버튼을 누르면 바로 새로 읽습니다.
+- **무거운 모듈**: 도면·3D(matplotlib·ezdxf·trimesh·scipy)는 실제로 도면을 그릴 때 불러옵니다 → 앱 시작이 빨라집니다.
+
+측정 (서버 쪽 스크립트 시간, 같은 PC·같은 데이터 복사본):
+
+```bash
+python scripts/bench_ui.py --data data --catalog ../../../CS/Term/Every_day   # 화면별·전환 시간
+python scripts/bench_ui.py --data data --profile stock                         # 한 화면 cProfile 상위 함수
+```
+
+`data/` 는 임시 폴더에 복사해서 쓰므로 원본은 바뀌지 않습니다. 브라우저가 화면을 그리는 시간은 빠져 있습니다.
 
 ## 11. Git — 수정한 내용 올리기
 

@@ -21,6 +21,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
 from pathlib import Path
 
 CATEGORY_FILES = {
@@ -143,6 +144,12 @@ def tokens(text: str) -> set[str]:
     return {t.lower() for t in TOKEN.findall(text) if t.lower() not in STOP}
 
 
+@lru_cache(maxsize=4096)
+def _name_tokens(name: str) -> frozenset[str]:
+    """항목 이름의 단어 — 이름은 잘 안 바뀌므로 기억해 둔다 (입력할 때마다 카탈로그 전체 이름을 다시 쪼개지 않게)."""
+    return frozenset(tokens(name))
+
+
 def acronyms(text: str) -> set[str]:
     """괄호 속 약어 (예: 'Process Reward Models, PRMs' → prms, prm)."""
     out = set()
@@ -160,7 +167,9 @@ def find_related(catalog: Catalog, name: str, draft: str = "", limit: int = 6, m
     """
     import math
 
-    names = [tokens(e.name) for e in catalog.entries]
+    if not name.strip() and not draft.strip():  # 입력이 비어 있으면 점수가 모두 0 → 계산 없이 (화면을 그릴 때마다 불림)
+        return []
+    names = [_name_tokens(e.name) for e in catalog.entries]
     df: dict[str, int] = {}
     for toks in names:
         for t in toks:
@@ -175,8 +184,9 @@ def find_related(catalog: Catalog, name: str, draft: str = "", limit: int = 6, m
     scored = []
     for e, e_name_tokens in zip(catalog.entries, names):
         e_acr = acronyms(e.name)
+        missing_acr = name_acr - e_acr  # 비어 있으면 본문 단어를 볼 필요가 없다 (본문 토큰화가 가장 비쌈)
         score = 2.0 * sum(idf(t) for t in name_tokens & e_name_tokens)
-        score += 6.0 * len(name_acr & e_acr) + 2.0 * len((name_acr - e_acr) & tokens(e.body[:3000]))
+        score += 6.0 * len(name_acr & e_acr) + (2.0 * len(missing_acr & tokens(e.body[:3000])) if missing_acr else 0.0)
         score += 0.5 * sum(idf(t) for t in draft_tokens & e_name_tokens) + 4.0 * len(draft_acr & e_acr)
         if normalize(name) and normalize(name) in e.key:
             score += 10

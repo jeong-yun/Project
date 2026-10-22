@@ -9,6 +9,7 @@
 """
 
 import json
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,9 +18,55 @@ import streamlit as st
 from core import catalog as cat
 from core import concept
 from core.config import BASE_DIR
+from core.memo import SigCache, file_sig
 
 CONCEPT_FEATURE = "concept_catalog"  # team.yaml features 에 있으면 이 화면 조각을 쓴다
 TASK_WRITE, TASK_DELETE = "write", "delete"
+
+# ─── 캐시: 화면을 다시 그릴 때마다 git 명령(한 번에 0.3~1초)·카탈로그 파싱을 되풀이하지 않게 ──────────────
+# 카탈로그 파일·.git 의 HEAD·index 등이 바뀌면 바로 다시 읽고, 바뀐 게 없어도 GIT_TTL_SEC 마다 새로 읽는다
+# (터미널에서 푸시한 것·'n시간 전' 표시). 커밋·푸시·pull 버튼을 누르면 즉시 비운다.
+GIT_TTL_SEC = 30
+_cache = SigCache(maxsize=64)
+GIT_FILES = ("HEAD", "index", "FETCH_HEAD", "ORIG_HEAD", "packed-refs", "logs/HEAD")
+
+
+def refresh_git() -> None:
+    _cache.clear()
+
+
+def _catalog_files(root: Path) -> list[Path]:
+    try:
+        return sorted(root.iterdir())
+    except OSError:
+        return []
+
+
+def _git_sig(repo: Path, root: Path) -> tuple | None:
+    sig = file_sig(root, *_catalog_files(root), *(repo / ".git" / name for name in GIT_FILES))
+    return None if sig is None else (*sig, int(time.time() // GIT_TTL_SEC))
+
+
+def load_catalog(root: Path) -> cat.Catalog:
+    """카탈로그 (파일이 그대로면 직전에 읽은 것). 항목 목록은 복사해서 돌려줘 고쳐 써도 캐시가 바뀌지 않는다."""
+    loaded = _cache.get(("catalog", str(root)), file_sig(root, *_catalog_files(root)), lambda: cat.Catalog.load(root))
+    return cat.Catalog(loaded.root, list(loaded.entries))
+
+
+def repo_root(root: Path) -> Path | None:
+    return _cache.get(("root", str(root)), (int(time.time() // GIT_TTL_SEC),), lambda: cat.repo_root(root))
+
+
+def repo_state(repo: Path, subdir: str, root: Path) -> tuple[cat.RepoInfo, str]:
+    """(GitHub 정보, git status) — 사이드바용."""
+    return _cache.get(("state", str(repo), subdir), _git_sig(repo, root),
+                      lambda: (cat.repo_info(repo, subdir), cat.git_status(repo, subdir)))
+
+
+def git_diff_status(ctx: "CatalogContext") -> tuple[str, str]:
+    """(git diff, git status) — 채택 후 커밋 패널용."""
+    return _cache.get(("diff", str(ctx.repo), ctx.subdir), _git_sig(ctx.repo, ctx.root),
+                      lambda: (cat.git_diff(ctx.repo, ctx.subdir), cat.git_status(ctx.repo, ctx.subdir)))
 
 
 @dataclass
@@ -45,30 +92,31 @@ def sidebar(settings: dict) -> CatalogContext | None:
     if not root.exists():
         st.error("폴더가 없습니다. `git clone https://github.com/jeong-yun/CS.git` 후 경로를 맞춰 주세요.")
         return None
-    repo = cat.repo_root(root)
+    repo = repo_root(root)
     subdir = str(root.relative_to(repo)).replace("\\", "/") if repo else ""
-    catalog = cat.Catalog.load(root)
+    catalog = load_catalog(root)
     counts = " · ".join(f"{k} {len(catalog.by_category(k))}" for k in cat.CATEGORY_FILES)
     st.caption(f"항목: {counts}")
     if repo is None:
         st.warning("git 저장소가 아닙니다 — 반영은 되지만 커밋·푸시는 할 수 없습니다.")
     else:
-        info = cat.repo_info(repo, subdir)
+        info, status = repo_state(repo, subdir, root)
         link = info.tree(subdir)
         if link:
             st.markdown(f"🐙 [GitHub 에서 보기]({link})")
         if info.last_commit:
             st.caption(f"마지막 커밋: {info.last_commit}")
-        status = cat.git_status(repo, subdir)
         st.caption("커밋 안 된 변경 없음" if not status else f"커밋 안 된 변경:\n```\n{status}\n```")
         if info.unpushed > 0:
             # 커밋만 하고 푸시하지 않은 채 남은 것 — GitHub 에는 아직 없다
             st.warning(f"⬆️ GitHub 에 아직 올리지 않은 커밋 {info.unpushed}개")
             if st.button("🚀 지금 푸시", use_container_width=True, key="concept_push_pending"):
                 ok, log = cat.git_push(repo)
+                refresh_git()
                 (st.success if ok else st.error)(log[-500:] or "완료")
         if st.button("⬇️ 최신 받기 (git pull)", use_container_width=True, key="concept_pull"):
             ok, log = cat.git_pull(repo)
+            refresh_git()
             (st.success if ok else st.error)(log[-500:] or "완료")
     return CatalogContext(root, repo, subdir, catalog)
 
@@ -91,6 +139,7 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
                        + "\n".join(f"- [{e.category}] {e.name}" for e in refs[:15]))
         if st.button("🗑 승인 — old_term 으로 이관", type="primary", disabled=busy, key=f"cd_go_{team_id}"):
             changes = cat.apply_plan(ctx.catalog, concept.delete_plan(target), "")
+            refresh_git()
             st.session_state["concept_delete_result"] = {"title": target.name, "changes": changes}
             st.rerun()
         result = st.session_state.get("concept_delete_result")
@@ -203,6 +252,7 @@ def apply_adopted(ctx: CatalogContext, run: dict, entry: str, plan: dict) -> Non
     run["concept_changes"] = cat.apply_plan(fresh, plan, entry)
     run["concept_edit_logs"] = concept.apply_edits(cat.Catalog.load(ctx.root), plan.get("edits") or [])
     run["concept_commit"] = f"Term: {plan.get('title') or info.get('title', '')} {concept.ACTIONS.get(plan.get('action'), '정리')}"
+    refresh_git()
 
 
 def render_changes(changes: list, edit_logs: list[str]) -> None:
@@ -217,23 +267,26 @@ def git_panel(ctx: CatalogContext, key: str, message: str) -> None:
     if ctx.repo is None:
         st.caption("git 저장소가 아니라 커밋·푸시는 할 수 없습니다.")
         return
+    diff, pending = git_diff_status(ctx)
     with st.expander("변경 내용 (git diff)"):
-        st.code(cat.git_diff(ctx.repo, ctx.subdir)[:30000] or "(차이 없음 — 이미 커밋했거나 새 파일만 있음)", language="diff")
+        st.code(diff[:30000] or "(차이 없음 — 이미 커밋했거나 새 파일만 있음)", language="diff")
     msg = st.text_input("커밋 메시지", value=message, key=f"msg_{key}")
-    pending = cat.git_status(ctx.repo, ctx.subdir)
     st.caption("📝 아직 커밋하지 않은 변경이 있습니다 — '🚀 커밋 후 푸시'를 누르면 커밋과 GitHub 업로드를 한 번에 합니다."
                if pending else "커밋하지 않은 변경 없음")
     c1, c2 = st.columns(2)
     if c1.button("💾 커밋만", use_container_width=True, key=f"commit_{key}", disabled=not pending):
         ok, log = cat.git_commit(ctx.repo, ctx.subdir, msg)
+        refresh_git()
         (st.success if ok else st.error)(log[-800:])
     if c2.button("🚀 커밋 후 GitHub 에 푸시", type="primary", use_container_width=True, key=f"push_{key}"):
         if pending:  # 커밋 안 된 변경이 있으면 먼저 커밋 — 커밋 없이 푸시하면 아무것도 올라가지 않는다
             ok, log = cat.git_commit(ctx.repo, ctx.subdir, msg)
+            refresh_git()
             if not ok:
                 st.error("커밋 실패: " + log[-800:])
                 return
         ok, log = cat.git_push(ctx.repo)
+        refresh_git()
         if not ok:
             st.error("푸시 실패: " + log[-800:])
         elif "up-to-date" in log.lower() or "up to date" in log.lower():
