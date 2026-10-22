@@ -1,0 +1,435 @@
+{
+  "version": 1,
+  "title": "4인 가족 2층 주택",
+  "units": "m",
+  "outline": {
+    "x": 0.0,
+    "y": 0.0,
+    "w": 12.0,
+    "h": 9.0
+  },
+  "wall": {
+    "exterior": 0.2,
+    "interior": 0.12
+  },
+  "stair": {
+    "x": 0.0,
+    "y": 6.23,
+    "w": 2.4,
+    "h": 2.77
+  },
+  "floors": [
+    {
+      "level": 1,
+      "name": "",
+      "height": 2.8,
+      "rooms": [
+        {
+          "id": "living",
+          "type": "living",
+          "name": "거실",
+          "area": 38.0,
+          "rect": {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 7.86,
+            "h": 5.03
+          }
+        },
+        {
+          "id": "kitchen",
+          "type": "kitchen",
+          "name": "주방·식당",
+          "area": 20.0,
+          "rect": {
+            "x": 7.86,
+            "y": 0.0,
+            "w": 4.14,
+            "h": 5.03
+          }
+        },
+        {
+          "id": "bath1",
+          "type": "bathroom",
+          "name": "욕실",
+          "area": 6.0,
+          "rect": {
+            "x": 2.4,
+            "y": 6.23,
+            "w": 2.22,
+            "h": 2.77
+          }
+        },
+        {
+          "id": "guest",
+          "type": "bedroom",
+          "name": "손님방",
+          "area": 14.0,
+          "rect": {
+            "x": 4.62,
+            "y": 6.23,
+            "w": 5.16,
+            "h": 2.77
+          }
+        },
+        {
+          "id": "util",
+          "type": "utility",
+          "name": "다용도실",
+          "area": 6.0,
+          "rect": {
+            "x": 9.78,
+            "y": 6.23,
+            "w": 2.22,
+            "h": 2.77
+          }
+        },
+        {
+          "id": "entry",
+          "type": "entrance",
+          "name": "현관",
+          "area": 4.0,
+          "rect": {
+            "x": 8.67,
+            "y": 5.03,
+            "w": 3.33,
+            "h": 1.2
+          }
+        },
+        {
+          "id": "hall",
+          "type": "corridor",
+          "name": "",
+          "rect": {
+            "x": 0.0,
+            "y": 5.03,
+            "w": 8.67,
+            "h": 1.2
+          }
+        },
+        {
+          "id": "stair",
+          "type": "stair",
+          "name": "",
+          "rect": {
+            "x": 0.0,
+            "y": 6.23,
+            "w": 2.4,
+            "h": 2.77
+          }
+        }
+      ],
+      "doors": [
+        {
+          "room": "stair",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.7,
+          "width": 1.0
+        },
+        {
+          "room": "living",
+          "to": "hall",
+          "side": "N",
+          "offset": 3.48,
+          "width": 0.9
+        },
+        {
+          "room": "bath1",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.71,
+          "width": 0.8
+        },
+        {
+          "room": "guest",
+          "to": "hall",
+          "side": "S",
+          "offset": 1.6,
+          "width": 0.9
+        },
+        {
+          "room": "entry",
+          "to": "hall",
+          "side": "W",
+          "offset": 0.15,
+          "width": 0.9
+        },
+        {
+          "room": "kitchen",
+          "to": "living",
+          "side": "W",
+          "offset": 2.06,
+          "width": 0.9
+        },
+        {
+          "room": "util",
+          "to": "entry",
+          "side": "S",
+          "offset": 0.66,
+          "width": 0.9
+        },
+        {
+          "room": "entry",
+          "to": "outside",
+          "side": "E",
+          "offset": 0.1,
+          "width": 1.0
+        }
+      ],
+      "windows": [
+        {
+          "room": "living",
+          "side": "S",
+          "offset": 2.73,
+          "width": 2.4,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "kitchen",
+          "side": "S",
+          "offset": 1.32,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bath1",
+          "side": "N",
+          "offset": 0.81,
+          "width": 0.6,
+          "sill": 1.5,
+          "height": 0.6
+        },
+        {
+          "room": "guest",
+          "side": "N",
+          "offset": 1.83,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "util",
+          "side": "E",
+          "offset": 1.08,
+          "width": 0.6,
+          "sill": 1.5,
+          "height": 0.6
+        }
+      ]
+    },
+    {
+      "level": 2,
+      "name": "",
+      "height": 2.8,
+      "rooms": [
+        {
+          "id": "family",
+          "type": "living",
+          "name": "가족실",
+          "area": 26.0,
+          "rect": {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 5.2,
+            "h": 5.03
+          },
+          "zone": "front"
+        },
+        {
+          "id": "master",
+          "type": "bedroom",
+          "name": "안방",
+          "area": 20.0,
+          "rect": {
+            "x": 5.2,
+            "y": 0.0,
+            "w": 4.0,
+            "h": 5.03
+          },
+          "zone": "front"
+        },
+        {
+          "id": "bed3",
+          "type": "bedroom",
+          "name": "침실3",
+          "area": 14.0,
+          "rect": {
+            "x": 9.2,
+            "y": 0.0,
+            "w": 2.8,
+            "h": 5.03
+          },
+          "zone": "front"
+        },
+        {
+          "id": "bed2",
+          "type": "bedroom",
+          "name": "침실2",
+          "area": 13.0,
+          "rect": {
+            "x": 2.4,
+            "y": 6.23,
+            "w": 4.8,
+            "h": 2.77
+          }
+        },
+        {
+          "id": "bath2",
+          "type": "bathroom",
+          "name": "욕실2",
+          "area": 7.0,
+          "rect": {
+            "x": 7.2,
+            "y": 6.23,
+            "w": 2.58,
+            "h": 2.77
+          }
+        },
+        {
+          "id": "dress",
+          "type": "dressroom",
+          "name": "드레스룸",
+          "area": 6.0,
+          "rect": {
+            "x": 9.78,
+            "y": 6.23,
+            "w": 2.22,
+            "h": 2.77
+          }
+        },
+        {
+          "id": "hall",
+          "type": "corridor",
+          "name": "",
+          "rect": {
+            "x": 0.0,
+            "y": 5.03,
+            "w": 12.0,
+            "h": 1.2
+          }
+        },
+        {
+          "id": "stair",
+          "type": "stair",
+          "name": "",
+          "rect": {
+            "x": 0.0,
+            "y": 6.23,
+            "w": 2.4,
+            "h": 2.77
+          }
+        }
+      ],
+      "doors": [
+        {
+          "room": "stair",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.7,
+          "width": 1.0
+        },
+        {
+          "room": "family",
+          "to": "hall",
+          "side": "N",
+          "offset": 2.15,
+          "width": 0.9
+        },
+        {
+          "room": "master",
+          "to": "hall",
+          "side": "N",
+          "offset": 1.55,
+          "width": 0.9
+        },
+        {
+          "room": "bed3",
+          "to": "hall",
+          "side": "N",
+          "offset": 0.95,
+          "width": 0.9
+        },
+        {
+          "room": "bed2",
+          "to": "hall",
+          "side": "S",
+          "offset": 1.95,
+          "width": 0.9
+        },
+        {
+          "room": "bath2",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.89,
+          "width": 0.8
+        },
+        {
+          "room": "dress",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.71,
+          "width": 0.8
+        }
+      ],
+      "windows": [
+        {
+          "room": "family",
+          "side": "S",
+          "offset": 1.4,
+          "width": 2.4,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "master",
+          "side": "S",
+          "offset": 1.25,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bed3",
+          "side": "S",
+          "offset": 0.65,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bed2",
+          "side": "N",
+          "offset": 1.65,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bath2",
+          "side": "N",
+          "offset": 0.99,
+          "width": 0.6,
+          "sill": 1.5,
+          "height": 0.6
+        },
+        {
+          "room": "dress",
+          "side": "E",
+          "offset": 1.08,
+          "width": 0.6,
+          "sill": 1.5,
+          "height": 0.6
+        }
+      ]
+    }
+  ],
+  "three_d": false,
+  "area_tolerance": 0.2,
+  "assumptions": [
+    "대지 정보가 없어 건물 12×9m 로 가정"
+  ],
+  "needs_check": []
+}

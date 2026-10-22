@@ -1,7 +1,9 @@
 """📐 평면도 그리기 테스트 — 벽 포셰·문/창 기호·가구·라벨 자동 맞춤·치수·DXF 블록."""
 
 import io
+import json
 import math
+from pathlib import Path
 
 import ezdxf
 import pytest
@@ -40,15 +42,22 @@ POOL_SAMPLE = {
 
 @pytest.fixture(scope="module")
 def pool():
-    layout, report = check(parse_layout(POOL_SAMPLE))
-    assert report.ok, report.errors
-    return layout
+    return _frozen("render_pool_layout.json")
 
 
 @pytest.fixture(scope="module")
 def house():
-    layout, report = check(parse_layout(SAMPLE))
-    assert report.ok, report.errors
+    return _frozen("render_house_layout.json")
+
+
+def _frozen(name: str):
+    """좌표가 고정된 레이아웃 — 렌더러 테스트는 '그리기'만 본다.
+
+    POOL_SAMPLE·SAMPLE 을 그대로 쓰면 배치 엔진(CP-SAT)이 방 모양을 정해, 엔진이 바뀔 때마다
+    '이 방에 TV·세면대가 들어가는지' 같은 그리기 검사가 흔들린다. 그래서 이 테스트를 만들 때의 배치를 파일로 고정했다.
+    """
+    data = json.loads((Path(__file__).parent / "fixtures" / name).read_text(encoding="utf-8"))
+    layout, _ = check(parse_layout(data))  # 좌표가 있으면 배치 엔진을 쓰지 않는다 (문·창만 채움)
     return layout
 
 
@@ -200,3 +209,18 @@ def test_png_svg_and_paper_scale(pool):
     svg = floorplan_render.to_svg(pool, 0).decode("utf-8")
     assert svg.startswith("<?xml") and "label:bed5" in svg
     assert [floorplan_render.paper_scale(*wh) for wh in ((30, 20), (60, 30), (61, 30))] == [100, 150, 200]
+
+
+def test_narrow_tub_bathroom_gets_small_bathtub():
+    """배치 엔진이 0.3m 격자로 자주 만드는 폭 1.5m 욕실에도 '욕조' 요청이면 욕조(1.2m 소형)를 그린다 — 두 작업 병합 후 찾은 문제."""
+    data = {
+        "title": "좁은 욕조 욕실", "outline": {"w": 6.0, "h": 2.7},
+        "floors": [{"level": 1, "rooms": [
+            {"id": "entry", "type": "entrance", "name": "현관", "rect": {"x": 0, "y": 0, "w": 1.5, "h": 2.7}},
+            {"id": "living", "type": "living", "name": "거실", "rect": {"x": 1.5, "y": 0, "w": 3.0, "h": 2.7}},
+            {"id": "bath1", "type": "bathroom", "name": "욕실(욕조)", "rect": {"x": 4.5, "y": 0, "w": 1.5, "h": 2.7}},
+        ]}],
+    }
+    layout, _ = check(parse_layout(data))
+    plan = floorplan_render.plan_floor(layout, 0)
+    assert "bathtub" in _kinds(plan, "bath1") and "shower" not in _kinds(plan, "bath1")

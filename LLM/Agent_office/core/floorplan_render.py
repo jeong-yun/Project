@@ -714,7 +714,8 @@ def _furnish_bathroom(r: _Room, room: Room) -> None:
     placed = False
     if _wants_tub(room):
         longest = sorted("SNWE", key=lambda s: -r.span(s))
-        placed = bool(r.first("bathtub", [(1.7, 0.75), (1.5, 0.75), (1.4, 0.7)], longest, ats=("start", "end")))
+        # 좁은 욕실(폭 1.5m 안팎 — 배치 엔진이 0.3m 격자로 자주 만드는 폭)은 짧은 벽에 1.2m 소형 욕조
+        placed = bool(r.first("bathtub", [(1.7, 0.75), (1.5, 0.75), (1.4, 0.7), (1.2, 0.7)], longest, ats=("start", "end")))
     if not placed:
         r.first("shower", [(0.9, 0.9), (0.8, 0.8)], r.sides(), ats=("start", "end"))
     # 변기는 옆 폭 0.75m, 세면대는 0.6m 이상인 벽에만 (좁은 틈에 끼워 넣지 않는다)

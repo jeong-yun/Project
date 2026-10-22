@@ -1,0 +1,433 @@
+{
+  "version": 1,
+  "title": "4인 가족 단층 주택",
+  "units": "m",
+  "outline": {
+    "x": 0.0,
+    "y": 0.0,
+    "w": 20.0,
+    "h": 13.0
+  },
+  "wall": {
+    "exterior": 0.2,
+    "interior": 0.12
+  },
+  "floors": [
+    {
+      "level": 1,
+      "name": "",
+      "height": 2.8,
+      "rooms": [
+        {
+          "id": "living",
+          "type": "living",
+          "name": "거실",
+          "area": 50.0,
+          "rect": {
+            "x": 0.0,
+            "y": 0.0,
+            "w": 7.81,
+            "h": 6.68
+          }
+        },
+        {
+          "id": "kitchen",
+          "type": "kitchen",
+          "name": "주방",
+          "area": 16.0,
+          "rect": {
+            "x": 7.81,
+            "y": 0.0,
+            "w": 2.5,
+            "h": 6.68
+          }
+        },
+        {
+          "id": "dining",
+          "type": "dining",
+          "name": "식당",
+          "area": 14.0,
+          "rect": {
+            "x": 10.31,
+            "y": 0.0,
+            "w": 2.19,
+            "h": 6.68
+          }
+        },
+        {
+          "id": "pool",
+          "type": "other",
+          "name": "수영장",
+          "area": 48.0,
+          "rect": {
+            "x": 12.5,
+            "y": 0.0,
+            "w": 7.5,
+            "h": 6.68
+          },
+          "zone": "front"
+        },
+        {
+          "id": "bed1",
+          "type": "bedroom",
+          "name": "침실1",
+          "area": 22.0,
+          "rect": {
+            "x": 0.0,
+            "y": 7.88,
+            "w": 4.49,
+            "h": 5.12
+          }
+        },
+        {
+          "id": "bed2",
+          "type": "bedroom",
+          "name": "침실2",
+          "area": 14.0,
+          "rect": {
+            "x": 4.49,
+            "y": 7.88,
+            "w": 2.86,
+            "h": 5.12
+          }
+        },
+        {
+          "id": "bed3",
+          "type": "bedroom",
+          "name": "침실3",
+          "area": 13.0,
+          "rect": {
+            "x": 7.35,
+            "y": 7.88,
+            "w": 2.65,
+            "h": 5.12
+          }
+        },
+        {
+          "id": "bed4",
+          "type": "bedroom",
+          "name": "침실4",
+          "area": 13.0,
+          "rect": {
+            "x": 10.0,
+            "y": 7.88,
+            "w": 2.65,
+            "h": 5.12
+          }
+        },
+        {
+          "id": "bed5",
+          "type": "bedroom",
+          "name": "침실5",
+          "area": 10.0,
+          "rect": {
+            "x": 12.65,
+            "y": 7.88,
+            "w": 3.06,
+            "h": 3.41
+          }
+        },
+        {
+          "id": "bath1",
+          "type": "bathroom",
+          "name": "욕실1(욕조)",
+          "area": 5.0,
+          "rect": {
+            "x": 12.65,
+            "y": 11.29,
+            "w": 3.06,
+            "h": 1.71
+          }
+        },
+        {
+          "id": "bath2",
+          "type": "bathroom",
+          "name": "욕실2",
+          "area": 4.0,
+          "rect": {
+            "x": 15.71,
+            "y": 7.88,
+            "w": 2.05,
+            "h": 2.05
+          }
+        },
+        {
+          "id": "sauna",
+          "type": "other",
+          "name": "사우나",
+          "area": 6.0,
+          "rect": {
+            "x": 15.71,
+            "y": 9.93,
+            "w": 2.05,
+            "h": 3.07
+          },
+          "zone": "back"
+        },
+        {
+          "id": "util",
+          "type": "utility",
+          "name": "다용도실",
+          "area": 5.0,
+          "rect": {
+            "x": 17.76,
+            "y": 7.88,
+            "w": 2.24,
+            "h": 2.33
+          }
+        },
+        {
+          "id": "dress",
+          "type": "dressroom",
+          "name": "드레스룸",
+          "area": 6.0,
+          "rect": {
+            "x": 17.76,
+            "y": 10.21,
+            "w": 2.24,
+            "h": 2.79
+          }
+        },
+        {
+          "id": "entry",
+          "type": "entrance",
+          "name": "현관",
+          "area": 6.0,
+          "rect": {
+            "x": 15.0,
+            "y": 6.68,
+            "w": 5.0,
+            "h": 1.2
+          }
+        },
+        {
+          "id": "hall",
+          "type": "corridor",
+          "name": "",
+          "rect": {
+            "x": 0.0,
+            "y": 6.68,
+            "w": 15.0,
+            "h": 1.2
+          }
+        }
+      ],
+      "doors": [
+        {
+          "room": "living",
+          "to": "hall",
+          "side": "N",
+          "offset": 3.45,
+          "width": 0.9
+        },
+        {
+          "room": "kitchen",
+          "to": "hall",
+          "side": "N",
+          "offset": 0.8,
+          "width": 0.9
+        },
+        {
+          "room": "dining",
+          "to": "hall",
+          "side": "N",
+          "offset": 0.64,
+          "width": 0.9
+        },
+        {
+          "room": "pool",
+          "to": "hall",
+          "side": "N",
+          "offset": 0.83,
+          "width": 0.9
+        },
+        {
+          "room": "bed1",
+          "to": "hall",
+          "side": "S",
+          "offset": 1.8,
+          "width": 0.9
+        },
+        {
+          "room": "bed2",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.98,
+          "width": 0.9
+        },
+        {
+          "room": "bed3",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.88,
+          "width": 0.9
+        },
+        {
+          "room": "bed4",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.88,
+          "width": 0.9
+        },
+        {
+          "room": "bed5",
+          "to": "hall",
+          "side": "S",
+          "offset": 0.75,
+          "width": 0.9
+        },
+        {
+          "room": "entry",
+          "to": "hall",
+          "side": "W",
+          "offset": 0.15,
+          "width": 0.9
+        },
+        {
+          "room": "bath2",
+          "to": "entry",
+          "side": "S",
+          "offset": 0.63,
+          "width": 0.8
+        },
+        {
+          "room": "util",
+          "to": "entry",
+          "side": "S",
+          "offset": 0.67,
+          "width": 0.9
+        },
+        {
+          "room": "dress",
+          "to": "util",
+          "side": "S",
+          "offset": 0.72,
+          "width": 0.8
+        },
+        {
+          "room": "bath1",
+          "to": "bed4",
+          "side": "W",
+          "offset": 0.46,
+          "width": 0.8
+        },
+        {
+          "room": "sauna",
+          "to": "bed5",
+          "side": "W",
+          "offset": 0.26,
+          "width": 0.9
+        },
+        {
+          "room": "entry",
+          "to": "outside",
+          "side": "E",
+          "offset": 0.1,
+          "width": 1.0
+        }
+      ],
+      "windows": [
+        {
+          "room": "living",
+          "side": "S",
+          "offset": 2.71,
+          "width": 2.4,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "kitchen",
+          "side": "S",
+          "offset": 0.5,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "dining",
+          "side": "S",
+          "offset": 0.34,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "pool",
+          "side": "S",
+          "offset": 3.0,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bed1",
+          "side": "W",
+          "offset": 1.81,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bed2",
+          "side": "N",
+          "offset": 0.68,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bed3",
+          "side": "N",
+          "offset": 0.58,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bed4",
+          "side": "N",
+          "offset": 0.58,
+          "width": 1.5,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "bath1",
+          "side": "N",
+          "offset": 1.23,
+          "width": 0.6,
+          "sill": 1.5,
+          "height": 0.6
+        },
+        {
+          "room": "sauna",
+          "side": "N",
+          "offset": 0.3,
+          "width": 1.45,
+          "sill": 0.9,
+          "height": 1.2
+        },
+        {
+          "room": "util",
+          "side": "E",
+          "offset": 0.87,
+          "width": 0.6,
+          "sill": 1.5,
+          "height": 0.6
+        },
+        {
+          "room": "dress",
+          "side": "E",
+          "offset": 1.09,
+          "width": 0.6,
+          "sill": 1.5,
+          "height": 0.6
+        }
+      ]
+    }
+  ],
+  "three_d": false,
+  "area_tolerance": 0.2,
+  "assumptions": [],
+  "needs_check": []
+}
