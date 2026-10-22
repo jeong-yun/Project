@@ -22,6 +22,7 @@ import traceback
 from collections.abc import Callable, Iterator
 from datetime import datetime
 
+from core import usage
 from core.llm_factory import NoAvailableModelError
 from core.schemas import AgentAnswer
 
@@ -161,9 +162,11 @@ def start_run(run: dict, events_factory: Callable[[], Iterator], on_step=None, o
     """백그라운드 스레드에서 워크플로우를 실행한다. events_factory 는 stream_office(...) 를 만드는 함수."""
 
     def _target():
-        consume(run, events_factory(), on_step)
-        if on_finish:
-            on_finish(run)
+        # 이 실행 안의 모든 모델 호출 기록에 팀·실행 id 를 붙인다 (동시 실행 스레드에도 이어진다)
+        with usage.scope(team_id=run.get("team_id", ""), run_id=run["run_id"]):
+            consume(run, events_factory(), on_step)
+            if on_finish:
+                on_finish(run)
 
     thread = threading.Thread(target=_target, name=f"office-{run['run_id'][:8]}", daemon=True)
     thread.start()

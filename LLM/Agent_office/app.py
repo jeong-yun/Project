@@ -40,7 +40,8 @@ from st_click_detector import click_detector
 
 import concept_ui
 import design_ui
-from core import audio_edit, concept, followup, llm_factory, music, stock_calc, verification
+import home_ui
+from core import audio_edit, concept, followup, llm_factory, music, stock_calc, usage, verification
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
@@ -133,6 +134,9 @@ def get_storage() -> Storage:
 
 storage = get_storage()
 DECIDED = ("adopted", "rejected")
+# 모델 호출마다 토큰·추정 비용을 저장소에 기록 (🏠 메인 화면) — 화면에서 고친 가격이 가격표보다 우선
+usage.set_sink(storage.record_usage)
+usage.set_price_overrides(storage.price_overrides)
 
 
 @st.cache_resource
@@ -170,10 +174,20 @@ team_names = {t.id: t.name for t in teams}
 TEAM_KEY, HISTORY_KEY = "team_pick", "history_open"
 
 
+VIEW_KEY, HOME, TEAM_VIEW = "view", "home", "team"
+
+
 def go_to_run(run: dict) -> None:
     """사이드바 '진행 중인 업무'를 누르면 그 업무의 팀·문의 대상으로 이동 (위젯이 그려지기 전에 실행되는 콜백)."""
+    st.session_state[VIEW_KEY] = TEAM_VIEW
     st.session_state[TEAM_KEY] = run["team_id"]
     st.session_state[f"target_{run['team_id']}"] = run["root_id"]
+
+
+def go_to_team(team: str) -> None:
+    """메인 화면의 팀 버튼 — 그 팀 업무 화면으로."""
+    st.session_state[VIEW_KEY] = TEAM_VIEW
+    st.session_state[TEAM_KEY] = team
 
 
 def short(text: str, n: int = 38) -> str:
@@ -185,6 +199,20 @@ def run_title(run: dict) -> str:
     info = run.get("concept") or {}
     return info.get("title") or run["question"]
 
+
+# ════════════════════════════════════════════════════════════════════
+# 🏠 메인 화면 (모델별 토큰·추정 비용, API 키별 내역) ↔ 🏢 팀 업무 화면
+# ════════════════════════════════════════════════════════════════════
+if VIEW_KEY not in st.session_state:  # 주소창의 ?view= 를 먼저 본다 (기본은 메인)
+    st.session_state[VIEW_KEY] = TEAM_VIEW if st.query_params.get("view") == TEAM_VIEW else HOME
+with st.sidebar:
+    view = st.radio("화면", [HOME, TEAM_VIEW], format_func={HOME: "🏠 메인", TEAM_VIEW: "🏢 팀 업무"}.get,
+                    horizontal=True, key=VIEW_KEY)
+st.query_params["view"] = view
+if view == HOME:
+    home_open = [r for r in runs.values() if r["status"] not in DECIDED and r["team_id"] in team_names]
+    home_ui.render(storage, models, home_open, team_names, go_to_team)
+    st.stop()
 
 with st.sidebar:
     st.markdown("### 팀 선택")
@@ -637,7 +665,8 @@ def start_music(run: dict, answer: str) -> None:
 
     def work() -> None:
         try:
-            build_music(run, answer)
+            with usage.scope(team_id=run.get("team_id", ""), run_id=run["run_id"]):
+                build_music(run, answer)
         except Exception as e:  # noqa: BLE001 — 실패해도 결과·결정은 막지 않는다
             run["music_error"] = f"{type(e).__name__}: {e}"
         finally:
@@ -916,7 +945,7 @@ def render_followup(run: dict) -> None:
     current, _ = current_result(run)
     validators = list(dict.fromkeys([*team.harness.validators, *(run.get("extra_validators") or [])]))
     try:
-        with st.spinner(f"{name_of(root)}이(가) 답하는 중… (수정이면 30초~1분)"):
+        with st.spinner(f"{name_of(root)}이(가) 답하는 중… (수정이면 30초~1분)"),                 usage.scope(team_id=team_id, run_id=run["run_id"], purpose="결정 전 문의·수정"):
             turn = followup.respond(
                 agent, run["question"], current.content, text.strip(), turns, followup_evidence(run),
                 storage.recent_lessons(team_id, root, settings.get("feedback", {}).get("max_lessons_in_prompt", 5)),
@@ -976,7 +1005,7 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
 def submit_decision(run: dict, decision: HumanDecision) -> None:
     """멈춰 있던 그래프를 사람의 결정으로 재개하고, 생성된 교훈을 기록한다."""
     lessons, notes = [], []
-    with st.spinner("결정을 반영하고 에이전트별 피드백을 정리하는 중…"):
+    with st.spinner("결정을 반영하고 에이전트별 피드백을 정리하는 중…"),             usage.scope(team_id=team_id, run_id=run["run_id"], purpose="결정 반영·교훈"):
         for kind, payload in resume_with_decision(make_graph(), org, decision, run["run_id"]):
             if kind == "lessons":
                 lessons = payload

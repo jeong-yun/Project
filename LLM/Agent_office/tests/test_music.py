@@ -353,6 +353,7 @@ def test_app_renders_music_team(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path / "results"))
     at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=60)
     at.session_state["team_pick"] = "music"
+    at.session_state["view"] = "team"  # 기본 화면은 🏠 메인
     at.run()
     assert not at.exception
     assert at.query_params["team"] == ["music"] or at.query_params["team"] == "music"
@@ -393,6 +394,7 @@ def test_app_music_section_recovers_track_and_edits(tmp_path, monkeypatch):
     try:
         at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
         at.session_state["team_pick"] = "music"
+        at.session_state["view"] = "team"  # 기본 화면은 🏠 메인
         at.run()
         assert not at.exception
         assert any("다시 불러왔습니다" in c.value for c in at.caption)
@@ -487,6 +489,7 @@ def test_app_music_button_generates_in_background(tmp_path, monkeypatch):
     try:
         at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
         at.session_state["team_pick"] = "music"
+        at.session_state["view"] = "team"  # 기본 화면은 🏠 메인
         at.run()
         button = next(b for b in at.button if b.label.startswith("🎵 곡 만들기"))
         button.click().run()

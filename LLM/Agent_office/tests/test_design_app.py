@@ -18,6 +18,7 @@ def app(tmp_path, monkeypatch, set_keys):
     monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path / "results"))
     at = AppTest.from_file(APP, default_timeout=60)
     at.query_params["team"] = "design"
+    at.query_params["view"] = "team"  # 기본 화면은 🏠 메인 — 팀 업무 화면으로
     return at
 
 

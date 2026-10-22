@@ -245,11 +245,22 @@
 - 테스트: 11건 추가(`tests/test_floorplan_space.py` — 외곽 효율·빈 곳 오류/경고, 바깥 공간이 빈 곳을 메움, 100평 표본 빈 마당 없음·수영장 끝 블록, 마당 요청 → 외부 라벨·DXF A-SITE, 중정 블록 분해, 복도 합치기·나란한 조각 경고·100평 복도 2조각 이하, 치수선이 실제 외벽을 따름, 풀이 설정), 기존 1건은 'A = ㄱ자' 기대를 '일자형 + 끝 블록'으로 바꿈 — 전체 304건 통과
 - 한계/다음 할 일: 일자형 100평은 복도가 12m 를 넘는 경우가 있어 경고가 남음(블록을 공용/개인 둘로 나누는 모형 검토), plan_references.md 가 스킬로 모든 에이전트 프롬프트에 들어가 약 20KB 가 늘어남(필요하면 요약본만 스킬에 두고 원문은 docs 로), 부하 측정은 이 노트북 기준
 
+**🏠 메인 화면 — 모델별 토큰 사용량·추정 비용, API 키별 내역**
+- 작업
+  - 사용량 기록(`core/usage.py`): `create_chat_model` 이 만드는 모든 LangChain 모델에 콜백을 붙여 호출이 끝날 때마다 입력·출력·캐시 토큰을 기록(초안·검토·통합·비평·브리프·교훈·검색 계획·지도·편집 계획까지 한 곳에서), 음악 생성(곡 단위)·채점(토큰)은 직접 기록. ContextVar 로 팀·실행 id 를 붙여 동시 실행 스레드까지 이어짐. 기록 실패는 모델 호출을 막지 않음
+  - API 키: 원문 대신 sha256 지문 + '앞 3자…뒤 4자'만 저장, 키가 바뀌면 이전 키로 남고 사람이 이름을 붙여 구분
+  - 가격표(`config/pricing.yaml`): 공식(Google·Anthropic)·제3자(OpenAI·Upstage) 출처 표기, 캐시 입력 가격, 날짜별 가격 변경(Gemini 3.8·3.6 Flash 2027-01-01 인상), 곡 단위(Lyria), 무료 provider. 화면에서 고친 가격이 우선하고 가격이 비어 있던 기록은 다시 계산
+  - 화면(`home_ui.py`): 🏠 메인 / 🏢 팀 업무 전환(기본 메인), 팀 바로가기, 기간별 합계·모델별 표·비용 막대·날짜별 비용, 지금 쓰는 키·이전 키 표에서 이름 편집·저장, 가격표 편집
+  - 저장소: `usage`·`api_keys`·`price_overrides` 표, 동시 쓰기를 위해 SQLite 잠금 대기 30초
+- 기술: LangChain BaseCallbackHandler(on_llm_end usage_metadata), ContextVar, SQLite 집계(UPSERT), Streamlit data_editor·bar_chart
+- 성과: 테스트 8건 추가(키 지문, 캐시·곡 단위·무료·날짜별 가격, 저장·요약·이름·재계산, 기록 실패 무시, 콜백 토큰 수집, 모델에 콜백 부착, 메인 화면 AppTest). 실제 화면에서 이전 키 이름 저장까지 확인(가짜 사용 기록)
+- 다음 할 일: 실제 업무 몇 건 뒤 각 사 콘솔 청구액과 추정 비용 비교, 가격표 정기 확인
+
 ---
 
 ## JD / 이력서용 요약 (누적)
 
-- **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
+- **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
 - **프로젝트 한 줄 소개**: 사용자가 supervisor 에게 '최종 상태'를 맡기면 전문가 에이전트 트리가 분배·작성·적대적 검토·통합하고, 비평가·하네스(코드 검증)로 확인한 결과를 사람이 묻고·고치고·채택하면 각 에이전트가 교훈을 학습하는 멀티 에이전트 프레임워크 — 범용·주식·여행·IT 개념·음악·설계 6개 전문 팀 (팀 추가는 YAML + 도구)
 - **대표 구현**
   - 주식: LLM 이 쓴 가중 점수·평균가·손익비·평단을 코드로 재계산해 틀리면 정답 값으로 재작성 (검증 가능한 보상)

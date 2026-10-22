@@ -20,6 +20,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
+from core import usage
 from core.schemas import ModelsConfig, ModelSpec, RankModels
 
 
@@ -310,7 +311,8 @@ def available_candidates(rank_models: RankModels, models: ModelsConfig) -> list[
 def create_chat_model(spec: ModelSpec, models: ModelsConfig) -> BaseChatModel:
     """ModelSpec 으로 ChatModel 을 만든다. provider 패키지는 필요할 때만 import 한다."""
     api_key = os.getenv(models.providers[spec.provider])
-    kwargs = {"model": spec.model}
+    # 호출이 끝날 때마다 토큰·추정 비용을 기록한다 (메인 화면 🏠 — core/usage.py). 기록 실패는 호출을 막지 않는다
+    kwargs = {"model": spec.model, "callbacks": [usage.UsageCallback(spec.provider, spec.model, api_key)]}
     if spec.temperature is not None:
         kwargs["temperature"] = spec.temperature
 

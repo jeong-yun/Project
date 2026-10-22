@@ -45,6 +45,36 @@ CREATE TABLE IF NOT EXISTS lessons (
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lessons_team_agent ON lessons(team_id, agent_id, active);
+CREATE TABLE IF NOT EXISTS usage (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            REAL NOT NULL,              -- 호출이 끝난 시각 (epoch 초)
+    provider      TEXT NOT NULL,
+    model         TEXT NOT NULL,
+    key_id        TEXT NOT NULL,              -- API 키 지문 (sha256 앞 12자리, 키 없음 = '')
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    calls         INTEGER NOT NULL DEFAULT 1,
+    cost_usd      REAL,                       -- 기록 당시 가격표로 계산한 추정 비용 (가격 미등록 = NULL)
+    team_id       TEXT NOT NULL DEFAULT '',
+    run_id        TEXT NOT NULL DEFAULT '',
+    purpose       TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
+CREATE TABLE IF NOT EXISTS api_keys (
+    key_id      TEXT PRIMARY KEY,             -- 키 원문은 저장하지 않는다
+    provider    TEXT NOT NULL,
+    masked      TEXT NOT NULL,                -- 화면 표시용 '앞 3자…뒤 4자'
+    label       TEXT NOT NULL DEFAULT '',     -- 사람이 붙인 이름 (예: 회사 OpenAI 키)
+    first_seen  REAL NOT NULL,
+    last_seen   REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS price_overrides (
+    model         TEXT PRIMARY KEY,           -- 화면 '⚙️ 가격표'에서 고친 가격 (config/pricing.yaml 보다 우선)
+    input         REAL NOT NULL,
+    output        REAL NOT NULL,
+    cached_input  REAL
+);
 """
 
 
@@ -77,7 +107,8 @@ class Storage:
             conn.execute("ALTER TABLE runs RENAME TO runs_legacy")
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+        # 동시 실행(형제 에이전트)·사용량 기록이 한꺼번에 쓰므로 잠금을 넉넉히 기다린다
+        conn = sqlite3.connect(self.db_path, timeout=30)
         conn.row_factory = sqlite3.Row  # row["컬럼명"] 으로 접근
         return conn
 
@@ -182,3 +213,89 @@ class Storage:
 
     def delete_lesson(self, lesson_id: int) -> None:
         self._execute("DELETE FROM lessons WHERE id=?", (lesson_id,))
+
+    # ─── 사용량·비용 (core/usage.py 가 호출마다 record_usage 로 넘긴다) ───────────
+
+    def record_usage(self, event) -> None:
+        """호출 1건 기록 + 처음 본 API 키면 키 목록에 추가 (마지막 사용 시각 갱신)."""
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT INTO usage (ts, provider, model, key_id, input_tokens, output_tokens, cached_tokens, calls, "
+                "cost_usd, team_id, run_id, purpose) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (event.ts, event.provider, event.model, event.key_id, event.input_tokens, event.output_tokens,
+                 event.cached_tokens, event.calls, event.cost_usd, event.team_id, event.run_id, event.purpose),
+            )
+            conn.execute(
+                "INSERT INTO api_keys (key_id, provider, masked, first_seen, last_seen) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(key_id) DO UPDATE SET last_seen=excluded.last_seen",
+                (event.key_id, event.provider, event.key_masked, event.ts, event.ts),
+            )
+
+    def usage_summary(self, since: float | None = None, key_id: str | None = None) -> list[dict]:
+        """(키 · provider · 모델)별 합계 — 호출 수·토큰·추정 비용. 비용이 NULL(가격 미등록)인 행은 priced_calls 로 구분."""
+        where, params = [], []
+        if since is not None:
+            where.append("ts >= ?")
+            params.append(since)
+        if key_id is not None:
+            where.append("key_id = ?")
+            params.append(key_id)
+        sql = (
+            "SELECT key_id, provider, model, SUM(calls) AS calls, SUM(input_tokens) AS input_tokens, "
+            "SUM(output_tokens) AS output_tokens, SUM(cached_tokens) AS cached_tokens, SUM(cost_usd) AS cost_usd, "
+            "SUM(CASE WHEN cost_usd IS NULL THEN calls ELSE 0 END) AS unpriced_calls, MIN(ts) AS first_ts, MAX(ts) AS last_ts "
+            "FROM usage" + (" WHERE " + " AND ".join(where) if where else "")
+            + " GROUP BY key_id, provider, model ORDER BY cost_usd DESC, calls DESC"
+        )
+        return [dict(r) for r in self._execute(sql, tuple(params))]
+
+    def usage_daily(self, since: float | None = None) -> list[dict]:
+        """날짜별 추정 비용·토큰 (현지 시각 기준)."""
+        sql = ("SELECT date(ts, 'unixepoch', 'localtime') AS day, SUM(cost_usd) AS cost_usd, "
+               "SUM(input_tokens + output_tokens) AS tokens, SUM(calls) AS calls FROM usage"
+               + (" WHERE ts >= ?" if since is not None else "") + " GROUP BY day ORDER BY day")
+        return [dict(r) for r in self._execute(sql, (since,) if since is not None else ())]
+
+    def api_keys(self) -> list[dict]:
+        return [dict(r) for r in self._execute("SELECT * FROM api_keys ORDER BY last_seen DESC")]
+
+    def set_key_label(self, key_id: str, label: str) -> None:
+        self._execute("UPDATE api_keys SET label=? WHERE key_id=?", (label.strip(), key_id))
+
+    def remember_key(self, key_id: str, provider: str, masked: str) -> None:
+        """지금 .env 에 있는 키를 (아직 호출 전이어도) 목록에 올려 이름을 미리 붙일 수 있게 한다."""
+        now = __import__("time").time()
+        self._execute(
+            "INSERT INTO api_keys (key_id, provider, masked, first_seen, last_seen) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(key_id) DO NOTHING",
+            (key_id, provider, masked, now, now),
+        )
+
+    def price_overrides(self) -> dict[str, dict]:
+        rows = self._execute("SELECT * FROM price_overrides")
+        return {r["model"]: {k: r[k] for k in ("input", "output", "cached_input") if r[k] is not None} for r in rows}
+
+    def set_price_override(self, model: str, input_price: float, output_price: float, cached_input: float | None = None) -> None:
+        self._execute(
+            "INSERT INTO price_overrides (model, input, output, cached_input) VALUES (?,?,?,?) "
+            "ON CONFLICT(model) DO UPDATE SET input=excluded.input, output=excluded.output, cached_input=excluded.cached_input",
+            (model, input_price, output_price, cached_input),
+        )
+
+    def clear_price_override(self, model: str) -> None:
+        self._execute("DELETE FROM price_overrides WHERE model=?", (model,))
+
+    def reprice_unpriced(self, estimate) -> int:
+        """가격이 없어 비용이 비어 있던 기록을 지금 가격표로 다시 계산 (가격을 새로 넣은 뒤). 고친 행 수."""
+        rows = self._execute("SELECT id, ts, provider, model, input_tokens, output_tokens, cached_tokens, calls "
+                             "FROM usage WHERE cost_usd IS NULL")
+        fixed = 0
+        with closing(self._connect()) as conn, conn:
+            for r in rows:
+                day = __import__("time").strftime("%Y-%m-%d", __import__("time").localtime(r["ts"]))
+                cost = estimate(r["provider"], r["model"], r["input_tokens"], r["output_tokens"], r["cached_tokens"],
+                                r["calls"], day=day)
+                if cost is not None:
+                    conn.execute("UPDATE usage SET cost_usd=? WHERE id=?", (cost, r["id"]))
+                    fixed += 1
+        return fixed

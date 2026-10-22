@@ -21,6 +21,7 @@ from typing import Callable
 
 from pydantic import BaseModel, Field
 
+from core import usage
 from core.harness.base import extract_code_blocks
 
 # settings.yaml 의 music: 가 없을 때 쓰는 기본값
@@ -290,8 +291,12 @@ LYRIA_TIMEOUT_SEC = 300  # 곡 1개 생성 최대 대기 — 넘으면 오류로
 GRADE_TIMEOUT_SEC = 120  # 채점(Gemini 가 듣기) 최대 대기
 
 
+def _api_key() -> str | None:
+    return os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+
+
 def _genai_client(timeout_sec: float = LYRIA_TIMEOUT_SEC):
-    key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    key = _api_key()
     if not key:
         raise MusicError("GOOGLE_API_KEY 가 없어 Lyria 를 부를 수 없습니다 (.env 확인)")
     from google import genai
@@ -310,6 +315,7 @@ def call_lyria(model: str, prompt: str) -> LyriaOutput:
     text = interaction.output_text or ""
     if audio is None or not audio.data:
         raise MusicError("Lyria 가 음원을 돌려주지 않았습니다 (안전 필터·아티스트 이름 등으로 거부됐을 수 있음)" + (f": {text[:200]}" if text else ""))
+    usage.record("google", model, _api_key(), calls=1, purpose="음악 생성 (Lyria)")  # 음원을 받았을 때만 — 곡 단위 과금 (config/pricing.yaml per_call)
     data = audio.data
     return LyriaOutput(audio=base64.b64decode(data) if isinstance(data, str) else bytes(data), text=text)
 
@@ -355,6 +361,11 @@ def call_gemini_audio(model: str, audio: bytes, prompt: str) -> TrackGrade:
         contents=[types.Part.from_bytes(data=audio, mime_type="audio/mp3"), prompt],
         config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=TrackGrade, temperature=0.2),
     )
+    meta = getattr(response, "usage_metadata", None)
+    if meta is not None:  # 출력 토큰에는 thinking 토큰도 포함해 과금된다
+        out_tokens = (getattr(meta, "candidates_token_count", 0) or 0) + (getattr(meta, "thoughts_token_count", 0) or 0)
+        usage.record("google", model, _api_key(), getattr(meta, "prompt_token_count", 0) or 0, out_tokens,
+                     getattr(meta, "cached_content_token_count", 0) or 0, purpose="음악 채점 (Gemini)")
     return response.parsed if isinstance(response.parsed, TrackGrade) else TrackGrade.model_validate_json(response.text)
 
 

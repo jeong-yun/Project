@@ -28,6 +28,18 @@ def clear_model_cooldown():
 
 
 @pytest.fixture(autouse=True)
+def no_usage_sink():
+    """사용량 기록 연결을 테스트마다 끊는다 — app.py(AppTest)가 연결한 저장소가 다음 테스트로 새지 않게."""
+    from core import usage
+
+    usage.set_sink(None)
+    usage.set_price_overrides(None)
+    yield
+    usage.set_sink(None)
+    usage.set_price_overrides(None)
+
+
+@pytest.fixture(autouse=True)
 def no_network_search(monkeypatch):
     """테스트 중 실제 웹 검색을 막는다. 호출된 검색어는 반환값 리스트에 기록된다 (검색어들은 동시에 검색되므로 기록 순서는 달라질 수 있음)."""
     from core import search
