@@ -94,13 +94,20 @@ KIND_RULES: dict[str, tuple[str, float | None, bool, float, float]] = {
     "garage": ("special", 2.0, False, 3.0, 15.0),
     "pantry": ("public", 3.0, False, 0.9, 1.0),
     "court": ("special", None, False, 3.0, 9.0),
+    # 바깥 공간 (실내 바닥이 아님) — 배치 엔진이 layout.outdoor 로 옮겨 ㄱ자 안쪽 모서리 등에 둔다
+    "yard": ("special", None, False, 3.0, 4.0),
+    "deck": ("special", None, False, 2.4, 4.0),
 }
+OUTDOOR_KINDS = {"yard", "deck"}  # 마당·데크(테라스) — 바닥 면적·외곽에 넣지 않고 도면에 '외부'로 그린다
+OUTDOOR_NAME = {"yard": "마당", "deck": "데크", "court": "중정"}
 # 이름 → 세부 종류 (LLM 이 type 을 other 로 쓰거나 모르는 종류를 지어내도 알아보게)
 KIND_WORDS = [
     (re.compile(r"사우나|찜질|한증|sauna", re.I), "sauna"),
     (re.compile(r"수영장|풀장|실내\s*풀|pool", re.I), "pool"),
     (re.compile(r"차고|주차|garage", re.I), "garage"),
     (re.compile(r"중정|안마당|court", re.I), "court"),
+    (re.compile(r"마당|정원|잔디|yard|garden", re.I), "yard"),
+    (re.compile(r"데크|테라스|파티오|deck|terrace|patio", re.I), "deck"),
     (re.compile(r"팬트리|식품\s*창고|pantry", re.I), "pantry"),
 ]
 MASTER_WORDS = re.compile(r"안방|부부|master|마스터", re.I)
@@ -109,6 +116,10 @@ ASPECT_ERROR_FACTOR = 1.25
 # 복도 몫(복도 면적 ÷ 층 바닥 면적) 경고·오류 기준, 일자 복도 길이 경고·오류 기준 (m)
 CORRIDOR_SHARE_WARN, CORRIDOR_SHARE_ERROR = 0.10, 0.15
 CORRIDOR_LENGTH_WARN, CORRIDOR_LENGTH_ERROR = 12.0, 18.0
+# 외곽 효율(실내 바닥 ÷ 외접 사각형) 경고 기준, 요청하지 않은 빈 마당(외곽 안쪽 모서리·둘러싸인 빈 곳) 오류 기준 ㎡
+# 근거: teams/design/skills/plan_references.md (ㄱ자 ≈ 0.75, ㄷ자 ≈ 0.83 → 0.85 미만이면 마당이 요청됐거나 외부 공간으로 지정돼야 한다)
+FOOTPRINT_EFF_WARN = 0.85
+VOID_ERROR = 15.0
 DOOR_MIN = 0.9  # 문을 낼 수 있는 공유 벽 길이 (m)
 Typology = Literal["auto", "rect", "L", "U", "courtyard"]
 TYPOLOGY_WORDS = {
@@ -249,6 +260,8 @@ class Layout(BaseModel):
     # 외곽 유형: rect 일자형 / L ㄱ자형 / U ㄷ자형 / courtyard 중정형 / auto (없으면 코드가 면적·프로그램으로 고른다)
     typology: Typology | None = None
     annex: list[Room] | None = None  # 별채로 뺀 방 (placement: annex — 본채 도면에는 그리지 않는다)
+    # 바깥 공간 (마당·데크·테라스, kind yard/deck) — 실내 바닥이 아니다. 맨 아래층 도면에 '외부'로 그린다 (rect/polygon 필요)
+    outdoor: list[Room] | None = None
 
     @field_validator("typology", mode="before")
     @classmethod
@@ -331,6 +344,8 @@ def room_kind(room: Room) -> str:
         return room.kind
     if room.type in ("other", "bathroom", "utility", "storage", "balcony"):
         for pattern, kind in KIND_WORDS:
+            if kind in OUTDOOR_KINDS and room.type != "other":
+                continue  # 발코니·욕실 이름의 '테라스' 등은 실내 방으로 둔다
             if pattern.search(room.name or "") or pattern.search(room.kind or ""):
                 return kind
     return room.type
@@ -350,6 +365,10 @@ def max_aspect(room: Room) -> float | None:
 
 def is_court(room: Room) -> bool:
     return room_kind(room) == "court"
+
+
+def is_outdoor(room: Room) -> bool:
+    return room_kind(room) in OUTDOOR_KINDS
 
 
 def is_wet(room: Room) -> bool:
@@ -1098,6 +1117,8 @@ class Report(BaseModel):
             s -= 100 * max(0.0, m.get("corridor_share", 0) - 0.05)
             s -= 2 * m.get("preferred_missed", 0)
             s -= 5 * max(0.0, m.get("worst_aspect", 1) - 2)
+            s -= 40 * (1 - m.get("footprint_eff", 1))  # 같은 조건이면 꽉 찬(일자형) 외곽이 낫다 — ㄱ자+데크 0.8 → −8
+            s -= 2 * max(0, m.get("corridor_pieces", 0) - 1)
         return round(s, 1)
 
 
@@ -1171,6 +1192,15 @@ def design_quality(floor: Floor, polys: dict[str, Polygon], outline: Polygon) ->
                       "공용·개인 구역을 나눠 복도를 짧게 하라")
     elif longest > CORRIDOR_LENGTH_WARN:
         warnings.append(f"{fl}: 일자 복도 길이 {longest:.1f}m — 12m 이하가 좋다")
+    # 복도 한 줄기(spine): 나란히 붙은 복도 조각 · 서로 안 이어진 복도 토막
+    parallel = [(a, b) for i, a in enumerate(corr) for b in corr[i + 1:] if _shared_len(polys[a], polys[b]) > 1.5]
+    hubs = [rid for rid, r in rooms.items() if r.type in ("entrance", "stair")]
+    groups = _corridor_groups(corr, hubs, polys)
+    spine = max((sum(polys[c].area for c in g) for g in groups), default=0.0) / corr_area if corr_area else 1.0
+    if parallel:
+        warnings.append(f"{fl}: 복도 조각 {len(parallel)}쌍이 나란히 붙어 있다 — 짧은 복도 여러 개 대신 한 줄기 복도로 합쳐라")
+    if len(groups) > 1:
+        warnings.append(f"{fl}: 복도가 {len(groups)}토막으로 끊겨 있다 — 현관에서 이어지는 한 줄기 동선(spine)이 좋다")
 
     # 이웃 관계
     prog = program_links(floor)
@@ -1227,6 +1257,8 @@ def design_quality(floor: Floor, polys: dict[str, Polygon], outline: Polygon) ->
 
     metrics = {
         "corridor_share": round(share, 3), "corridor_area": round(corr_area, 1), "corridor_longest": round(longest, 1),
+        "corridor_pieces": len(corr), "corridor_groups": len(groups), "corridor_parallel": len(parallel),
+        "corridor_spine": round(spine, 2),
         "worst_aspect": round(worst[0], 2), "worst_aspect_room": worst[1],
         "required_ok": req_ok, "required": req_n, "preferred_missed": len(missed), "preferred": len(prog.preferred),
         "daylight_ok": light_ok, "daylight": light_need, "wet_clusters": len(clusters),
@@ -1234,8 +1266,59 @@ def design_quality(floor: Floor, polys: dict[str, Polygon], outline: Polygon) ->
     return errors, warnings, metrics
 
 
+def _corridor_groups(corr: list[str], hubs: list[str], polys: dict[str, Polygon]) -> list[set[str]]:
+    """복도 덩어리 목록 (1개 = 한 줄기 동선). 복도끼리 또는 현관·계단을 사이에 두고 0.9m 이상 맞닿으면 한 덩어리."""
+    groups: list[set[str]] = []
+    for c in corr + hubs:
+        near = [g for g in groups if any(_shared_len(polys[c], polys[o]) >= DOOR_MIN - EPS for o in g)]
+        groups = [g for g in groups if g not in near] + [set().union({c}, *near)]
+    return [g & set(corr) for g in groups if g & set(corr)]
+
+
+def footprint_quality(layout: Layout, floor: Floor, polys: dict[str, Polygon], outline: Polygon,
+                      judge: bool = True) -> tuple[list[str], list[str], dict]:
+    """외곽 효율 검사 (오류, 경고, 지표) — 요청하지 않은 빈 마당을 잡는다.
+
+    실내 바닥 = 외곽 − 중정. 외접 사각형 안의 빈 곳(ㄱ·ㄷ자 안쪽 모서리, 둘러싸인 빈 곳)은
+    중정 방이나 바깥 공간(layout.outdoor — 마당·데크)으로 지정돼 있으면 '계획된 외부', 아니면 '요청하지 않은 빈 곳'이다.
+    - 외곽 효율(실내 ÷ 외접 사각형)과 계획된 외부까지 친 효율이 0.85 미만이면 경고
+    - 요청하지 않은 빈 곳이 15㎡ 를 넘으면 오류 (외곽 유형을 엔진·LLM 이 정한 경우. 가져온 도면의 자유 외곽은 경고)
+    judge=False 면 지표만 (위층 — 같은 외곽을 두 번 지적하지 않게)
+    """
+    fl = floor.label
+    courts = [polys[r.id] for r in floor.rooms if r.id in polys and is_court(r)]
+    indoor = outline.difference(unary_union(courts)) if courts else outline
+    bb = box(*outline.bounds)
+    outdoor = [r.shape() for r in (layout.outdoor or []) if r.shape() is not None]
+    planned = unary_union(courts + outdoor) if courts or outdoor else None
+    empty = bb.difference(indoor)
+    regions = [g for g in getattr(empty, "geoms", [empty]) if not g.is_empty and g.area > 0.05]
+    unplanned = [g.difference(planned) if planned is not None else g for g in regions]
+    void_max = max((g.area for g in unplanned), default=0.0)
+    planned_in = planned.intersection(bb).area if planned is not None else 0.0
+    eff = indoor.area / bb.area if bb.area else 1.0
+    eff_planned = min(1.0, (indoor.area + planned_in) / bb.area) if bb.area else 1.0
+    errors: list[str] = []
+    warnings: list[str] = []
+    if judge:
+        w, h = bb.bounds[2] - bb.bounds[0], bb.bounds[3] - bb.bounds[1]
+        if void_max > VOID_ERROR:
+            msg = (f"{fl}: 외곽 {w:.1f}×{h:.1f}m 안에 요청하지 않은 빈 곳 {void_max:.1f}㎡ 가 있다 (외곽 효율 {eff:.0%}) — "
+                   "마당·중정을 요청하지 않았으면 typology 를 rect(일자형)로 두고 큰 특수실은 본채 끝이나 별채(placement: annex)에 넣어라. "
+                   "마당이 필요하면 방 목록에 {\"type\": \"other\", \"name\": \"마당\"} 을 넣어라")
+            (errors if layout.typology in TYPOLOGY_KO else warnings).append(msg)
+        elif eff_planned < FOOTPRINT_EFF_WARN:
+            warnings.append(f"{fl}: 외곽 효율 {eff_planned:.0%} — 외접 사각형 {w:.1f}×{h:.1f}m 의 {1 - eff_planned:.0%} 가 비어 있다 (85% 이상이 좋다)")
+    metrics = {"footprint_eff": round(eff, 3), "footprint_eff_planned": round(eff_planned, 3), "void_max": round(void_max, 1),
+               "outdoor_area": round(planned_in, 1)}
+    return errors, warnings, metrics
+
+
 def metrics_line(label: str, m: dict) -> str:
-    return (f"설계 지표 — {label}: 복도 {m['corridor_share']:.0%}({m['corridor_area']:g}㎡, 최장 {m['corridor_longest']:g}m) · "
+    fp = (f"외곽 효율 {m['footprint_eff']:.0%}" + (f"(외부 공간 포함 {m['footprint_eff_planned']:.0%})" if m.get("outdoor_area") else "")
+          + f" · 빈 곳 최대 {m['void_max']:g}㎡ · ") if "footprint_eff" in m else ""
+    spine = f" · 복도 {m['corridor_pieces']}조각/{m['corridor_groups']}줄기" if m.get("corridor_pieces") else ""
+    return (f"설계 지표 — {label}: {fp}복도 {m['corridor_share']:.0%}({m['corridor_area']:g}㎡, 최장 {m['corridor_longest']:g}m){spine} · "
             f"장단변비 최대 {m['worst_aspect']:g}({m['worst_aspect_room'] or '-'}) · 필수 이웃 {m['required_ok']}/{m['required']} · "
             f"좋은 이웃 {m['preferred'] - m['preferred_missed']}/{m['preferred']} · 채광 {m['daylight_ok']}/{m['daylight']} · "
             f"물 쓰는 곳 {m['wet_clusters']}묶음")
@@ -1259,6 +1342,13 @@ def validate(layout: Layout, tolerance: float | None = None) -> Report:
         rep.errors.append("건물 외곽(outline)이 대지(site)를 벗어난다. 외곽을 줄이거나 대지 크기를 확인하라")
     lowest = min(levels)
     stair_shapes: list[tuple[Floor, Polygon | None]] = []
+    base = layout.outline_polygon()
+    for o in layout.outdoor or []:
+        shape = o.shape()
+        if shape is None:
+            rep.errors.append(f"바깥 공간 '{o.label}'({o.id}) 에 좌표(rect/polygon)가 없다")
+        elif base.is_valid and shape.intersection(base).area > 0.05:
+            rep.warnings.append(f"바깥 공간 '{o.label}' 이 건물 외곽과 {shape.intersection(base).area:.1f}㎡ 겹친다 — 마당·데크는 외곽 밖에 둔다")
 
     for floor in layout.floors:
         fl = floor.label
@@ -1384,8 +1474,11 @@ def validate(layout: Layout, tolerance: float | None = None) -> Report:
             if room.type in HABITABLE and not is_court(room) and room.id in polys and not any(w.room == room.id for w in floor.windows):
                 rep.warnings.append(f"{fl}: '{room.label}'에 창이 없다 (채광·환기 확인)")
         q_errors, q_warnings, metrics = design_quality(floor, polys, outline)
-        rep.errors += q_errors
-        rep.warnings += q_warnings
+        f_errors, f_warnings, f_metrics = footprint_quality(layout, floor, polys, outline,
+                                                            judge=floor.level == lowest or floor.outline is not None)
+        rep.errors += q_errors + f_errors
+        rep.warnings += q_warnings + f_warnings
+        metrics = {**f_metrics, **metrics}
         rep.metrics[fl] = metrics
         rep.notes.append(metrics_line(fl, metrics))
 
@@ -1446,17 +1539,21 @@ def candidates(layout: Layout, n: int = 3, tolerance: float | None = None, time_
     """후보안을 최대 n개 만든다. 첫 번째(A)는 check(layout) 와 같은 기본 배치(하네스가 검증한 그 안).
 
     좌표가 이미 있는 레이아웃(수정 업무 등)은 후보가 하나뿐이다. 같은 배치가 나오면 다른 현관 방향·시드로 다시 푼다.
+    B·C 는 검증을 통과한 안을 먼저 고르고, 모자랄 때만 통과 못 한 안으로 채운다 (모든 후보가 '말이 되게').
     """
     from core import floorplan_solver  # 순환 import 를 피해 늦게 불러온다
 
     base_resolved, base_report = check(layout, tolerance, {"time_limit": time_limit} if time_limit else None)
     typ = base_resolved.typology or "rect"
-    first = Candidate("A", f"{TYPOLOGY_KO.get(typ, typ)} · 기본", {}, base_resolved, base_report)
+    extra = "".join(f" · {'·'.join(dict.fromkeys(r.label for r in items))}{' 별채' if items is base_resolved.annex else ''}"
+                    for items in (base_resolved.annex, base_resolved.outdoor) if items)
+    first = Candidate("A", f"{TYPOLOGY_KO.get(typ, typ)} · 기본{extra}", {}, base_resolved, base_report)
     out = [first]
     program_only = any(f.rooms and not any(r.shape() is not None for r in f.rooms) for f in layout.floors)
     if n <= 1 or not program_only:
         return out
     seen = {_signature(base_resolved)}
+    backlog: list[Candidate] = []
     for opts in floorplan_solver.candidate_options(layout):
         if len(out) >= n:
             break
@@ -1470,9 +1567,16 @@ def candidates(layout: Layout, n: int = 3, tolerance: float | None = None, time_
         got = resolved.typology or opts["typology"]
         if opts.get("annex_special") and resolved.annex:
             title = f"{TYPOLOGY_KO.get(got, got)} · {'·'.join(r.label for r in resolved.annex)} 별채"
+        elif opts.get("aspect"):
+            title = f"{TYPOLOGY_KO.get(got, got)} · {'길쭉한 남향' if opts['aspect'] > 1.8 else '깊고 짧은'} 외곽"
         else:
             title = f"{TYPOLOGY_KO.get(got, got)} · 현관 {SIDE_KO.get(opts['entry_side'], opts['entry_side'])}"
-        out.append(Candidate("ABCDE"[len(out)], title, opts, resolved, report))
+        if resolved.outdoor and got != "rect":
+            title += " · " + "·".join(dict.fromkeys(r.label for r in resolved.outdoor))
+        (out if report.ok else backlog).append(Candidate("", title, opts, resolved, report))
+    out += backlog[: max(0, n - len(out))]
+    for k, c in enumerate(out):
+        c.label = "ABCDE"[k]
     return out
 
 

@@ -13,6 +13,7 @@ core/floorplan.py 의 resolve 가 부른다. 시간 안에 답을 못 찾으면 
 
 import json
 import math
+import os
 from bisect import bisect_left
 from dataclasses import dataclass, field
 
@@ -23,6 +24,7 @@ from shapely.ops import unary_union
 from core.floorplan import (
     CIRCULATION,
     KIND_RULES,
+    OUTDOOR_NAME,
     OUTSIDE,
     ROOM_TYPES,
     TYPOLOGY_KO,
@@ -32,6 +34,8 @@ from core.floorplan import (
     Program,
     Rect,
     Room,
+    is_court,
+    is_outdoor,
     max_aspect,
     needs_daylight,
     opening_segment,
@@ -50,9 +54,17 @@ FRONT_DOOR_LEN = 1.2  # 현관 바깥문 자리
 STAIR_SIZE = (2.4, 3.0)  # 꺾인 계단 (m)
 TIME_LIMIT = 10.0  # 후보 하나(층 하나)의 최대 풀이 시간 (초) — 방이 적으면 줄인다 (auto_time_limit)
 WORKERS = 8
+# CPU 부하에 강하게: 작업량(결정적 시간)이 모자라면 이어서 푼다 (solve_model). 환경 변수 FLOORPLAN_STOP=wall 이면 예전 방식
+STOP_MODE = os.environ.get("FLOORPLAN_STOP", "det")
+DET_PER_SEC = 0.3  # 이 PC(i5-1135G7 4코어/8스레드) 측정: 한가할 때 벽시계 1초에 결정적 시간 0.22~0.66(중앙 약 0.5), 바쁠 때 0.15~0.4 → 한가할 땐 대개 첫 풀이로 끝나게 낮게
+WALL_CAP = 2.5  # 이어 풀어도 벽시계는 time_limit × 2.5 까지만
+LAST_STATS: dict = {}  # 마지막 풀이의 벽시계·결정적 시간·목표값 (측정용)
 COARSE_GRID = 0.6  # 방이 많으면 먼저 0.6m 격자로 빠르게 풀어 0.3m 풀이의 출발점(hint)으로 쓴다
 COARSE_FROM = 8  # 방(복도·계단 제외)이 이보다 많으면 굵은 격자부터
 FILLER_MAX = 4.5  # 틈 메우기 수납의 최대 넓이 (㎡)
+KEEP_SIZE = {"bathroom", "utility", "sauna", "entrance", "dressroom", "pantry", "storage"}  # 남는 면적을 나눠 주지 않는 작은 방
+HALL_PIECE_COST = 120  # 둘째 복도 조각을 쓰는 벌점 (목표 단위: 이웃하면 좋은 방 하나 = 60)
+COURT_MIN = 4.8  # 중정 최소 폭 (m)
 SPECIAL_WING_MIN = 20.0  # 이 면적(㎡) 이상인 특수실(수영장·차고)은 ㄱ·ㄷ자 날개에 따로 둔다
 
 
@@ -80,6 +92,7 @@ class Shape:
     blocks: list[tuple[Rect, str]]  # (블록, 역할 main / special)
     court: Rect | None = None
     notes: list[str] = field(default_factory=list)
+    voids: list[Rect] = field(default_factory=list)  # 외접 사각형 안의 빈 곳(ㄱ·ㄷ자 안쪽) — 마당·데크(바깥 공간)로 지정한다
 
     def outline_value(self) -> Rect | list[tuple[float, float]]:
         b = self.polygon.bounds
@@ -93,73 +106,89 @@ def _poly(points: list[tuple[float, float]], ox: float, oy: float) -> Polygon:
 
 
 def make_shape(typology: str, gross: float, special: float = 0.0, origin: tuple[float, float] = (0.0, 0.0),
-               keep: Rect | None = None) -> Shape | None:
-    """유형별 외곽. gross = 바닥 면적(중정 제외), special = 날개에 따로 둘 특수실 면적. 만들 수 없으면 None."""
+               keep: Rect | None = None, void: float | None = None, aspect: float | None = None) -> Shape | None:
+    """유형별 외곽. gross = 바닥 면적(중정 제외), special = 따로 둘 큰 특수실(수영장·차고) 면적. 만들 수 없으면 None.
+
+    - rect : 꽉 찬 직사각형 (외곽 효율 100%). 큰 특수실은 같은 직사각형의 동쪽 끝 블록(깊이 전체)에 → 빈 마당이 생기지 않는다.
+             aspect = 가로 ÷ 세로 목표 (기본 1.6 — 실제 평면 데이터 중앙값 1.3~1.6, plan_references.md)
+    - L/U  : 안쪽 모서리(남쪽)가 빈다 → voids 로 돌려줘 마당·데크로 지정한다. void = 그 빈 곳의 목표 넓이(요청한 마당),
+             없으면 바닥의 15% (25~60㎡) — 날개를 넓고 짧게 잡아 빈 곳이 '쓸 수 있는 데크' 크기가 되게 한다
+    - courtyard : 둘레 띠 + 가운데 중정 (중정 폭 ≥ 4.8m)
+    """
     ox, oy = origin
+    big = special >= SPECIAL_WING_MIN
     if typology == "rect":
         if keep is not None:
-            poly = keep.polygon()
-            return Shape("rect", poly, [(keep, "main")])
-        d = _snap(_clamp(math.sqrt(gross / 1.6), 6.0, 12.6))
-        w = _snap(gross / d)
-        r = Rect(x=ox, y=oy, w=w, h=d)
-        return Shape("rect", r.polygon(), [(r, "main")])
-    if typology == "L":
-        if special >= SPECIAL_WING_MIN:
-            main_a, wing_a = gross - special, special
+            r = keep
         else:
-            main_a, wing_a = gross * 0.6, gross * 0.4
+            d = _snap(_clamp(math.sqrt(gross / (aspect or 1.6)), 6.0, 13.8 if gross > 250 else 12.6))
+            r = Rect(x=ox, y=oy, w=_snap(gross / d), h=d)
+        blocks = [(r, "main")]
+        if big:
+            sw = _snap(special / r.h)
+            if sw >= 4.5 and r.w - sw >= 6.0 and r.h / sw <= 3.0:
+                blocks = [(Rect(x=r.x, y=r.y, w=round(r.w - sw, 2), h=r.h), "main"),
+                          (Rect(x=round(r.x + r.w - sw, 2), y=r.y, w=sw, h=r.h), "special")]
+        return Shape("rect", r.polygon(), blocks)
+    if typology == "L":
+        # 본채 띠(북쪽, w1×d1) + 동쪽 날개(남쪽으로, ww×lw). 빈 곳 = 남서쪽 (w1−ww)×lw — 거실 앞 마당·데크
+        main_a, wing_a = (gross - special, special) if big else (gross * 0.62, gross * 0.38)
         d1 = _snap(_clamp(math.sqrt(main_a / 2.2), 7.8, 11.4))
         w1 = _snap(main_a / d1)
-        if special >= SPECIAL_WING_MIN:
-            ww = _snap(_clamp(math.sqrt(wing_a / 1.4), 6.0, min(w1 * 0.6, 13.2)))
-        else:
-            ww = _snap(_clamp(d1 * 0.9, 6.6, min(9.6, w1 * 0.6)))
+        v = void if void else _clamp(0.15 * gross, 25.0, 60.0)
+        ww = _snap(_clamp(w1 * wing_a / (v + wing_a), 6.0 if big else 4.8, w1 - 4.2))
         lw = _snap(wing_a / ww)
-        if lw < 3.6 or w1 < ww + 3.6:
+        if lw < 4.2:  # 빈 곳이 너무 얕으면 날개를 좁고 길게
+            ww = math.floor(wing_a / 4.2 / GRID) * GRID
+            lw = _snap(wing_a / ww)
+        if lw < 3.6 or w1 - ww < 4.2 or max(ww, lw) / min(ww, lw) > 3.0:
             return None
-        pts = [(0, 0), (w1, 0), (w1, d1 + lw), (w1 - ww, d1 + lw), (w1 - ww, d1), (0, d1)]
-        blocks = [(Rect(x=ox, y=oy, w=w1, h=d1), "main"),
-                  (Rect(x=round(ox + w1 - ww, 2), y=round(oy + d1, 2), w=ww, h=lw), "special" if special >= SPECIAL_WING_MIN else "main")]
-        return Shape("L", _poly(pts, ox, oy), blocks)
+        vx = round(w1 - ww, 2)
+        pts = [(vx, 0), (w1, 0), (w1, lw + d1), (0, lw + d1), (0, lw), (vx, lw)]
+        blocks = [(Rect(x=ox, y=round(oy + lw, 2), w=w1, h=d1), "main"),
+                  (Rect(x=round(ox + vx, 2), y=oy, w=ww, h=lw), "special" if big else "main")]
+        return Shape("L", _poly(pts, ox, oy), blocks, voids=[Rect(x=ox, y=oy, w=vx, h=lw)])
     if typology == "U":
-        if special >= SPECIAL_WING_MIN:
-            west_a = special
-            east_a = (gross - special) * 0.3
-        else:
-            west_a = east_a = gross * 0.22
+        # 본채 띠(북쪽) + 서·동 날개(남쪽으로, 같은 길이). 빈 곳 = 두 날개 사이 남쪽 마당
+        west_a, east_a = (special, (gross - special) * 0.3) if big else (gross * 0.22, gross * 0.22)
         bar_a = gross - west_a - east_a
         d1 = _snap(_clamp(math.sqrt(bar_a / 2.6), 7.8, 10.8))
         w1 = _snap(bar_a / d1)
-        sw = special >= SPECIAL_WING_MIN
-        ww = _snap(_clamp(math.sqrt(west_a / 1.4), 6.0, 13.2)) if sw else _snap(_clamp(d1 * 0.85, 6.0, 9.0))
-        we = _snap(_clamp(d1 * 0.85, 6.0, 9.0))
-        lw, le = _snap(west_a / ww), _snap(east_a / we)
-        if min(lw, le) < 3.6 or w1 < ww + we + 3.6:
+        ww = _snap(_clamp(math.sqrt(west_a / 2.0), 4.2, 13.2))
+        la = _snap(west_a / ww)
+        we = _snap(east_a / la)
+        if we < 3.6 or la < 4.2 or w1 - ww - we < 4.2:
             return None
-        pts = [(0, 0), (w1, 0), (w1, d1 + le), (w1 - we, d1 + le), (w1 - we, d1), (ww, d1), (ww, d1 + lw), (0, d1 + lw)]
-        blocks = [(Rect(x=ox, y=oy, w=w1, h=d1), "main"),
-                  (Rect(x=ox, y=round(oy + d1, 2), w=ww, h=lw), "special" if sw else "main"),
-                  (Rect(x=round(ox + w1 - we, 2), y=round(oy + d1, 2), w=we, h=le), "main")]
-        return Shape("U", _poly(pts, ox, oy), blocks)
+        pts = [(0, 0), (ww, 0), (ww, la), (w1 - we, la), (w1 - we, 0), (w1, 0), (w1, la + d1), (0, la + d1)]
+        blocks = [(Rect(x=ox, y=round(oy + la, 2), w=w1, h=d1), "main"),
+                  (Rect(x=ox, y=oy, w=ww, h=la), "special" if big else "main"),
+                  (Rect(x=round(ox + w1 - we, 2), y=oy, w=we, h=la), "main")]
+        return Shape("U", _poly(pts, ox, oy), blocks, voids=[Rect(x=round(ox + ww, 2), y=oy, w=round(w1 - ww - we, 2), h=la)])
     if typology == "courtyard":
-        # 둘레 띠(깊이 d)의 넓이 = gross: 2d(W+H) − 4d² = gross, W = 1.2H. 중정이 4.8m 이상이 되는 가장 깊은 띠를 고른다
-        for d in (6.6, 6.3, 6.0, 5.7, 5.4):
-            h = _snap((gross + 4 * d * d) / (2 * d) / 2.2)
-            w = _snap(gross / (2 * d) + 2 * d - h)
-            cw, ch = round(w - 2 * d, 2), round(h - 2 * d, 2)
-            if min(cw, ch) >= 4.8:
-                r = Rect(x=ox, y=oy, w=w, h=h)
-                court = Rect(x=round(ox + d, 2), y=round(oy + d, 2), w=cw, h=ch)
-                return Shape("courtyard", r.polygon(), [(r, "main")], court=court)
-        return None
+        # 중정(cw×ch ≈ void, 폭 ≥ 4.8m) + 둘레 띠(깊이 d): (cw+2d)(ch+2d) − cw·ch = gross → 4d² + 2d(cw+ch) − gross = 0
+        # 띠가 4.5m 보다 얕으면 중정을 줄인다 (단층 중정 최소 폭 4m 이상 — plan_references.md)
+        v = void if void else max(COURT_MIN * COURT_MIN, 0.12 * gross)
+        for _ in range(4):
+            cw = _snap(max(COURT_MIN, math.sqrt(v * 1.2)))
+            ch = _snap(max(COURT_MIN, v / cw))
+            d = (-2 * (cw + ch) + math.sqrt(4 * (cw + ch) ** 2 + 16 * gross)) / 8
+            if d >= 4.5 or (cw <= COURT_MIN and ch <= COURT_MIN):
+                break
+            v *= 0.75
+        if d < 4.5:
+            return None
+        d = _snap(min(d, 7.2))
+        r = Rect(x=ox, y=oy, w=round(cw + 2 * d, 2), h=round(ch + 2 * d, 2))
+        court = Rect(x=round(ox + d, 2), y=round(oy + d, 2), w=cw, h=ch)
+        return Shape("courtyard", r.polygon(), [(r, "main")], court=court)
     return None
 
 
 def shape_from_outline(poly: Polygon) -> Shape:
     """주어진 외곽 다각형(직각 다각형)을 직사각형 블록으로 쪼갠다."""
-    xs = sorted({round(x, 3) for x, _ in poly.exterior.coords})
-    ys = sorted({round(y, 3) for _, y in poly.exterior.coords})
+    rings = [poly.exterior, *poly.interiors]  # 구멍(중정) 꼭짓점도 칸 경계로 — 빠뜨리면 중정형 블록이 하나도 안 나온다
+    xs = sorted({round(x, 3) for ring in rings for x, _ in ring.coords})
+    ys = sorted({round(y, 3) for ring in rings for _, y in ring.coords})
     rows: list[list[tuple[float, float]]] = []
     for y0, y1 in zip(ys, ys[1:]):
         runs, start = [], None
@@ -239,6 +268,7 @@ class Item:
     fixed: tuple[int, int, int, int] | None = None  # (x, y, w, h) 칸
     sizes: list[tuple[int, int]] | None = None  # 정해진 크기 중 하나 (계단)
     target: float = 0.0  # 목표 칸 수 (외곽에 맞춰 늘이거나 줄인 값)
+    fits: bool = True  # 목표 면적 합이 가용 면적과 허용 오차 안에서 맞음 → 방 면적도 LLM 목표의 ±18% 안에
     orig: float = 0.0  # LLM 이 쓴 목표 칸 수
     optional: bool = False
 
@@ -270,8 +300,8 @@ def _access_rules(items: dict[str, Item], prog: Program, root: str | None, halls
     base = [h for h in [root, *hubs] if h]
     if halls:
         rules[halls[0]] = [h for h in [root, living] if h]
-        for k, h in enumerate(halls[1:], 1):
-            rules[h] = [x for x in [root, living, *halls[:k]] if x]
+        for k, h in enumerate(halls[1:], 1):  # 가지 복도는 앞 복도(또는 현관)에서 갈라진다 → 한 줄기 동선
+            rules[h] = [x for x in [root, *halls[:k]] if x]
     if living and root:
         rules[living] = [x for x in [root, halls[0] if halls else None] if x]
     common_baths = [b for b in baths if b not in suite_of]
@@ -435,7 +465,8 @@ def solve_floor(
         sx2, sy2 = (math.ceil(STAIR_SIZE[1] / cx - 0.05), math.ceil(STAIR_SIZE[0] / cy - 0.05))
         items[stair_id] = Item(stair_id, stair_room, "stair", sizes=[(sx, sy), (sx2, sy2)])
     n_prog = len(program)
-    n_halls = 1 if n_prog <= 5 else (2 if n_prog <= 10 else 3)
+    # 복도는 많아야 2조각 (한 줄기 + 가지 하나) — 예전 3조각은 짧은 복도가 나란히 붙는 '틈 메우기'로 쓰였다
+    n_halls = 1 if n_prog <= 6 else 2
     halls = []
     for k in range(n_halls):
         base = explicit_corr[k] if k < len(explicit_corr) else None
@@ -484,9 +515,15 @@ def solve_floor(
         scale = caps[g] / want if want else 1.0
         if g == "main" and abs(scale - 1) > 0.1:
             notes.append(f"목표 면적 합 {want * cell_area:.1f}㎡ ↔ 복도·계단을 뺀 가용 면적 약 {caps[g] * cell_area:.1f}㎡ → 비례로 늘이거나 줄였다")
+        # 남는 면적은 거실·침실 같은 큰 방이 나눠 갖는다 — 욕실·사우나·현관 같은 작은 방이 목표의 +20% 를 넘지 않게
+        small = [i for i in ids if items[i].kind in KEEP_SIZE] if scale > 1.08 else []
+        small_cells = sum(target_m2(items[i].room) for i in small) * 1.05 / cell_area
+        flex_want = want - sum(target_m2(items[i].room) for i in small) / cell_area
+        flex_scale = (caps[g] - small_cells) / flex_want if small and flex_want > 0 else scale
         for i in ids:
-            items[i].target = target_m2(items[i].room) * scale / cell_area
+            items[i].target = target_m2(items[i].room) * (1.05 if i in small else flex_scale) / cell_area
             items[i].orig = target_m2(items[i].room) / cell_area
+            items[i].fits = 0.85 <= scale <= 1.18
 
     m = cp_model.CpModel()
     X, Y = ax.n, ay.n
@@ -585,6 +622,8 @@ def solve_floor(
             m.Add(v["h"] == hall_cells).OnlyEnforceIf(o)
             m.Add(v["w"] == hall_cells).OnlyEnforceIf(o.Not())
             obj.append(3 * ka * v["ae"])
+            if iid != halls[0]:
+                obj.append(HALL_PIECE_COST * v["p"])  # 복도 조각 하나 더 = 벌점 (틈은 수납·방 크기로 메운다)
             continue
         if iid in fillers:
             m.Add(v["a"] <= math.ceil(FILLER_MAX / cell_area))
@@ -599,6 +638,8 @@ def solve_floor(
         ref = it.orig if 0.88 <= t / max(it.orig, 1e-6) <= 1.12 else t
         lo = max(KIND_RULES[it.kind][4] / cell_area, lo_area_f * ref, minw_x * minw_y)
         hi = max(lo + 1, hi_area_f * ref)
+        if it.fits and not relaxed:  # 남는 면적은 복도·수납·다른 방으로 — 검증 허용(±20%)을 넘기지 않는다
+            hi = max(lo + 1, min(hi, hi_area_f * it.orig))
         m.Add(v["a"] >= math.floor(lo))
         m.Add(v["a"] <= math.ceil(hi))
         dev = m.NewIntVar(0, X * Y, f"dev_{iid}")
@@ -658,15 +699,16 @@ def solve_floor(
         else:
             right = shape.polygon.contains(Point(x1 + 0.05, (y1 + y2) / 2))
             segs.append((False, ax.idx(x1), ay.idx(min(y1, y2)), ay.idx(max(y1, y2)), 1 if right else -1, "W" if right else "E"))
+    n_outer = len(segs)  # 여기까지가 건물 바깥 외벽 (현관문은 여기에만)
     if shape.court is not None:  # 중정을 둘러싼 방도 채광 가능
         c = shape.court
         x0, y0, x1, y1 = ax.idx(c.x), ay.idx(c.y), ax.idx(c.x + c.w), ay.idx(c.y + c.h)
         segs += [(True, y0, x0, x1, -1, "N"), (True, y1, x0, x1, 1, "S"), (False, x0, y0, y1, -1, "E"), (False, x1, y0, y1, 1, "W")]
 
-    def touch(a: str, sides: set[str] | None = None, length: int = door_cells):
+    def touch(a: str, sides: set[str] | None = None, length: int = door_cells, outer: bool = False):
         va = V[a]
         lits = []
-        for horiz, c, s0, s1, side, compass in segs:
+        for horiz, c, s0, s1, side, compass in (segs[:n_outer] if outer else segs):
             if (sides is not None and compass not in sides) or s1 - s0 < length:
                 continue
             d = m.NewBoolVar("")
@@ -730,8 +772,8 @@ def solve_floor(
         if it.room is None or it.fixed is not None or it.kind in ("corridor", "stair") or iid in fillers:
             continue
         if it.kind == "entrance" and lowest:
-            m.Add(touch(iid, length=cells(FRONT_DOOR_LEN)) == 1)
-            obj.append(120 * touch(iid, {entry_side}, cells(FRONT_DOOR_LEN)).Not())
+            m.Add(touch(iid, length=cells(FRONT_DOOR_LEN), outer=True) == 1)
+            obj.append(250 * touch(iid, {entry_side}, cells(FRONT_DOOR_LEN), outer=True).Not())  # 현관은 도로(앞) 쪽
             continue
         if needs_daylight(it.room):
             lit = touch(iid)
@@ -742,7 +784,7 @@ def solve_floor(
         elif it.kind in ("kitchen", "dining", "bathroom", "pool", "sauna"):
             obj.append(15 * touch(iid).Not())
         if it.kind == "living":
-            obj.append(80 * touch(iid, {"S"}).Not())
+            obj.append(120 * touch(iid, {"S"}).Not())  # 남향 거실
         elif it.kind == "bedroom":
             obj.append(15 * touch(iid, {"S", "E"}).Not())
 
@@ -787,6 +829,24 @@ def solve_floor(
     for seq in (halls, fillers):  # 빈 복도·수납은 뒤로
         for a, b in zip(seq, seq[1:]):
             m.AddImplication(V[b]["p"], V[a]["p"])
+    # 복도끼리는 끝과 끝(또는 T자)으로만 만난다 — 긴 변을 맞대고 나란히 붙는 조각(예전 '현관 옆 짧은 복도 여러 개') 금지
+    for i, a in enumerate(halls):
+        for b in halls[i + 1:]:
+            va, vb = V[a], V[b]
+            for p, q, along in ((va, vb, "x"), (vb, va, "x"), (va, vb, "y"), (vb, va, "y")):
+                side = m.NewBoolVar("")  # p 의 오른쪽(위쪽) 벽 = q 의 왼쪽(아래쪽) 벽
+                if along == "x":
+                    m.Add(p["xe"] == q["x"]).OnlyEnforceIf(side)
+                    m.Add(p["xe"] != q["x"]).OnlyEnforceIf(side.Not())
+                    lo, hi, qlo, qhi = p["y"], p["ye"], q["y"], q["ye"]
+                else:
+                    m.Add(p["ye"] == q["y"]).OnlyEnforceIf(side)
+                    m.Add(p["ye"] != q["y"]).OnlyEnforceIf(side.Not())
+                    lo, hi, qlo, qhi = p["x"], p["xe"], q["x"], q["xe"]
+                apart = [m.NewBoolVar(""), m.NewBoolVar("")]  # 맞댄 길이 ≤ 복도 폭
+                m.Add(hi <= qlo + hall_cells).OnlyEnforceIf(apart[0])
+                m.Add(qhi <= lo + hall_cells).OnlyEnforceIf(apart[1])
+                m.AddBoolOr(apart).OnlyEnforceIf([side, va["p"], vb["p"]])
 
     if hint:  # 굵은 격자 풀이의 방 위치를 출발점으로
         for iid, r in hint.items():
@@ -802,11 +862,7 @@ def solve_floor(
                 m.AddHint(V[iid]["p"], 0)
     m.Minimize(sum(obj))
     time_limit = time_limit or auto_time_limit(len(program))
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = time_limit
-    solver.parameters.num_workers = WORKERS
-    solver.parameters.random_seed = seed
-    status = solver.Solve(m)
+    status, values = solve_model(m, time_limit, seed)
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         why = "제약을 모두 만족하는 배치가 없다" if status == cp_model.INFEASIBLE else f"{time_limit:g}초 안에 배치를 찾지 못했다"
         raise SolverFailed(f"{floor.label}: {why}")
@@ -816,10 +872,10 @@ def solve_floor(
     rects: dict[str, Rect] = {}
     for iid, it in items.items():
         v = V[iid]
-        if v["p"] is not None and not solver.Value(v["p"]):
+        if v["p"] is not None and not values[v["p"].Index()]:
             continue
-        x, y = solver.Value(v["x"]), solver.Value(v["y"])
-        xe, ye = solver.Value(v["xe"]), solver.Value(v["ye"])
+        x, y = values[v["x"].Index()], values[v["y"].Index()]
+        xe, ye = values[v["xe"].Index()], values[v["ye"].Index()]
         rect = Rect(x=ax.at(x), y=ay.at(y), w=round(ax.at(xe) - ax.at(x), 3), h=round(ay.at(ye) - ay.at(y), 3))
         rects[iid] = rect
         base = it.room or Room(id=iid, type="corridor")
@@ -829,6 +885,8 @@ def solve_floor(
         placed.append(base.model_copy(update=update))
     order = {r.id: i for i, r in enumerate(floor.rooms)}
     placed.sort(key=lambda r: order.get(r.id, len(order)))
+    placed, merge_notes = merge_corridors(placed, rules)
+    notes += merge_notes
     placed, fill_notes = fill_voids(placed, shape.polygon, rules)
     doors = floor.doors or _doors_from_access(placed, rules, open_set, root if lowest and entry else None, entry_side, shape.polygon)
     status_ko = "최적" if status == cp_model.OPTIMAL else "시간 제한 내 최선"
@@ -836,6 +894,55 @@ def solve_floor(
     notes.append(f"{floor.label}: 배치 엔진(CP-SAT) {status_ko} 해 — 복도 {hall_area:.1f}㎡" + (" (제약 일부 완화)" if relaxed else ""))
     notes += fill_notes
     return FloorPlan(placed, doors, notes, rects)
+
+
+def _set_limits(solver: cp_model.CpSolver, time_limit: float, seed: int, mode: str = "wall") -> None:
+    """한 번의 풀이 설정 — 벽시계 time_limit 초, 병렬 WORKERS."""
+    solver.parameters.num_workers = WORKERS
+    solver.parameters.random_seed = seed
+    solver.parameters.max_time_in_seconds = time_limit
+
+
+def work_budget(time_limit: float) -> float:
+    """time_limit 초 풀이에 기대하는 작업량(CP-SAT 결정적 시간) — 이 PC 가 한가할 때의 값 (DET_PER_SEC 측정)."""
+    return time_limit * DET_PER_SEC
+
+
+def solve_model(m: cp_model.CpModel, time_limit: float, seed: int = 0) -> tuple[int, list[int]]:
+    """풀이 + 바쁜 PC 보정 → (상태, 변수 값 목록[변수 번호]).
+
+    STOP_MODE 'det'(기본): 벽시계 time_limit 초 동안 쌓인 작업량(결정적 시간)이 work_budget 에 못 미치고 최적도 아니면
+    (다른 실험이 CPU 를 쓰는 중), 지금까지의 최선 답을 출발점(hint)으로 이어서 푼다 — 벽시계는 time_limit × WALL_CAP 까지.
+    한가한 PC 에서는 첫 풀이로 끝나 예전과 같은 시간이 든다. CP-SAT 의 max_deterministic_time 은 병렬(비 interleave) 풀이에서
+    지켜지지 않아(측정: README 7-5) 직접 잰다. 'wall': 예전처럼 한 번만.
+    """
+    budget, cap = work_budget(time_limit), time_limit * (WALL_CAP if STOP_MODE == "det" else 1.0)
+    best: tuple[float, int, list[int]] | None = None
+    status, wall, det, rounds, chunk = cp_model.UNKNOWN, 0.0, 0.0, 0, time_limit
+    while True:
+        solver = cp_model.CpSolver()
+        _set_limits(solver, chunk, seed + rounds)
+        status = solver.Solve(m)
+        rounds += 1
+        wall += solver.WallTime()
+        det += solver.deterministic_time
+        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE) and (best is None or solver.ObjectiveValue() < best[0]):
+            best = (solver.ObjectiveValue(), status, list(solver.ResponseProto().solution))
+        done = status in (cp_model.OPTIMAL, cp_model.INFEASIBLE, cp_model.MODEL_INVALID)
+        enough = det >= budget and best is not None  # 답이 아직 없으면 작업량과 상관없이 벽시계 한도까지 찾는다
+        if done or STOP_MODE != "det" or enough or wall >= cap - 0.5:
+            break
+        chunk = max(1.0, min(time_limit, cap - wall))
+        if best is not None:  # 최선 답에서 이어서
+            m.ClearHints()
+            for i, val in enumerate(best[2]):
+                m.AddHint(m.GetIntVarFromProtoIndex(i), val)
+    LAST_STATS.clear()
+    LAST_STATS.update(wall=wall, det=det, rounds=rounds, objective=best[0] if best else None,
+                      status=cp_model.CpSolver().StatusName(best[1] if best else status))
+    if best is None:
+        return status, []
+    return best[1], best[2]
 
 
 def _aspect_limit(m: cp_model.CpModel, v: dict, ratio: float, cx: float, cy: float) -> None:
@@ -880,6 +987,43 @@ def _rect_pieces(geom) -> list[Polygon]:
         for r in shape_from_outline(poly.buffer(0)).blocks:
             out.append(r[0].polygon())
     return [p for p in out if p.area > 1e-3]
+
+
+def merge_corridors(rooms: list[Room], rules: dict[str, list[str]]) -> tuple[list[Room], list[str]]:
+    """맞닿은 복도 조각을 합쳐 한 줄기로: 합친 모양이 직사각형이면(일렬로 이어진 조각·같은 길이로 나란한 조각) 한 방으로 만든다.
+
+    rules(접근 규칙)의 id 도 바꿔, 문 배치가 합쳐진 복도를 쓰게 한다.
+    """
+    rooms = list(rooms)
+    notes: list[str] = []
+    merged = True
+    while merged:
+        merged = False
+        corr = [i for i, r in enumerate(rooms) if r.type == "corridor" and r.rect is not None]
+        for a in corr:
+            for b in corr:
+                if a >= b:
+                    continue
+                pa, pb = rooms[a].shape(), rooms[b].shape()
+                u = pa.union(pb)
+                if pa.boundary.intersection(pb.boundary).length < 0.9 or abs(u.area - box(*u.bounds).area) > 1e-3:
+                    continue
+                x0, y0, x1, y1 = u.bounds
+                keep, gone = rooms[a], rooms[b]
+                rooms[a] = keep.model_copy(update={"rect": Rect(x=round(x0, 3), y=round(y0, 3), w=round(x1 - x0, 3), h=round(y1 - y0, 3))})
+                del rooms[b]
+                rules.pop(gone.id, None)
+                for k, opts in rules.items():
+                    if gone.id in opts:
+                        rules[k] = list(dict.fromkeys(keep.id if o == gone.id else o for o in opts))
+                if keep.id in rules:
+                    rules[keep.id] = [o for o in rules[keep.id] if o not in (keep.id, gone.id)]
+                notes.append(f"복도 조각 두 개를 한 줄기({x1 - x0:.1f}×{y1 - y0:.1f}m)로 합쳤다")
+                merged = True
+                break
+            if merged:
+                break
+    return rooms, notes
 
 
 def fill_voids(rooms: list[Room], outline: Polygon, rules: dict[str, list[str]]) -> tuple[list[Room], list[str]]:
@@ -1023,40 +1167,84 @@ def _target(r: Room) -> float:
 
 
 def auto_typology(layout: Layout) -> str:
-    """유형을 안 정했을 때: 여러 층·작은 집은 일자형, 큰 특수실이 있으면 ㄱ자, 아주 크면 ㄷ자."""
-    if len(layout.floors) > 1:
-        return "rect"
-    rooms = layout.floors[0].rooms
-    area = layout.outline_polygon().area
-    special = sum(_target(r) for r in rooms if room_zone(r) == "special" and room_kind(r) != "court")
-    if special >= SPECIAL_WING_MIN:
+    """유형을 안 정했을 때: 기본은 꽉 찬 일자형(직사각형).
+
+    빈 마당이 생기는 ㄱ·ㄷ·중정형은 이유가 있을 때만 — 중정을 요청(방 목록에 중정) → 중정형, 마당·데크를 요청 → ㄱ자(안쪽 모서리가 마당),
+    큰 특수실을 날개에 두라고 함(placement: wing) → ㄱ자. 큰 수영장·차고는 일자형 동쪽 끝 블록에 넣는다 (plan_references.md).
+    """
+    rooms = [r for f in layout.floors for r in f.rooms]
+    if any(is_court(r) for r in rooms):
+        return "courtyard" if len(layout.floors) == 1 else "L"
+    if any(is_outdoor(r) for r in rooms):
         return "L"
-    if area > 260:
-        return "U"
+    if any(r.placement == "wing" and room_zone(r) == "special" and _target(r) >= SPECIAL_WING_MIN for r in rooms):
+        return "L"
     return "rect"
 
 
 def _big_special(layout: Layout) -> list[Room]:
     return [r for f in layout.floors for r in f.rooms
-            if room_zone(r) == "special" and room_kind(r) != "court" and _target(r) >= SPECIAL_WING_MIN and r.placement != "main"]
+            if room_zone(r) == "special" and room_kind(r) != "court" and not is_outdoor(r)
+            and _target(r) >= SPECIAL_WING_MIN and r.placement != "main"]
 
 
 def candidate_options(layout: Layout) -> list[dict]:
-    """후보안 B·C… 에 쓸 풀이 옵션 (A = 기본 배치와 다른 것부터): 다른 외곽 유형 → 큰 특수실 별채 → 현관 방향 바꾸기."""
+    """후보안 B·C… 에 쓸 풀이 옵션 — 서로 다르되 모두 '말이 되는' 안만 (A = 기본 배치와 다른 것부터).
+
+    - 큰 수영장·차고: 별채안(본채는 일자형) → ㄱ자 날개 + 안쪽 모서리 데크
+    - 마당·중정 요청: 다른 방식의 외부 공간 (중정 ↔ ㄱ자 마당, ㄱ자 마당 ↔ 일자형 + 앞마당)
+    - 그 밖: 일자형의 비율만 바꾼 안 (길쭉한 남향 / 깊고 짧은) — 요청하지 않은 빈 마당은 만들지 않는다
+    그다음 현관 방향을 바꾼 안.
+    """
     first = layout.typology if layout.typology not in (None, "auto") else auto_typology(layout)
     single = len(layout.floors) == 1
     special = _big_special(layout) if single else []
-    if not single:
-        typs = ["L"]
-    elif layout.outline_polygon().area > 200:
-        typs = ["U", "L", "rect"] if special else ["U", "courtyard", "L", "rect"]  # 큰 수영장은 중정 둘레에 안 들어간다
-    else:
-        typs = ["L", "rect"]
-    opts = [{"typology": t, "entry_side": "S", "seed": 0} for t in typs if t != first]
+    rooms = [r for f in layout.floors for r in f.rooms]
+    base = {"entry_side": "S", "seed": 0}
+    opts: list[dict] = []
     if special:
-        opts.insert(1, {"typology": "rect", "entry_side": "S", "seed": 0, "annex_special": True})
+        opts.append({"typology": "rect", "annex_special": True, **base})
+        if first != "L":
+            opts.append({"typology": "L", **base})
+    elif any(is_court(r) or is_outdoor(r) for r in rooms):
+        opts += [{"typology": t, **base} for t in ("L", "rect") if t != first]
+    elif first == "rect":
+        opts += [{"typology": "rect", "aspect": a, **base} for a in (2.2, 1.25)]
+    else:
+        opts.append({"typology": "rect", **base})
     opts += [{"typology": first, "entry_side": side, "seed": k + 1} for k, side in enumerate(("E", "W"))]
     return opts
+
+
+def _outdoor_rooms(requested: list[Room], shape: Shape, big_special: bool) -> list[Room]:
+    """바깥 공간을 놓는다: 외곽의 빈 곳(ㄱ·ㄷ자 안쪽)에 요청한 마당·데크를 맞추고, 요청이 없으면 그 빈 곳을 데크(특수실 날개)·마당으로 지정.
+
+    빈 곳이 없는데 마당을 요청했으면(일자형) 건물 남쪽 앞에 둔다.
+    """
+    out: list[Room] = []
+    voids = list(shape.voids)
+    taken = {r.id for r in requested}
+    x0, y0, x1, _ = shape.polygon.bounds
+    front_x = x0
+    for r in requested:
+        kind = room_kind(r) if room_kind(r) in OUTDOOR_NAME else "yard"
+        if voids:
+            v = voids.pop(0)
+        else:
+            want = _target(r)
+            w = _snap(min(x1 - front_x, max(4.8, math.sqrt(want * 2.0))))
+            d = _snap(max(3.0, want / w))
+            v = Rect(x=round(front_x, 2), y=round(y0 - d, 2), w=w, h=d)
+            front_x += w
+        out.append(Room(id=r.id, type="other", kind=kind, name=r.name or OUTDOOR_NAME[kind], rect=v))
+    for k, v in enumerate(voids):
+        kind = "deck" if big_special else "yard"
+        rid = kind if k == 0 else f"{kind}{k + 1}"
+        while rid in taken:
+            rid += "_"
+        taken.add(rid)
+        out.append(Room(id=rid, type="other", kind=kind, name=OUTDOOR_NAME[kind], rect=v))
+    return out
 
 
 def solve_layout(
@@ -1066,10 +1254,13 @@ def solve_layout(
     seed: int = 0,
     time_limit: float | None = None,
     annex_special: bool = False,
+    aspect: float | None = None,
 ) -> tuple[Layout, list[str]]:
     """좌표가 없는 층을 모두 배치한 레이아웃. 실패하면 SolverFailed.
 
     annex_special=True 면 큰 특수실(수영장·차고, 20㎡ 이상)을 별채로 빼고 본채만 배치한다 (후보안 비교용).
+    aspect = 일자형 외곽의 가로÷세로 (주면 LLM 이 쓴 외곽 대신 같은 넓이의 다른 비율 — 후보안 비교용).
+    마당·데크(kind yard/deck) 방은 실내 바닥에서 빼서 layout.outdoor 에 놓는다 (ㄱ·ㄷ자 안쪽 모서리 또는 건물 앞).
     """
     out = layout.model_copy(deep=True)
     notes: list[str] = []
@@ -1089,33 +1280,59 @@ def solve_layout(
             f.rooms = [r for r in f.rooms if r.placement != "annex"]
         out.annex = (out.annex or []) + annex
         notes.append("별채로 뺀 방(본채 도면에는 없음): " + ", ".join(f"{r.label} {_target(r):g}㎡" for r in annex))
+    # 바깥 공간(마당·데크)은 실내 바닥이 아니다
+    yards = [r for f in todo for r in f.rooms if is_outdoor(r)]
+    for f in todo:
+        f.rooms = [r for r in f.rooms if not is_outdoor(r)]
 
     # 외곽 유형
     base = out.outline_polygon()
     if all_program and isinstance(out.outline, Rect):
-        typ = typology or (out.typology if out.typology not in (None, "auto") else auto_typology(out))
+        typ = typology or (out.typology if out.typology not in (None, "auto") else auto_typology(layout))
         rooms = [r for f in todo for r in f.rooms]
         special = sum(_target(r) for r in rooms if room_zone(r) == "special" and room_kind(r) != "court"
                       and r.placement != "main") if len(todo) == 1 else 0.0
         gross = out.outline.w * out.outline.h - sum(_target(r) for r in annex)
-        keep = out.outline if typ == "rect" and not annex else None
-        shape = make_shape(typ, gross, special, (out.outline.x, out.outline.y), keep)
+        court_a = sum(_target(r) for r in rooms if is_court(r))
+        if typ == "courtyard" and court_a and gross - court_a >= 1.05 * sum(_target(r) for r in rooms if not is_court(r)):
+            gross -= court_a  # LLM 이 쓴 외곽에 중정이 들어 있다 → 둘레 띠(실내) 넓이는 그만큼 작다
+        keep = out.outline if typ == "rect" and not annex and aspect is None else None
+        void = sum(_target(r) for r in (yards if typ != "courtyard" else [r for r in rooms if is_court(r)])) or None
+        shape = make_shape(typ, gross, special, (out.outline.x, out.outline.y), keep, void=void, aspect=aspect)
+        if shape is None and typ in ("courtyard", "U"):  # 둘러싼 마당이 안 들어가면 ㄱ자 안쪽 마당으로
+            shape = make_shape("L", gross, special, (out.outline.x, out.outline.y), void=void)
+            if shape is not None:
+                notes.append(f"{TYPOLOGY_KO[typ]} 외곽을 만들기엔 면적이 작아 ㄱ자형(안쪽 모서리 마당)으로 바꿨다")
         if shape is None:
             notes.append(f"{TYPOLOGY_KO.get(typ, typ)} 외곽을 만들기엔 면적이 작아 일자형으로 바꿨다")
-            shape = make_shape("rect", gross, 0.0, (out.outline.x, out.outline.y), out.outline if not annex else None)
+            shape = make_shape("rect", gross, special, (out.outline.x, out.outline.y), out.outline if not annex else None)
         if out.site is not None and not out.site.polygon().buffer(0.01).covers(shape.polygon):
             notes.append(f"{TYPOLOGY_KO.get(shape.typology)} 외곽이 대지를 벗어나 원래 외곽을 썼다")
             shape = shape_from_outline(base)
         out.outline = shape.outline_value()
         out.typology = shape.typology if shape.typology in TYPOLOGY_KO else out.typology
+        b = shape.polygon.bounds
         if shape.typology != "rect" or typ != "rect":
-            b = shape.polygon.bounds
             notes.append(f"외곽 유형: {TYPOLOGY_KO.get(shape.typology, shape.typology)} — {b[2] - b[0]:.1f}×{b[3] - b[1]:.1f}m 안 바닥 {shape.polygon.area:.1f}㎡")
+        if shape.typology == "rect" and any(role == "special" for _, role in shape.blocks):
+            notes.append("큰 특수실은 일자형 외곽의 동쪽 끝 블록(깊이 전체)에 두었다 — 빈 마당 없이 꽉 찬 외곽")
     else:
         if isinstance(out.outline, Rect):
             shape = make_shape("rect", 0, keep=out.outline)
         else:
             shape = shape_from_outline(base)
+    # 중정을 요청했는데 중정형 외곽이 안 되면 그 중정은 바깥 마당으로
+    if shape.court is None:
+        courts = [r for f in todo for r in f.rooms if is_court(r)]
+        if courts:
+            yards += courts
+            for f in todo:
+                f.rooms = [r for r in f.rooms if not is_court(r)]
+            notes.append(f"중정형 외곽이 안 돼 {', '.join(r.label for r in courts)} 을(를) 건물 밖 마당으로 두었다")
+    placed_out = _outdoor_rooms(yards, shape, any(role == "special" for _, role in shape.blocks))
+    if placed_out:
+        out.outdoor = (out.outdoor or []) + placed_out
+        notes.append("바깥 공간(실내 바닥 아님): " + ", ".join(f"{r.label} {r.rect.w:g}×{r.rect.h:g}m" for r in placed_out))
 
     multi = len([f for f in out.floors if f.rooms]) > 1
     stair = out.stair
