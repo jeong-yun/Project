@@ -116,14 +116,16 @@ Anthropic API 키는 크레딧이 없어 꺼 두었지만, 이 PC 에 **Claude �
 - 팀장 순서: **claude_cli Opus 5.5 → OpenAI gpt-5.5 → gpt-5.4 → (Anthropic API, 비활성) → 무료 모델**. 다른 직급은 그대로입니다.
 
 **준비**
-1. Claude Code CLI 설치 후 터미널에서 `claude auth login` → 구독 계정으로 로그인 (`claude auth status` 에 `"loggedIn": true`).
+1. 터미널에서 `claude auth login` → 브라우저에서 구독 계정으로 승인 (`claude auth status` 에 `"loggedIn": true`).
+   데스크톱 앱(UI)의 로그인과는 별개입니다 — 앱이 띄우는 `claude -p` 는 CLI 쪽 로그인(`~/.claude/.credentials.json`)만 봅니다.
+   회사 PC 에서 '브라우저를 확인할 수 없습니다'가 나오면 터미널에 나온 로그인 주소를 휴대폰(회사망 밖)에서 열어 승인하고 코드를 붙여 넣으세요.
 2. `claude` 가 PATH 에 없으면 `.env` 에 `CLAUDE_CLI_PATH=C:\경로\claude.exe` (없으면 `~/.local/bin`, Claude 데스크톱 앱이 함께 설치한 CLI 순으로 찾음).
 3. 사이드바 ⚙️ 모델 상태에 `✅ claude_cli` 가 보이면 준비 완료 (`🔑 로그인 필요` / `⚪ Claude CLI 없음` 이면 1·2번 확인).
 
 **주의**
 - **구독 한도는 내가 직접 쓰는 Claude 대화·Claude Code 와 함께 줄어듭니다.** 그래서 호출 수가 적은 팀장(실행당 분배·검토·통합 몇 번)에만 배정했고,
   `llm_concurrency.claude_cli: 1` 로 한 번에 하나씩만 부릅니다. 한도에 걸리면 자동으로 GPT-5.5 로 넘어갑니다.
-- 호출마다 CLI 를 새로 띄우므로 **시작에만 5~7초**가 더 걸립니다. 더 빠르게(한도도 덜 쓰게) 하려면 `settings.yaml` 의 `claude_cli.effort` 를 `medium`/`low` 로.
+- 호출마다 CLI 를 새로 띄우므로 **시작에만 5~8초**가 더 걸립니다 (2026-10-22 실측: 한 문장 답변 — 첫 글자 9.1초, 전체 12.6초, 그중 모델 시간 4.4초 / 팀장 업무 분배(구조화 출력 Delegation) — 14초, 입력 1,572·출력 511 토큰, 대안 전환 없이 성공). 더 빠르게(한도도 덜 쓰게) 하려면 `settings.yaml` 의 `claude_cli.effort` 를 `medium`/`low` 로.
 - '🆓 무료 모델만 사용' 을 켜면 claude_cli 도 쓰지 않습니다.
 
 **되돌리기 (팀장을 다시 GPT-5.5 로)**: `config/models.yaml` 의 `disabled_providers` 에 `claude_cli` 를 추가하거나(`[anthropic, claude_cli]`),
