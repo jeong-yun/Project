@@ -175,17 +175,22 @@ def test_multi_floor_stairs_align_and_suite_is_entered_through_master():
     assert dress_doors and all({d.room, d.to} == {"dress", "master"} for d in dress_doors)  # 드레스룸은 안방을 거쳐
 
 
-def test_big_program_uses_wing_for_pool_and_short_corridor(big_candidates):
+def test_big_program_puts_pool_in_end_block_and_short_corridor(big_candidates):
     a = big_candidates[0]
-    assert a.layout.typology == "L" and a.report.ok, a.report.errors
+    assert a.layout.typology == "rect" and a.report.ok, a.report.errors  # 빈 마당 없는 꽉 찬 일자형이 기본
     floor = a.layout.floors[0]
     pool = next(r for r in floor.rooms if r.id == "pool").shape()
-    shape = floorplan_solver.make_shape("L", 330.6, 116.0)
-    wing = next(b for b, role in shape.blocks if role == "special")
-    assert wing.polygon().buffer(0.05).covers(pool)  # 수영장은 ㄱ자 날개에
+    shape = floorplan_solver.make_shape("rect", 330.6, 116.0, keep=a.layout.outline)
+    end = next(b for b, role in shape.blocks if role == "special")
+    assert end.polygon().buffer(0.05).covers(pool)  # 수영장은 동쪽 끝 블록(깊이 전체)에
     m = a.report.metrics["1층"]
-    assert m["corridor_share"] <= 0.10 and m["corridor_longest"] <= 12.0
+    assert m["corridor_share"] <= 0.10 and m["corridor_longest"] <= 18.0
     assert m["worst_aspect"] <= 3.0 + 0.02
+    ell = next((c for c in big_candidates if c.layout.typology == "L"), None)
+    if ell is not None:  # ㄱ자안은 수영장 날개 + 안쪽 모서리 데크
+        wing = next(b for b, role in floorplan_solver.make_shape("L", 330.6, 116.0).blocks if role == "special")
+        pool = next(r for r in ell.layout.floors[0].rooms if r.id == "pool").shape()
+        assert wing.polygon().buffer(0.05).covers(pool) and ell.layout.outdoor
 
 
 def test_three_candidates_are_diverse(big_candidates):

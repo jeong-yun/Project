@@ -9,10 +9,12 @@
          세탁기 / 선반 / 신발장 / 계단 디딤판·UP 화살표 / 수영장 물결 / 사우나 벤치). 방 크기에 맞춰 줄이고, 안 들어가면 뺀다.
          문 열리는 자리는 비워 둔다
   라벨 : 방 이름 + 면적 — 글자 크기를 줄이고, 줄을 나누고, 그래도 안 되면 지시선(콜아웃)으로 밖에 쓴다. 서로 겹치지 않는다
-  치수 : 전체 치수 2면(남·서) + 외벽을 따라 방 경계 연속 치수 4면 (단위 mm), 방위표·축척 막대·표제란('개념·참고용 도면')
+  치수 : 전체 치수 2면(남·서) + 외벽을 따라 방 경계 연속 치수 4면 (단위 mm), 방위표·축척 막대·표제란('개념·참고용 도면').
+         ㄱ·ㄷ자는 꺾인 외벽마다 따로 (외접 사각형의 빈 곳이 아니라 실제 외벽을 따라), 보조선은 실제 외벽에서 시작
+  외부 : 마당·데크(layout.outdoor)·중정은 실내와 다르게 — 옅은 초록(마당·중정)/나무색 줄(데크) + 점선 + '(외부)' 라벨
 
   DXF : ezdxf. 레이어 A-WALL(벽 포셰)·A-DOOR(문)·A-GLAZ(창)·A-ROOM(방 경계)·A-TEXT(방 이름·면적)·A-DIMS(치수)·
-        A-FURN(가구·설비 블록)·A-STRS(계단 블록)·A-ANNO(방위·축척·표제란).
+        A-FURN(가구·설비 블록)·A-STRS(계단 블록)·A-ANNO(방위·축척·표제란)·A-SITE(마당·데크).
         모델 공간에 층을 옆으로 나란히 두고, 층마다 종이 공간 시트(레이아웃 '1층', '2층' …, A3 표준 축척)를 만든다.
         레이아웃 JSON 을 DXF 안(XRECORD)에 함께 넣어 두어, 다시 읽을 때 정확히 되살린다 (core/floorplan_import.py).
   PNG/SVG : matplotlib (pyplot 을 쓰지 않음 — 백그라운드 스레드에서도 안전). 층마다 한 장. 1m = 같은 길이로 그려서
@@ -41,11 +43,12 @@ from matplotlib.path import Path
 from matplotlib.ft2font import LoadFlags
 from matplotlib.textpath import TextPath
 from matplotlib.transforms import Affine2D
-from shapely.geometry import Point, Polygon
+from shapely.geometry import LineString, Point, Polygon
 from shapely.geometry import box as shp_box
 from shapely.geometry.polygon import orient
 
 from core.floorplan import OUTSIDE, FloorGeometry, Layout, Opening, Room, dump_layout, floor_geometry
+from core.floorplan import room_kind as program_kind
 
 XRECORD_KEY = "AGENT_OFFICE_LAYOUT"  # DXF 안에 레이아웃 JSON 을 넣어 두는 사전 이름
 LAYERS = {  # 이름: (AutoCAD 색 번호, 설명)
@@ -58,14 +61,17 @@ LAYERS = {  # 이름: (AutoCAD 색 번호, 설명)
     "A-FURN": (9, "가구·설비 (블록)"),
     "A-STRS": (4, "계단 (블록)"),
     "A-ANNO": (7, "방위·축척·표제란"),
+    "A-SITE": (82, "바깥 공간 (마당·데크·중정)"),
 }
 FLOOR_GAP = 1.5  # 모델 공간에서 층 도면 틀 사이 간격 (m)
 ROOM_COLORS = {  # 구역별 옅은 바닥색
     "living": "#FFF8E6", "dining": "#FFF3E0", "kitchen": "#FFEEDD", "entrance": "#F0F0F0", "office": "#EEF3FF",
     "bedroom": "#EEF7EC", "bathroom": "#E6F4FA", "utility": "#ECECF5", "storage": "#F3F3F3", "dressroom": "#F3EEF8",
     "balcony": "#F5FAEC", "corridor": "#FAFAFA", "stair": "#F1ECE4", "other": "#F7F7F7",
-    "pool": "#F2F0EA", "sauna": "#F7EEE2",
+    "pool": "#F2F0EA", "sauna": "#F7EEE2", "court": "#E8F3E1",
 }
+OUTDOOR_FILL = {"yard": "#E8F3E1", "court": "#E8F3E1", "deck": "#F3E8D6"}  # 바깥 공간 바닥 (마당·중정 옅은 초록, 데크 나무색)
+OUTDOOR_INK = "#5E7D4F"
 INK = "#1A1A1A"  # 벽·문 선
 FURN_INK = "#6B6B6B"  # 가구 선
 WATER = "#2B7BB9"
@@ -401,6 +407,8 @@ def room_kind(room: Room) -> str:
     """가구를 고를 방 종류 (스키마 종류 → 없으면 이름으로 추정)."""
     if room.type != "other":
         return room.type
+    if program_kind(room) in ("court", "yard", "deck"):
+        return program_kind(room)
     text = _room_text(room)
     return next((kind for kind, keys in NAME_KINDS if any(k in text for k in keys)), "other")
 
@@ -996,8 +1004,10 @@ def _callout(rid: str, name: str, area: str, target, spots: list[tuple[Polygon, 
 @dataclass
 class Chain:
     side: str  # S/N/W/E
-    tier: float  # 외곽에서 치수선까지 (m)
+    tier: float  # 외벽(edge)에서 치수선까지 (m)
     coords: list[float]  # 치수점 (S/N 은 x, W/E 는 y)
+    edge: float = 0.0  # 치수선을 띄우는 기준 외벽 좌표 (S/N 은 y, W/E 는 x) — ㄱ·ㄷ자는 꺾인 외벽마다 다르다
+    faces: list[float] = field(default_factory=list)  # 치수점마다 보조선이 시작하는 실제 외벽 좌표
 
 
 @dataclass
@@ -1015,6 +1025,7 @@ class FloorPlan:
     anno: list[Prim]  # 방위표·축척 막대·표제란
     frame: Box  # 도면 전체 범위 (m)
     scale: int  # 1:scale (A3)
+    outdoor: list[Prim] = field(default_factory=list)  # 마당·데크 (맨 아래층만)
 
     @property
     def floor(self):
@@ -1060,27 +1071,103 @@ def _keepouts(rid: str, inner_box: Box, geom: FloorGeometry, kinds: dict[str, st
     return keep, door_sides, window_sides
 
 
+def _facade_runs(outline: Polygon, side: str) -> dict[float, list[tuple[float, float]]]:
+    """그 방향(S/N/W/E)을 바라보는 외벽 선분들 — {외벽 좌표: [(시작, 끝)…]} (ㄱ·ㄷ자는 좌표가 여럿)."""
+    runs: dict[float, list[tuple[float, float]]] = {}
+    coords = list(outline.exterior.coords)
+    for (ax, ay), (bx, by) in zip(coords, coords[1:]):
+        horizontal = abs(ay - by) < 1e-6
+        if horizontal != (side in "SN") or (abs(ax - bx) < 1e-6 and abs(ay - by) < 1e-6):
+            continue
+        if horizontal:
+            probe = Point((ax + bx) / 2, ay + (0.05 if side == "N" else -0.05))
+            key, span = round(ay, 3), (min(ax, bx), max(ax, bx))
+        else:
+            probe = Point(ax + (0.05 if side == "E" else -0.05), (ay + by) / 2)
+            key, span = round(ax, 3), (min(ay, by), max(ay, by))
+        if not outline.contains(probe):  # 바깥을 바라보는 벽
+            runs.setdefault(key, []).append(span)
+    return runs
+
+
+def _clamp(v: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, v))
+
+
+def _face(outline: Polygon, side: str, v: float) -> float:
+    """치수점 v 에서 그 방향의 가장 바깥 외벽 좌표 (보조선 시작점)."""
+    x0, y0, x1, y1 = outline.bounds
+    best = None
+    for d in (-0.01, 0.01):
+        if side in "SN":
+            c = _clamp(v + d, x0 + 0.005, x1 - 0.005)
+            line = LineString([(c, y0 - 1), (c, y1 + 1)])
+        else:
+            c = _clamp(v + d, y0 + 0.005, y1 - 0.005)
+            line = LineString([(x0 - 1, c), (x1 + 1, c)])
+        cut = line.intersection(outline)
+        if cut.is_empty:
+            continue
+        b = cut.bounds
+        val = {"S": b[1], "N": b[3], "W": b[0], "E": b[2]}[side]
+        if best is None or (val < best if side in "SW" else val > best):
+            best = val
+    return best if best is not None else {"S": y0, "N": y1, "W": x0, "E": x1}[side]
+
+
 def _chains(geom: FloorGeometry) -> list[Chain]:
+    """치수 연속선 — 꺾인 외벽(run)마다 그 외벽에서 띄워 방 경계를 잰다 + 남·서 전체 치수 (보조선은 실제 외벽에서)."""
     x0, y0, x1, y1 = geom.outline.bounds
     out = []
     for side in "SWNE":
         horizontal = side in "SN"
-        edge = {"S": y0, "N": y1, "W": x0, "E": x1}[side]
         lo, hi = (x0, x1) if horizontal else (y0, y1)
-        pts = {lo, hi}
-        for poly in geom.rooms.values():
-            bx0, by0, bx1, by1 = poly.bounds
-            near = {"S": by0, "N": by1, "W": bx0, "E": bx1}[side]
-            if abs(near - edge) < 0.05:
-                pts |= {bx0, bx1} if horizontal else {by0, by1}
-        merged = []
-        for v in sorted(pts):
-            if lo - 0.01 <= v <= hi + 0.01 and (not merged or v - merged[-1] > 0.05):
-                merged.append(v)
-        if len(merged) > 2:
-            out.append(Chain(side, DIM_TIERS[0], merged))
+        for edge, spans in _facade_runs(geom.outline, side).items():
+            pts = {v for sp in spans for v in sp}
+            for poly in geom.rooms.values():
+                bx0, by0, bx1, by1 = poly.bounds
+                near = {"S": by0, "N": by1, "W": bx0, "E": bx1}[side]
+                if abs(near - edge) < 0.05:
+                    for v in ((bx0, bx1) if horizontal else (by0, by1)):
+                        if any(a - 0.01 <= v <= b + 0.01 for a, b in spans):
+                            pts.add(v)
+            merged = []
+            for v in sorted(pts):
+                if not merged or v - merged[-1] > 0.05:
+                    merged.append(v)
+            if len(merged) > 2:
+                out.append(Chain(side, DIM_TIERS[0], merged, edge, [edge] * len(merged)))
         if side in "SW":
-            out.append(Chain(side, DIM_TIERS[1], [lo, hi]))
+            outer = {"S": y0, "W": x0}[side]
+            out.append(Chain(side, DIM_TIERS[1], [lo, hi], outer, [_face(geom.outline, side, lo), _face(geom.outline, side, hi)]))
+    return out
+
+
+def _outdoor_prims(layout: Layout) -> list[Prim]:
+    """마당·데크 (layout.outdoor) — 실내와 다른 바닥색 + 점선 테두리 + 데크 널 줄 + '이름 (외부)' 라벨."""
+    out: list[Prim] = []
+    for room in layout.outdoor or []:
+        poly = room.shape()
+        if poly is None or poly.area < 0.5:
+            continue
+        kind = program_kind(room)
+        pts = list(poly.exterior.coords)[:-1]
+        fill = OUTDOOR_FILL.get(kind, OUTDOOR_FILL["yard"])
+        out.append(_poly(*pts, fill=fill, color=fill, lw=0.1, dxf_color=82))
+        out.append(_line(*pts, pts[0], color=OUTDOOR_INK, lw=0.7, dash=True, dxf_color=82))  # 점선 테두리
+        bx0, by0, bx1, by1 = poly.bounds
+        if kind == "deck":  # 데크 널 (0.6m 간격 가는 선)
+            k = 1
+            while by0 + 0.6 * k < by1 - 0.1:
+                seg = LineString([(bx0, by0 + 0.6 * k), (bx1, by0 + 0.6 * k)]).intersection(poly)
+                for g in getattr(seg, "geoms", [seg]):
+                    if not g.is_empty and g.length > 0.2:
+                        out.append(_line(*list(g.coords), color="#C9B48F", lw=0.35, dxf_color=42))
+                k += 1
+        c = poly.representative_point()
+        h = _clamp(min(bx1 - bx0, by1 - by0) / 6, 0.17, 0.34)
+        out.append(_text(c.x, c.y + h * 0.6, f"{room.label} (외부)", h, bold=True, color=OUTDOOR_INK))
+        out.append(_text(c.x, c.y - h * 0.6, f"{poly.area:.1f}㎡", h * 0.72, color=OUTDOOR_INK))
     return out
 
 
@@ -1175,7 +1262,8 @@ def plan_floor(layout: Layout, index: int = 0) -> FloorPlan:
         solid = [f.box for f in ctx.items if f.kind not in SOFT] + ctx.keep
         soft = [f.box for f in ctx.items if f.kind in SOFT]
         shrunk = inner.buffer(-0.06, join_style="mitre")
-        lab = _fit_label(room.id, room.label, area, shrunk if not shrunk.is_empty else inner, solid, soft)
+        name = room.label + (" (외부)" if kinds.get(room.id) == "court" else "")
+        lab = _fit_label(room.id, name, area, shrunk if not shrunk.is_empty else inner, solid, soft)
         if lab:
             labels.append(lab)
         else:
@@ -1193,7 +1281,12 @@ def plan_floor(layout: Layout, index: int = 0) -> FloorPlan:
             labels.append(_callout(room.id, room.label, area, (c.x, c.y), spots, taken, geom.outline, layout.wall.exterior))
 
     chains = _chains(geom)
+    outdoor = _outdoor_prims(layout) if floor.level == min(f.level for f in layout.floors) else []
     x0, y0, x1, y1 = geom.outline.bounds
+    for p in outdoor:  # 건물 앞 마당 등 외곽 밖 바깥 공간도 도면 틀 안에
+        if p.kind == "poly" and p.closed:
+            x0, y0 = min(x0, *(q[0] for q in p.pts)), min(y0, *(q[1] for q in p.pts))
+            x1, y1 = max(x1, *(q[0] for q in p.pts)), max(y1, *(q[1] for q in p.pts))
     t = layout.wall.exterior
     core = (x0 - DIM_TIERS[1] - 0.75, y0 - DIM_TIERS[1] - 0.6, x1 + DIM_TIERS[0] + 0.7, y1 + DIM_TIERS[0] + 0.7)
     total = sum(p.area for p in geom.rooms.values())
@@ -1205,27 +1298,24 @@ def plan_floor(layout: Layout, index: int = 0) -> FloorPlan:
     for p in anno:
         if p.kind == "text" and "{SCALE}" in p.text:
             p.text = p.text.replace("{SCALE}", f"축척 1:{scale} (A3)")
-    return FloorPlan(layout, index, geom, interiors, kinds, furniture, doors, windows, labels, chains, anno, frame, scale)
+    return FloorPlan(layout, index, geom, interiors, kinds, furniture, doors, windows, labels, chains, anno, frame, scale, outdoor)
 
 
 def _dim_prims(plan: FloorPlan) -> list[Prim]:
     """치수 연속선 (PNG 용) — 보조선·45° 눈금·mm 글자. 좁은 칸은 글자를 위로 엇갈려 올린다."""
-    x0, y0, x1, y1 = plan.geom.outline.bounds
     t = plan.layout.wall.exterior
     out: list[Prim] = []
     for ch in plan.chains:
         horizontal = ch.side in "SN"
         sign = -1 if ch.side in "SW" else 1
-        edge = {"S": y0, "N": y1, "W": x0, "E": x1}[ch.side]
-        line = edge + sign * ch.tier
-        face = edge + sign * (t / 2 + 0.12)
+        line = ch.edge + sign * ch.tier
 
         def pt(a, b):
             return (a, b) if horizontal else (b, a)
 
         out.append(_line(pt(ch.coords[0] - 0.15, line), pt(ch.coords[-1] + 0.15, line), color=DIM_INK, lw=0.45))
-        for v in ch.coords:
-            out.append(_line(pt(v, face), pt(v, line + sign * 0.12), color=DIM_INK, lw=0.3))
+        for v, f in zip(ch.coords, ch.faces or [ch.edge] * len(ch.coords)):
+            out.append(_line(pt(v, f + sign * (t / 2 + 0.12)), pt(v, line + sign * 0.12), color=DIM_INK, lw=0.3))
             out.append(_line(pt(v - 0.08, line - 0.08), pt(v + 0.08, line + 0.08), color=DIM_INK, lw=0.9))
         lift = False
         for a, b in zip(ch.coords, ch.coords[1:]):
@@ -1299,6 +1389,8 @@ def to_dxf(layout: Layout) -> bytes:
     for i, plan in enumerate(plans):
         geom, floor = plan.geom, plan.floor
         dx = i * step
+        for p in plan.outdoor:  # 마당·데크
+            _dxf_prim(msp, p, "A-SITE", dx)
         # 벽: 포셰 채움(HATCH) + 윤곽선
         hatch = msp.add_hatch(color=7, dxfattribs={"layer": "A-WALL"})
         for outer, holes in _rings(geom.walls):
@@ -1338,14 +1430,15 @@ def to_dxf(layout: Layout) -> bytes:
         override = {"dimtxt": DIM_TEXT * 0.75, "dimasz": 0.12, "dimblk": "ARCHTICK", "dimexe": 0.12, "dimexo": t / 2 + 0.12,
                     "dimlfac": 1000, "dimdec": 0, "dimtad": 1, "dimgap": 0.05, "dimtxsty": "KOREAN", "dimtih": 0, "dimtoh": 0}
         for ch in plan.chains:
-            edge = {"S": y0, "N": y1, "W": x0, "E": x1}[ch.side]
+            edge = ch.edge
             sign = -1 if ch.side in "SW" else 1
+            faces = ch.faces or [edge] * len(ch.coords)
             if ch.side in "SN":
-                pts = [(v + dx, edge) for v in ch.coords]
+                pts = [(v + dx, f) for v, f in zip(ch.coords, faces)]
                 base_pt = (ch.coords[0] + dx, edge + sign * ch.tier)
                 angle = 0
             else:
-                pts = [(edge + dx, v) for v in ch.coords]
+                pts = [(f + dx, v) for v, f in zip(ch.coords, faces)]
                 base_pt = (edge + sign * ch.tier + dx, ch.coords[0])
                 angle = 90
             msp.add_multi_point_linear_dim(base=base_pt, points=pts, angle=angle, dimstyle="EZDXF", override=override,
@@ -1454,6 +1547,7 @@ def _figure(layout: Layout, index: int) -> Figure:
     ax.set_aspect("equal")
     ax.axis("off")
     geom = plan.geom
+    _draw_prims(ax, plan.outdoor, 0.5)  # 마당·데크 (바깥)
     # 바닥 (구역별 옅은 색)
     fills = [(list(poly.exterior.coords), ROOM_COLORS.get(plan.kinds.get(rid, "other"), "#F7F7F7")) for rid, poly in geom.rooms.items()]
     ax.add_collection(PolyCollection([f[0] for f in fills], facecolors=[f[1] for f in fills], edgecolors="none", zorder=1))
