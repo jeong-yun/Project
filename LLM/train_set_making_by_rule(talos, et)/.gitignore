@@ -10,6 +10,7 @@
 08_dataset/
 09_features/
 10_review/
+11_supervised/
 logs/
 .run/
 __pycache__/

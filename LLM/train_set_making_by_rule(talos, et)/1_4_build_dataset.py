@@ -76,7 +76,8 @@ LOG_DIR = BASE_DIR / "logs"
 
 SEP = "|||"
 LABELS = {"anomalies", "normal"}
-FORMAT = 2              # 출력 형식 판 (바뀌면 다음 실행에서 모든 날짜를 다시 변환). 2 = 요청 줄 역슬래시 %5C, sk, 수정·삭제
+FORMAT = 3              # 출력 형식 판 (바뀌면 다음 실행에서 모든 날짜를 다시 변환). 2 = 요청 줄 역슬래시 %5C, sk, 수정·삭제
+                        # 3 = payload 가 '|' 로 끝나면 끝에 줄바꿈 (구분자 '|||' 와 붙어 label 이 '|anomalies' 로 읽히지 않게)
 EDITS_NAME = "edits.json"
 # 요청 줄에서 로그 표기(줄바꿈 '\n', 제어문자 '\x00')로 읽힐 글자 역슬래시
 AMBIG_BS = re.compile(r"\\(?=n|x(?:0[0-9b-f]|1[0-9a-f]|7f))")
@@ -401,6 +402,11 @@ def collect_events(results, rejected, st, mapping, rules, edits=None):
                 if n_addr and not same_verdict(http, new, label, rule.get("conditions", [])):
                     new, n_addr = http, -1                  # 바꾸면 룰 판정이 달라짐 → 원래대로 (표시만)
                 http = new
+            if http.rstrip("\n").endswith("|"):             # 끝 '|' 가 로그 구분자와 붙음 (…'|id||||anomalies) → 끝에 줄바꿈
+                fixed = end_newline(http)
+                if not same_verdict(http, fixed, label, rule.get("conditions", [])):
+                    rejected.append(dict(ref, reason="payload 끝 '|' - 줄바꿈을 붙이면 룰 판정이 달라짐")); continue
+                http = fixed
             ev.update(id=rid, label=label, attack_type=atype, http=http, addr_fixed=n_addr,
                       conditions=rule.get("conditions", []), seed=seed, sk=sk, edited="·".join(edited),
                       # 생성 단계의 검증 기록 (화면의 '학습데이터' 페이지가 label 사유·검증 결과로 보여 줌)
@@ -410,11 +416,25 @@ def collect_events(results, rejected, st, mapping, rules, edits=None):
     return events
 
 
+def end_newline(http):
+    """끝이 '|' 인 메시지: 본문이 있으면 본문 끝에 줄바꿈 하나 + Content-Length 다시 (헤더만이면 그대로).
+    one_line 이 '|' 뒤의 마지막 줄바꿈 하나는 남겨, 로그가 '…|\\n|||label' 이 된다."""
+    head, sep, body = http.partition("\n\n")
+    if not sep or not body.rstrip("\n"):
+        return http
+    body = body.rstrip("\n") + "\n"
+    head = re.sub(r"(?im)^(Content-Length:[ \t]*)\d+", lambda m: f"{m.group(1)}{len(body.encode('utf-8'))}", head, count=1)
+    return head + sep + body
+
+
 def one_line(http, st):
     """HTTP 메시지를 한 줄 payload 로. 줄바꿈 표기는 매핑 md 의 'payload 줄바꿈' (기본 두 글자 '\\n')."""
     nl = " " if st["payload 줄바꿈"].lower() == "space" else "\\n"
+    msg = http.rstrip("\n")
+    if msg.endswith("|"):                                   # 끝 '|' 가 구분자 '|||' 와 붙지 않게 줄바꿈 하나는 남김
+        msg += "\n"
     # 요청 줄의 글자 역슬래시 + n·제어문자 표기 → %5C (그대로 두면 로그를 읽을 때 줄바꿈으로 읽혀 요청 줄이 잘림)
-    head, sep, rest = http.rstrip("\n").partition("\n")
+    head, sep, rest = msg.partition("\n")
     s = AMBIG_BS.sub("%5C", head) + sep + rest
     # 줄바꿈 외 제어문자(바이너리 바이트)는 기존 학습 로그처럼 '\x00' 글자 표기로 (로그 한 줄이 깨지지 않게)
     s = re.sub(r"[\x00-\x09\x0b-\x1f\x7f]", lambda m: f"\\x{ord(m.group()):02x}", s)
