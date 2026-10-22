@@ -29,6 +29,7 @@ requests>=2.31
 
 # 설계 팀 (📐 평면도·3D) — 모두 CPU 로 동작 (GPU 불필요)
 shapely>=2.0,<3          # 방 겹침·외곽·면적 검증, 벽 형상
+ortools>=9.12,<10        # 방 배치 엔진 (CP-SAT 제약 풀이, CPU) — Windows·Python 3.11 휠 제공 (9.15 에서 검증)
 ezdxf>=1.3,<2            # DXF 쓰기·읽기
 matplotlib>=3.8,<4       # PNG·SVG 미리보기
 trimesh>=4.4,<6          # 3D 벽 세우기, GLB·OBJ·STL
