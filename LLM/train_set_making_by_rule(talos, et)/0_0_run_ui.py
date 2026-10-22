@@ -9,12 +9,15 @@
   2. 생성·수집            학습데이터 생성(건수 확인·파일럿·시작·중지·강제 중지, 3_0_run_generation.py)
                           수집 에이전트 시작·중지(매일 정해진 시각), 지금 1회 수집 (1_0_run_daily.py)
   3. 룰별 상태            상태 플래그·출처·검색으로 찾기, CSV 내려받기 (07_llm_output/_progress/rule_status.csv)
-  4. 학습데이터           08_dataset 의 IPS·WAF 로그를 날짜·장비별로 보기
-                          - log: 수집 형식 로그 줄 그대로
-                          - 데이터 프레임: index, payload, method, label, label 사유, 검증 결과
+  4. 신규 학습 데이터     08_dataset 의 IPS·WAF 신규 학습데이터를 날짜·장비별 표(데이터 프레임)로 보기, CSV 내려받기
+                          - index, payload, method, label, label 사유, 검증 결과, label 정합성, 탐지 피처
                             label 사유 = 어떤 룰의 어떤 조건을 만족/불일치했는지 + 생성 메모
                             검증 결과 = 생성 때 검증(코드 검사·검토 모델·LLM/증강) + 지금 현재 룰로 다시 확인한 결과
                                         (normal 은 다른 공격 룰·공격 흔적이 없는지도 확인)
+                          - 로그 형식 파일은 여기서 받지 않는다 → 6. 에서 버전을 확정할 때 기존 + 신규를 합쳐 만든다
+  5. 피처                 4.1 피처 설명과 켜진 줄 수
+  6. 기존 학습데이터와 비교  신규 학습데이터를 기준 버전(기존 학습데이터)과 비교해 등급(제거·A·B·C)을 매기고(5_5),
+                          선별해 버전(26 하반기 등)에 담고 확정하면 학습 파일·로그를 내보낸다 (5_7, 실행은 5_0_run_supervised.py)
 
 [동작]
   - 작업은 별도 프로세스로 실행한다 → 화면(이 프로그램)을 닫아도 작업은 계속된다. 다시 열면 상태를 이어서 보여 준다.
@@ -59,7 +62,8 @@ JOBS = {   # 이름: (스크립트, 잠금 이름)
     "generation": ("3_0_run_generation.py", "generation"),
     "collect": ("1_0_run_daily.py", "collect"),
     "agent": ("1_0_run_daily.py", "agent"),
-    "dataset": ("1_4_build_dataset.py", "dataset"),    # 학습데이터 화면의 '학습 로그에 반영' (수정·삭제 적용)
+    "dataset": ("1_4_build_dataset.py", "dataset"),    # 신규 학습 데이터 화면의 '학습 로그에 반영' (수정·삭제 적용)
+    "supervised": ("5_0_run_supervised.py", "supervised"),  # 6. 기존 학습데이터와 비교 (비교·버전 확정)
 }
 PROGRESS_FILE = BASE / "07_llm_output" / "_progress" / "progress.json"
 RULES_FILE = BASE / "07_llm_output" / "_progress" / "rule_status.jsonl"
@@ -141,8 +145,8 @@ def log_text(job, lines=150):
     rec = _ui_record(job)
     if rec.get("out") and (RT.RUN_DIR / rec["out"]).exists():
         return tail(RT.RUN_DIR / rec["out"], lines)
-    fallback = {"generation": "3_0_run_generation.log", "collect": "run_daily.log", "agent": "run_daily.log"}[job]
-    return tail(BASE / "logs" / fallback, lines)
+    fallback = {"generation": "3_0_run_generation.log", "collect": "run_daily.log", "agent": "run_daily.log"}.get(job)
+    return tail(BASE / "logs" / fallback, lines) if fallback else ""
 
 
 # ── 지금 실행 중인 생성의 진행률 (로그만 읽음) ──────────────────────────
@@ -667,12 +671,17 @@ def label_info(log_path):
     return _labels[lab]
 
 
-def matching(date, dev, label, rule, text, cons=""):
-    """조건에 맞는 줄 번호 목록 (0부터). 조건이 없으면 None (= 모든 줄). cons = label 정합성 (전체 검증 결과 필요)."""
+def matching(date, dev, label, rule, text, cons="", hold=""):
+    """조건에 맞는 줄 번호 목록 (0부터). 조건이 없으면 None (= 모든 줄). cons = label 정합성 (전체 검증 결과 필요).
+    hold = 보류 대상 (6. 선별의 보류 옵션과 같은 기준): rule = '정합 (룰 기준)' 공격, pyua = python-requests UA 정상."""
     path = _log_path(date, dev)
+    if hold == "rule":
+        label, cons = "anomalies", "RULE"
+    elif hold == "pyua":
+        label = "normal"
     if not (label or rule or text or cons):
         return None
-    key = (str(path), path.stat().st_mtime, label, rule, text, cons)
+    key = (str(path), path.stat().st_mtime, label, rule, text, cons, hold)
     if key in _filters:
         return _filters[key]
     n = len(line_index(path))
@@ -701,17 +710,21 @@ def matching(date, dev, label, rule, text, cons=""):
                 if t in line.lower():
                     hits.add(i)
         keep = [i for i in keep if i in hits]
+    if hold == "pyua":                                  # 헤더의 User-Agent 가 python-requests (로그의 줄바꿈은 글자 \n)
+        with open(path, "rb") as f:
+            hits = {i for i, line in enumerate(x for x in f if x.strip()) if PY_UA_RE.search(line)}
+        keep = [i for i in keep if i in hits]
     if len(_filters) > 16:
         _filters.pop(next(iter(_filters)))
     _filters[key] = keep
     return keep
 
 
-def select_rows(dates, dev, label, rule, text, offset, limit, cons=""):
+def select_rows(dates, dev, label, rule, text, offset, limit, cons="", hold=""):
     """여러 날짜를 이어 붙인 것처럼 페이지를 고른다 → (전체 수, [(날짜, 그 날짜의 줄 번호, 전체 index)])."""
     parts = []
     for d in dates:
-        m = matching(d, dev, label, rule, text, cons)
+        m = matching(d, dev, label, rule, text, cons, hold)
         parts.append((d, m, len(line_index(_log_path(d, dev))) if m is None else len(m)))
     total = sum(p[2] for p in parts)
     picked, start = [], 0
@@ -761,6 +774,17 @@ TRACE_NAMES = {"sql": "SQL 인젝션 흔적", "xss": "XSS 흔적", "cmd": "명�
                "shellshock": "Shellshock 흔적", "sensitive": "민감 파일 접근", "double_enc": "기호 이중 URL 인코딩",
                "unicode_enc": "%u 인코딩", "ctrl_bytes": "제어문자·NULL 바이트", "scanner_ua": "스캐너·공격 도구 UA"}
 CONS = {"OK": "정합", "RULE": "정합 (룰 기준)", "CHECK": "확인 필요", "BAD": "불일치"}
+HOLD = {"rule": "'정합 (룰 기준)' 공격", "pyua": "python-requests UA 정상"}     # 6. 선별의 보류 옵션 대상
+PY_UA_RE = re.compile(rb"\\nuser-agent:[ \t]*python-requests", re.I)          # 5.5 와 같은 기준 (헤더 줄 시작)
+
+
+def split_log(line):
+    """학습 로그 한 줄 → 필드 목록. 8필드면 앞 6필드는 앞에서, label 은 마지막 '|||' 뒤로 읽는다
+    (payload 가 '|' 로 끝나면 '…|id||||anomalies' 처럼 구분자와 붙어, 앞에서만 나누면 label 이 '|anomalies' 가 됨)."""
+    head = line.split("|||", 6)
+    if len(head) == 7 and "|||" in head[6]:
+        return head[:6] + head[6].rsplit("|||", 1)
+    return line.split("|||")
 _feat = {"in_dir": None, "F": None, "matcher": None, "types": {}, "note": ""}
 
 
@@ -964,7 +988,7 @@ GROUP_DOC = [
     ("공격 룰", "ra_", "신뢰할 수 있는 공격 룰(정보성 룰, 기존 normal 에도 걸리는 모호한 룰 제외)과 대조해 "
                       "공격 유형별로 모든 조건이 일치한 룰 수. 조건 일부만 맞거나 확인 못 한 조건이 있으면 세지 않는다."),
     ("개별 룰", "r_", "특정 룰 하나의 탐지 여부와 그 룰의 정규식 조건별 일치 (4_0 --rules 로 지정). "
-                     "학습데이터 화면에서는 그 줄을 만든 룰로 계산한다."),
+                     "신규 학습 데이터 화면에서는 그 줄을 만든 룰로 계산한다."),
 ]
 R_ALL, R_RE = "r_<룰>_all", "r_<룰>_re<n>"
 
@@ -1223,7 +1247,7 @@ def _verify_work(date, dev, mode, path, v):
                 idx = list(range(s, min(n, s + 2000)))
                 metas = read_label_lines(li[4], idx) if li else [{}] * len(idx)
                 for line, meta in zip(read_lines(path, idx), metas):
-                    f = line.split("|||")
+                    f = split_log(line)
                     todo += _row_key(*((f[6], f[7]) if len(f) == 8 else (line, "")), meta) not in known
             v["todo"] = todo
         srcs = [open(p, "rb") for p in files]
@@ -1240,7 +1264,7 @@ def _verify_work(date, dev, mode, path, v):
             metas = read_label_lines(li[4], idx) if li else [{}] * len(idx)
             olds = read_lines(frame, idx) if aligned else None
             for k, (line, meta) in enumerate(zip(read_lines(path, idx), metas)):
-                f = line.split("|||")
+                f = split_log(line)
                 payload, lab = (f[6], f[7]) if len(f) == 8 else (line, "")
                 key = _row_key(payload, lab, meta)
                 if olds is not None or key in known:    # 이미 확인한 줄: 이 장비 줄 순서대로, 아니면 내용이 같은 줄
@@ -1478,7 +1502,7 @@ def _line_meta(date, dev, line):
 def check_edit(b):
     """고친 label·payload 를 학습 로그와 똑같이 한 줄로 만들어 다시 검증 (저장하지 않음)."""
     text, meta = _line_meta(b.get("date", ""), b.get("dev", "ips"), int(b.get("line", -1)))
-    f = text.split("|||")
+    f = split_log(text)
     label = b.get("label") if b.get("label") in ("anomalies", "normal") else (f[7] if len(f) == 8 else "")
     payload = f[6] if len(f) == 8 else text
     if b.get("payload") is not None:
@@ -1597,7 +1621,7 @@ def start_rebuild(date):
 
 
 def data_query(q):
-    """학습데이터 화면의 조건 → (날짜 목록, 장비, label, 룰 id, payload 검색어, label 정합성)."""
+    """신규 학습 데이터 화면의 조건 → (날짜 목록, 장비, label, 룰 id, payload 검색어, label 정합성, 보류 대상)."""
     dev, date = _q(q, "dev", "ips"), _q(q, "date")
     dates = [d["date"] for d in dataset_dates()]
     if date and date != "all":
@@ -1605,9 +1629,11 @@ def data_query(q):
             raise ValueError("date")
         dates = [date]
     label, rule, text, cons = _q(q, "label"), _q(q, "rule").strip(), _q(q, "q").strip(), _q(q, "cons")
-    if dev not in ("ips", "waf") or label not in ("", "anomalies", "normal") or cons not in ("", *CONS):
-        raise ValueError("dev/label/cons")
-    return dates, dev, label, rule, text, cons
+    hold = _q(q, "hold")
+    if (dev not in ("ips", "waf") or label not in ("", "anomalies", "normal") or cons not in ("", *CONS)
+            or hold not in ("", *HOLD)):
+        raise ValueError("dev/label/cons/hold")
+    return dates, dev, label, rule, text, cons, hold
 
 
 FRAME_COLS = ["index", "payload", "method", "label", "label 사유", "검증 결과", "label 정합성", "label 정합성 사유",
@@ -1625,13 +1651,14 @@ def frame_csv(q):
     """데이터 프레임 내려받기: 조건에 맞는 모든 줄을 화면의 열 그대로 CSV(UTF-8 BOM, 엑셀용)로.
     → (줄 수, 파일 이름, 바이트 조각 생성기). '전체 검증'의 저장된 줄별 결과가 있으면 그것을 쓰고(빠름),
     없으면 줄마다 다시 확인한다(1천 줄에 약 15초). 200줄씩 만들어 바로 보낸다."""
-    dates, dev, label, rule, text, cons = data_query(q)
+    dates, dev, label, rule, text, cons, hold = data_query(q)
     parts = []
     for d in dates:                                     # 조건 오류(예: 전체 검증 전 정합성 필터)는 보내기 전에
-        m = matching(d, dev, label, rule, text, cons)
+        m = matching(d, dev, label, rule, text, cons, hold)
         parts.append((d, m, len(line_index(_log_path(d, dev))) if m is None else len(m)))
     total = sum(n for _, _, n in parts)
-    name = "_".join([dev, dates[0] if len(dates) == 1 else "all", "frame"] + [x for x in (label, cons) if x]) + ".csv"
+    name = "_".join([dev, dates[0] if len(dates) == 1 else "all", "frame"] +
+                    [x for x in (label, cons, hold and f"hold-{hold}") if x]) + ".csv"
 
     def chunks():
         buf = io.StringIO()
@@ -1650,7 +1677,7 @@ def frame_csv(q):
                 buf.seek(0)
                 buf.truncate()
                 for k, (line, meta) in enumerate(zip(read_lines(path, idx), metas)):
-                    f = line.split("|||")
+                    f = split_log(line)
                     payload, method, lab = (f[6], f[5], f[7]) if len(f) == 8 else (line, "", "")
                     try:
                         a = saved[k] if saved else analyze(payload, lab, meta)
@@ -1670,10 +1697,10 @@ def frame_csv(q):
 
 
 def data_rows(q):
-    view = _q(q, "view", "frame")
-    dates, dev, label, rule, text, cons = data_query(q)
-    offset, limit = page_args(q, 500 if view == "log" else 100)
-    total, picked = select_rows(dates, dev, label, rule, text, offset, limit, cons)
+    """신규 학습 데이터 표 한 페이지 (데이터 프레임 열 + 수정·삭제 상태)."""
+    dates, dev, label, rule, text, cons, hold = data_query(q)
+    offset, limit = page_args(q, 100)
+    total, picked = select_rows(dates, dev, label, rule, text, offset, limit, cons, hold)
     rows = []
     by_date = {}
     for d, i, g in picked:
@@ -1681,18 +1708,13 @@ def data_rows(q):
     for d, items in by_date.items():
         path = _log_path(d, dev)
         lines = read_lines(path, [i for i, _ in items])
-        metas = [{}] * len(items)
         li = label_info(path)
-        if view == "frame" and li:
-            metas = read_label_lines(li[4], [i for i, _ in items])
-        cache = frame_cache(d, dev) if view == "frame" else None
+        metas = read_label_lines(li[4], [i for i, _ in items]) if li else [{}] * len(items)
+        cache = frame_cache(d, dev)
         saved = cached_rows(cache, [i for i, _ in items]) if cache else None    # '전체 검증' 결과가 있으면 그대로
-        edits = read_edits(d) if view == "frame" else {}
+        edits = read_edits(d)
         for k, ((i, g), line, meta) in enumerate(zip(items, lines, metas)):
-            if view == "log":
-                rows.append({"index": g, "date": d, "line": line})
-                continue
-            f = line.split("|||")
+            f = split_log(line)
             payload, method, lab = (f[6], f[5], f[7]) if len(f) == 8 else (line, "", "")
             a = saved[k] if saved else analyze(payload, lab, meta)
             e = edits.get(meta.get("sk")) or {}
@@ -1731,6 +1753,196 @@ def read_label_lines(lab_path, idx_list):
     return out
 
 
+# ── 6. 기존 학습데이터와 비교 (5.x: 비교·확정은 5_0_run_supervised.py 별도 프로세스, 화면은 결과·선별만) ──
+# 선별 미리 보기는 확정(5.7 finalize)과 같은 select() 를 쓴다 → 사람이 확인한 수 그대로 내보냄.
+
+_sup = {"C": None, "V": None, "tables": {}}
+
+
+def sup_mods():
+    with _lock:
+        if _sup["C"] is None:
+            _sup["C"] = _load("sup_common_ui", "5_0a_common.py")
+            _sup["V"] = _load("sup_versions_ui", "5_7_versions.py")
+    return _sup["C"], _sup["V"]
+
+
+def sup_table(base, dev):
+    """비교 결과 표 (5.5 <장비>_table.json, 파일이 바뀌면 다시 읽음). 없으면 None."""
+    C, _ = sup_mods()
+    p = C.compared_files(base, dev)["table"]
+    try:
+        mt = p.stat().st_mtime
+    except OSError:
+        return None
+    hit = _sup["tables"].get((base, dev))
+    if hit and hit[0] == mt:
+        return hit[1]
+    t = json.loads(p.read_text(encoding="utf-8"))
+    with _lock:
+        _sup["tables"] = {k: x for k, x in _sup["tables"].items() if k[0] == base}     # 지금 기준 버전 것만 메모리에
+        _sup["tables"][(base, dev)] = (mt, t)
+    return t
+
+
+def _sup_base(q_base):
+    C, _ = sup_mods()
+    v = C.load_versions()
+    finals = [x["name"] for x in v["versions"] if x.get("status") == "final"]
+    if q_base and q_base not in finals:
+        raise ValueError("기준 버전")
+    return v, finals, (q_base or (finals[-1] if finals else ""))
+
+
+def sup_state(q_base=""):
+    """화면 6: 버전 목록, 실행 상태, 넣을 것, 장비별 비교 결과 상태(그 뒤 바뀐 날짜), 새로 비교할 양 추정."""
+    C, V = sup_mods()
+    v, finals, base = _sup_base(q_base)
+    timing = C.read_json(C.CACHE / "timing.json", {})
+    rows_by_date = {d["date"]: d["events"] for d in dataset_dates()}
+    out = {"versions": V.version_rows(), "finals": finals, "base": base, "job": job_state("supervised"),
+           "status": RT.read_status("supervised"), "problems": C.setup_problems(v, base or None),
+           "feature_code": v.get("feature_code"), "defaults": C.default_sources(), "dates": sorted(rows_by_date),
+           "disk_free_gb": round(C.disk_free_gb(), 1), "timing": timing, "dev": {},
+           "options": V.DEFAULT_OPTIONS, "option_text": V.OPTION_TEXT, "grades": C.GRADE_TEXT}
+    for dev in C.DEVICES:
+        f = C.compared_files(base, dev) if base else None
+        s = C.read_json(f["summary"], None) if f else None
+        d = {"has": bool(s), "total": sum(rows_by_date.values())}
+        prev = {}
+        if s:
+            ls = s.get("log_stats") or {}
+            d.update(created_at=s.get("created_at"), rows=s.get("rows"), snapshot=s.get("snapshot"), mode=s.get("mode"),
+                     changed=[x for x, st in ls.items() if C.log_stat(x, dev) != st],
+                     new_dates=[x for x in rows_by_date if x not in ls and C.log_path(x, dev)])
+            t = (s.get("tables") or {}).get("날짜별") or {}
+            k = (t.get("cols") or [""]).index("합계") if "합계" in (t.get("cols") or []) else None
+            prev = {r[0]: r[k] for r in t.get("rows", [])} if k is not None else {}
+            d["est_new"] = sum(n if x in d["new_dates"] else max(0, n - prev.get(x, 0)) for x, n in rows_by_date.items()
+                               if x in d["new_dates"] or x in d["changed"])
+        else:
+            d["est_new"] = d["total"]
+        cache = C.CACHE / "base" / f"{base}_{dev}.parquet"
+        d["base_cached"] = cache.exists()
+        d["models_cached"] = len(list((C.CACHE / "models" / base).glob(f"{dev}_*.joblib"))) >= 4 if base else False
+        d["rate"] = timing.get(f"feat_rows_per_sec_{dev}")
+        out["dev"][dev] = d
+    return out
+
+
+def sup_summary(q):
+    C, _ = sup_mods()
+    _, _, base = _sup_base(_q(q, "base"))
+    dev = _q(q, "dev", "ips")
+    if dev not in C.DEVICES:
+        raise ValueError("dev")
+    s = C.read_json(C.compared_files(base, dev)["summary"], None) if base else None
+    return s or {}
+
+
+def sup_preview(b):
+    C, V = sup_mods()
+    _, _, base = _sup_base(b.get("base", ""))
+    dev = b.get("dev", "ips")
+    if dev not in C.DEVICES:
+        raise ValueError("dev")
+    t = sup_table(base, dev)
+    if t is None:
+        return {"none": True}
+    return V.preview(t, b.get("conditions"), b.get("options"), b.get("overrides"), b.get("view", ""))
+
+
+def sup_save(b):
+    C, V = sup_mods()
+    _, _, base = _sup_base(b.get("base", ""))
+    if job_state("supervised")["running"]:
+        raise ValueError("비교·확정이 도는 중입니다 - 끝난 뒤에 담으세요")
+    tables = {}
+    for dev in C.DEVICES:
+        t = sup_table(base, dev)
+        if t is None:
+            raise ValueError(f"{dev.upper()} 비교 결과가 없습니다 - IPS·WAF 둘 다 비교한 뒤 담으세요")
+        tables[dev] = t
+    return V.save_draft(b.get("name", ""), base, b.get("conditions"), b.get("options"), b.get("overrides"), tables)
+
+
+def sup_start(kind, b):
+    """비교 또는 확정을 별도 프로세스로 시작."""
+    C, V = sup_mods()
+    if job_state("supervised")["running"]:
+        raise ValueError("비교·확정이 이미 도는 중입니다")
+    if kind == "compare":
+        v, _, base = _sup_base(b.get("base", ""))
+        devs = [d for d in (b.get("devs") or list(C.DEVICES)) if d in C.DEVICES]
+        problems = C.setup_problems(v, base or None, devs)
+        if not base or problems:
+            raise ValueError("; ".join(problems) or "기준 버전이 없습니다")
+        args = ["compare", "--base", base, "--mode", "all" if b.get("mode") == "all" else "new"]
+        for d in devs:
+            args += ["--dev", d]
+        if b.get("include_compared"):
+            args.append("--include-compared")
+    else:
+        v = C.load_versions()
+        name = b.get("name", "")
+        if C.get_version(v, name).get("status") != "draft":
+            raise ValueError("초안만 확정할 수 있습니다")
+        args = ["finalize", "--version", name]
+    RT.clear_stop("supervised")
+    return {"pid": spawn("supervised", args), "args": args}
+
+
+def sup_candidates_csv(q):
+    """선별 후보 CSV (사람 검토용): 조건·옵션(spec JSON 또는 저장한 초안) 그대로 고른 샘플 + payload.
+    view = rule | pyua 면 고른 샘플 대신 그 보류 대상 전부 (지금 선별에 들어갔는지 '선별' 열로)."""
+    C, V = sup_mods()
+    v, _, base = _sup_base(_q(q, "base"))
+    dev, view = _q(q, "dev", "ips"), _q(q, "view")
+    if dev not in C.DEVICES or view not in ("", *V.HOLD):
+        raise ValueError("dev/view")
+    if _q(q, "name"):
+        spec = C.get_version(v, _q(q, "name"))
+        base = spec.get("base") or base
+    else:
+        spec = json.loads(_q(q, "spec", "{}") or "{}")
+    t = sup_table(base, dev)
+    if t is None:
+        raise ValueError("비교 결과가 없습니다")
+    sel, cand, _ = V.select(t, spec.get("conditions"), spec.get("options"), spec.get("overrides"))
+    on = set(sel) if view else None
+    rows = V.hold_rows(t, cand, view) if view else sel
+    cons_txt = {"0": "검증 전", "1": "정합", "2": "정합 (룰 기준)", "3": "확인 필요", "4": "불일치"}
+    name = (f"{dev}_{base}_보류_{'정합룰기준' if view == 'rule' else 'python-requests'}_{len(rows)}.csv" if view
+            else f"{dev}_{base}_후보_{len(rows)}.csv").replace(" ", "_")
+
+    def chunks():
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["date", "index", "rule_id", "공격 유형", "출처", "label", "등급", "근거", "label 정합성", "method", "payload"]
+                   + (["선별"] if view else []))
+        yield ("﻿" + buf.getvalue()).encode("utf-8")
+        for s in range(0, len(rows), 500):
+            part = rows[s:s + 500]
+            by_date = {}
+            for i in part:
+                by_date.setdefault(t["dates"][t["date"][i]], []).append(i)
+            buf.seek(0)
+            buf.truncate()
+            for d, idx in by_date.items():
+                lines = read_lines(_log_path(d, dev), [t["line"][i] for i in idx])
+                for i, line in zip(idx, lines):
+                    f = split_log(line)
+                    fl = t["fl"][i]
+                    why = ", ".join(x for x, bit in (("새 패턴", 32), ("RF 틀림", 64), ("LGBM 틀림", 128),
+                                                     ("기준엔 반대 라벨만", 4), ("python-requests", 1)) if fl & bit)
+                    w.writerow([d, t["line"][i], t["rules"][t["rule"][i]], t["types"][t["type"][i]],
+                                t["sources"][t["src"][i]], "anomalies" if t["y"][i] else "normal", C.GRADES[t["g"][i]],
+                                why, cons_txt.get(t["cons"][i], ""), _cell(f[5] if len(f) == 8 else ""),
+                                _cell(f[6] if len(f) == 8 else line)] + (["들어감" if i in on else "빠짐"] if view else []))
+            yield buf.getvalue().encode("utf-8")
+    return name, chunks()
+
+
 # ── 공통 ────────────────────────────────────────────────────────────────
 
 def input_dates():
@@ -1761,7 +1973,7 @@ def state():
             "agent": dict(job_state("agent"), status=RT.read_status("agent")),
             "last_collect": RT.read_status("collect"), "input_dates": input_dates(),
             "models": settings_summary(), "settings": dict(zip(("generate", "review", "overlap"), parallel())),
-            "step_seconds": step_summary()}
+            "step_seconds": step_summary(), "supervised": job_state("supervised")}
 
 
 # ── 요청 처리 ────────────────────────────────────────────────────────────
@@ -1829,6 +2041,25 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, verify_summary(_q(q, "date"), _q(q, "dev", "ips")))
             if u.path == "/api/data/edits":
                 return self._send(200, edits_summary(_q(q, "date")))
+            if u.path == "/api/sup/state":
+                return self._send(200, sup_state(_q(q, "base")))
+            if u.path == "/api/sup/summary":
+                return self._send(200, sup_summary(q))
+            if u.path == "/download/sup/report":
+                C, _ = sup_mods()
+                _, _, base = _sup_base(_q(q, "base"))
+                dev = _q(q, "dev", "ips")
+                p = C.compared_files(base, dev)["report"] if base and dev in C.DEVICES else None
+                if not p or not p.exists():
+                    return self._send(404, {"error": "엑셀이 없습니다"})
+                from urllib.parse import quote
+                return self._send(200, p.read_bytes(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                  {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(f'{dev}_{base}_비교.xlsx')}"})
+            if u.path == "/download/sup/candidates":
+                from urllib.parse import quote
+                name, chunks = sup_candidates_csv(q)
+                return self._stream(chunks, "text/csv; charset=utf-8",
+                                    {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
             if u.path == "/api/features":
                 dev = _q(q, "dev", "ips")
                 if dev not in ("ips", "waf"):
@@ -1837,10 +2068,6 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/download/rule_status.csv" and CSV_FILE.exists():
                 return self._send(200, CSV_FILE.read_bytes(), "text/csv; charset=utf-8",
                                   {"Content-Disposition": "attachment; filename=rule_status.csv"})
-            if u.path == "/download/dataset":
-                path = _log_path(_q(q, "date"), _q(q, "dev", "ips"))
-                return self._send(200, path.read_bytes(), "text/plain; charset=utf-8",
-                                  {"Content-Disposition": f"attachment; filename={path.name}"})
             if u.path == "/download/frame":             # 데이터 프레임 (화면의 열 그대로, 조건에 맞는 모든 줄)
                 total, name, chunks = frame_csv(q)
                 return self._stream(chunks, "text/csv; charset=utf-8",
@@ -1876,6 +2103,25 @@ class Handler(BaseHTTPRequestHandler):
             return 200, delete_bad(b.get("date", ""), b.get("dev", "ips"))
         if path == "/api/data/rebuild":
             return 200, start_rebuild(b.get("date", ""))
+        if path == "/api/sup/compare":
+            return 200, sup_start("compare", b)
+        if path == "/api/sup/finalize":
+            return 200, sup_start("finalize", b)
+        if path == "/api/sup/stop":
+            if not job_state("supervised")["running"]:
+                return 409, {"error": "실행 중인 비교·확정이 없습니다"}
+            RT.request_stop("supervised")
+            return 200, {"stop_requested": True}
+        if path == "/api/sup/preview":
+            return 200, sup_preview(b)
+        if path == "/api/sup/save":
+            return 200, sup_save(b)
+        if path == "/api/sup/delete":
+            sup_mods()[1].delete_draft(b.get("name", ""))
+            return 200, {"deleted": True}
+        if path == "/api/sup/register":
+            sup_mods()[1].register_base(b.get("name", ""), b.get("tag", ""), b.get("files"), b.get("feature_code"))
+            return 200, {"registered": True}
         if path in ("/api/data/verify", "/api/data/verify/stop"):
             dev, mode = b.get("dev", "ips"), b.get("mode", "all")
             dates = [d["date"] for d in dataset_dates()]
@@ -1977,7 +2223,6 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
 .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:13px}.kv b{font-weight:600;color:var(--muted)}
 details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-top:8px}.msg{font-size:13px;margin-top:8px;min-height:18px}
 .payload{font:12px/1.45 Consolas,monospace;white-space:pre-wrap;word-break:break-all;max-height:10.5em;overflow:auto;background:var(--bg);border-radius:6px;padding:6px 8px;min-width:280px}
-.logline{font:12px/1.5 Consolas,monospace;white-space:pre-wrap;word-break:break-all;padding:4px 6px;border-bottom:1px solid var(--line)}.logline .ix{color:var(--muted);margin-right:8px}
 .chk{font-size:12px;line-height:1.5;min-width:220px}td.method{min-width:130px}.chk .ok{color:var(--ok)}.chk .warn{color:var(--warn)}.chk .bad{color:var(--bad);font-weight:600}
 tr.lv-bad td{background:rgba(214,69,69,.06)}.reason{font-size:12.5px;min-width:240px}
 .pager{display:flex;gap:8px;align-items:center;margin-top:10px}
@@ -1998,10 +2243,13 @@ code.fn{cursor:help;border-bottom:1px dotted var(--muted)}
 .tipbox[hidden]{display:none}.tipbox .t{font-weight:600;margin-bottom:2px}
 tr.hl td{background:rgba(47,111,222,.12)}.fgroup td{background:var(--bg);font-weight:600}.nw{white-space:nowrap}
 .pat{font:11.5px Consolas,monospace;word-break:break-all;white-space:pre-wrap;max-height:9em;overflow:auto;background:var(--bg);border-radius:6px;padding:4px 6px;min-width:220px}
+label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var(--fg)}.g0{background:var(--chip);color:var(--muted)}.g1{background:#fde0e0;color:#a32424}.g2{background:#dde8fb;color:#1f4fa3}.g3{background:#d7f3e3;color:#13633a}
+.hold{display:flex;gap:6px 18px;flex-wrap:wrap;margin-top:8px;font-size:12.5px}.hold a,a[data-hv]{cursor:pointer;color:var(--accent);text-decoration:underline}
+.tw{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}.tw>div{min-width:260px;flex:1}.tw h4{margin:10px 0 4px;font-size:13px}table.mini td,table.mini th{padding:3px 6px}.ck{display:inline-flex;gap:3px;align-items:center;margin-right:8px}
 @media (max-width:480px){main{padding:10px}.grid{grid-template-columns:1fr}}
 </style></head><body>
 <header><div class="top"><h1>Snort 룰 학습데이터</h1><span class="sub" id="hdr"></span></div>
-<nav><a href="#/" data-p="progress">1. 진행 현황</a><a href="#/run" data-p="run">2. 생성·수집<span class="run" id="navRun" hidden></span><span class="navpct" id="navPct"></span></a><a href="#/rules" data-p="rules">3. 룰별 상태</a><a href="#/data" data-p="data">4. 학습데이터</a><a href="#/features" data-p="features">5. 피처</a></nav></header>
+<nav><a href="#/" data-p="progress">1. 진행 현황</a><a href="#/run" data-p="run">2. 생성·수집<span class="run" id="navRun" hidden></span><span class="navpct" id="navPct"></span></a><a href="#/rules" data-p="rules">3. 룰별 상태</a><a href="#/data" data-p="data">4. 신규 학습 데이터</a><a href="#/features" data-p="features">5. 피처</a><a href="#/sup" data-p="sup">6. 기존 학습데이터와 비교<span class="run" id="navSup" hidden></span></a></nav></header>
 <main>
 <!-- 1. 진행 현황 -->
 <section class="page" id="p-progress">
@@ -2045,17 +2293,17 @@ tr.hl td{background:rgba(47,111,222,.12)}.fgroup td{background:var(--bg);font-we
  <div style="overflow-x:auto"><table style="margin-top:10px"><thead><tr><th>룰 id</th><th>상태</th><th>공격 유형</th><th>룰 이름</th><th>날짜 폴더 / 요청</th><th class="n">anomalies</th><th class="n">normal</th><th class="n">기존</th></tr></thead><tbody id="rBody"></tbody></table></div>
  <div class="pager"><button id="rPrev">이전</button><button id="rNext">다음</button></div></div></section>
 
-<!-- 4. 학습데이터 -->
-<section class="page" id="p-data"><div class="card"><h2>학습데이터 <span class="muted" style="font-weight:400" id="dSum"></span></h2>
+<!-- 4. 신규 학습 데이터 -->
+<section class="page" id="p-data"><div class="card"><h2>신규 학습 데이터 <span class="muted" style="font-weight:400" id="dSum"></span></h2>
  <div class="row">
-  <label>보기<span class="seg"><button id="vLog">log</button><button id="vFrame" class="on">데이터 프레임</button></span></label>
   <label>날짜<select id="dDate"></select></label>
   <label>장비<select id="dDev"><option value="ips">IPS</option><option value="waf">WAF</option></select></label>
   <label>label<select id="dLabel"><option value="">전체</option><option>anomalies</option><option>normal</option></select></label>
   <label>룰 id<input id="dRule" placeholder="예: et:1:2001044" style="width:150px"></label>
   <label>payload 검색<input id="dQ" style="width:200px"></label>
   <label>label 정합성<select id="dCons"><option value="">전체</option><option value="OK">정합</option><option value="RULE">정합 (룰 기준)</option><option value="CHECK">확인 필요</option><option value="BAD">불일치</option></select></label>
-  <button id="dGo">조회</button><button id="dVerifyNew">검증 안 한 데이터만 검증</button><button id="dVerify">전체 검증</button><button class="danger" id="dVerifyStop" style="display:none">검증 중지</button><a id="dDown" style="font-size:13px;align-self:center">로그 내려받기</a>
+  <label>보류 대상<select id="dHold"><option value="">전체</option><option value="rule">'정합 (룰 기준)' 공격</option><option value="pyua">python-requests UA 정상</option></select></label>
+  <button id="dGo">조회</button><button id="dVerifyNew">검증 안 한 데이터만 검증</button><button id="dVerify">전체 검증</button><button class="danger" id="dVerifyStop" style="display:none">검증 중지</button><a id="dDown" style="font-size:13px;align-self:center">CSV 내려받기</a>
  </div>
  <div class="vsum" id="dVsum"></div>
  <div class="vsum" id="dEdits"></div><div id="dEditList" style="display:none"></div>
@@ -2075,11 +2323,50 @@ tr.hl td{background:rgba(47,111,222,.12)}.fgroup td{background:var(--bg);font-we
  <div class="row" style="margin-top:12px">
   <label>묶음<select id="fGroup"><option value="">전체</option></select></label>
   <label>검색 (이름·설명·패턴)<input id="fQ" style="width:240px"></label>
-  <label>켜진 줄 수 기준<select id="fDev"><option value="ips">IPS 학습데이터</option><option value="waf">WAF 학습데이터</option></select></label>
+  <label>켜진 줄 수 기준<select id="fDev"><option value="ips">IPS 신규 학습 데이터</option><option value="waf">WAF 신규 학습 데이터</option></select></label>
   <button id="fCount">켜진 줄 수 다시 계산</button><span class="muted" style="align-self:center;font-size:12.5px" id="fCountMsg"></span>
  </div>
  <div style="margin-top:10px;overflow-x:auto"><table><thead><tr><th>피처</th><th>이름</th><th>무엇을 보는지</th><th>예</th><th>값</th><th class="n">켜진 줄<br>anomalies</th><th class="n">켜진 줄<br>normal</th><th class="n">켜졌을 때<br>anomalies 비율</th><th>패턴 (4.1 코드 그대로)</th></tr></thead><tbody id="fBody"></tbody></table></div>
 </div></section>
+
+<!-- 6. 기존 학습데이터와 비교 -->
+<section class="page" id="p-sup">
+<div class="card"><h2>기존 학습데이터와 비교 <span class="muted" style="font-weight:400" id="sHdr"></span></h2>
+ <div class="muted" style="font-size:13px">신규 학습 데이터(4.)를 <b>기준 버전</b>(기존 학습데이터)과 비교해 샘플마다 등급을 매기고 → 학습에 넣을 샘플을 골라 <b>버전</b>(예: 26 하반기)에 담은 뒤 → 사람이 확인하고 <b>확정</b>하면 기존 + 신규 학습 파일(CSV)·로그를 만듭니다. 다음 버전(27 상반기)은 확정한 버전을 기준으로 다시 비교하고, 이미 비교한 샘플은 빼고 새로 들어온 샘플만 봅니다.<br>
+ <b>등급</b> (앞이 우선) <span class="chip g0">제거</span> 중복(숫자만 다른 것 포함) 또는 기준에 같은 payload · <span class="chip g1">A</span> 기준 모델(기준 데이터로 학습한 RF·LGBM) 중 하나라도 틀림 = 기준 데이터에 부족한 데이터 · <span class="chip g2">B</span> 기준에 없던 피처 패턴(모델은 맞힘) · <span class="chip g3">C</span> 이미 학습된 패턴</div>
+ <div id="sSetup"></div>
+ <div class="row" style="margin-top:10px">
+  <label>기준 버전<select id="sBase"></select></label>
+  <label class="inl"><input type="checkbox" id="sInc"> 확정된 버전에서 이미 비교한 데이터도 다시 비교</label>
+  <button class="primary" id="sRunNew">새로 생긴 데이터만 비교</button><button id="sRunAll">전체 다시 비교</button><button class="danger" id="sStop" style="display:none">중지</button>
+ </div>
+ <div class="est" id="sEst"></div>
+ <div id="sJob" style="margin-top:8px"></div>
+ <details><summary>실행 로그</summary><pre id="sLog"></pre></details></div>
+<div class="card"><h2>비교 결과 <span class="seg" id="sDevSeg" style="vertical-align:middle;margin-left:6px"><button data-d="ips" class="on">IPS</button><button data-d="waf">WAF</button></span> <span class="muted" style="font-weight:400" id="sResHdr"></span><a id="sXlsx" style="float:right;font-size:13px;font-weight:400">엑셀 받기</a></h2>
+ <div id="sRes" class="muted">비교 결과가 없습니다.</div></div>
+<div class="card"><h2>선별 → 버전 후보 <span class="muted" style="font-weight:400" id="sSelHdr"></span></h2>
+ <div class="muted" style="font-size:12.5px">기본값: <b>A 전부 + B·C 패턴당 20개</b> (제거는 항상 뺌, 패턴이 넘치면 룰을 돌아가며 고름). 바꾸면 위에서 고른 장비 기준으로 바로 다시 셉니다. 룰별 표에서 룰 단위로 빼거나 넣고, '후보 CSV 받기'로 payload 를 확인한 뒤 담으세요. 확정은 아래 버전 표에서 합니다.</div>
+ <div class="row" style="margin-top:8px">
+  <label>A 부족한 데이터<select id="oA"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option></select></label>
+  <label>B 새 패턴<select id="oB"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option></select></label>
+  <label>C 이미 학습됨<select id="oC"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option></select></label>
+  <label class="inl"><input type="checkbox" id="oBad"> '불일치' 빼기</label>
+  <label class="inl"><input type="checkbox" id="oRule"> '정합 (룰 기준)' 공격 빼기 <span class="muted">(보류)</span></label>
+  <label class="inl"><input type="checkbox" id="oPy"> python-requests UA 정상 빼기 <span class="muted">(보류)</span></label>
+ </div>
+ <div class="hold" id="sHold"></div>
+ <div class="row" style="margin-top:6px">
+  <label>보기<select id="sView"><option value="">선별 전체</option><option value="rule">보류 데이터만: '정합 (룰 기준)' 공격</option><option value="pyua">보류 데이터만: python-requests UA 정상</option></select></label>
+ </div>
+ <div class="row" style="margin-top:6px;align-items:center;font-size:13px"><span class="muted">날짜</span><span id="cDates"></span><span class="muted" style="margin-left:10px">출처</span><span id="cSrc"></span></div>
+ <div id="sPrev" style="margin-top:8px"></div>
+ <div class="row" style="margin-top:10px"><label>룰 검색 (id·유형)<input id="sRuleQ" style="width:200px"></label><label>룰 표<select id="sRuleF"><option value="">A 많은 순</option><option value="ov">조정한 룰</option><option value="sel0">하나도 안 고른 룰</option></select></label><span class="muted" id="sRuleCnt" style="align-self:center;font-size:12.5px"></span></div>
+ <div id="sRules" style="margin-top:6px;max-height:520px;overflow:auto"></div>
+ <div class="row" style="margin-top:12px"><label>버전 이름<input id="sVName" placeholder="예: 26 하반기" style="width:160px"></label><button class="primary" id="sSave">버전 후보에 담기 (IPS·WAF)</button><a id="sCand" style="font-size:13px;align-self:center">후보 CSV 받기 (지금 장비)</a><span class="muted" id="sSaveMsg" style="align-self:center;font-size:13px"></span></div></div>
+<div class="card"><h2>버전 <span class="muted" style="font-weight:400" id="sVerHdr"></span></h2><div id="sVers" style="overflow-x:auto"></div>
+ <details style="margin-top:10px"><summary>기준 버전 등록 (기존 학습데이터 · 넣을 것)</summary><div id="sReg"></div></details></div>
+</section>
 </main>
 <script>
 const H={"Content-Type":"application/json","X-RuleData-UI":"1"};
@@ -2090,18 +2377,18 @@ let S=null,P=null,flagNames={},rOff=0,page="progress";
 function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 function chip(f){return `<span class="chip f-${f}">${esc(flagNames[f]||f)}</span>`}
 /* ── 페이지 전환 ── */
-function route(){const parts=location.hash.replace(/^#\/?/,"").split("/"),h=parts[0];page={"":"progress",run:"run",rules:"rules",data:"data",features:"features"}[h]||"progress";
+function route(){const parts=location.hash.replace(/^#\/?/,"").split("/"),h=parts[0];page={"":"progress",run:"run",rules:"rules",data:"data",features:"features",sup:"sup"}[h]||"progress";
  document.querySelectorAll(".page").forEach(s=>s.classList.toggle("on",s.id==="p-"+page));
  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.dataset.p===page));
  if(page==="rules")loadRules();if(page==="data")initData();if(page==="run"||page==="progress")loadState();if(page==="progress")loadProgress();
- if(page==="features")loadFeatures(parts[1]?decodeURIComponent(parts[1]):"")}
+ if(page==="features")loadFeatures(parts[1]?decodeURIComponent(parts[1]):"");if(page==="sup")loadSup()}
 window.addEventListener("hashchange",route);
 /* ── 2. 생성·수집 ── */
 async function loadState(){S=await get("/api/state");const g=S.generation,c=S.collect,a=S.agent,run=g.run;
  const pct=g.running&&run&&run.state==="running"?run.pct+"%":"";
  $("hdr").textContent=`입력 ${S.input_dates.at(-1)||"-"} · 생성 ${S.models["생성"]||"?"} / 검토 ${S.models["검토"]||"?"} · ${S.now.replace("T"," ")}`+(g.running?` · 생성 실행 중 ${pct}`:"")+(a.running?((a.status||{}).state==="수집 중"?" · 수집 중":" · 수집 에이전트 켜짐 (대기)"):"");
- $("navRun").hidden=!(g.running||c.running||(a.running&&(a.status||{}).state==="수집 중"));   // 대기 중인 에이전트는 표시 안 함$("navPct").textContent=pct;
- document.title=(pct?`(${pct}) `:"")+"Snort 룰 학습데이터";
+ $("navRun").hidden=!(g.running||c.running||(a.running&&(a.status||{}).state==="수집 중"));$("navPct").textContent=pct;   // 대기 중인 에이전트는 표시 안 함
+ document.title=(pct?`(${pct}) `:"")+"Snort 룰 학습데이터";$("navSup").hidden=!(S.supervised&&S.supervised.running);
  if(page==="progress"){const show=g.running||(run&&!run.error);$("runCard").hidden=!show;
   if(show){$("runTitle").textContent=(g.running?"지금 실행 중인 학습데이터 생성":"마지막 학습데이터 생성")+(run&&run.gen&&!run.dry_run?` (이번 실행: ${run.asked?`요청 ${fmt(run.asked)}개`:"남은 요청 전부"})`:"");$("runBody").innerHTML=runHtml(g)}}
  if(page!=="run")return;
@@ -2200,20 +2487,21 @@ async function loadRules(){const qs=new URLSearchParams({flag:$("rFlag").value,s
  $("rPrev").disabled=rOff===0;$("rNext").disabled=rOff+50>=r.total;}
 let tm;$("rQ").oninput=()=>{clearTimeout(tm);tm=setTimeout(()=>{rOff=0;loadRules()},300)};$("rFlag").onchange=$("rSrc").onchange=()=>{rOff=0;loadRules()};
 $("rPrev").onclick=()=>{rOff=Math.max(0,rOff-50);loadRules()};$("rNext").onclick=()=>{rOff+=50;loadRules()};
-/* ── 4. 학습데이터 ── */
-let dView="frame",dOff=0,dInit=false,D=[],dTot=0,dReady=false,dV=null,dVT=0,dRows=[],dE=null,dET=0,dERun=false,edX=null;
-function dLimit(){return dView==="log"?200:50}
+/* ── 4. 신규 학습 데이터 (표만, 로그 형식 파일은 6. 에서 버전을 확정할 때 만듦) ── */
+let dOff=0,dInit=false,D=[],dTot=0,dReady=false,dV=null,dVT=0,dRows=[],dE=null,dET=0,dERun=false,edX=null,dPending=null;
+function dLimit(){return 50}
 async function initData(){if(!dInit){const r=await get("/api/data/dates");D=r.dates;
   $("dDate").innerHTML=(D.length>1?'<option value="all">전체 (모든 날짜)</option>':"")+D.slice().reverse().map(d=>`<option value="${d.date}">${d.date} (${fmt(d.events)}건)</option>`).join("");
   if(D.length)$("dDate").value=D.at(-1).date;dInit=true}
+ if(dPending){$("dRule").value=dPending.rule||"";$("dDev").value=dPending.dev;if(D.length>1)$("dDate").value="all";   // 6. 의 '4.에서 보기'
+  $("dLabel").value=$("dCons").value=$("dQ").value="";$("dHold").value=dPending.hold||"";dHoldUi();dOff=0;dPending=null}
  loadData();loadVerify();loadEdits();ensureFeat()}
+function dHoldUi(){const h=$("dHold").value;for(const id of["dLabel","dCons"]){$(id).disabled=!!h;if(h)$(id).value=""}}   // 보류 대상이 label·정합성을 정함
 function dSummary(){const v=$("dDate").value,ds=v==="all"?D:D.filter(d=>d.date===v);const a=ds.reduce((s,d)=>s+(d.label.anomalies||0),0),n=ds.reduce((s,d)=>s+(d.label.normal||0),0);
  $("dSum").textContent=`· ${v==="all"?"전체":v} · ${fmt(a+n)}건 (anomalies ${fmt(a)} / normal ${fmt(n)}) · 룰 ${fmt(ds.reduce((s,d)=>s+d.rules,0))}개`;
- const dl=$("dDown");   // log 보기 = 그 날짜의 로그 파일, 데이터 프레임 보기 = 지금 조건에 맞는 모든 줄을 표의 열 그대로 CSV
- if(dView==="frame"){dl.textContent="데이터 프레임 내려받기 (CSV)";dl.style.visibility="visible";
-  dl.href="/download/frame?"+new URLSearchParams({date:v,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value})}
- else{dl.textContent="로그 내려받기";dl.href=v==="all"?"#":`/download/dataset?date=${v}&dev=${$("dDev").value}`;dl.style.visibility=v==="all"?"hidden":"visible"}
- $("dHelp").innerHTML=dView==="log"?"수집 시스템 형식(|||, 8필드) 로그 줄 그대로입니다. 앞의 번호는 index 입니다.":"<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>데이터 프레임 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다.";}
+ // 지금 조건에 맞는 모든 줄을 표의 열 그대로 CSV
+ $("dDown").href="/download/frame?"+new URLSearchParams({date:v,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value});
+ $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다.";}
 async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=await get(`/api/data/verify?date=${v}&dev=${$("dDev").value}`)}catch(e){$("dVsum").textContent="";return}
  dV=s;dReady=s.status==="done"&&!!s.frame_ready;
  const run=s.status==="running";$("dVerifyStop").style.display=run?"":"none";$("dVerifyNew").disabled=$("dVerify").disabled=run;
@@ -2227,23 +2515,20 @@ async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=aw
  if(s.status!=="done"){$("dVsum").innerHTML=(s.status==="error"?`<span class="muted">검증 오류: ${esc(s.error)}</span>`:`<span class="muted">검증 전 — 모든 줄의 label 정합성을 확인하면 정합성으로 걸러 볼 수 있습니다.</span>`)+stop+est;return}
  const tot=Object.values(s.summary).reduce((a,b)=>a+b,0);
  $("dVsum").innerHTML=`<b>label 정합성 (${fmt(tot)}줄)</b>`+["OK","RULE","CHECK","BAD"].map(k=>`<span class="chip c-${k}" data-c="${k}">${esc(s.names[k])} ${fmt(s.summary[k]||0)} (${tot?(100*(s.summary[k]||0)/tot).toFixed(1):0}%)</span>`).join("")+`<span class="muted">${s.finished_at.replace("T"," ")} 검증${s.reused?` · 이미 확인한 결과 ${fmt(s.reused)}줄 그대로 씀`:""}${s.old_rules?` · ${fmt(s.old_rules)}줄은 이전 룰 입력(${esc(Object.keys(s.rule_inputs).filter(k=>k!==s.latest_input).sort().join(", "))}) 기준 - 최신 룰(${esc(s.latest_input)})로 다시 보려면 '전체 검증'`:""}</span>`+stop+(s.est_new?est:"");
- $("dVsum").querySelectorAll("[data-c]").forEach(c=>c.onclick=()=>{$("dCons").value=c.dataset.c;dOff=0;loadData()});renderEdits();}
+ $("dVsum").querySelectorAll("[data-c]").forEach(c=>c.onclick=()=>{$("dHold").value="";dHoldUi();$("dCons").value=c.dataset.c;dOff=0;loadData()});renderEdits();}
 async function startVerify(mode){try{const r=await post("/api/data/verify",{date:$("dDate").value,dev:$("dDev").value,mode});
   if(!r.started.length&&r.done.length){$("dVsum").innerHTML='<span class="muted">새로 확인할 줄이 없습니다 - 이미 모두 검증했습니다.</span>';setTimeout(loadVerify,2500)}else loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}}
 $("dVerifyNew").onclick=()=>startVerify("new");
 $("dVerify").onclick=()=>{if(!dV||confirm(`모든 줄(${fmt(dV.total)}줄)을 지금 룰로 새로 확인합니다 (약 ${hms(dV.est_all_s)}). 진행할까요?`))startVerify("all")};
 $("dVerifyStop").onclick=async()=>{try{await post("/api/data/verify/stop",{date:$("dDate").value,dev:$("dDev").value});loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}};
 async function loadData(){dSummary();if(!D.length){$("dBody").innerHTML='<div class="muted">08_dataset 에 학습데이터가 없습니다.</div>';return}
- const qs=new URLSearchParams({view:dView,date:$("dDate").value,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,offset:dOff,limit:dLimit()});
+ const qs=new URLSearchParams({date:$("dDate").value,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value,offset:dOff,limit:dLimit()});
  $("dBody").style.opacity=.5;let r;try{r=await get("/api/data/rows?"+qs)}catch(e){$("dBody").innerHTML=`<div class="muted">불러오지 못했습니다: ${esc(e.message)}</div>`;return}finally{$("dBody").style.opacity=1}
  const all=$("dDate").value==="all";
- if(dView==="log"){$("dBody").innerHTML=r.rows.map(x=>`<div class="logline"><span class="ix">${x.index}${all?" · "+x.date:""}</span>${esc(x.line)}</div>`).join("")||'<div class="muted">없음</div>'}
- else{$("dBody").innerHTML=`<table><thead><tr><th class="n">index</th><th>payload</th><th>method</th><th>label</th><th>label 사유</th><th>검증 결과</th><th>label 정합성</th><th>탐지 피처 <a href="#/features" style="font-weight:400">(설명)</a></th><th>수정·삭제</th></tr></thead><tbody>${r.rows.map((x,k)=>`<tr class="lv-${x.level}"><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td class="method">${esc(x.method)}</td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></td><td class="reason">${esc(x.reason)}</td><td class="chk">${x.checks.map(([s,t])=>`<div class="${s}">${s==="ok"?"✔":s==="warn"?"△":"✘"} ${esc(t)}</div>`).join("")}</td><td class="cons"><span class="chip c-${x.cons}">${esc(x.cons_text)}</span><div>${esc(x.cons_reason)}</div></td><td class="feat">${x.features.length?x.features.map(f=>`<div><code class="fn" data-f="${esc(f.name)}" data-d="${f.name.startsWith("k_")?"":esc(f.desc)}">${esc(f.name)}</code> = ${f.value} <span class="muted">${esc(f.desc)}</span></div>`).join("")+`<div class="muted">${x.label==="normal"?"✘ 정상인데 켜진 피처가 있음":`켜진 피처 ${x.features.length}개 → 모델이 공격으로 볼 근거`}</div>`:`<div class="muted">${x.label==="normal"?"켜진 피처 없음 → 정상으로 볼 근거":"켜진 피처 없음 → 이 피처로는 탐지 못 함"}</div>`}</td><td class="act">${editCell(x,k)}</td></tr>`).join("")}</tbody></table>`}
+ $("dBody").innerHTML=`<table><thead><tr><th class="n">index</th><th>payload</th><th>method</th><th>label</th><th>label 사유</th><th>검증 결과</th><th>label 정합성</th><th>탐지 피처 <a href="#/features" style="font-weight:400">(설명)</a></th><th>수정·삭제</th></tr></thead><tbody>${r.rows.map((x,k)=>`<tr class="lv-${x.level}"><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td class="method">${esc(x.method)}</td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></td><td class="reason">${esc(x.reason)}</td><td class="chk">${x.checks.map(([s,t])=>`<div class="${s}">${s==="ok"?"✔":s==="warn"?"△":"✘"} ${esc(t)}</div>`).join("")}</td><td class="cons"><span class="chip c-${x.cons}">${esc(x.cons_text)}</span><div>${esc(x.cons_reason)}</div></td><td class="feat">${x.features.length?x.features.map(f=>`<div><code class="fn" data-f="${esc(f.name)}" data-d="${f.name.startsWith("k_")?"":esc(f.desc)}">${esc(f.name)}</code> = ${f.value} <span class="muted">${esc(f.desc)}</span></div>`).join("")+`<div class="muted">${x.label==="normal"?"✘ 정상인데 켜진 피처가 있음":`켜진 피처 ${x.features.length}개 → 모델이 공격으로 볼 근거`}</div>`:`<div class="muted">${x.label==="normal"?"켜진 피처 없음 → 정상으로 볼 근거":"켜진 피처 없음 → 이 피처로는 탐지 못 함"}</div>`}</td><td class="act">${editCell(x,k)}</td></tr>`).join("")}</tbody></table>`;
  dRows=r.rows;dTot=r.total;$("dCount").textContent=`${fmt(r.total)}건 중 ${r.total?dOff+1:0}–${Math.min(dOff+dLimit(),r.total)}`;$("dPrev").disabled=dOff===0;$("dNext").disabled=dOff+dLimit()>=r.total;}
 $("dDown").onclick=e=>{   // 저장된 '전체 검증' 결과가 없으면 줄마다 다시 확인하므로 오래 걸릴 수 있음
- if(dView==="frame"&&!dReady&&dTot>1000&&!confirm(`'전체 검증' 결과가 없어 ${fmt(dTot)}줄을 하나씩 다시 확인하며 CSV 를 만듭니다 (${dur(dTot*0.015)}).\n'전체 검증'을 먼저 하면 바로 받을 수 있습니다. 지금 받을까요?`))e.preventDefault()};
-$("vLog").onclick=()=>{dView="log";$("vLog").classList.add("on");$("vFrame").classList.remove("on");dOff=0;loadData()};
-$("vFrame").onclick=()=>{dView="frame";$("vFrame").classList.add("on");$("vLog").classList.remove("on");dOff=0;loadData()};
+ if(!dReady&&dTot>1000&&!confirm(`'전체 검증' 결과가 없어 ${fmt(dTot)}줄을 하나씩 다시 확인하며 CSV 를 만듭니다 (${dur(dTot*0.015)}).\n'전체 검증'을 먼저 하면 바로 받을 수 있습니다. 지금 받을까요?`))e.preventDefault()};
 for(const id of["dDate","dDev"])$(id).onchange=()=>{dOff=0;$("dCons").value="";loadData();loadVerify();loadEdits()};
 /* 수정·삭제: 저장하면 '학습 로그에 반영'(1.4 다시 만들기) 때 학습 로그에 들어간다 */
 function editCell(x,k){if(!x.sk)return"";
@@ -2286,6 +2571,7 @@ $("dEdits").addEventListener("click",async e=>{const b=e.target.closest("button[
 $("dEditList").addEventListener("click",async e=>{const b=e.target.closest("button[data-u]");if(!b)return;const it=dE.items[+b.dataset.u];
  try{await post("/api/data/edit",{date:it.date,sk:it.sk,action:"undo"});$("dEditList").style.display="none";loadEdits();loadData()}catch(err){alert("실패: "+err.message)}});
 for(const id of["dLabel","dCons"])$(id).onchange=()=>{dOff=0;loadData()};
+$("dHold").onchange=()=>{dOff=0;dHoldUi();loadData()};
 $("dGo").onclick=()=>{dOff=0;loadData()};for(const id of["dRule","dQ"])$(id).onkeydown=e=>{if(e.key==="Enter"){dOff=0;loadData()}};
 $("dPrev").onclick=()=>{dOff=Math.max(0,dOff-dLimit());loadData()};$("dNext").onclick=()=>{dOff+=dLimit();loadData()};
 /* ── 5. 피처 ── */
@@ -2296,9 +2582,9 @@ function ensureFeat(){if(FC)return Promise.resolve(FC);if(!fLoading)fLoading=get
 async function loadFeatures(focus){if(focus!==undefined)fFocus=focus;
  try{FC=await get("/api/features?dev="+$("fDev").value)}catch(e){$("fBody").innerHTML=`<tr><td colspan="9" class="muted">불러오지 못했습니다: ${esc(e.message)}</td></tr>`;return}
  const r=FC,gs=$("fGroup");if(gs.options.length===1)gs.innerHTML+=r.groups.map(g=>`<option>${esc(g.name)}</option>`).join("");
- $("fIntro").innerHTML=`ML 탐지 모델(4.1)이 payload 에서 뽑는 피처입니다. 공격일 때만 켜지는 <b>확실한 신호</b>만 두었습니다 (길이·헤더 수 같은 모호한 값은 쓰지 않음). 4. 학습데이터의 '탐지 피처'에 나오는 이름이 모두 여기 있습니다.`+
+ $("fIntro").innerHTML=`ML 탐지 모델(4.1)이 payload 에서 뽑는 피처입니다. 공격일 때만 켜지는 <b>확실한 신호</b>만 두었습니다 (길이·헤더 수 같은 모호한 값은 쓰지 않음). 4. 신규 학습 데이터의 '탐지 피처'에 나오는 이름이 모두 여기 있습니다.`+
   r.groups.map(g=>`<div style="margin-top:4px"><b>${esc(g.name)}</b> <code>${esc(g.prefix)}</code> ${esc(g.desc)}</div>`).join("")+`<div style="margin-top:4px">공격 룰 피처에 쓰는 룰: ${fmt(r.attack_rules)}개${r.note?` (${esc(r.note)})`:""}</div>`;
- $("fCountMsg").textContent=r.running?"켜진 줄 수 계산 중…":!r.dates.length?"켜진 줄 수가 아직 없습니다 - '켜진 줄 수 다시 계산'을 누르세요 (학습데이터 전체 검증과 같은 작업, 수 초~수 분)":r.missing.length?`검증 안 된 날짜 ${r.missing.length}개 (${r.missing.join(", ")}) - 다시 계산하면 포함`:"";
+ $("fCountMsg").textContent=r.running?"켜진 줄 수 계산 중…":!r.dates.length?"켜진 줄 수가 아직 없습니다 - '켜진 줄 수 다시 계산'을 누르세요 (신규 학습 데이터 전체 검증과 같은 작업, 수 초~수 분)":r.missing.length?`검증 안 된 날짜 ${r.missing.length}개 (${r.missing.join(", ")}) - 다시 계산하면 포함`:"";
  if(r.running)setTimeout(()=>{if(page==="features")loadFeatures()},2000);
  renderFeatures()}
 function renderFeatures(){const r=FC;if(!r)return;const g=$("fGroup").value,q=$("fQ").value.trim().toLowerCase(),la=r.labels.anomalies||0,ln=r.labels.normal||0,have=r.dates.length>0;
@@ -2312,7 +2598,7 @@ function renderFeatures(){const r=FC;if(!r)return;const g=$("fGroup").value,q=$(
  if(fFocus){const el=document.getElementById("f-"+fFocus);if(el)el.scrollIntoView({block:"center"})}}
 let fTm;$("fQ").oninput=()=>{clearTimeout(fTm);fTm=setTimeout(()=>{fFocus="";renderFeatures()},200)};$("fGroup").onchange=()=>{fFocus="";renderFeatures()};$("fDev").onchange=()=>loadFeatures();
 $("fCount").onclick=async()=>{try{await post("/api/data/verify",{date:"all",dev:$("fDev").value,mode:"new"});$("fCountMsg").textContent="켜진 줄 수 계산 중…";setTimeout(()=>loadFeatures(),1500)}catch(e){$("fCountMsg").textContent="실패: "+e.message}};
-/* 피처 이름 말풍선 (4. 학습데이터의 '탐지 피처') */
+/* 피처 이름 말풍선 (4. 신규 학습 데이터의 '탐지 피처') */
 const tip=document.createElement("div");tip.className="tipbox";tip.hidden=true;document.body.appendChild(tip);let tipOn=null;
 function showTip(t){tipOn=t;const d=featDoc(t.dataset.f);
  tip.innerHTML=`<div class="t"><code>${esc(t.dataset.f)}</code> ${d?esc(d.title):""}</div>`+(d?`<div class="muted">${esc(d.group)} · 값: ${esc(d.value)}</div><div>${esc(d.what)}</div>${d.example?`<div class="muted">예: ${esc(d.example)}</div>`:""}`:'<div class="muted">설명을 불러오는 중…</div>')+
@@ -2323,6 +2609,122 @@ function showTip(t){tipOn=t;const d=featDoc(t.dataset.f);
 document.addEventListener("mouseover",e=>{const t=e.target.closest&&e.target.closest("[data-f]");if(t){if(t!==tipOn)showTip(t)}else if(tipOn){tipOn=null;tip.hidden=true}});
 document.addEventListener("scroll",()=>{tipOn=null;tip.hidden=true},true);
 document.addEventListener("click",e=>{const t=e.target.closest&&e.target.closest("[data-f]");if(t){tipOn=null;tip.hidden=true;location.hash="#/features/"+encodeURIComponent(fkey(t.dataset.f))}});
+/* ── 6. 기존 학습데이터와 비교 (비교·확정은 별도 프로세스, 선별 미리 보기는 확정과 같은 계산) ── */
+let SS=null,sDev="ips",sPv=null,sPvT=0,sJT=0,sRunWas=false,sFormInit=false,sResInit=false;
+const sO={dates:null,sources:null,rules:{},types:{}};   // 날짜·출처 null = 전부 (뒤에 생긴 날짜도)
+function gchip(g){return `<span class="chip g${["제거","A","B","C"].indexOf(g)}">${esc(g)}</span>`}
+function sSpec(){const v=id=>{const x=$(id).value;return x==="all"?"all":+x};
+ return {conditions:{dates:sO.dates||[],sources:sO.sources||[]},options:{A:v("oA"),B:v("oB"),C:v("oC"),exclude_bad:$("oBad").checked,exclude_rule_based:$("oRule").checked,exclude_python_ua_normal:$("oPy").checked},overrides:{rules:sO.rules,types:sO.types}}}
+function sSetForm(o,c,ov){for(const k of["A","B","C"])$("o"+k).value=String(o[k]);$("oBad").checked=!!o.exclude_bad;$("oRule").checked=!!o.exclude_rule_based;$("oPy").checked=!!o.exclude_python_ua_normal;
+ sO.dates=c&&c.dates&&c.dates.length?c.dates.slice():null;sO.sources=c&&c.sources&&c.sources.length?c.sources.slice():null;sO.rules=Object.assign({},(ov&&ov.rules)||{});sO.types=Object.assign({},(ov&&ov.types)||{})}
+async function loadSup(){let s;try{s=await get("/api/sup/state?base="+encodeURIComponent($("sBase").value||""))}catch(e){$("sSetup").innerHTML=`<div class="msg">불러오지 못했습니다: ${esc(e.message)}</div>`;return}
+ SS=s;const opts=s.finals.map(n=>`<option${n===s.base?" selected":""}>${esc(n)}</option>`).join("");if($("sBase").innerHTML!==opts)$("sBase").innerHTML=opts;
+ if(!sFormInit){sSetForm(s.options,null,null);sFormInit=true}
+ $("sHdr").textContent=s.base?`· 기준 ${s.base} · 디스크 여유 ${s.disk_free_gb}GB`:"";
+ $("sSetup").innerHTML=s.problems.length?`<div class="est"><b>넣을 것</b><ul style="margin:4px 0 0 18px;padding:0">${s.problems.map(p=>`<li>${esc(p)}</li>`).join("")}</ul><div class="muted">아래 '기준 버전 등록'에서 기존 학습데이터(표준모델 학습 형식 CSV)·원본 로그·표준모델 피처 파일 위치를 넣으세요.</div></div>`:"";
+ const run=s.job.running,st=s.status||{};
+ for(const id of["sRunNew","sRunAll"])$(id).disabled=run||!s.base||s.problems.length>0;$("sStop").style.display=run?"":"none";$("sSave").disabled=run;
+ sEstimate();sJobView(run,st);renderVers();renderReg();
+ if(run){clearTimeout(sJT);sJT=setTimeout(()=>{if(page==="sup")loadSup()},2000)}
+ if(!sResInit||(sRunWas&&!run)){sResInit=true;loadSupRes();sPreview()}   // 처음 열 때, 비교·확정이 막 끝났을 때
+ sRunWas=run;
+ try{$("sLog").textContent=(await get("/api/log?job=supervised&lines=80")).text;$("sLog").scrollTop=1e9}catch(e){}}
+function sEstimate(){const s=SS;if(!s||!s.base){$("sEst").innerHTML="";return}
+ const t=s.timing||{},line=mode=>{let sec=0;const parts=[];for(const d of["ips","waf"]){const x=s.dev[d],n=mode==="all"?x.total:x.est_new;
+   let ss=n?n/(x.rate||120)+60:20;if(!x.base_cached)ss+=t[`compare:${d}:base`]||200;if(!x.models_cached||mode==="all")ss+=t[`compare:${d}:model`]||240;sec+=ss;parts.push(`${d.toUpperCase()} ${fmt(n)}개`)}
+  return `피처 계산 ${parts.join(" · ")} → <b>${dur(sec)}</b>`};
+ const ch=["ips","waf"].map(d=>{const x=s.dev[d];if(!x.has)return `${d.toUpperCase()} 아직 비교 안 함`;
+   const bad=(x.changed||[]).concat(x.new_dates||[]);return `${d.toUpperCase()} ${esc((x.created_at||"").replace("T"," "))} 비교 (${fmt(x.rows)}행)`+(bad.length?` · <b>그 뒤 바뀌거나 새로 생긴 날짜 ${esc(bad.join(", "))}</b> → 다시 비교해야 이 데이터가 들어갑니다`:" · 그 뒤 변경 없음")}).join("<br>");
+ $("sEst").innerHTML=`${ch}<div style="margin-top:4px"><b>예상</b> 새로 생긴 데이터만: ${line("new")} · 전체 다시: ${line("all")}<div class="muted">피처는 샘플마다 한 번만 계산해 저장하고, 기준 데이터·기준 모델은 처음 한 번만 준비합니다. 생성 중이면 CPU 를 나눠 써서 더 걸립니다.</div></div>`}
+function sJobView(run,st){const el=$("sJob");if(!st||!st.state){el.innerHTML="";return}
+ const steps=(st.steps||[]).map((x,i,a)=>{const live=run&&i===a.length-1;return `<span class="step ${x.sec!=null&&!live?"done":live?"running":"fail"}">${x.sec!=null&&!live?"✔":live?"●":"✘"} ${esc(x.text)}${x.sec!=null&&!live?` <b>${hms(x.sec)}</b>`:""}</span>`}).join("");
+ const what=st.cmd==="finalize"?`버전 확정 '${esc(st.version||"")}'`:`비교 (기준 ${esc(st.base||"")} · ${(st.devs||[]).map(d=>d.toUpperCase()).join("·")} · ${st.mode==="all"?"전체 다시":"새로 생긴 데이터만"})`;
+ let head="";
+ if(run){const pr=st.total?`${fmt(st.done)} / ${fmt(st.total)}${st.unit||""}`:st.done!=null?`${fmt(st.done)}${st.unit||""}`:"";
+  head=`<b>${what} 중</b> · ${esc(st.step||"")} ${pr}${st.eta_s!=null?` · 이 단계 남은 시간 약 <b>${hms(st.eta_s)}</b> (${clock(st.eta_s)} 쯤)`:""}${SS.job.stop_requested?" · <b>중지 요청됨</b>":""}`+
+   (st.total?`<div class="bar live" style="margin:6px 0"><i style="width:${Math.min(100,100*st.done/st.total)}%"></i></div>`:"")}
+ else head=st.state==="done"?`<b>${what} 끝남</b> · ${esc((st.finished_at||"").replace("T"," "))}`:st.state==="stopped"?`<b>${what} 중지됨</b> · 계산한 피처는 저장됨 → '새로 생긴 데이터만 비교'로 이어서 할 수 있음`:st.state==="fail"?`<b>${what} 실패</b> · ${esc(st.error||"")} <span class="muted">(실행 로그 확인)</span>`:`<b>${what}</b> 끝나지 않음 (화면 밖에서 멈춤)`;
+ el.innerHTML=`<div style="font-size:13px">${head}</div><div class="steps">${steps}</div>`}
+const PCT_T=new Set(["흔적: User-Agent"]);
+function scell(v,col,tn){if(v==null||v==="")return"";if(typeof v==="number"){if(Number.isInteger(v))return fmt(v);if(/율/.test(col)||PCT_T.has(tn))return (100*v).toFixed(1)+"%";return v.toFixed(1)}return esc(v)}
+function stable(r,name){const t=r.tables[name];if(!t)return"";return `<h4>${esc(name)}</h4>${t.note?`<div class="muted" style="font-size:12px">${esc(t.note)}</div>`:""}<table class="mini"><thead><tr>${t.cols.map((c,i)=>`<th${i?' class="n"':""}>${esc(c)}</th>`).join("")}</tr></thead><tbody>${t.rows.map(row=>`<tr>${row.map((v,i)=>`<td${i?' class="n"':""}>${i===0&&name==="등급별"&&typeof v==="string"&&v!=="합계"?gchip(v.split(" ")[0])+" "+esc(v.split(" ").slice(1).join(" ")):scell(v,t.cols[i],name)}</td>`).join("")}</tr>`).join("")}</tbody></table>`}
+async function loadSupRes(){if(!SS||!SS.base)return;let r;try{r=await get(`/api/sup/summary?base=${encodeURIComponent(SS.base)}&dev=${sDev}`)}catch(e){return}
+ $("sXlsx").href=`/download/sup/report?base=${encodeURIComponent(SS.base)}&dev=${sDev}`;$("sXlsx").style.visibility=r.rows?"visible":"hidden";
+ if(!r.rows){$("sRes").innerHTML='<div class="muted">이 장비는 아직 비교하지 않았습니다 - 위에서 비교를 실행하세요.</div>';$("sResHdr").textContent="";return}
+ $("sResHdr").textContent=`· ${r.created_at.replace("T"," ")} · ${fmt(r.rows)}행 · 스냅숏 ${r.snapshot}`;
+ $("sRes").innerHTML=`<div class="kv">${r.kv.map(([k,v,n])=>`<b>${esc(k)}</b><span>${esc(v)}${n?` <span class="muted">${esc(n)}</span>`:""}</span>`).join("")}</div>
+  <div class="tw"><div>${stable(r,"등급별")}${stable(r,"A 근거")}</div><div>${stable(r,"기준 모델의 신규 탐지")}${stable(r,"품질")}</div></div>
+  <details><summary>공격 유형·출처·날짜별, label 정합성, 데이터 흔적, 평가 분할</summary><div class="tw"><div>${stable(r,"공격 유형별")}</div><div>${stable(r,"출처별")}${stable(r,"날짜별")}${stable(r,"label 정합성")}</div><div>${stable(r,"흔적: User-Agent")}${stable(r,"흔적: 헤더·길이")}${stable(r,"표준모델 피처 1개만 켜지는 공격")}${stable(r,"평가 분할")}</div></div></details>`}
+function sPreviewSoon(){clearTimeout(sPvT);sPvT=setTimeout(sPreview,250)}
+async function sPreview(){clearTimeout(sPvT);if(!SS||!SS.base)return;let r;
+ try{r=await post("/api/sup/preview",Object.assign({base:SS.base,dev:sDev,view:$("sView").value},sSpec()))}catch(e){$("sPrev").innerHTML=`<div class="muted">미리 보기 실패: ${esc(e.message)}</div>`;return}
+ if(r.none){sPv=null;$("sPrev").innerHTML='<div class="muted">이 장비의 비교 결과가 없습니다.</div>';$("sRules").innerHTML="";$("sRuleCnt").textContent="";$("sSelHdr").textContent="";$("cDates").innerHTML=$("cSrc").innerHTML=$("sHold").innerHTML="";return}
+ sPv=r;renderConds(r);renderHold(r);const vw=r.view;
+ $("sSelHdr").textContent=vw?`· ${sDev.toUpperCase()} 보류 데이터만 (${HOLDT[vw]}) ${fmt(r.cand)}개 · 그중 지금 선별에 들어간 것 ${fmt(r.hold[vw][1])}개`
+  :`· ${sDev.toUpperCase()} 후보 ${fmt(r.cand)}개 중 선택 ${fmt(r.sel)}개 (공격 ${fmt(r.sel_label["공격"])} / 정상 ${fmt(r.sel_label["정상"])})`;
+ const bg=r.by_grade,f=(g,l)=>bg.find(x=>x[0]===g&&x[1]===l)||[g,l,0,0];
+ const rowsG=["제거","A","B","C"].map(g=>{const a=f(g,"공격"),n=f(g,"정상");return `<tr><td>${gchip(g)}</td><td class="n">${fmt(a[2])}</td><td class="n"><b>${fmt(a[3])}</b></td><td class="n">${fmt(n[2])}</td><td class="n"><b>${fmt(n[3])}</b></td></tr>`}).join("");
+ const why=Object.entries(r.why).filter(([k,v])=>v).map(([k,v])=>`<tr><td>${esc(k)}</td><td class="n">${fmt(v)}</td></tr>`).join("");
+ const by=(rows,label,tcol)=>`<table class="mini"><thead><tr><th>${label}</th><th class="n">후보</th><th class="n">선택</th><th class="n">공격</th><th class="n">정상</th>${tcol?"<th>빼기</th>":""}</tr></thead><tbody>${rows.map(x=>`<tr><td>${esc(x[0])}</td><td class="n">${fmt(x[1])}</td><td class="n"><b>${fmt(x[2])}</b></td><td class="n">${fmt(x[3])}</td><td class="n">${fmt(x[4])}</td>${tcol?`<td><input type="checkbox" data-t="${esc(x[0])}"${sO.types[x[0]]?" checked":""}></td>`:""}</tr>`).join("")}</tbody></table>`;
+ $("sPrev").innerHTML=`<div class="tw"><div><h4>등급별 (${vw?"보류 데이터 → 그중 지금 선별에 들어간 것":"후보 → 선택"})</h4><table class="mini"><thead><tr><th>등급</th><th class="n">공격 후보</th><th class="n">공격 선택</th><th class="n">정상 후보</th><th class="n">정상 선택</th></tr></thead><tbody>${rowsG}<tr><td><b>합계</b></td><td class="n" colspan="4">${vw?`<b>${fmt(r.hold[vw][1])}</b> / 보류 데이터 ${fmt(r.cand)}`:`<b>${fmt(r.sel)}</b> / 후보 ${fmt(r.cand)}`}</td></tr></tbody></table>
+  ${vw?`<div class="est">보류 데이터만 보는 중입니다 (${HOLDT[vw]}). 표·룰별 표·CSV 가 이 데이터만 셉니다. 보류 옵션을 켜면 '지금 선별에 들어간 것'이 빠집니다. <a data-hv="">선별 전체로 돌아가기</a></div>`
+   :`<h4>뺀 이유</h4><table class="mini"><tbody>${why||'<tr><td class="muted">없음</td></tr>'}</tbody></table>`}</div>
+  <div><h4>공격 유형별 (빼기 = 그 유형 모두 뺌)</h4>${by(r.by_type,"공격 유형",true)}</div>
+  <div><h4>출처별</h4>${by(r.by_source,"출처")}<h4>날짜별</h4>${by(r.by_date,"날짜")}</div></div>`;
+ $("sPrev").querySelectorAll("[data-t]").forEach(c=>c.onchange=()=>{if(c.checked)sO.types[c.dataset.t]="exclude";else delete sO.types[c.dataset.t];sPreviewSoon()});
+ renderRules();
+ $("sCand").textContent=vw?"보류 데이터 CSV 받기 (지금 장비)":"후보 CSV 받기 (지금 장비)";
+ $("sCand").href="/download/sup/candidates?"+new URLSearchParams({base:SS.base,dev:sDev,spec:JSON.stringify(sSpec()),view:vw||""})}
+const HOLDT={rule:"'정합 (룰 기준)' 공격",pyua:"python-requests UA 정상"};
+function renderHold(r){const h=r.hold||{},one=k=>{const x=h[k]||[0,0,0,0,0,0];
+  const unv=k==="rule"&&r.unverified_att?` <span class="muted">(검증 전 공격 ${fmt(r.unverified_att)}개는 셀 수 없음 → 4.에서 '검증 안 한 데이터만 검증' 뒤 '새로 생긴 데이터만 비교')</span>`:"";
+  return `<span><b>${HOLDT[k]}</b> ${fmt(x[0])}개`+(x[0]?` <span class="muted">(제거 ${fmt(x[2])} · A ${fmt(x[3])} · B ${fmt(x[4])} · C ${fmt(x[5])}) · 지금 선별에 ${fmt(x[1])}개 = 옵션을 켜면 빠지는 수</span> <a data-hv="${k}">6.에서 보기</a> · <a data-h4="${k}">4.에서 보기</a>`:"")+unv+"</span>"};
+ $("sHold").innerHTML=`<span class="muted">보류 대상 (조건 안의 후보 중)</span>${one("rule")}${one("pyua")}`}
+document.getElementById("p-sup").addEventListener("click",e=>{const a=e.target.closest("a[data-hv],a[data-h4]");if(!a)return;e.preventDefault();
+ if(a.dataset.h4){dPending={hold:a.dataset.h4,dev:sDev};location.hash="#/data";return}
+ $("sView").value=a.dataset.hv;sPreview()});
+$("sView").onchange=sPreview;
+function renderConds(r){const box=(id,list,key,attr)=>{const el=$(id);el.innerHTML=list.map(d=>`<label class="ck"><input type="checkbox" data-${attr}="${esc(d)}"${!sO[key]||sO[key].includes(d)?" checked":""}>${esc(d)}</label>`).join("");
+  el.querySelectorAll("input").forEach(c=>c.onchange=()=>{const on=[...el.querySelectorAll("input:checked")].map(x=>x.dataset[attr]);sO[key]=on.length===list.length?null:on.length?on:["-"];sPreviewSoon()})};
+ box("cDates",r.all_dates,"dates","cd");box("cSrc",r.all_sources,"sources","cs")}
+function renderRules(){const r=sPv;if(!r){$("sRules").innerHTML="";return}const q=$("sRuleQ").value.trim().toLowerCase(),f=$("sRuleF").value;
+ let rows=r.rules.filter(x=>(!q||x[0].toLowerCase().includes(q)||x[1].toLowerCase().includes(q))&&(f!=="ov"||x[8])&&(f!=="sel0"||!x[7]));
+ const n=rows.length;rows=rows.slice(0,300);$("sRuleCnt").textContent=`${fmt(n)}개 룰${n>300?" 중 300개 표시 (검색으로 좁히세요)":""} · 조정 ${Object.keys(sO.rules).length}개`;
+ $("sRules").innerHTML=`<table class="mini"><thead><tr><th>룰 id</th><th>공격 유형</th><th class="n">후보</th><th class="n">제거</th><th class="n">A</th><th class="n">B</th><th class="n">C</th><th class="n">선택</th><th>조정</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr><td class="nw">${esc(x[0])}</td><td>${esc(x[1])}</td>${[2,3,4,5,6].map(i=>`<td class="n">${fmt(x[i])}</td>`).join("")}<td class="n"><b>${fmt(x[7])}</b></td><td><select data-r="${esc(x[0])}"><option value="">기본</option><option value="exclude"${x[8]==="exclude"?" selected":""}>빼기</option><option value="include"${x[8]==="include"?" selected":""}>넣기 (상한 없이)</option></select></td><td class="nw"><a href="#/data" data-open="${esc(x[0])}">4.에서 보기</a></td></tr>`).join("")}</tbody></table>`}
+$("sRules").addEventListener("change",e=>{const s=e.target.closest("select[data-r]");if(!s)return;if(s.value)sO.rules[s.dataset.r]=s.value;else delete sO.rules[s.dataset.r];sPreviewSoon()});
+$("sRules").addEventListener("click",e=>{const a=e.target.closest("a[data-open]");if(!a)return;e.preventDefault();dPending={rule:a.dataset.open,dev:sDev,hold:$("sView").value};location.hash="#/data"});
+function vDesc(x){if(x.kind==="external")return esc(x.note||"");const o=x.options||{},c=x.conditions||{},ov=x.overrides||{},cap=k=>o[k]==="all"?"전부":o[k]===0?"빼기":`패턴당 ${o[k]}`;
+ return `A ${cap("A")} · B ${cap("B")} · C ${cap("C")}`+(o.exclude_bad?" · 불일치 빼기":"")+(o.exclude_rule_based?" · 정합(룰 기준) 공격 빼기":"")+(o.exclude_python_ua_normal?" · python-requests 정상 빼기":"")+
+  `<br>날짜 ${c.dates&&c.dates.length?esc(c.dates.join(", ")):"전부"} · 출처 ${c.sources&&c.sources.length?esc(c.sources.join(", ")):"전부"}`+(Object.keys(ov.rules||{}).length?` · 룰 조정 ${Object.keys(ov.rules).length}개`:"")+(Object.keys(ov.types||{}).length?` · 유형 빼기 ${esc(Object.keys(ov.types).join(", "))}`:"")}
+function renderVers(){const vs=SS.versions;$("sVerHdr").textContent=vs.length?`· ${vs.length}개 (확정 ${vs.filter(x=>x.status==="final").length})`:"";
+ if(!vs.length){$("sVers").innerHTML='<div class="muted">버전이 없습니다 - 아래에서 기준 버전(기존 학습데이터)을 등록하세요.</div>';return}
+ const dv=(x,d)=>{const c=x.dev[d]||{};if(x.status==="draft"&&c.draft)return `<span class="muted">추가 후보</span> <b>${fmt(c.draft.sel)}</b><div class="muted">공격 ${fmt(c.draft.sel_label["공격"])} / 정상 ${fmt(c.draft.sel_label["정상"])}</div>`;
+   if(c.rows==null)return '<span class="muted">-</span>';const l=c.label||{};return `${fmt(c.rows)}<div class="muted">공격 ${fmt(l.anomalies)} / 정상 ${fmt(l.normal)}</div>`+(c.added!=null?`<div class="muted">기준 + 추가 ${fmt(c.added)}</div>`:"")};
+ $("sVers").innerHTML=`<table class="mini"><thead><tr><th>버전</th><th>기준</th><th>상태</th><th>IPS 행</th><th>WAF 행</th><th>조건·선별</th><th>시각</th><th></th></tr></thead><tbody>${vs.map(x=>`<tr><td class="nw"><b>${esc(x.name)}</b>${x.tag?` <span class="muted">${esc(x.tag)}</span>`:""}</td><td class="nw">${esc(x.base||"-")}</td><td>${x.status==="final"?'<span class="chip c-OK">확정</span>':'<span class="chip c-CHECK">초안</span>'}</td><td class="nw">${dv(x,"ips")}</td><td class="nw">${dv(x,"waf")}</td><td class="reason">${vDesc(x)}</td><td class="muted nw">${esc((x.finalized_at||x.updated_at||x.created_at||"").replace("T"," ").slice(0,16))}</td><td class="nw">${x.status==="draft"?`<button class="sm" data-v="load" data-n="${esc(x.name)}">불러오기</button><button class="sm primary" data-v="final" data-n="${esc(x.name)}">확정</button><button class="sm danger" data-v="del" data-n="${esc(x.name)}">삭제</button>`:x.kind==="external"?'<span class="muted">등록한 기준</span>':`<span class="muted">11_supervised/versions/${esc(x.name)}/</span>`}</td></tr>`).join("")}</tbody></table>`}
+$("sVers").addEventListener("click",async e=>{const b=e.target.closest("button[data-v]");if(!b)return;const name=b.dataset.n,x=SS.versions.find(v=>v.name===name);
+ try{if(b.dataset.v==="load"){sSetForm(Object.assign({},SS.options,x.options),x.conditions,x.overrides);$("sVName").value=name;sPreview();$("sSaveMsg").textContent=`'${name}' 초안을 불러왔습니다`;return}
+  if(b.dataset.v==="del"){if(!confirm(`초안 '${name}' 을 지웁니다. 진행할까요?`))return;await post("/api/sup/delete",{name});loadSup();return}
+  const msg=["ips","waf"].map(d=>x.dev[d]&&x.dev[d].draft?`${d.toUpperCase()} 추가 ${fmt(x.dev[d].draft.sel)}개`:"").filter(Boolean).join(", ");
+  if(!confirm(`'${name}' 을 확정합니다 (${msg}).\n기준 '${x.base}' + 추가 샘플로 IPS·WAF 학습 파일(CSV)·로그를 만듭니다 (장비마다 약 0.5GB, 디스크 여유 ${SS.disk_free_gb}GB).\n저장한 뒤 비교 결과·학습데이터가 바뀌었으면 확정하지 않습니다. 확정한 버전은 고칠 수 없고 다음 버전의 기준이 됩니다. 진행할까요?`))return;
+  await post("/api/sup/finalize",{name});setTimeout(loadSup,800)}catch(err){alert("실패: "+err.message)}});
+function renderReg(){if($("sReg").dataset.done)return;$("sReg").dataset.done="1";const d=SS.defaults,fc=SS.feature_code||{};
+ $("sReg").innerHTML=`<div class="muted" style="font-size:12.5px;margin:6px 0">첫 기준 버전(예: 26 상반기 = v26.02.02)의 파일 위치를 넣습니다. 공개본을 받아 쓸 때 넣을 것: 사용자 룰(<code>00_custom_rules</code>), 기존 학습 로그(<code>06_기존 데이터/{ips,waf}_*_raw.log</code>), 기준 학습데이터(표준모델 학습 형식 CSV: method, payload, label, {장비}_payload_* 피처 → <code>06_기존 데이터/학습데이터/</code>), 표준모델 피처 파일(노트북을 변환한 .py, '# 1) 피처 생성' 앞에 정규식 사전 → <code>06_기존 데이터/피처 코드/</code>).</div>
+ <div class="row"><label>이름<input id="rgName" placeholder="26 상반기" style="width:120px"></label><label>태그<input id="rgTag" placeholder="v26.02.02" style="width:110px"></label></div>
+ ${["ips","waf"].map(dev=>`<div class="row" style="margin-top:6px"><b style="align-self:center;width:40px">${dev.toUpperCase()}</b><label>학습 파일 CSV<input id="rg_${dev}_csv" style="width:320px" value="${esc(d[dev].train_csv)}"></label><label>원본 로그<input id="rg_${dev}_log" style="width:300px" value="${esc(d[dev].raw_log)}"></label><label>표준모델 피처 파일<input id="rg_${dev}_code" style="width:300px" value="${esc(fc[dev]||d[dev].feature_code)}"></label></div>`).join("")}
+ <div class="row" style="margin-top:8px"><button id="rgGo">등록</button><span class="muted" id="rgMsg" style="align-self:center"></span></div>`;
+ $("rgGo").onclick=async()=>{const files={},code={};for(const dev of["ips","waf"]){files[dev]={train_csv:$(`rg_${dev}_csv`).value.trim(),raw_log:$(`rg_${dev}_log`).value.trim()};code[dev]=$(`rg_${dev}_code`).value.trim()}
+  try{await post("/api/sup/register",{name:$("rgName").value.trim(),tag:$("rgTag").value.trim(),files,feature_code:code});$("rgMsg").textContent="등록했습니다";loadSup()}catch(e){$("rgMsg").textContent="실패: "+e.message}}}
+async function sRun(mode){if(mode==="all"&&!confirm("피처·기준 모델을 모두 다시 계산합니다 (IPS·WAF, 수십 분). 진행할까요?"))return;
+ try{await post("/api/sup/compare",{base:SS.base,mode,include_compared:$("sInc").checked});setTimeout(loadSup,800)}catch(e){alert("실패: "+e.message)}}
+$("sRunNew").onclick=()=>sRun("new");$("sRunAll").onclick=()=>sRun("all");
+$("sStop").onclick=async()=>{try{await post("/api/sup/stop",{});loadSup()}catch(e){alert("실패: "+e.message)}};
+$("sBase").onchange=()=>{sPv=null;sResInit=false;loadSup()};
+$("sDevSeg").addEventListener("click",e=>{const b=e.target.closest("button[data-d]");if(!b)return;sDev=b.dataset.d;$("sDevSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));loadSupRes();sPreview()});
+for(const id of["oA","oB","oC","oBad","oRule","oPy"])$(id).onchange=sPreviewSoon;
+let sRq;$("sRuleQ").oninput=()=>{clearTimeout(sRq);sRq=setTimeout(renderRules,200)};$("sRuleF").onchange=renderRules;
+$("sSave").onclick=async()=>{const name=$("sVName").value.trim();if(!name){$("sSaveMsg").textContent="버전 이름을 넣으세요 (예: 26 하반기)";return}
+ if(SS.versions.some(v=>v.name===name&&v.status==="draft")&&!confirm(`초안 '${name}' 을 지금 선별로 덮어씁니다. 진행할까요?`))return;
+ try{const r=await post("/api/sup/save",Object.assign({name,base:SS.base},sSpec()));$("sSaveMsg").textContent=`'${name}' 에 담았습니다: `+["ips","waf"].map(d=>`${d.toUpperCase()} ${fmt(r.draft_counts[d].sel)}개`).join(" · ")+" → 아래 버전 표에서 확인 후 확정";loadSup()}catch(e){$("sSaveMsg").textContent="실패: "+e.message}};
 /* ── 주기적 갱신 ── */
 let lastRunning=false,ticks=0;
 async function tick(){try{await loadState();const running=S.generation.running;

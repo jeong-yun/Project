@@ -7,7 +7,7 @@
   3.1  3_1_prepare_requests.py   ← LLM 입력 준비: 생성할 룰만 골라 '호출 1회 = 요청 파일 1개' 로 나눔 (비용 0)
                                    기존 1000건 이상 룰 제외, 1~50건 룰은 기존 예시를 붙여 '비슷하지만 다른' 샘플 생성
   3.2  3_2_generate.py           ← 데이터 생성: 생성 모델(UpStage Solar) → 룰별 씨앗 샘플 + 코드 검사
-  3.3  3_3_review.py             ← 데이터 검토: 검토 모델(ChatGPT gpt-5) → pass / fix / drop, 코드 재검사
+  3.3  3_3_review.py             ← 데이터 검토: 검토 모델(ChatGPT gpt-6-luna) → pass / fix / drop, 코드 재검사
   3.4  3_4_augment.py            ← 데이터 증강: 조건과 무관한 부분만 바꿔 룰당 목표 수까지 (비용 0)
   1.4  1_4_build_dataset.py      ← IPS·WAF(8필드) 수집 로그 → 08_dataset/
   3.5  3_5_progress.py           ← 진행 현황: 현재 룰 중 학습데이터를 만든 비율, 룰별 상태 플래그 → 07_llm_output/_progress/
