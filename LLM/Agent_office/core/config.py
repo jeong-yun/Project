@@ -11,6 +11,7 @@
 읽은 YAML 은 core/schemas.py 의 pydantic 모델로 검증되어, 오타가 있으면 앱 시작 시 바로 알려 준다.
 """
 
+import copy
 import os
 from datetime import date
 from pathlib import Path
@@ -18,6 +19,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+from core.memo import SigCache, file_sig
 from core.schemas import ModelsConfig, OrgNode, Rank, RankModels, Team
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -50,9 +52,19 @@ def date_label(d: date) -> str:
     return f"{d.isoformat()} ({WEEKDAYS[d.weekday()]})"
 
 
-def load_yaml(path: Path) -> dict:
+# libyaml(C)이 있으면 그것으로 — 순수 파이썬 파서보다 열 배쯤 빠르다 (결과는 safe_load 와 같음)
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+_yaml_cache = SigCache()
+
+
+def _parse_yaml(path: Path) -> dict:
     with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        return yaml.load(f, Loader=_YAML_LOADER) or {}
+
+
+def load_yaml(path: Path) -> dict:
+    """YAML 읽기. 화면을 다시 그릴 때마다 읽으므로 파일이 그대로면 이전에 읽은 것을 쓴다 (복사본이라 고쳐 써도 안전)."""
+    return copy.deepcopy(_yaml_cache.get(str(path), file_sig(path), lambda: _parse_yaml(path)))
 
 
 def load_ranks() -> list[Rank]:
@@ -193,10 +205,25 @@ def rank_models(rank_id: str, models: ModelsConfig, team: Team | None = None) ->
 # ─── 아바타 이미지 ────────────────────────────────────────────────────
 
 
+_listing_cache = SigCache()
+
+
+def _listing(folder: Path) -> frozenset[str]:
+    """폴더 안 파일 이름들 (소문자 — Windows 처럼 대소문자 무시). 파일을 넣거나 지우면 폴더 수정 시각이 바뀌어 다시 읽는다."""
+    def read() -> frozenset[str]:
+        try:
+            return frozenset(name.lower() for name in os.listdir(folder))
+        except OSError:
+            return frozenset()
+
+    return _listing_cache.get(str(folder), file_sig(folder), read)
+
+
 def _first_existing(base: Path, stem: str) -> Path | None:
+    names = _listing(base)  # 파일마다 있는지 묻지 않고 폴더 목록 한 번으로 (조직도를 그릴 때마다 수십 번 불림)
     for ext in AVATAR_EXTS:
         path = base / f"{stem}.{ext}"
-        if path.exists():
+        if path.name.lower() in names:
             return path
     return None
 

@@ -5,13 +5,13 @@
   adopted_files : 채택 시 results/design/ 에 함께 저장할 파일 (레이아웃 JSON·DXF·PNG·SVG·3D)
 
 그리는 일은 모두 core/floorplan*.py 가 한다 (화면 로직만 여기).
+도면·3D 모듈(matplotlib·ezdxf·trimesh·scipy — 불러오는 데만 수 초)은 실제로 그릴 때 불러온다 → 앱 시작·첫 화면이 빨라진다.
 """
 
 import re
 
 import streamlit as st
 
-from core import floorplan_3d, floorplan_render
 from core.floorplan import LayoutParseError, best_candidate, candidates, dump_layout, layout_from_text, metrics_line, report_markdown
 from core.schemas import HumanDecision
 
@@ -42,6 +42,8 @@ def build_outputs(text: str, want_3d: bool = False, print_scale: int = DEFAULT_S
         return {"error": str(e)}
     if layout is None:
         return {"error": "최종 답변에 레이아웃 JSON(```json 블록, floors 포함)이 없어 도면을 그릴 수 없습니다."}
+    from core import floorplan_render  # 무거운 모듈은 그릴 때만 (맨 위 설명)
+
     cands = [c for c in candidates(layout, n_candidates) if not any(r.shape() is None for f in c.layout.floors for r in f.rooms)]
     if not cands:
         report = candidates(layout, 1)[0].report
@@ -59,6 +61,8 @@ def build_outputs(text: str, want_3d: bool = False, print_scale: int = DEFAULT_S
 
 def adopt_candidate(out: dict, label: str) -> None:
     """후보안 하나를 채택해 도면 파일(JSON·DXF·PNG·SVG, 3D 를 만들었으면 3D 도)을 그 안으로 다시 만든다."""
+    from core import floorplan_render
+
     cand = next(c for c in out["candidates"] if c["label"] == label)
     resolved = cand["layout"]
     files: dict[str, bytes] = {"layout.json": dump_layout(resolved).encode("utf-8"), "평면도.dxf": floorplan_render.to_dxf(resolved)}
@@ -74,6 +78,8 @@ def adopt_candidate(out: dict, label: str) -> None:
 
 def add_3d(out: dict) -> None:
     """3D 파일을 out 에 더한다 (GLB·OBJ·프린팅용 STL·IFC)."""
+    from core import floorplan_3d
+
     layout, scale = out["layout"], out.get("print_scale") or DEFAULT_SCALE
     out["files"]["3d.glb"] = floorplan_3d.glb_bytes(layout)
     out["files"]["3d.obj"] = floorplan_3d.obj_bytes(layout)
@@ -137,6 +143,8 @@ def preview(run: dict, final_text: str) -> None:
         if out["has_3d"]:
             with tabs[-1]:
                 if "figure" not in out:
+                    from core import floorplan_3d
+
                     out["figure"] = floorplan_3d.plotly_figure(layout)
                 st.plotly_chart(out["figure"], use_container_width=True, key=f"plan3d_{rid}")
                 st.caption("마우스로 돌리기·확대 · 지붕 없는 모형(위에서 안을 봄) · 회색 = 벽, 베이지 = 바닥판")

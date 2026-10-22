@@ -18,6 +18,7 @@ from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from core.memo import SigCache, file_sig
 from core.schemas import AgentAnswer, HumanDecision, Lesson
 
 DECIDED = ("adopted", "rejected")
@@ -82,13 +83,24 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+_read_caches: dict[str, SigCache] = {}  # DB 파일 경로 → 읽기 결과 캐시 (같은 파일을 여는 Storage 객체끼리 공유)
+
+
+def _read_cache(db_path: Path) -> SigCache:
+    return _read_caches.setdefault(str(db_path.resolve()), SigCache())
+
+
 class Storage:
     def __init__(self, db_path: Path | str):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._reads = _read_cache(self.db_path)
         with closing(self._connect()) as conn, conn:
             self._migrate(conn)
             conn.executescript(SCHEMA)
+            # WAL 모드면 쓰기가 -wal 파일에 먼저 쌓이므로 그 파일도 지문에 넣는다 (기본 모드는 DB 파일만 보면 된다)
+            wal = conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        self._extra_sig_files = (f"{self.db_path}-wal",) if wal else ()
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -113,6 +125,14 @@ class Storage:
         return conn
 
     def _execute(self, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+        if sql.lstrip().upper().startswith("SELECT"):
+            # 읽기는 DB 파일이 그대로면 직전 결과를 쓴다 (화면을 다시 그릴 때마다 같은 조회를 되풀이하지 않게).
+            # 어느 스레드·Storage 객체가 쓰든 파일 수정 시각이 바뀌므로 자동으로 다시 읽는다 (core/memo.py)
+            sig = file_sig(self.db_path, *self._extra_sig_files)
+            return self._reads.get((sql, params), sig, lambda: self._run_sql(sql, params))
+        return self._run_sql(sql, params)
+
+    def _run_sql(self, sql: str, params: tuple) -> list[sqlite3.Row]:
         # closing: 연결 닫기 / 두 번째 conn: 오류 없으면 commit, 오류면 rollback
         with closing(self._connect()) as conn, conn:
             return conn.execute(sql, params).fetchall()
