@@ -94,6 +94,9 @@ ranks_by_id = {r.id: r for r in ranks}
 PROVIDER_STATUS = {
     "ok": ("✅", "사용 가능"), "disabled": ("⛔", "비활성"), "no_key": ("⚪", "키 없음"),
     "offline": ("🔌", "서버 꺼짐 (FreeLLMAPI Docker 를 켜세요)"),
+    # claude_cli (Claude 구독)
+    "not_installed": ("⚪", "Claude CLI 없음 (README 'Claude 구독' 절)"),
+    "logged_out": ("🔑", "로그인 필요 — 터미널에서 `claude auth login`"),
 }
 REFRESH_SEC = 1.0  # 작업 중 화면 자동 갱신 간격
 # AGENT_OFFICE_DATA_DIR 환경변수로 저장 위치를 바꿀 수 있다 (테스트·여러 사용자 분리용)
@@ -275,7 +278,8 @@ with st.sidebar:
             icon, text = PROVIDER_STATUS[status]
             st.markdown(f"{icon} {provider} — {text}")
         st.caption("사용할 수 없는 provider 는 config/models.yaml 의 대안(fallback) 모델로 대체됩니다. "
-                   "유료 키가 모두 안 되면 마지막에 freellm(무료 모델)으로 넘어갑니다.")
+                   "유료 키가 모두 안 되면 마지막에 freellm(무료 모델)으로 넘어갑니다. "
+                   "claude_cli = Claude 구독(팀장) — 한도는 내가 쓰는 Claude 와 공유하며, 한도에 걸리면 30분간 대안 모델을 씁니다.")
         critic = verification_cfg.get("critic", {})
         st.caption(
             f"⚖️ 비평가: {'켜짐' if critic.get('enabled', True) else '꺼짐'} "

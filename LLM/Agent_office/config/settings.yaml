@@ -30,6 +30,12 @@ llm_concurrency:
   freellm: 2               # FreeLLMAPI (Groq·Gemini 무료 티어 묶음)
   google: 3
   openai: 4
+  claude_cli: 1            # Claude 구독(claude -p) — 호출마다 CLI 프로세스를 띄우고, 사람과 나눠 쓰는 구독 한도를 아끼려고 1개씩
+
+claude_cli:
+  # Claude 구독 호출 (config/models.yaml 의 provider: claude_cli, core/claude_cli.py)
+  timeout_sec: 600         # 이 시간 안에 안 끝나면 중단하고 대안 모델로 (CLI 시작에만 5~7초)
+  effort: ""               # low | medium | high | xhigh | max — 비우면 CLI 기본값. 낮추면 빠르고 구독 한도를 덜 쓴다
 
 web_search:
   # 팀 team.yaml 의 tools 에 web_search 가 있고, 질문 화면의 '🌐 웹 검색' 이 켜져 있을 때 사용

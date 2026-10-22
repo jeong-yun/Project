@@ -53,7 +53,8 @@
 | Provider | 환경 변수 | 발급처 | 현재 사용처 |
 |---|---|---|---|
 | Google (Gemini) | `GOOGLE_API_KEY` | https://aistudio.google.com/apikey | 사원·대리, 보조 작업(브리프·검색어·비평·교훈) |
-| OpenAI (ChatGPT) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys | 차장·부장·팀장 |
+| OpenAI (ChatGPT) | `OPENAI_API_KEY` | https://platform.openai.com/api-keys | 차장·부장, 팀장 대안 |
+| Claude 구독 (`claude_cli`) | 키 없음 (`CLAUDE_CLI_PATH` 선택) | 이 PC 의 Claude Code CLI 로그인 (아래 2-2) | **팀장 1순위** (Claude Opus 5.5, 구독 한도 사용·청구 없음) |
 | Anthropic (Claude) | `ANTHROPIC_API_KEY` | https://console.anthropic.com/ | **현재 비활성** (크레딧 충전 후 사용) |
 | Upstage (Solar) | `UPSTAGE_API_KEY` | https://console.upstage.ai/ | 대안 모델 (선택) |
 | FreeLLMAPI (무료 모델) | `FREELLMAPI_API_KEY`, `FREELLMAPI_BASE_URL` | 내 PC 의 FreeLLMAPI 대시보드 (아래 2-1) | 유료 키가 모두 안 될 때 마지막 대안 / '🆓 무료 모델만 사용' |
@@ -61,7 +62,8 @@
 
 - **일부 키만 있어도 동작합니다.** 사용할 수 없는 provider 는 `config/models.yaml` 의 대안(fallback) 모델로 자동 대체됩니다.
 - 키가 있어도 호출이 실패하면(크레딧 부족, 할당량 초과, 모델 단종 등) 다음 후보로 넘어가고, 타임라인의 "검증 기록"에 사유가 남습니다.
-- **Claude 를 다시 쓰려면**: `config/models.yaml` 의 `disabled_providers: [anthropic]` 에서 anthropic 을 지우고, 부장·팀장 primary 를 Claude 모델로 바꾸면 됩니다.
+- **Claude API 를 다시 쓰려면**: `config/models.yaml` 의 `disabled_providers: [anthropic]` 에서 anthropic 을 지우고, 부장·팀장 primary 를 Claude 모델로 바꾸면 됩니다.
+  (팀장은 지금 API 대신 **Claude 구독**으로 Claude 를 씁니다 — 아래 2-2)
 - Gemini **Pro** 계열은 무료 등급 할당량이 0 입니다 (Flash 계열은 무료 사용 가능).
 - 웹 검색은 DuckDuckGo(`ddgs` 패키지), 주가 데이터는 Yahoo Finance(`yfinance` 패키지)를 쓰므로 별도 키가 필요 없습니다.
 - 비용: 기본 팀 전체(팀장부터)에 질문하면 LLM 호출 약 12~15회 (브리프 1 + 검색어 1 + 분배 2 + 초안 3 + 검토·통합 5 + 비평 1 + 교훈 1).
@@ -94,6 +96,38 @@
 - **동시 호출 제한**: 형제 에이전트가 동시에 일하므로 `config/settings.yaml` 의 `llm_concurrency` 로 provider 별 동시 LLM 호출 수를 제한합니다
   (기본 freellm 2 · google 3 · openai 4 · 그 밖 4, 0 이하 = 제한 없음). 무료 한도(429)가 자주 걸리면 freellm 을 1 로 낮추세요.
 - 무료 티어 입력은 제공자 학습에 쓰일 수 있습니다 — 회사·개인 민감 데이터에는 유료 키를 쓰세요.
+
+## 2-2. Claude 구독 (`claude_cli`) — 팀장이 API 크레딧 대신 구독으로 Claude Opus 5.5 사용
+
+Anthropic API 키는 크레딧이 없어 꺼 두었지만, 이 PC 에 **Claude 구독(Pro/Max)** 으로 로그인한 Claude Code CLI 가 있으면
+팀장이 `claude -p`(비대화형 실행)로 **Claude Opus 5.5** 를 씁니다. API 요금이 아니라 구독 사용 한도에서 차감되므로 메인 화면(🏠)에는
+비용 0, 요금 칸 **'구독 (청구 없음)'** 으로 보입니다 (참고로 'API 로 했다면 얼마'인지 가격표 기준 추정치를 함께 보여 줌).
+
+**어떻게 동작하나** (`core/claude_cli.py`)
+- 호출 1회 = `claude -p` 프로세스 1개. 시스템 프롬프트는 `--system-prompt-file`(Claude Code 기본 프롬프트를 통째로 바꿈), 질문은 표준 입력으로 보냅니다.
+- **답만 하게 잠금**: `--tools ""`(도구 전부 끔), `--safe-mode`(CLAUDE.md·hooks·플러그인·MCP·스킬 끔), `--strict-mcp-config`,
+  `--permission-mode dontAsk`, `--permission-prompts none`, `--disable-slash-commands`, `--no-session-persistence`, 매번 새 빈 임시 폴더에서 실행.
+  → `~/.claude` 의 hooks·설정이 명령을 실행하지 못합니다 (회사 관리 정책(managed settings)만 그대로 적용).
+- `--bare` 는 쓰지 않습니다 — bare 모드는 구독 로그인을 읽지 않고 API 키만 씁니다.
+- 자식 프로세스 환경에서 `ANTHROPIC_API_KEY` 등을 지웁니다 — `.env` 의 API 키(크레딧 없음)로 청구되지 않게.
+- 초안은 `stream-json` 의 글자 조각으로 화면에 실시간 표시, 분배·검토(구조화 출력)는 `--json-schema` → `structured_output`.
+- 실패 처리: CLI 없음·로그인 안 됨 → 바로 다음 후보(그 뒤 5분간 후보에서 빠짐) / **구독 한도** → 다음 후보로, 30분 동안 건너뜀 /
+  과부하 → 잠깐 뒤 재시도 / 시간 초과(`settings.yaml` 의 `claude_cli.timeout_sec`, 기본 600초) → 다음 후보.
+- 팀장 순서: **claude_cli Opus 5.5 → OpenAI gpt-5.5 → gpt-5.4 → (Anthropic API, 비활성) → 무료 모델**. 다른 직급은 그대로입니다.
+
+**준비**
+1. Claude Code CLI 설치 후 터미널에서 `claude auth login` → 구독 계정으로 로그인 (`claude auth status` 에 `"loggedIn": true`).
+2. `claude` 가 PATH 에 없으면 `.env` 에 `CLAUDE_CLI_PATH=C:\경로\claude.exe` (없으면 `~/.local/bin`, Claude 데스크톱 앱이 함께 설치한 CLI 순으로 찾음).
+3. 사이드바 ⚙️ 모델 상태에 `✅ claude_cli` 가 보이면 준비 완료 (`🔑 로그인 필요` / `⚪ Claude CLI 없음` 이면 1·2번 확인).
+
+**주의**
+- **구독 한도는 내가 직접 쓰는 Claude 대화·Claude Code 와 함께 줄어듭니다.** 그래서 호출 수가 적은 팀장(실행당 분배·검토·통합 몇 번)에만 배정했고,
+  `llm_concurrency.claude_cli: 1` 로 한 번에 하나씩만 부릅니다. 한도에 걸리면 자동으로 GPT-5.5 로 넘어갑니다.
+- 호출마다 CLI 를 새로 띄우므로 **시작에만 5~7초**가 더 걸립니다. 더 빠르게(한도도 덜 쓰게) 하려면 `settings.yaml` 의 `claude_cli.effort` 를 `medium`/`low` 로.
+- '🆓 무료 모델만 사용' 을 켜면 claude_cli 도 쓰지 않습니다.
+
+**되돌리기 (팀장을 다시 GPT-5.5 로)**: `config/models.yaml` 의 `disabled_providers` 에 `claude_cli` 를 추가하거나(`[anthropic, claude_cli]`),
+팀장 `primary` 를 주석에 적힌 `{ provider: openai, model: gpt-5.5 }` 로 바꾸고 fallback 의 첫 줄(gpt-5.5)을 지우면 됩니다.
 
 ## 3. 설치 — 새 PC 에서 처음 시작하기
 

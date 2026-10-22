@@ -15,7 +15,8 @@ from core.storage import Storage
 
 PERIODS = {"오늘": 1, "7일": 7, "30일": 30, "전체": None}  # 최근 며칠
 PROVIDER_NAMES = {"openai": "OpenAI", "google": "Google", "anthropic": "Anthropic", "upstage": "Upstage",
-                  "freellm": "무료(FreeLLMAPI)"}
+                  "freellm": "무료(FreeLLMAPI)", "claude_cli": "구독(Claude)"}
+SUBSCRIPTION = "claude_cli"  # Claude 구독(claude -p) — 토큰은 기록하지만 청구 없음, 한도는 사람이 쓰는 Claude 와 공유
 
 
 def period_start(label: str) -> float | None:
@@ -30,6 +31,8 @@ def current_keys(models) -> dict[str, tuple[str, str]]:
     """지금 .env 에 있는 키 — {키 id: (provider, 가린 키)}."""
     out = {}
     for provider, env in models.providers.items():
+        if provider == SUBSCRIPTION:
+            continue  # API 키가 아니라 구독 로그인 (CLAUDE_CLI_PATH 는 실행 파일 경로)
         key = os.getenv(env)
         if key:
             key_id, masked = usage.key_fingerprint(key)
@@ -39,11 +42,26 @@ def current_keys(models) -> dict[str, tuple[str, str]]:
 
 def key_label(key: dict | None, key_id: str, provider: str = "") -> str:
     if not key_id:
-        return f"{PROVIDER_NAMES.get(provider, provider)} (키 없음)"
+        return f"{PROVIDER_NAMES.get(provider, provider)} " + ("(로그인)" if provider == SUBSCRIPTION else "(키 없음)")
     if key and key.get("label"):
         return key["label"]
     masked = key["masked"] if key else key_id[:6]
     return f"{PROVIDER_NAMES.get(key['provider'] if key else provider, provider)} 키 {masked}"
+
+
+def billing(provider: str) -> str:
+    """모델별 표의 '요금' 칸 — 구독·무료·API 종량제를 구분한다."""
+    if provider == SUBSCRIPTION:
+        return "구독 (청구 없음)"
+    if provider in usage.load_pricing()["free_providers"]:
+        return "무료"
+    return "API 종량제"
+
+
+def api_equivalent(rows: list[dict]) -> float:
+    """구독 호출을 Anthropic API 로 했다면 얼마였을지 (가격표 기준, 참고용)."""
+    return sum(usage.estimate_cost("anthropic", r["model"], r["input_tokens"], r["output_tokens"], calls=r["calls"]) or 0
+               for r in rows if r["provider"] == SUBSCRIPTION)
 
 
 def money(value: float | None) -> str:
@@ -102,6 +120,10 @@ def _totals(rows: list[dict]) -> None:
     c4.metric("출력 토큰", f"{sum(r['output_tokens'] for r in rows):,}")
     st.caption("추정 비용 = 토큰 × 가격표(아래 ⚙️). 무료 등급·배치 할인·세금은 빠져 있어 실제 청구액과 다를 수 있습니다 — "
                "실제 결제 금액은 각 사 콘솔(OpenAI Usage · Google Cloud Billing · Anthropic Console)에서 확인하세요.")
+    sub_calls = sum(r["calls"] for r in rows if r["provider"] == SUBSCRIPTION)
+    if sub_calls:
+        st.caption(f"🎫 Claude 구독 호출 {sub_calls:,}건은 비용 0 (구독, 청구 없음) — API 로 했다면 약 {money(api_equivalent(rows))} (참고용). "
+                   "구독 한도는 내가 쓰는 Claude 대화·Claude Code 와 함께 줄어듭니다.")
     if unpriced:
         st.warning(f"가격표에 없는 모델 호출 {unpriced:,}건은 비용에 빠져 있습니다 — 아래 ⚙️ 가격표에서 가격을 넣으면 다시 계산합니다.")
 
@@ -120,8 +142,9 @@ def _by_model(rows: list[dict], keys: dict, period: str, storage: Storage) -> No
         m["cost"] += r["cost_usd"] or 0
         m["unpriced"] += r["unpriced_calls"]
     table = [
-        {"모델": model, "회사": PROVIDER_NAMES.get(provider, provider), "호출": m["calls"], "입력 토큰": m["in"],
-         "출력 토큰": m["out"], "추정 비용($)": round(m["cost"], 4) if m["unpriced"] < m["calls"] else None}
+        {"모델": model, "회사": PROVIDER_NAMES.get(provider, provider), "요금": billing(provider), "호출": m["calls"],
+         "입력 토큰": m["in"], "출력 토큰": m["out"],
+         "추정 비용($)": round(m["cost"], 4) if m["unpriced"] < m["calls"] else None}
         for (provider, model), m in sorted(by_model.items(), key=lambda kv: -kv[1]["cost"])
     ]
     c1, c2 = st.columns([3, 2])

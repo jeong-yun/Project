@@ -256,6 +256,12 @@
 - 성과: 테스트 8건 추가(키 지문, 캐시·곡 단위·무료·날짜별 가격, 저장·요약·이름·재계산, 기록 실패 무시, 콜백 토큰 수집, 모델에 콜백 부착, 메인 화면 AppTest). 실제 화면에서 이전 키 이름 저장까지 확인(가짜 사용 기록)
 - 다음 할 일: 실제 업무 몇 건 뒤 각 사 콘솔 청구액과 추정 비용 비교, 가격표 정기 확인
 
+**팀장 모델 — Claude 구독(claude -p) provider 추가**
+- 작업: Anthropic API 크레딧 없이도 팀장이 Claude Opus 5.5 를 쓰도록, 이 PC 의 Claude 구독 로그인을 쓰는 `claude_cli` provider 추가 (`core/claude_cli.py` — Claude Code CLI 를 LangChain ChatModel 로 감쌈). 팀장 순서를 claude_cli Opus 5.5 → GPT-5.5 → GPT-5.4 → … 로 변경(다른 직급 그대로), 동시 호출 1개, 사이드바 상태(🔑 로그인 필요·⚪ CLI 없음), 메인 화면 요금 칸 '구독 (청구 없음)' + 'API 로 했다면' 참고 추정치. Anthropic API Opus 대안의 temperature 제거(현재 Claude 는 sampling 인자를 주면 400)
+- 기술: subprocess + Claude Code headless(`-p`, `stream-json` text_delta 스트리밍, `--json-schema` → structured_output), 도구·hooks·MCP·CLAUDE.md 를 끈 '답만 하는' 실행(`--tools ""`·`--safe-mode`·`dontAsk`·빈 임시 폴더), 자식 환경에서 API 키 제거(구독으로만 과금), 오류 분류(로그인 안 됨 → 사용 불가 캐시 / 구독 한도 → 30분 쿨다운 / 과부하 → 재시도 / 시간 초과 → 대안), 상태 확인 백그라운드 갱신
+- 성과: 가짜 CLI 프로세스로 테스트 17건 추가(메시지 변환·명령 플래그·환경 정리·json/stream-json 해석·구조화 출력·로그인 오류·한도 쿨다운·시간 초과·대안 전환·사용량 '구독' 기록). 실제 CLI(2.1.304)로 플래그 조합·Windows 파이프·오류 분류까지 확인 — CLI 시작 오버헤드 약 5~7초 실측
+- 다음 할 일: 구독 로그인 후 실제 팀장 호출 지연·품질을 GPT-5.5 와 비교, 구독 한도 소진 빈도 관찰
+
 ---
 
 ## JD / 이력서용 요약 (누적)

@@ -14,7 +14,8 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 # freellm = FreeLLMAPI 프록시 (무료 티어 모델 모음, OpenAI 호환) — 유료 키를 쓸 수 없을 때의 무료 대안
-Provider = Literal["openai", "anthropic", "google", "upstage", "freellm"]
+# claude_cli = 이 PC 에 로그인된 Claude 구독을 Claude Code CLI(claude -p)로 호출 (core/claude_cli.py) — API 크레딧 대신 구독 한도
+Provider = Literal["openai", "anthropic", "google", "upstage", "freellm", "claude_cli"]
 
 
 # ════════════════════════════════════════════════════════════════════
