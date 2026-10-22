@@ -57,6 +57,22 @@ def no_network_search(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def no_network_feeds(monkeypatch):
+    """🏠 메인 화면 뉴스·SNS 수집이 테스트 중 실제 네트워크·백그라운드 수집을 하지 않게 한다.
+    수집기 테스트는 가짜 http·뉴스 검색을 직접 넣는다. start_collect 호출은 반환 리스트에 기록된다."""
+    from core import feeds, search
+
+    def blocked(*args, **kwargs):
+        raise RuntimeError("테스트 중 네트워크 금지")
+
+    started: list[str] = []
+    monkeypatch.setattr(search, "news_search", blocked)
+    monkeypatch.setattr(feeds.Http, "_send", blocked)
+    monkeypatch.setattr(feeds, "start_collect", lambda settings, models, data_dir, teams=None: started.append(str(data_dir)) or True)
+    return started
+
+
 @pytest.fixture
 def ranks():
     return load_ranks()
