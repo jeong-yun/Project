@@ -300,10 +300,13 @@ def build_office_graph(
             return run_harness(answer, redo_draft, state)
         except NoAvailableModelError as e:
             # 실무자 한 명의 모든 모델이 실패해도 팀 전체를 멈추지 않는다 → 실패 표시를 남기고 관리자가 나머지로 진행
+            lines = str(e).splitlines()
+            # 호출 전에 막힌 경우(무료 서버 꺼짐·키 없음)는 그 이유 한 줄뿐 → 본문에도 이유를 쓴다
+            reason = "" if len(lines) > 1 else f" ({lines[0].split(': ', 1)[-1]})" if lines else ""
             return AgentAnswer(
                 node_id=node_id, rank_id=agent.rank.id, kind="draft",
-                content=f"⚠️ {agent.name}: 모델 오류로 초안을 작성하지 못했습니다. 이 부분은 다른 결과로 보완해야 합니다.",
-                model=agent.rank_models.primary, errors=str(e).splitlines()[1:][:6],
+                content=f"⚠️ {agent.name}: 모델 오류로 초안을 작성하지 못했습니다{reason}. 이 부분은 다른 결과로 보완해야 합니다.",
+                model=agent.rank_models.primary, errors=lines[1:][:6] or lines[:1],
                 verification_log=["모든 후보 모델 호출 실패 → 이 에이전트 없이 진행"],
             )
 

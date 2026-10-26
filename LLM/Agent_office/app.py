@@ -305,7 +305,19 @@ nodes = {n.id: n for n in org.walk()}
 parents = parent_map(org)
 member_choices = member_store.load(team_id)
 # 에이전트별 모델 후보 (팀원 모델 선택 반영 — 아무도 안 골랐으면 직급 설정 그대로). 조직도·에이전트 패널 표시용
-member_chains = member_models.team_rank_models(org, models, team, member_choices)
+member_plans = member_models.plan(org, models, team, member_choices)
+member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
+runtime_states = llm_factory.provider_status(models)
+
+
+def chosen_off(node_id: str) -> tuple[str, str] | None:
+    """(모델, 이유) — 사람이 고른(또는 규칙으로 낮춘) 모델을 지금 쓸 수 없을 때. 기본 팀원이거나 쓸 수 있으면 None."""
+    p = member_plans[node_id]
+    if not (p.choice or p.limited):
+        return None
+    provider, model = member_models.split_key(p.effective)
+    reason = llm_factory.STATUS_REASONS.get(runtime_states.get(provider, "no_key"), "")
+    return (model, reason) if reason else None
 
 
 def name_of(node_id: str) -> str:
@@ -410,6 +422,9 @@ def node_html(node: OrgNode, statuses: dict, focus: str, active_ids: set | None,
         classes.append("ao-st-working")
     candidates = llm_factory.available_candidates(member_chains[node.id], models)
     model = candidates[0][0].model if candidates else "모델 없음"
+    off = chosen_off(node.id)
+    if off:  # 고른 모델이 꺼져 있으면 대안 모델을 슬쩍 보여 주지 않고 그대로 알린다
+        model = f"⛔ {off[0]} 꺼짐" + (f" → {candidates[0][0].model}" if candidates else " · 실패 예정")
     badge = (
         f"<div><span class='ao-badge ao-b-{state}'>{html.escape(label)}{DOTS if state == 'working' else ''}</span></div>"
         if state
@@ -844,6 +859,10 @@ def render_agent_panel(node_id: str, run: dict | None) -> None:
             c_img.markdown(f"<div style='font-size:48px'>{rank.emoji}</div>", unsafe_allow_html=True)
         cands = llm_factory.available_candidates(member_chains[node_id], models)
         model = cands[0][0].label + (" (대안)" if cands and cands[0][1] else "") if cands else "모델 없음"
+        off = chosen_off(node_id)
+        if off:
+            model = f"⛔ 고른 모델 꺼짐: {off[0]} ({off[1]})" + (
+                f" → 대안 {cands[0][0].label}" if cands else " → 맡기면 이 팀원은 실패합니다 (유료 모델로 넘어가지 않음)")
         state = run["statuses"].get(node_id) if run else None
         c_info.markdown(f"#### {name_of(node_id)}" + (f" · {state[1]}" if state else ""))
         c_info.caption(f"{rank.name} · {node.specialty or rank.role} · {model} · 📚 교훈 {storage.lesson_counts(team_id).get(node_id, 0)}개")
@@ -1460,6 +1479,9 @@ def render_member_models() -> None:
                 on_change=on_member_model_change, args=(node.id,),
             )
             c_use.caption(usage_text(used.get(node.id, [])))
+            off = chosen_off(node.id)
+            if off:
+                c_use.markdown(f":red[⛔ **고른 모델 꺼짐**] — {off[1]}")  # 무료 서버면 'Docker Desktop 실행 후 FreeLLMAPI 켜기'까지
         if chosen:
             st.button("↩️ 모두 기본으로", key=f"member_reset_{team_id}", on_click=reset_member_models)
 
@@ -1495,10 +1517,28 @@ def render_field(field: TaskField, key: str):
     return st.text_input(label, value=str(field.default or ""), key=key, placeholder=field.placeholder, help=field.help or None)
 
 
+def warn_chosen_off() -> None:
+    """이번 업무에 참여할 팀원 중 고른 모델이 꺼진 사람이 있으면 맡기기 전에 알린다 (시간을 쓰기 전에)."""
+    lines, server_off = [], False
+    for nid in [n.id for n in subtree(org, target).walk()]:
+        off = chosen_off(nid)
+        if not off:
+            continue
+        server_off |= off[1] == llm_factory.FREE_SERVER_OFF
+        fails = not llm_factory.available_candidates(member_chains[nid], models)
+        lines.append(f"- **{name_of(nid)}** · {off[0]} — {off[1]} → "
+                     + ("이 팀원은 실패합니다 (유료 모델로 넘어가지 않음)" if fails else "대안 모델로 진행"))
+    if lines:
+        hint = ("FreeLLMAPI 는 Docker Desktop 을 켜면 자동으로 다시 켜집니다. 또는 '🎛 팀원 모델 선택'에서 모델을 바꾸세요."
+                if server_off else "'🎛 팀원 모델 선택'에서 모델을 바꿀 수 있습니다.")
+        st.warning("⛔ 고른 모델이 꺼져 있는 팀원이 있습니다.\n\n" + "\n".join(lines) + "\n\n" + hint)
+
+
 def render_task_input() -> dict:
     """업무 입력칸을 그리고, '맡기기'를 누른 경우 워크플로우로 넘길 요청(dict)을 돌려준다 (안 누르면 빈 dict)."""
     request: dict = {}  # 업무 양식이든 자유 질문이든 여기에 모은다
     st.markdown(f"#### 💬 {name_of(target)} 에게 업무 맡기기")
+    warn_chosen_off()
     # (안쪽에 '원하는 최종 상태' 접기 상자가 있어 바깥은 접기 상자가 아닌 테두리 상자로 둔다 — Streamlit 은 접기 상자 중첩 불가)
     with st.container(border=True):
         task_ids = [t.id for t in team.tasks]
