@@ -17,7 +17,7 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from core import llm_factory
 from core.config import date_label, rank_models, today
 from core.llm_factory import NoAvailableModelError
-from core.schemas import AgentAnswer, Delegation, ModelsConfig, ModelSpec, OrgNode, Rank, ReviewResult, Team
+from core.schemas import AgentAnswer, Delegation, ModelsConfig, ModelSpec, OrgNode, Rank, RankModels, ReviewResult, Team
 from core.verification import rubric_text
 
 __all__ = ["EmptyResponseError", "NoAvailableModelError", "OrgAgent", "AnswerStream", "chunk_text", "with_feedback"]
@@ -56,6 +56,7 @@ class OrgAgent:
         rubric: dict | None = None,
         names: dict[str, str] | None = None,
         skills: str = "",
+        chain: RankModels | None = None,
     ):
         self.node = node
         self.rank = rank
@@ -64,7 +65,8 @@ class OrgAgent:
         self.rubric = rubric  # 채점 루브릭(퓨샷 예시 포함) — 검토할 때 프롬프트에 들어간다
         self.names = names or {}  # 에이전트 id → 표시 이름 (하위 에이전트 소개용)
         self.skills = skills  # 팀 스킬(teams/<팀>/skills/*.md) — 모든 업무에 적용되는 고정 지침
-        self.rank_models = rank_models(rank.id, models, team)  # 이 직급이 쓸 모델 후보
+        # 이 에이전트가 쓸 모델 후보 — 화면에서 팀원 모델을 골랐으면 그것(core/member_models.py), 아니면 직급 설정
+        self.rank_models = chain or rank_models(rank.id, models, team)
 
     @property
     def name(self) -> str:

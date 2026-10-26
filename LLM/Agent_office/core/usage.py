@@ -44,6 +44,7 @@ class UsageEvent:
     team_id: str = ""
     run_id: str = ""
     purpose: str = ""
+    agent_id: str = ""  # 조직도의 에이전트 id (워크플로우 안의 호출만 — 브리프·검색 계획 등 공용 호출은 빈 값)
     ts: float = field(default_factory=time.time)
 
 
@@ -138,7 +139,7 @@ _scope: ContextVar[dict] = ContextVar("usage_scope", default={})
 
 @contextmanager
 def scope(**tags: str) -> Iterator[None]:
-    """with usage.scope(team_id="stock", run_id="…", purpose="결정 전 문의"): … — 안쪽 호출 기록에 붙는다."""
+    """with usage.scope(team_id="stock", run_id="…", purpose="결정 전 문의", agent_id="lead"): … — 안쪽 호출 기록에 붙는다."""
     token = _scope.set({**_scope.get(), **{k: v for k, v in tags.items() if v}})
     try:
         yield
@@ -170,6 +171,7 @@ def record(provider: str, model: str, api_key: str | None, input_tokens: int = 0
             input_tokens=int(input_tokens or 0), output_tokens=int(output_tokens or 0), cached_tokens=int(cached_tokens or 0),
             calls=calls, cost_usd=estimate_cost(provider, model, input_tokens or 0, output_tokens or 0, cached_tokens or 0, calls),
             team_id=tags.get("team_id", ""), run_id=tags.get("run_id", ""), purpose=purpose or tags.get("purpose", ""),
+            agent_id=tags.get("agent_id", ""),
         )
         _sink(event)
         return event

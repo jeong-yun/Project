@@ -56,6 +56,8 @@ class ModelsConfig(BaseModel):
     disabled_providers: list[Provider] = Field(default_factory=list)
     ranks: dict[str, RankModels]
     utility: RankModels  # 검색어 생성·교훈 생성·비평(critic) 등 보조 작업용
+    # 모델 강도 순서 — 위(앞)가 가장 강함, 한 줄 안은 같은 강도. 항목은 "provider:model" (팀원 모델 선택 규칙에 쓴다)
+    model_tiers: list[list[str]] = Field(default_factory=list)
 
 
 class Rank(BaseModel):

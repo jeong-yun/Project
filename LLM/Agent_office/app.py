@@ -42,7 +42,7 @@ import board_ui
 import concept_ui
 import design_ui
 import home_ui
-from core import audio_edit, concept, followup, llm_factory, music, stock_calc, usage, verification
+from core import audio_edit, concept, followup, llm_factory, member_models, music, stock_calc, usage, verification
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
@@ -57,7 +57,6 @@ from core.config import (
     load_settings,
     load_verification,
     parent_map,
-    rank_models,
     resolve_avatar,
     subtree,
     team_org,
@@ -107,6 +106,8 @@ RESULTS_DIR = Path(os.getenv("AGENT_OFFICE_RESULTS_DIR") or BASE_DIR / settings.
 ROUTE_MAP = "route_map"  # team.yaml features 에 있으면 여행 경로 지도를 만든다
 MUSIC_TRACK = "music_track"  # team.yaml features 에 있으면 끝난 뒤 Lyria 로 곡을 만들고 편집할 수 있다
 MUSIC_CFG = music.music_settings(settings)  # settings.yaml 의 music: (모델·가격·채점·자동 재생성)
+# 화면에서 고른 팀원별 모델 — 데이터 폴더의 member_models.json (config/*.yaml 은 바꾸지 않는다)
+member_store = member_models.MemberModelStore(DATA_DIR)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -244,6 +245,7 @@ with st.sidebar:
                       on_click=go_to_run, args=(r,), use_container_width=True)
 
     # 유료 키를 아끼거나 키가 없을 때: 유료 provider 를 모두 끄고 FreeLLMAPI 무료 모델만 쓴다
+    base_models = models  # 팀원 모델 선택 규칙은 '무료만' 토글과 상관없이 원래 설정으로 판단한다
     if st.toggle("🆓 무료 모델만 사용", key="free_only", help="FreeLLMAPI(무료 티어) 모델만 사용합니다. 무료 모델은 하루 호출 한도가 작습니다."):
         models = llm_factory.free_only(models)
         if llm_factory.provider_status(models).get("freellm") != "ok":
@@ -301,6 +303,9 @@ with st.sidebar:
 org = team_org(team, ranks)
 nodes = {n.id: n for n in org.walk()}
 parents = parent_map(org)
+member_choices = member_store.load(team_id)
+# 에이전트별 모델 후보 (팀원 모델 선택 반영 — 아무도 안 골랐으면 직급 설정 그대로). 조직도·에이전트 패널 표시용
+member_chains = member_models.team_rank_models(org, models, team, member_choices)
 
 
 def name_of(node_id: str) -> str:
@@ -310,7 +315,8 @@ def name_of(node_id: str) -> str:
 
 def make_graph():
     return build_office_graph(
-        org, ranks, team, models, settings, verification_cfg, storage=storage, checkpointer=get_checkpointer()
+        org, ranks, team, models, settings, verification_cfg, storage=storage, checkpointer=get_checkpointer(),
+        member_models=member_store.load(team_id),  # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로
     )
 
 
@@ -402,7 +408,7 @@ def node_html(node: OrgNode, statuses: dict, focus: str, active_ids: set | None,
         classes.append("ao-dim")  # 이번 질문에 참여하지 않는 칸은 흐리게
     if state == "working":
         classes.append("ao-st-working")
-    candidates = llm_factory.available_candidates(rank_models(node.rank, models, team), models)
+    candidates = llm_factory.available_candidates(member_chains[node.id], models)
     model = candidates[0][0].model if candidates else "모델 없음"
     badge = (
         f"<div><span class='ao-badge ao-b-{state}'>{html.escape(label)}{DOTS if state == 'working' else ''}</span></div>"
@@ -836,7 +842,7 @@ def render_agent_panel(node_id: str, run: dict | None) -> None:
             c_img.image(str(path), width=72)
         else:
             c_img.markdown(f"<div style='font-size:48px'>{rank.emoji}</div>", unsafe_allow_html=True)
-        cands = llm_factory.available_candidates(rank_models(node.rank, models, team), models)
+        cands = llm_factory.available_candidates(member_chains[node_id], models)
         model = cands[0][0].label + (" (대안)" if cands and cands[0][1] else "") if cands else "모델 없음"
         state = run["statuses"].get(node_id) if run else None
         c_info.markdown(f"#### {name_of(node_id)}" + (f" · {state[1]}" if state else ""))
@@ -950,7 +956,7 @@ def render_followup(run: dict) -> None:
         return
     node = nodes[root]
     agent = OrgAgent(node, ranks_by_id[node.rank], team, models, names={n: name_of(n) for n in nodes},
-                     skills=load_skills(team_id))
+                     skills=load_skills(team_id), chain=member_chains[root])
     current, _ = current_result(run)
     validators = list(dict.fromkeys([*team.harness.validators, *(run.get("extra_validators") or [])]))
     try:
@@ -1362,6 +1368,103 @@ def live_area() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════
+# 본문 ③-1 팀원 모델 선택 — 에이전트마다 모델을 고른다 (상하 관계 규칙: core/member_models.py)
+# ════════════════════════════════════════════════════════════════════
+MEMBER_NOTE_KEY = "member_model_note"
+PROVIDER_NAMES = {"claude_cli": "Claude CLI", "anthropic": "Anthropic", "openai": "OpenAI", "google": "Google",
+                  "upstage": "Upstage", "freellm": "FreeLLM"}
+USAGE_DAYS = 7
+
+
+def model_option_label(key: str, states: dict[str, str]) -> str:
+    provider, model = member_models.split_key(key)
+    icon = "" if states.get(provider) == "ok" else f" {PROVIDER_STATUS.get(states.get(provider), ('⚪', ''))[0]}"
+    return f"{model} · {PROVIDER_NAMES.get(provider, provider)} · {member_models.cost_label(provider)}{icon}"
+
+
+def member_widget_key(node_id: str) -> str:
+    return f"member_model_{team_id}_{node_id}"
+
+
+def on_member_model_change(node_id: str) -> None:
+    """선택을 저장하고, 규칙을 어기게 된 하위를 낮춘 뒤 무엇이 바뀌었는지 알림으로 남긴다 (위젯 콜백)."""
+    new_key = st.session_state.get(member_widget_key(node_id)) or ""
+    choices, changes = member_models.apply_choice(org, base_models, team, member_store.load(team_id), node_id, new_key)
+    member_store.save(team_id, choices)
+    if changes:
+        lines = [f"{name_of(c.node_id)}: {member_models.split_key(c.before)[1]} → {member_models.split_key(c.after)[1]}"
+                 for c in changes]
+        st.session_state[MEMBER_NOTE_KEY] = "🔽 상하 관계 규칙에 따라 아래 팀원의 모델이 함께 바뀌었습니다 — " + " · ".join(lines)
+    else:
+        st.session_state.pop(MEMBER_NOTE_KEY, None)
+
+
+def reset_member_models() -> None:
+    member_store.save(team_id, {})
+    st.session_state[MEMBER_NOTE_KEY] = "모든 팀원을 기본(직급 설정)으로 되돌렸습니다."
+
+
+def usage_text(rows: list[dict]) -> str:
+    if not rows:
+        return "최근 사용 없음"
+    calls = sum(r["calls"] or 0 for r in rows)
+    tokens = sum(r["tokens"] or 0 for r in rows)
+    top = rows[0]["model"] + (f" 외 {len(rows) - 1}개" if len(rows) > 1 else "")
+    return f"{calls}회 · {tokens / 1000:,.1f}천 토큰 · {top}"
+
+
+def render_member_models() -> None:
+    chosen = len(member_choices)
+    # 제목은 고정 — 제목이 바뀌면 Streamlit 이 새 상자로 보고 접어 버린다 (고를 때마다 닫히지 않게)
+    with st.expander("🎛 팀원 모델 선택"):
+        st.caption(
+            ("지금: 모두 기본(직급 설정). " if not chosen else f"지금: {chosen}명 직접 선택. ")
+            + "팀원마다 쓸 모델을 고릅니다. **기본** = config/models.yaml 의 직급 모델 (지금과 같음). "
+            "규칙: 팀원은 상사보다 강한 모델을 쓸 수 없고, 상사의 모델을 **직접 고르면** 그 아래 팀원은 **더 낮은** 모델만 쓸 수 있습니다. "
+            "팀장이 기본이면(Opus 5.5) 부장도 Opus 까지 고를 수 있습니다. 상사를 바꿔 규칙에 걸린 팀원은 자동으로 낮춰집니다. "
+            "모델이 안 되면 직급의 대안 모델로 넘어가되, 상사 규칙을 넘는 대안은 쓰지 않습니다. "
+            "바꾼 선택은 **다음에 맡기는 업무부터** 적용됩니다."
+        )
+        if running:
+            st.info("진행 중인 업무는 시작할 때의 모델을 그대로 씁니다.")
+        note = st.session_state.pop(MEMBER_NOTE_KEY, None)
+        if note:
+            st.info(note)
+        plans = member_models.plan(org, base_models, team, member_choices)
+        states = llm_factory.provider_status(base_models)
+        used = storage.usage_by_agent(team_id, since=time.time() - USAGE_DAYS * 86400)
+        depth = {org.id: 0}
+        for node in org.walk():
+            for child in node.children:
+                depth[child.id] = depth[node.id] + 1
+        head = st.columns([3, 5, 3])
+        head[0].caption("팀원")
+        head[1].caption("모델 · 제공처 · 비용 (구독 / 유료 API / 무료)")
+        head[2].caption(f"최근 {USAGE_DAYS}일 사용량")
+        for node in org.walk():
+            p = plans[node.id]
+            options = ["", *member_models.allowed_keys(base_models, node, p)]
+            # '기본'을 고르면 쓸 모델 (본인 선택만 뺀 결과 — 상사 규칙에 걸리면 자동으로 낮춘 모델)
+            as_default = p if not p.choice else member_models.plan(
+                org, base_models, team, {k: v for k, v in member_choices.items() if k != node.id})[node.id]
+            default_label = ("🔽 기본(자동 제한) · " if as_default.limited else "기본 · ") + model_option_label(as_default.effective, states)
+            key = member_widget_key(node.id)
+            st.session_state[key] = p.choice if p.choice in options else ""  # 저장값이 기준 (자동으로 낮춘 값 반영)
+            c_name, c_pick, c_use = st.columns([3, 5, 3])
+            rank = ranks_by_id[node.rank]
+            c_name.markdown("&emsp;" * depth[node.id] + f"{rank.emoji} **{name_of(node.id)}**"
+                            + ("" if name_of(node.id).startswith(rank.name) else f" · {rank.name}"))
+            c_pick.selectbox(
+                f"{name_of(node.id)} 모델", options, key=key, label_visibility="collapsed",
+                format_func=lambda k, d=default_label: d if not k else model_option_label(k, states),
+                on_change=on_member_model_change, args=(node.id,),
+            )
+            c_use.caption(usage_text(used.get(node.id, [])))
+        if chosen:
+            st.button("↩️ 모두 기본으로", key=f"member_reset_{team_id}", on_click=reset_member_models)
+
+
+# ════════════════════════════════════════════════════════════════════
 # 본문 ④ 업무 맡기기 — 팀 업무 양식 또는 자유 질문
 # ════════════════════════════════════════════════════════════════════
 FREE_FORM = "free"
@@ -1522,6 +1625,7 @@ if idle:
     request = render_task_input()
 
 st.fragment(run_every=REFRESH_SEC if any_running else None)(live_area)()
+render_member_models()
 
 
 # ════════════════════════════════════════════════════════════════════

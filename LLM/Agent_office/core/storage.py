@@ -59,7 +59,8 @@ CREATE TABLE IF NOT EXISTS usage (
     cost_usd      REAL,                       -- 기록 당시 가격표로 계산한 추정 비용 (가격 미등록 = NULL)
     team_id       TEXT NOT NULL DEFAULT '',
     run_id        TEXT NOT NULL DEFAULT '',
-    purpose       TEXT NOT NULL DEFAULT ''
+    purpose       TEXT NOT NULL DEFAULT '',
+    agent_id      TEXT NOT NULL DEFAULT ''    -- 조직도의 에이전트 id (팀원별 사용량 — 워크플로우 밖 호출은 '')
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -124,6 +125,9 @@ class Storage:
             conn.execute("DROP INDEX IF EXISTS idx_lessons_team_rank")
         if "start_rank" in columns("runs"):
             conn.execute("ALTER TABLE runs RENAME TO runs_legacy")
+        usage_columns = columns("usage")
+        if usage_columns and "agent_id" not in usage_columns:  # 팀원별 사용량 칸 추가 (예전 기록은 '')
+            conn.execute("ALTER TABLE usage ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''")
 
     def _connect(self) -> sqlite3.Connection:
         # 동시 실행(형제 에이전트)·사용량 기록이 한꺼번에 쓰므로 잠금을 넉넉히 기다린다
@@ -261,9 +265,10 @@ class Storage:
         with closing(self._connect()) as conn, conn:
             conn.execute(
                 "INSERT INTO usage (ts, provider, model, key_id, input_tokens, output_tokens, cached_tokens, calls, "
-                "cost_usd, team_id, run_id, purpose) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "cost_usd, team_id, run_id, purpose, agent_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (event.ts, event.provider, event.model, event.key_id, event.input_tokens, event.output_tokens,
-                 event.cached_tokens, event.calls, event.cost_usd, event.team_id, event.run_id, event.purpose),
+                 event.cached_tokens, event.calls, event.cost_usd, event.team_id, event.run_id, event.purpose,
+                 getattr(event, "agent_id", "")),
             )
             conn.execute(
                 "INSERT INTO api_keys (key_id, provider, masked, first_seen, last_seen) VALUES (?,?,?,?,?) "
@@ -288,6 +293,18 @@ class Storage:
             + " GROUP BY key_id, provider, model ORDER BY cost_usd DESC, calls DESC"
         )
         return [dict(r) for r in self._execute(sql, tuple(params))]
+
+    def usage_by_agent(self, team_id: str, since: float | None = None) -> dict[str, list[dict]]:
+        """팀원별 사용량 {에이전트 id: [{provider, model, calls, tokens, cost_usd}…]} (호출 많은 순) — 화면 '🎛 팀원 모델 선택'."""
+        sql = ("SELECT agent_id, provider, model, SUM(calls) AS calls, SUM(input_tokens + output_tokens) AS tokens, "
+               "SUM(cost_usd) AS cost_usd FROM usage WHERE team_id = ? AND agent_id != ''"
+               + (" AND ts >= ?" if since is not None else "")
+               + " GROUP BY agent_id, provider, model ORDER BY calls DESC")
+        out: dict[str, list[dict]] = {}
+        for r in self._execute(sql, (team_id, since) if since is not None else (team_id,)):
+            row = dict(r)
+            out.setdefault(row.pop("agent_id"), []).append(row)
+        return out
 
     def usage_daily(self, since: float | None = None) -> list[dict]:
         """날짜별 추정 비용·토큰 (현지 시각 기준)."""

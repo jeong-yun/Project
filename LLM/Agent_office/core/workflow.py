@@ -39,12 +39,13 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from core import harness, llm_factory, search, verification
+from core import harness, llm_factory, search, usage, verification
 from core.agent import OrgAgent, chunk_text, with_feedback
 from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
 from core.config import load_skills, parent_map, subtree
 from core.feedback import generate_lessons
+from core.member_models import team_rank_models
 from core.schemas import AgentAnswer, HumanDecision, Lesson, ModelsConfig, OrgNode, Rank, Team, ToolResult
 from core.search import WebContext
 from core.storage import Storage
@@ -103,8 +104,13 @@ def build_office_graph(
     verification_cfg: dict | None = None,
     storage: Storage | None = None,
     checkpointer=None,
+    member_models: dict[str, str] | None = None,
 ):
-    """조직도 전체로 그래프를 만든다. 어느 에이전트부터 시작할지는 실행할 때 root_id 로 정한다."""
+    """조직도 전체로 그래프를 만든다. 어느 에이전트부터 시작할지는 실행할 때 root_id 로 정한다.
+
+    member_models: 화면에서 고른 팀원별 모델 {에이전트 id: "provider:model"} (core/member_models.py).
+    모델 후보는 여기서 한 번 정해 에이전트에 넣으므로, 실행 중에 선택을 바꿔도 이번 실행은 시작할 때의 모델 그대로다.
+    """
     verification_cfg = verification_cfg or {}
     rewrite_answer = settings.get("review", {}).get("rewrite_answer", True)
     max_lessons = settings.get("feedback", {}).get("max_lessons_in_prompt", 5)
@@ -118,8 +124,9 @@ def build_office_graph(
     skills = load_skills(team.id)  # teams/<팀>/skills/*.md
     nodes = {n.id: n for n in org.walk()}
     names = {n.id: n.name or ranks_by_id[n.rank].name for n in nodes.values()}
+    chains = team_rank_models(org, models, team, member_models)  # 아무도 안 골랐으면 직급 설정 그대로
     agents = {
-        n.id: OrgAgent(n, ranks_by_id[n.rank], team, models, rubric=rubric, names=names, skills=skills)
+        n.id: OrgAgent(n, ranks_by_id[n.rank], team, models, rubric=rubric, names=names, skills=skills, chain=chains[n.id])
         for n in nodes.values()
     }
     parents = parent_map(org)
@@ -363,6 +370,14 @@ def build_office_graph(
         running: dict[Future, tuple[str, str]] = {}  # future → (op, 에이전트 id)
         failures: list[BaseException] = []
 
+        def as_agent(job, node_id: str):
+            """스레드 안의 모델 호출 기록에 에이전트 id 를 붙인다 (화면 '🎛 팀원 모델 선택'의 팀원별 사용량)."""
+            def run(*args):
+                with usage.scope(agent_id=node_id):
+                    return job(*args)
+
+            return run
+
         with ContextThreadPoolExecutor(max_workers=len(subtree(org, root).walk())) as pool:
 
             def start(op: str, node_id: str) -> None:
@@ -371,11 +386,11 @@ def build_office_graph(
                 lessons = lessons_for(node_id)  # 저장소 조회는 메인 스레드에서
                 if op == "integrate":
                     children = [results[cid] for cid in assigned[node_id]]
-                    future = pool.submit(integrate, state, node_id, tasks[node_id], children, lessons)
+                    future = pool.submit(as_agent(integrate, node_id), state, node_id, tasks[node_id], children, lessons)
                 elif nodes[node_id].children:
-                    future = pool.submit(plan_children, state, node_id, tasks[node_id], lessons)
+                    future = pool.submit(as_agent(plan_children, node_id), state, node_id, tasks[node_id], lessons)
                 else:
-                    future = pool.submit(draft, state, node_id, tasks[node_id], lessons)
+                    future = pool.submit(as_agent(draft, node_id), state, node_id, tasks[node_id], lessons)
                 running[future] = (op, node_id)
 
             start("visit", root)
