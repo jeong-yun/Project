@@ -43,6 +43,7 @@ import threading
 import time
 import webbrowser
 from array import array
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -64,7 +65,9 @@ JOBS = {   # 이름: (스크립트, 잠금 이름)
     "agent": ("1_0_run_daily.py", "agent"),
     "dataset": ("1_4_build_dataset.py", "dataset"),    # 신규 학습 데이터 화면의 '학습 로그에 반영' (수정·삭제 적용)
     "supervised": ("5_0_run_supervised.py", "supervised"),  # 6. 기존 학습데이터와 비교 (비교·버전 확정)
+    "redo": ("3_3_review.py", "generation"),   # 2. 검토에서 뺀 샘플 '다시 만들기' (3_3 --redo-safety, 생성과 같은 잠금)
 }
+START_WAIT = {"redo": 600}      # 다시 만들기는 다시 검토할 요청을 찾은 뒤(1분쯤) 잠금을 잡는다 → 그동안도 '시작하는 중'
 PROGRESS_FILE = BASE / "07_llm_output" / "_progress" / "progress.json"
 RULES_FILE = BASE / "07_llm_output" / "_progress" / "rule_status.jsonl"
 CSV_FILE = BASE / "07_llm_output" / "_progress" / "rule_status.csv"
@@ -85,7 +88,7 @@ def job_state(job):
     lock = RT.read_lock(JOBS[job][1])
     rec = _ui_record(job)
     starting = (lock is None and rec.get("pid") and RT.pid_alive(rec["pid"])
-                and time.time() - rec.get("t", 0) < 60)
+                and time.time() - rec.get("t", 0) < START_WAIT.get(job, 60))
     return {"running": bool(lock) or bool(starting), "starting": bool(starting), "lock": lock or {},
             "stop_requested": RT.stop_requested(JOBS[job][1]), "ui": rec}
 
@@ -141,10 +144,19 @@ def tail(path, lines=150):
 
 
 def log_text(job, lines=150):
-    """화면에서 시작한 작업이면 그 출력, 아니면(명령줄 실행) 로그 파일."""
-    rec = _ui_record(job)
-    if rec.get("out") and (RT.RUN_DIR / rec["out"]).exists():
-        return tail(RT.RUN_DIR / rec["out"], lines)
+    """화면에서 시작한 작업이면 그 출력, 아니면(명령줄 실행) 로그 파일.
+    생성은 '다시 만들기'(같은 생성 잠금, .run/redo-*.out - 명령줄에서 띄운 것 포함)와 견주어 더 최근 출력."""
+    outs = [RT.RUN_DIR / r["out"] for r in map(_ui_record, [job, "redo"] if job == "generation" else [job]) if r.get("out")]
+    if job == "generation":
+        outs += sorted(RT.RUN_DIR.glob("redo-*.out"))[-1:]
+    stamp = {}
+    for p in outs:
+        try:
+            stamp[p] = p.stat().st_mtime
+        except OSError:
+            pass
+    if stamp:
+        return tail(max(stamp, key=stamp.get), lines)
     fallback = {"generation": "3_0_run_generation.log", "collect": "run_daily.log", "agent": "run_daily.log"}.get(job)
     return tail(BASE / "logs" / fallback, lines) if fallback else ""
 
@@ -290,18 +302,18 @@ def parallel():
     """(생성 동시 요청 수, 검토 동시 요청 수, 생성·검토 동시 진행) - 3_0a_common.parallel_settings 와 같은 기본값."""
     run = run_settings()
 
-    def num(key, default):
+    def num(key, default, top):
         try:
-            return max(1, min(16, int(run.get(key, default))))
+            return max(1, min(top, int(run.get(key, default))))
         except ValueError:
             return default
-    return (num("생성 동시 요청 수", 10), num("검토 동시 요청 수", 12),
+    return (num("생성 동시 요청 수", 10, 16), num("검토 동시 요청 수", 12, 32),
             run.get("생성·검토 동시 진행", "예").strip().lower() in ("예", "yes", "y", "true", "1", "on"))
 
 
 def _llm_counts(name, since, until, ok_re):
     """3_2·3_3 로그 → 이번 실행(since~until)의 대상 수, 성공·실패 수, 최근 경고(재시도 등), 토큰."""
-    s = {"header": False, "target": None, "follow": False, "wait": 0, "cap": 0, "workers": None, "now": None, "auto": False, "chk_ok": 0, "chk_fail": 0, "fixed": 0, "dropped": 0, "ok": 0,
+    s = {"header": False, "target": None, "follow": False, "wait": 0, "cap": 0, "workers": None, "now": None, "auto": False, "redo": False, "chk_ok": 0, "chk_fail": 0, "fixed": 0, "dropped": 0, "ok": 0,
          "fail": 0, "pending": 0, "retry": None, "start": None, "last": None, "tin": 0, "tout": 0, "stopped": False,
          "done_ts": [], "by_name": {}}
     for ts, lv, msg in _log_since(name, since):
@@ -314,14 +326,16 @@ def _llm_counts(name, since, until, ok_re):
             w = re.search(r"동시 (?:최대 )?(\d+)개씩", msg)     # 2026-10-20 전 실행은 하나씩
             s["workers"] = int(w.group(1)) if w else 1
             s["auto"] = "동시 최대" in msg                     # 속도 제한에 맞춰 자동 조절하는 실행 (4개부터 시작)
-        elif (m := re.search(r"(?:생성|검토) 동시 요청 \d+ → (\d+)", msg)):   # 속도 제한에 맞춘 자동 조절
-            s["now"] = int(m.group(1))
+            s["redo"] = "다시 검토" in msg                    # 3_3 --redo-safety: 대체 검토 모델만 부름
             if (m := re.search(r"이번 (\d+)개", msg)):
                 s["target"] = int(m.group(1))
             if (m := re.search(r"생성과 함께 진행: 대기 (\d+)개", msg)):   # 3.3 이 생성(3.2)과 함께 도는 경우
                 s["follow"], s["wait"] = True, int(m.group(1))
                 c = re.search(r"최대 (\d+)개", msg)
                 s["cap"] = int(c.group(1)) if c else 0
+        elif (m := re.search(r"(?:생성|검토)( 대체)? 동시 요청 \d+ → (\d+)", msg)):   # 속도 제한에 맞춘 자동 조절
+            if bool(m.group(1)) == s["redo"]:           # 보통 실행에서 대체 검토(일부 룰만)의 동시 수는 따로 셈
+                s["now"] = int(m.group(2))
         elif (m := re.search(r"\[3\.2\] 검토 대기 중인 생성 결과 (\d+)개", msg)):
             s["pending"] = int(m.group(1))
         elif re.match(ok_re, msg):
@@ -824,6 +838,22 @@ def feature_engine():
     return _feat
 
 
+def _lost_reading(C, raw, http, conditions):
+    """anomalies 인데 룰 조건이 어긋날 때: 로그 형식이 잃는 정보를 되살려 읽으면 조건이 모두 맞는지 → 그 읽기 ('' = 그래도 불일치).
+    1.4 는 payload 끝 줄바꿈을 지우고(헤더만 있는 요청은 끝 빈 줄까지), 줄바꿈을 두 글자 '\\n' 으로 적어 본문의 글자 역슬래시+n 과
+    구별되지 않는다 (요청 줄만 %5C). 예 (2026-10-26): FortiOS·Nessus 룰은 끝 '\\r\\n\\r\\n', Netgear 룰은 끝 줄바꿈,
+    Exiftool 룰은 본문의 글자 '\\n' 이 조건이라 로그로는 확인할 수 없다 (생성 원본은 일치)."""
+    head, sep, body = raw.replace("\\r\\n", "\\n").partition("\\n\\n")
+    lit = C.norm_payload(head) + "\n\n" + body if sep and "\\n" in body else None      # 본문의 '\n' 을 글자 그대로
+    for name, h in (("끝 줄바꿈이 지워짐", http + "\n"), ("끝 빈 줄이 지워짐", http + "\n\n"),
+                    ("본문의 글자 '\\n' 을 줄바꿈으로 읽음", lit), ("본문의 글자 '\\n'·끝 줄바꿈", lit and lit + "\n")):
+        if h is not None:
+            parts = C.split_http(h)
+            if all(C.check_condition(c, parts) is True for c in conditions):
+                return name
+    return ""
+
+
 def analyze(payload, label, meta, ctx=None):
     """데이터 프레임 한 줄 → label 사유, 검증 결과, label 정합성(+사유), 탐지 피처.
     ctx = (C, rules, cross, feature_engine 결과): 전체 검증처럼 많은 줄을 볼 때 한 번 정해 넘긴다 (도중에 새 입력 날짜가 와도 같은 룰로).
@@ -832,7 +862,8 @@ def analyze(payload, label, meta, ctx=None):
       OK    정합           anomalies: 룰 조건 모두 일치 + 범용 공격 흔적이나 다른 공격 룰도 공격으로 봄
                            normal:    룰 조건 불일치 + 공격 흔적·공격 룰 없음
       RULE  정합(룰 기준)  anomalies: 룰 조건은 모두 일치하지만 범용 공격 흔적·다른 공격 룰은 없음 (룰 고유 패턴으로만 공격)
-      CHECK 확인 필요      룰이 없거나 판단 불가 조건(정규식 해석 불가)이 있음
+      CHECK 확인 필요      룰이 없거나 판단 불가 조건(정규식 해석 불가)이 있음 / anomalies 인데 로그 그대로는 룰 조건이 어긋나지만
+                           로그 형식이 잃는 정보(끝 줄바꿈·본문의 글자 '\\n')를 되살려 읽으면 모두 일치 (_lost_reading)
       BAD   불일치         anomalies 인데 룰 조건 불일치 / normal 인데 룰에 탐지되거나 공격 흔적·공격 룰이 있음
     탐지 피처: 4.1 의 피처 중 이 payload 에서 켜지는 것 (공격 흔적 k_, 공격 룰 ra_, 이 룰의 개별 룰·정규식 r_)
     """
@@ -878,6 +909,7 @@ def analyze(payload, label, meta, ctx=None):
         ok_n = sum(1 for _, r in res if r is True)
         failed = [c for c, r in res if r is False]
         unknown = [c for c, r in res if r is None]
+        lost = _lost_reading(C, raw, http, rule["conditions"]) if label == "anomalies" and failed else ""
         slug = F.rule_slug(rid)
         if not failed and not unknown:
             feats.append({"name": f"r_{slug}_all", "value": 1, "group": "개별 룰", "desc": f"이 룰 탐지 ({rid})"})
@@ -887,7 +919,11 @@ def analyze(payload, label, meta, ctx=None):
                               "desc": f"정규식 조건 일치: {(c.get('pattern') or '')[:40]}"})
         # label 정합성
         if label == "anomalies":
-            if failed:
+            if lost:
+                cons, cons_reason = "CHECK", (f"로그 형식({lost}) 때문에 룰 {rid} 조건 {_cond_text(failed[0])} 을 로그로 확인할 수 "
+                                              f"없음 - 되살려 읽으면 {n}/{n} 일치"
+                                              + (" (생성 시 코드 검사 ok)" if meta.get("local_check") == "ok" else ""))
+            elif failed:
                 cons, cons_reason = "BAD", (f"anomalies 인데 룰 {rid} 조건 {ok_n}/{n} 만 일치 (불일치: {_cond_text(failed[0])})"
                                             " → 룰 기준으로 공격이 아님")
             elif unknown:
@@ -915,7 +951,8 @@ def analyze(payload, label, meta, ctx=None):
         if label == "anomalies":
             reason = f"룰 {rid} 탐지 조건 {n}개를 모두 만족 → 공격 ({meta.get('attack_type', '')})"
             if failed:
-                checks.append(("bad", f"지금 다시 확인: 조건 {ok_n}/{n} 일치 - 불일치 {_cond_text(failed[0])}"))
+                checks.append(("warn" if lost else "bad", f"지금 다시 확인: 조건 {ok_n}/{n} 일치 - 불일치 {_cond_text(failed[0])}"
+                               + (f" (로그 형식 때문: {lost} → 되살리면 {n}/{n})" if lost else "")))
             else:
                 checks.append(("ok", f"지금 다시 확인: 조건 {ok_n}/{n} 일치"))
         else:
@@ -937,7 +974,7 @@ def analyze(payload, label, meta, ctx=None):
     elif any(s == "warn" for s, _ in checks) or cons == "CHECK":
         level = "warn"
     return {"reason": reason, "checks": checks, "level": level, "cons": cons, "cons_text": CONS[cons],
-            "cons_reason": cons_reason, "features": feats}
+            "cons_reason": cons_reason, "features": feats, "lv": VERIFY_LOGIC}
 
 
 # ── 피처 설명 (4.1 피처 목록 · 읽기만) ──────────────────────────────────
@@ -1076,6 +1113,9 @@ _verify = {}
 _stopped = {}        # (날짜, 장비) → 중지한 검증 (화면 표시)
 _saved = {}          # verify.json → (수정 시각, 내용)
 CODE_NUM = {"OK": "1", "RULE": "2", "CHECK": "3", "BAD": "4"}
+# analyze 판정 규칙 판 (줄별 결과의 lv). 올리면 예전 판으로 확인한 줄 중 '불일치' 만 다시 확인한다 (나머지는 그대로 다시 씀).
+# 2 = anomalies 의 룰 조건 불일치를 로그 형식이 잃는 정보(끝 줄바꿈·본문의 글자 '\n')를 되살려 다시 확인 (2026-10-26)
+VERIFY_LOGIC = 2
 MS_PER_LINE = 12.0   # 검증 기록이 없을 때 새로 확인하는 줄 1개의 시간 (데이터에 따라 8~30ms)
 REUSE_SEC = 0.0003   # 이미 확인한 결과를 그대로 쓰는 줄 1개의 시간
 ROW_HEAD = re.compile(rb'^\{"k": "([0-9a-f]+)", "in": "([^"]*)"')
@@ -1174,10 +1214,15 @@ def _known_rows(date, dev, in_dir):
     return known, files
 
 
+def _stale_bad(v):
+    """예전 판정 규칙(VERIFY_LOGIC 전)으로 끝난 검증의 '불일치' 줄 수 - '검증 안 한 데이터만' 이 다시 확인한다."""
+    return (v.get("summary") or {}).get("BAD", 0) if v.get("logic", 1) < VERIFY_LOGIC else 0
+
+
 def _all_verified(date, dev):
-    """새로 확인할 줄이 없음: 지금 로그·룰 입력으로 끝난 검증이 있고 줄별 결과에 내용 지문이 있음."""
+    """새로 확인할 줄이 없음: 지금 로그·룰 입력으로 끝난 검증이 있고 줄별 결과에 내용 지문이 있음 (예전 판정 규칙의 '불일치' 없음)."""
     p = frame_cache(date, dev)
-    if p is None:
+    if p is None or _stale_bad(verify_state(date, dev)):
         return False
     with open(p, "rb") as f:
         return bool(ROW_HEAD.match(f.readline()))
@@ -1192,7 +1237,7 @@ def start_verify(date, dev, mode="all"):
         if mode == "new" and _all_verified(date, dev):
             return "done"
         st = path.stat()
-        v = _verify[(date, dev)] = {"status": "running", "mode": mode, "phase": "start", "done": 0,
+        v = _verify[(date, dev)] = {"status": "running", "mode": mode, "phase": "start", "done": 0, "logic": VERIFY_LOGIC,
                                     "total": len(line_index(path)), "todo": None, "analyzed": 0, "reused": 0,
                                     "eta_s": None, "ms": _ms_per_line(date, dev), "mtime": st.st_mtime,
                                     "size": st.st_size, "started_at": RT.now_iso()}
@@ -1276,7 +1321,11 @@ def _verify_work(date, dev, mode, path, v):
                         a = json.loads(srcs[no].readline())
                     a.pop("k", None)
                     row_in = a.pop("in", None) or old_in
-                    v["reused"] += 1
+                    if a.get("cons") == "BAD" and a.get("lv", 1) < VERIFY_LOGIC:   # 판정 규칙이 바뀐 뒤 '불일치' 는 다시 확인
+                        a, row_in = analyze(payload, lab, meta, ctx), in_dir
+                        v["analyzed"] += 1
+                    else:
+                        v["reused"] += 1
                 else:
                     a, row_in = analyze(payload, lab, meta, ctx), in_dir
                     v["analyzed"] += 1
@@ -1320,7 +1369,7 @@ def _verify_work(date, dev, mode, path, v):
                  rule_inputs=ins, ms_per_line=round(ms, 2), finished_at=RT.now_iso(), phase=None, eta_s=None)
         _verify_file(date, dev).write_text(json.dumps(
             {k: v[k] for k in ("mtime", "size", "total", "mode", "analyzed", "reused", "ms_per_line", "codes", "summary",
-                               "features", "labels", "frame_in_dir", "rule_inputs", "started_at", "finished_at")},
+                               "features", "labels", "frame_in_dir", "rule_inputs", "started_at", "finished_at", "logic")},
             ensure_ascii=False), encoding="utf-8")
     except _Stop as e:
         saved = _keep_partial(out, srcs, tmp, part, v["done"])
@@ -1375,9 +1424,9 @@ def cached_rows(cache, idx):
 
 
 def _est_new(date, dev, v, n):
-    """'검증 안 한 데이터만' 이 새로 확인할 줄 수 (대략 - 시작하면 정확히 셈) = 전체 - 이미 확인한 줄."""
+    """'검증 안 한 데이터만' 이 새로 확인할 줄 수 (대략 - 시작하면 정확히 셈) = 전체 - 이미 확인한 줄 (+ 예전 판정 규칙의 '불일치')."""
     if v.get("status") == "done":
-        return 0
+        return _stale_bad(v)
     known = 0
     for d in (dev, _other(dev)):
         for p in (_frame_file(date, d), _partial_file(date, d)):
@@ -1838,16 +1887,30 @@ def sup_summary(q):
     return s or {}
 
 
+def sup_combined(base):
+    """IPS·WAF 비교 표를 샘플(sk)로 짝지은 공통 선별 표 (5.7 combine, 두 표가 바뀌면 다시). 하나라도 없으면 None."""
+    C, V = sup_mods()
+    ti, tw = sup_table(base, "ips"), sup_table(base, "waf")
+    if ti is None or tw is None:
+        return None
+    key = (base, id(ti), id(tw))                        # sup_table 은 파일이 바뀔 때만 새 표를 돌려준다
+    hit = _sup.get("comb")
+    if hit and hit[0] == key:
+        return hit[1]
+    tc = V.combine(ti, tw)
+    with _lock:
+        _sup["comb"] = (key, tc)
+    return tc
+
+
 def sup_preview(b):
+    """선별 미리 보기: IPS·WAF 공통 선별 (두 장비에 같은 샘플, 장비 선택과 상관없음)."""
     C, V = sup_mods()
     _, _, base = _sup_base(b.get("base", ""))
-    dev = b.get("dev", "ips")
-    if dev not in C.DEVICES:
-        raise ValueError("dev")
-    t = sup_table(base, dev)
-    if t is None:
-        return {"none": True}
-    return V.preview(t, b.get("conditions"), b.get("options"), b.get("overrides"), b.get("view", ""))
+    tc = sup_combined(base)
+    if tc is None:
+        return {"none": True, "missing": [d.upper() for d in C.DEVICES if sup_table(base, d) is None]}
+    return V.preview(tc, b.get("conditions"), b.get("options"), b.get("overrides"), b.get("view", ""))
 
 
 def sup_save(b):
@@ -1891,33 +1954,34 @@ def sup_start(kind, b):
 
 
 def sup_candidates_csv(q):
-    """선별 후보 CSV (사람 검토용): 조건·옵션(spec JSON 또는 저장한 초안) 그대로 고른 샘플 + payload.
+    """선별 후보 CSV (사람 검토용): IPS·WAF 공통 선별을 조건·옵션(spec JSON 또는 저장한 초안) 그대로 고른 샘플 + payload.
+    두 장비에 같은 샘플이 들어가므로 한 파일 (줄 번호·등급·method 는 장비별 열).
     view = rule | pyua 면 고른 샘플 대신 그 보류 대상 전부 (지금 선별에 들어갔는지 '선별' 열로)."""
     C, V = sup_mods()
     v, _, base = _sup_base(_q(q, "base"))
-    dev, view = _q(q, "dev", "ips"), _q(q, "view")
-    if dev not in C.DEVICES or view not in ("", *V.HOLD):
-        raise ValueError("dev/view")
+    view = _q(q, "view")
+    if view not in ("", *V.HOLD):
+        raise ValueError("view")
     if _q(q, "name"):
         spec = C.get_version(v, _q(q, "name"))
         base = spec.get("base") or base
     else:
         spec = json.loads(_q(q, "spec", "{}") or "{}")
-    t = sup_table(base, dev)
+    t = sup_combined(base)
     if t is None:
-        raise ValueError("비교 결과가 없습니다")
+        raise ValueError("IPS·WAF 비교 결과가 둘 다 있어야 합니다")
     sel, cand, _ = V.select(t, spec.get("conditions"), spec.get("options"), spec.get("overrides"))
     on = set(sel) if view else None
     rows = V.hold_rows(t, cand, view) if view else sel
     cons_txt = {"0": "검증 전", "1": "정합", "2": "정합 (룰 기준)", "3": "확인 필요", "4": "불일치"}
-    name = (f"{dev}_{base}_보류_{'정합룰기준' if view == 'rule' else 'python-requests'}_{len(rows)}.csv" if view
-            else f"{dev}_{base}_후보_{len(rows)}.csv").replace(" ", "_")
+    name = (f"{base}_보류_{'정합룰기준' if view == 'rule' else 'python-requests'}_{len(rows)}.csv" if view
+            else f"{base}_IPS·WAF_공통후보_{len(rows)}.csv").replace(" ", "_")
 
     def chunks():
         buf = io.StringIO()
         w = csv.writer(buf)
-        w.writerow(["date", "index", "rule_id", "공격 유형", "출처", "label", "등급", "근거", "label 정합성", "method", "payload"]
-                   + (["선별"] if view else []))
+        w.writerow(["date", "IPS index", "WAF index", "rule_id", "공격 유형", "출처", "label", "등급 (공통)", "IPS 등급",
+                    "WAF 등급", "근거", "label 정합성", "IPS method", "WAF method", "payload"] + (["선별"] if view else []))
         yield ("﻿" + buf.getvalue()).encode("utf-8")
         for s in range(0, len(rows), 500):
             part = rows[s:s + 500]
@@ -1927,16 +1991,277 @@ def sup_candidates_csv(q):
             buf.seek(0)
             buf.truncate()
             for d, idx in by_date.items():
-                lines = read_lines(_log_path(d, dev), [t["line"][i] for i in idx])
-                for i, line in zip(idx, lines):
-                    f = split_log(line)
+                li = read_lines(_log_path(d, "ips"), [t["line"][i] for i in idx])
+                lw = read_lines(_log_path(d, "waf"), [t["wline"][i] for i in idx])
+                for i, a, b in zip(idx, li, lw):
+                    f, fw = split_log(a), split_log(b)
                     fl = t["fl"][i]
                     why = ", ".join(x for x, bit in (("새 패턴", 32), ("RF 틀림", 64), ("LGBM 틀림", 128),
                                                      ("기준엔 반대 라벨만", 4), ("python-requests", 1)) if fl & bit)
-                    w.writerow([d, t["line"][i], t["rules"][t["rule"][i]], t["types"][t["type"][i]],
+                    w.writerow([d, t["line"][i], t["wline"][i], t["rules"][t["rule"][i]], t["types"][t["type"][i]],
                                 t["sources"][t["src"][i]], "anomalies" if t["y"][i] else "normal", C.GRADES[t["g"][i]],
-                                why, cons_txt.get(t["cons"][i], ""), _cell(f[5] if len(f) == 8 else ""),
-                                _cell(f[6] if len(f) == 8 else line)] + (["들어감" if i in on else "빠짐"] if view else []))
+                                C.GRADES[t["gi"][i]], C.GRADES[t["gw"][i]], why, cons_txt.get(t["cons"][i], ""),
+                                _cell(f[5] if len(f) == 8 else ""), _cell(fw[5] if len(fw) == 8 else ""),
+                                _cell(f[6] if len(f) == 8 else a)] + (["들어감" if i in on else "빠짐"] if view else []))
+            yield buf.getvalue().encode("utf-8")
+    return name, chunks()
+
+
+# ── 2. 검토에서 뺀 샘플 (3.3 의 _3_reviewed/*.rejected.jsonl: 검토 모델 drop · 코드 검사 · 형식) ──────────
+# 검토 모델(gpt-6-luna)이 공격 샘플을 '안전하게 보존·수정할 수 없다'며 빼는 일이 많다 (10-22~26 약 9천 개).
+# 날짜·검토 모델·공격 유형별로 몇 개를 왜 뺐는지 보여 준다. 분류는 이유 문구로 (검토 모델이 쓴 이유는 그대로 보여 줌).
+# 다시 만들기 (2026-10-26~): 3_3 --redo-safety 가 안전 사유로 뺀(또는 거절한) 룰을 '검토 대체 모델'로 다시 검토하면 옛 결과는
+#   _3_reviewed/_replaced 로 옮겨지고 새 결과가 쓰인다 → 다시 만든 샘플은 이 목록에서 빠지고 다시 검토 뒤에도 빠진 것만 남는다
+#   (전·후 수는 meta.json 의 redo.before). 대체 모델이 뺀 샘플은 검토 모델을 대체 모델로 보인다 (meta.json 의 fallback.answered).
+EXCL_SAFETY = re.compile(
+    r"안전|위험|익스플로잇|악용|무기화|무해|피해 없|재현 가능|실행 가능|운영 가능|보존(하거나|할 수 없|해 줄 수 없)|"
+    r"재현(하거나|할 수 없|용)|재구성할 수 없|보정(하지 않|할 수 없)|보강할 수 없|검증·정제할 수 없|제공할 수 없|지원할 수 없|"
+    r"도움(이 될 수|을 줄 수 없|을 드릴 수 없)|승인하거나|공격 (실행|코드|입력을 만들|요청이라|요청으로 (바꿔야|수정할 수 없))|"
+    r"페이로드를 재작성할 수 없|실행 페이로드|명령 (실행|주입|치환) (요청이라|페이로드|기능|공격)|콜백을 유도|다운로드 후 실행|"
+    r"서비스 중단|설정 손실|DoS 트리거|(노출|권한 상승)을 유발|열거 기능을 유지|하드코(딩|드)된 (자격|인증)|파괴적 명령|"
+    r"exploit|weapon|safety|safely|unsafe|harm|can(not|'t) (assist|help|provide|preserve|keep|convert)|refus", re.I)
+EXCL_RULE = re.compile(r"모순|응답|response|JSON|CRLF|multipart|바이너리|REPEAT|조건 불일치|만족(할|시킬|하도록|시키려면)? ?수 없|"
+                       r"within|일치하지 않|불만족|정규식|부정 조건|HTTP 형식|유효한 HTTP", re.I)
+EXCL_DUP = re.compile(r"중복|다양성|동일한 내용")
+EXCL_CATS = ["안전상 이유", "룰 조건상 불가", "중복·다양성", "기타 검토", "코드 검사", "형식"]
+_excl = {}                                              # 날짜 → (요청별 파일 지문, 그 날짜 결과)
+_excl_req = {}                                          # (날짜, 요청) → (파일 지문, 요청 결과) - 바뀐 요청만 다시 읽음
+_rv = {}                                                # 3_3_review 의 SAFETY_RE (다시 검토 대상 문구)
+
+
+def redo_model():
+    """LLM_설정.md '검토 대체 모델' (비었거나 '-'·none 이면 '' = 다시 만들기 못 함). 검토 모델과 같아도 된다
+    (3_3 --redo-safety 는 처음 판정이 예전 검토 모델의 원문이라 같은 모델로도 다시 검토함, 2026-10-26 16:20~)."""
+    m = run_settings().get("검토 대체 모델", "").strip()
+    return "" if m.lower() in ("", "-", "none") else m
+
+
+def _redo_re():
+    """다시 만들기 대상을 고르는 문구 = 3_3_review.SAFETY_RE (3_3 --redo-safety 와 같은 기준). 못 읽으면 화면의 '안전상 이유'."""
+    if "re" not in _rv:
+        try:
+            _rv["re"] = _load("review_33", "3_3_review.py").SAFETY_RE
+        except Exception:
+            _rv["re"] = EXCL_SAFETY
+    return _rv["re"]
+
+
+def _excl_cat(stage, reason):
+    """빠진 이유 분류: 검토 모델이 뺀 것은 이유 문구로, 나머지는 단계 그대로."""
+    if stage != "검토":
+        return "코드 검사" if stage == "코드 검사" else "형식"
+    if EXCL_SAFETY.search(reason):
+        return "안전상 이유"
+    if EXCL_DUP.search(reason):
+        return "중복·다양성"
+    if EXCL_RULE.search(reason):
+        return "룰 조건상 불가"
+    return "기타 검토"
+
+
+def _jsonl(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            return [json.loads(x) for x in f if x.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def excluded_dates():
+    d = BASE / "07_llm_output"
+    return sorted(p.name for p in d.glob("*") if DATE_RE.match(p.name) and (p / "_3_reviewed").is_dir()) \
+        if d.is_dir() else []
+
+
+def _excl_request(date, rev, gen, name, has_rej, fb, safety):
+    """요청 하나 → {recs: 빠진 샘플, att: 룰별 [생성 공격 수, 남은 공격 수], redo: 다시 검토 전·후 수, cand: 다시 만들기 대상 룰}."""
+    try:
+        meta = json.loads((rev / f"{name}.meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        meta = {}
+    model, fbk = meta.get("reviewer") or "?", meta.get("fallback") or {}
+    fb_rules, fb_model = set(fbk.get("answered") or []), fbk.get("model") or ""
+    out = {"recs": [], "att": {}, "redo": None, "cand": set()}
+    if isinstance(meta.get("redo"), dict):
+        b, u = meta["redo"].get("before") or {}, (meta.get("usage") or {}).get("reviewer_fallback") or {}
+        out["redo"] = {"at": str(meta["redo"].get("at", "")), "model": fb_model,
+                       "samples": [b.get("samples") or 0, meta.get("samples") or 0],
+                       "rejected": [b.get("rejected") or 0, meta.get("rejected") or 0],
+                       "tokens": (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)}
+    rej = _jsonl(rev / f"{name}.rejected.jsonl") if has_rej else []
+    if not rej:
+        return out
+    # 다시 만들기 대상: 아직 대체 검토를 안 한 요청에서 처음 검토 모델이 안전 사유로 뺀 샘플이 있는 룰 (3_3 redo_candidates 와 같은 기준,
+    # 응답을 거절해 판정이 없는 룰은 뺀 샘플이 없어 여기서는 셀 수 없음 - 실제 수는 실행 로그)
+    if fb and not fbk and model not in ("?", fb):
+        out["cand"] = {r.get("id") for r in rej if r.get("stage") == "검토" and safety.search(str(r.get("reason", "")))}
+    g_by = {g.get("id"): g for g in _jsonl(gen / f"{name}.jsonl") if isinstance(g, dict)}
+    for rid, g in g_by.items():
+        out["att"][rid] = [sum(1 for s in g.get("samples", []) if isinstance(s, dict) and s.get("label") == "anomalies"), 0]
+    for k in _jsonl(rev / f"{name}.jsonl"):
+        if k.get("id") in out["att"]:
+            out["att"][k["id"]][1] += sum(1 for s in k.get("samples", []) if s.get("label") == "anomalies")
+    for r in rej:
+        g = g_by.get(r.get("id"), {})
+        smp, i = g.get("samples") or [], r.get("i")
+        s = smp[i] if isinstance(i, int) and 0 <= i < len(smp) and isinstance(smp[i], dict) else {}
+        reason, stage = str(r.get("reason", "")), r.get("stage", "")
+        out["recs"].append({"date": date, "req": name, "id": r.get("id", ""), "i": i, "stage": stage, "reason": reason,
+                            "cat": _excl_cat(stage, reason),
+                            "model": fb_model if stage == "검토" and fb_model and r.get("id") in fb_rules else model,
+                            "label": s.get("label", ""), "type": g.get("attack_type") or "other",
+                            "redo": r.get("id") in out["cand"]})
+    return out
+
+
+def excluded_records(date):
+    """그 입력 날짜의 3.3 에서 빠진 샘플 [{date, req, id, i, stage, cat, reason, model, label, type, redo}],
+    룰별 {id: [생성된 공격 수, 검토 뒤 남은 공격 수]}, 다시 검토한 요청 {이름: 전·후 수}, 다시 만들기 대상 {이름: 룰 수}.
+    요청마다 파일(meta·뺀 샘플·남은 샘플) 지문으로 캐시해 바뀐 요청만 다시 읽는다 (다시 만들기가 도는 중에도 가볍게)."""
+    rev = BASE / "07_llm_output" / date / "_3_reviewed"
+    gen = rev.parent / "_2_generated"
+    try:
+        ents = {e.name: e for e in os.scandir(rev) if e.is_file()}
+    except OSError:
+        ents = {}
+    fb, safety = redo_model(), _redo_re()
+    sigs = {}
+    for n in sorted({x[:-len(s)] for x in ents for s in (".meta.json", ".rejected.jsonl") if x.endswith(s)}):
+        st = [ents.get(n + s) for s in (".meta.json", ".rejected.jsonl", ".jsonl")]
+        sigs[n] = tuple((e.stat().st_size, e.stat().st_mtime_ns) if e else None for e in st) + (fb,)
+    hit = _excl.get(date)
+    if hit and hit[0] == sigs:
+        return hit[1]
+    res = {"recs": [], "att": {}, "redone": {}, "cand": {}}
+    for n, sig in sigs.items():
+        h = _excl_req.get((date, n))
+        if not h or h[0] != sig:
+            h = _excl_req[(date, n)] = (sig, _excl_request(date, rev, gen, n, bool(sig[1] and sig[1][0]), fb, safety))
+        o = h[1]
+        res["recs"] += o["recs"]
+        for k, v in o["att"].items():
+            x = res["att"].setdefault(k, [0, 0])
+            x[0] += v[0]
+            x[1] += v[1]
+        if o["redo"]:
+            res["redone"][n] = o["redo"]
+        if o["cand"]:
+            res["cand"][n] = len(o["cand"])
+    with _lock:
+        for k in [k for k in list(_excl_req) if k[0] == date and k[1] not in sigs]:     # 옮겨진 요청
+            _excl_req.pop(k, None)
+        _excl[date] = (sigs, res)
+    return res
+
+
+def _excl_select(q):
+    """화면 조건(날짜·검토 모델·분류·공격 유형) → (모든 날짜, 고른 날짜, 그 날짜 전체 기록, 조건에 맞는 기록, 룰별 공격 수, 조건,
+    다시 만들기 {redone: {(날짜, 요청): 전·후 수}, cand: {(날짜, 요청): 대상 룰 수}} - 다시 만들기는 날짜 단위라 날짜 조건만)."""
+    dates = excluded_dates()
+    date = _q(q, "date") or (dates[-1] if dates else "")
+    if date and date != "all" and date not in dates:
+        raise ValueError("date")
+    model, cat, typ = _q(q, "model"), _q(q, "cat"), _q(q, "type")
+    if cat and cat not in EXCL_CATS:
+        raise ValueError("cat")
+    recs, att, redo = [], {}, {"redone": {}, "cand": {}}
+    for d in (dates if date == "all" else [date] if date else []):
+        x = excluded_records(d)
+        recs += x["recs"]
+        for k, v in x["att"].items():
+            a = att.setdefault(k, [0, 0])
+            a[0] += v[0]
+            a[1] += v[1]
+        for kind in redo:
+            redo[kind].update({(d, n): v for n, v in x[kind].items()})
+    sel = [r for r in recs if (not model or r["model"] == model) and (not cat or r["cat"] == cat)
+           and (not typ or r["type"] == typ)]
+    return dates, date, recs, sel, att, {"model": model, "cat": cat, "type": typ}, redo
+
+
+def excluded_summary(q):
+    """2. 화면 '검토에서 뺀 샘플': 분류별·공격 유형(method)별 수, 이유 상위, 공격 샘플이 모두 빠진 룰, 다시 만들기 (대상·결과)."""
+    dates, date, recs, sel, att, cond, redo = _excl_select(q)
+    try:
+        mapping = dataset_mod().load_mapping()[1]
+    except Exception:
+        mapping = {}
+    by_model = [r for r in recs if not cond["model"] or r["model"] == cond["model"]]
+    cats = {c: 0 for c in EXCL_CATS}
+    for r in by_model:
+        cats[r["cat"]] += 1
+    lost = lambda r: r["label"] == "anomalies" and att.get(r["id"], [0, 0])[0] > 0 and att[r["id"]][1] == 0
+    rows = {}
+    for r in sel:
+        x = rows.setdefault(r["type"], {"n": 0, "cats": {c: 0 for c in EXCL_CATS}, "att": 0, "norm": 0, "rules": set(),
+                                        "lost": set(), "redo": 0})
+        x["n"] += 1
+        x["redo"] += r["redo"]
+        x["cats"][r["cat"]] += 1
+        x["att" if r["label"] == "anomalies" else "norm"] += 1
+        x["rules"].add(r["id"])
+        if lost(r):
+            x["lost"].add(r["id"])
+    types = [{"type": t, "name": ATTACK_NAMES.get(t, t), "method": (mapping.get(t) or {}).get("ips", ""), "n": x["n"],
+              "cats": x["cats"], "att": x["att"], "norm": x["norm"], "rules": len(x["rules"]), "lost": len(x["lost"]),
+              "redo": x["redo"]}
+             for t, x in sorted(rows.items(), key=lambda kv: -kv[1]["n"])]
+    reasons, ex = Counter(), {}
+    for r in sel:
+        reasons[(r["cat"], r["reason"])] += 1
+        ex.setdefault((r["cat"], r["reason"]), set()).add(r["id"])
+    top = [{"cat": c, "reason": t, "n": n, "rules": sorted(ex[(c, t)])[:3], "rule_n": len(ex[(c, t)])}
+           for (c, t), n in reasons.most_common(40)]
+    lost_rules = sorted({r["id"] for r in sel if lost(r)})
+    # 다시 만들기: 대상(아직 대체 검토 안 한 요청의 안전 사유 룰) · 결과(다시 검토한 요청의 전·후 수) - 날짜 조건만
+    done, cand, model = list(redo["redone"].values()), [r for r in recs if r["redo"]], redo_model()
+    same = [x for x in done if x["model"] == model]          # 예상 토큰은 지금 대체 모델로 다시 만든 요청의 평균
+    lock = RT.read_lock("generation") or {}
+    rd = {"model": model, "running": "redo" in str(lock.get("by", "")),
+          "cand_req": len(redo["cand"]), "cand_rules": sum(redo["cand"].values()), "cand_n": len(cand),
+          "cand_att": sum(r["label"] == "anomalies" for r in cand),
+          "done_req": len(done), "last_at": max((x["at"] for x in done), default=""),
+          # 요청마다 남은 샘플 + 뺀 샘플 = 생성 샘플이라, 목록에서 빠진 수 = 늘어난 학습 샘플 수 (증강 전)
+          "removed": sum(x["rejected"][0] - x["rejected"][1] for x in done),
+          "left": sum(x["rejected"][1] for x in done),
+          "avg_tokens": round(sum(x["tokens"] for x in same) / len(same)) if same else 0, "avg_n": len(same)}
+    return {"dates": dates, "date": date, "models": sorted({r["model"] for r in recs}), "cats": EXCL_CATS,
+            "by_cat": cats, "total": len(by_model), "sel": len(sel),
+            "sel_label": {"anomalies": sum(r["label"] == "anomalies" for r in sel),
+                          "normal": sum(r["label"] == "normal" for r in sel)},
+            "rules": len({r["id"] for r in sel}), "lost_rules": lost_rules[:200], "lost_n": len(lost_rules),
+            "types": types, "reasons": top, "redo": rd, **cond}
+
+
+def excluded_csv(q):
+    """검토에서 뺀 샘플 CSV (조건 그대로, 생성된 원래 http 포함)."""
+    dates, date, recs, sel, att, cond, _ = _excl_select(q)
+    try:
+        mapping = dataset_mod().load_mapping()[1]
+    except Exception:
+        mapping = {}
+    name = "_".join(["excluded", date or "none"] + [x for x in (cond["cat"], cond["type"]) if x]).replace(" ", "_") + ".csv"
+
+    def chunks():
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["date", "요청", "rule_id", "공격 유형", "method (IPS)", "label", "단계", "분류", "이유", "검토 모델",
+                    "다시 만들기 대상", "http"])
+        yield ("﻿" + buf.getvalue()).encode("utf-8")
+        by_req = {}
+        for r in sel:
+            by_req.setdefault((r["date"], r["req"]), []).append(r)
+        for (d, req), rs in by_req.items():
+            g_by = {g.get("id"): g for g in _jsonl(BASE / "07_llm_output" / d / "_2_generated" / f"{req}.jsonl")
+                    if isinstance(g, dict)}
+            buf.seek(0)
+            buf.truncate()
+            for r in rs:
+                smp, i = (g_by.get(r["id"]) or {}).get("samples") or [], r["i"]
+                http = smp[i].get("http", "") if isinstance(i, int) and 0 <= i < len(smp) and isinstance(smp[i], dict) else ""
+                w.writerow([d, req, r["id"], r["type"], (mapping.get(r["type"]) or {}).get("ips", ""), r["label"],
+                            r["stage"], r["cat"], _cell(r["reason"]), r["model"], "예" if r["redo"] else "",
+                            _cell(str(http).replace("\r\n", "\n").replace("\n", "\\n"))])
             yield buf.getvalue().encode("utf-8")
     return name, chunks()
 
@@ -1950,16 +2275,342 @@ def input_dates():
 
 
 def settings_summary():
+    """머리글·생성 카드의 모델 {생성, 검토: 'provider:model' (검토 생략이면 'none'), 대체: 검토 대체 모델}."""
     try:
-        text = (BASE / "docs" / "코드참조" / "LLM_설정.md").read_text(encoding="utf-8")
+        text = SETTINGS_FILE.read_text(encoding="utf-8")
     except OSError:
         return {}
     out = {}
     for role in ("생성", "검토"):
         m = re.search(rf"^\|\s*{role}\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|", text, re.M)
         if m:
-            out[role] = f"{m.group(1)}:{m.group(2)}"
+            out[role] = "none" if m.group(1) in ("none", "-") else f"{m.group(1)}:{m.group(2)}"
+    out["대체"] = redo_model()
     return out
+
+
+# ── 2. 모델 설정 (LLM_설정.md: '모델' 표의 생성·검토 줄, '실행' 표의 검토 대체 모델·동시 요청 수) ─────────
+# 파이프라인(3_0 → 3.x)이 실행할 때마다 이 파일을 읽으므로, 생성·다시 만들기가 도는 동안(generation 잠금)에는 저장하지 않는다.
+# 바꾼 칸만 고치고(설명 칸·다른 줄·줄바꿈은 그대로) 임시 파일에 쓴 뒤 바꾼다. 바꾼 기록은 logs/llm_settings_changes.jsonl.
+# 키 값은 화면으로 내보내지 않는다 (.env 에 있는지·형식만 본다).
+MODEL_LOG = BASE / "logs" / "llm_settings_changes.jsonl"
+MODEL_NAME_RE = re.compile(r"^[\w.\-]+$")                       # MODEL_RE 의 model 부분
+KNOWN_MODELS = {       # 고르기 목록 (직접 입력도 됨) - 이 프로젝트에서 썼거나 LLM_설정.md 에 적힌 이름 (+ 지난 기록의 모델)
+    "upstage": ["solar-pro2"],
+    "openai": ["gpt-6-luna", "gpt-6.1-sol", "gpt-5"],
+    "anthropic": ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"],
+    "claude_cli": ["sonnet", "opus", "haiku", "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"],
+}
+MODEL_FIELDS = ("provider", "model", "temperature", "max_tokens")      # '모델' 표의 2~5번째 칸
+RUN_FIELDS = {"fb": "검토 대체 모델", "conc_gen": "생성 동시 요청 수", "conc_rev": "검토 동시 요청 수"}
+CONC_TOP = {"conc_gen": 16, "conc_rev": 32}                     # 3_0a_common.parallel_settings 의 상한
+# 연결 확인: 아주 짧은 요청 1개를 별도 프로세스에서 (API 키를 화면 프로세스에 올리지 않고, 파이프라인 로그에도 남기지 않음)
+CHECK_CODE = r"""
+import importlib.util, json, logging, sys, time
+base, role, model, temp, mt = sys.argv[1:6]
+spec = importlib.util.spec_from_file_location("llm_common_check", base + "/3_0a_common.py")
+C = importlib.util.module_from_spec(spec); spec.loader.exec_module(C)
+C.load_env()
+roles, providers, run = C.load_settings()
+cfg = C.role_config(roles, role, model)
+cfg.update(temperature=float(temp) if temp else None, max_tokens=int(mt))
+run = dict(run, **{"재시도 횟수": "1", "응답 대기 시간": "120"})
+log = logging.getLogger("model_check"); log.propagate = False; log.addHandler(logging.NullHandler())
+t = time.time()
+try:
+    text, u = C.call_llm(cfg, providers, "Reply with the single word OK.", "ping", run, log)
+    out = {"ok": True, "reply": " ".join(text.split())[:80], "in": u.get("input_tokens", 0), "out": u.get("output_tokens", 0),
+           "cut": u.get("finish_reason") == "length"}
+except Exception as e:
+    out = {"ok": False, "error": " ".join(str(e).split())[:400], "fatal": C.is_fatal(e)}
+out["sec"] = round(time.time() - t, 1)
+print(json.dumps(out, ensure_ascii=False))
+"""
+_mstat, _cli, _c3 = {}, {"t": 0.0, "val": None}, {}     # 모델별 기록(meta.json 마다), claude 로그인(5분), 3_0a_common
+_magg = {"t": 0.0, "val": None}                         # 모델별 기록 합계 (1분 - 파일 7천 개를 매번 훑지 않게)
+
+
+def _md_tables(text):
+    """md 의 '## 제목' 별 표 {제목: [[셀, …]]} (3_0a_common.md_tables 와 같은 규칙, 머리글·구분선 제외)."""
+    tables, section, seen = {}, None, False
+    for line in text.splitlines():
+        s = line.strip()
+        if s.startswith("## "):
+            section, seen = s[3:].strip(), False
+            tables[section] = []
+        elif section is not None and s.startswith("|"):
+            cells = [c.strip() for c in s.strip("|").split("|")]
+            if set("".join(cells)) <= set("-: "):
+                continue
+            if seen:
+                tables[section].append(cells)
+            seen = True
+    return tables
+
+
+def _common():
+    """3_0a_common (claude 실행 파일 찾기·CLI 환경) - 처음 쓸 때 한 번 읽는다."""
+    if "m" not in _c3:
+        _c3["m"] = _load("llm_common_ui", "3_0a_common.py")
+    return _c3["m"]
+
+
+def _dotenv():
+    """.env 의 {이름: 값} (3_0a_common.load_env 와 같은 규칙). 값은 화면으로 내보내지 않는다."""
+    out = {}
+    try:
+        for line in (BASE / ".env").read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                out[k.strip()] = v.replace("\t", " ").split(" #")[0].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return out
+
+
+def _key_state(name, env):
+    """키가 있는지만: 있음 / 없음 / 형식 오류 (한글·공백이 섞임 - 3_0a_common.call_llm 이 거절)."""
+    v = (os.environ.get(name) or env.get(name) or "").strip()
+    return "없음" if not v else "있음" if v.isascii() and " " not in v else "형식 오류"
+
+
+def claude_status(refresh=False, url=""):
+    """claude 실행 파일·로그인 (`claude auth status --json`, 5분 캐시). 메일·조직 같은 계정 정보는 내보내지 않는다."""
+    if not refresh and _cli["val"] is not None and time.time() - _cli["t"] < 300:
+        return _cli["val"]
+    val = {"exe": "", "version": "", "logged_in": None, "method": "", "plan": "", "error": ""}
+    try:
+        C = _common()
+        name = getattr(C, "CLAUDE_CLI_ENV", "CLAUDE_CLI_PATH")       # 파이프라인처럼 .env 의 실행 파일 경로도 본다
+        exe = C.claude_cli_path({"url": url if url not in ("", "-") else _dotenv().get(name, "")})
+        env = C._claude_cli_env()
+    except Exception as e:
+        exe, val["error"] = None, f"실행 파일을 찾지 못함 ({type(e).__name__})"
+    if exe:
+        v = re.search(r"claude-code[\\/]([\d.]+)[\\/]", exe)
+        val.update(exe=Path(exe).name, version=v.group(1) if v else "")
+        try:
+            r = subprocess.run([exe, "auth", "status", "--json"], capture_output=True, timeout=60, env=env, cwd=str(BASE),
+                               stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            d = json.loads((r.stdout or b"").decode("utf-8", "replace").strip() or "{}")
+            val.update(logged_in=bool(d.get("loggedIn")), method=str(d.get("authMethod") or ""),
+                       plan=str(d.get("subscriptionType") or ""))
+        except (OSError, ValueError, subprocess.SubprocessError) as e:
+            val["error"] = f"로그인 상태를 읽지 못함 ({type(e).__name__})"
+    _cli.update(t=time.time(), val=val)
+    return val
+
+
+def _meta_contrib(path, kind):
+    """meta.json 하나 → ((역할, 'provider:model', 초, 입력 토큰, 출력 토큰), …). 검토에 대체 모델을 함께 쓴 요청은
+    토큰을 검토·대체로 나누고 시간은 세지 않는다 (시간이 두 모델 합이라)."""
+    try:
+        m = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    u = m.get("usage") or {}
+    tok = lambda x: ((x or {}).get("input_tokens") or 0, (x or {}).get("output_tokens") or 0)
+    if kind == "생성":
+        return (("생성", m["generator"], m.get("seconds") or 0, *tok(u.get("generator"))),) if m.get("generator") else ()
+    if not m.get("reviewer"):
+        return ()
+    fb = m.get("fallback") or {}
+    if fb.get("model"):
+        return (("검토", m["reviewer"], 0, *tok(u.get("reviewer_primary"))), ("대체", fb["model"], 0, *tok(u.get("reviewer_fallback"))))
+    return (("검토", m["reviewer"], m.get("seconds") or 0, *tok(u.get("reviewer"))),)
+
+
+def model_stats(fresh=False):
+    """모델별 지난 기록 {생성|검토|대체: {'provider:model': {n, sec_n, sec, tin, tout}}} - 모든 날짜의
+    _2_generated·_3_reviewed meta.json (바뀐 파일만 다시 읽음, 합계는 1분). 화면의 예상 시간·토큰과 '기록 없음' 표시에 쓴다."""
+    if not fresh and _magg["val"] is not None and time.time() - _magg["t"] < 60:
+        return _magg["val"]
+    out, seen = {"생성": {}, "검토": {}, "대체": {}}, set()
+    root = BASE / "07_llm_output"
+    for d in (sorted(p for p in root.iterdir() if DATE_RE.match(p.name)) if root.is_dir() else []):
+        for sub, kind in (("_2_generated", "생성"), ("_3_reviewed", "검토")):
+            try:
+                ents = [e for e in os.scandir(d / sub) if e.name.endswith(".meta.json")]
+            except OSError:
+                continue
+            for e in ents:
+                st = e.stat()
+                hit = _mstat.get(e.path)
+                if not hit or hit[0] != (st.st_size, st.st_mtime_ns):
+                    hit = _mstat[e.path] = ((st.st_size, st.st_mtime_ns), _meta_contrib(e.path, kind))
+                seen.add(e.path)
+                for role, model, sec, tin, tout in hit[1]:
+                    x = out[role].setdefault(model, {"n": 0, "sec_n": 0, "sec": 0.0, "tin": 0, "tout": 0})
+                    x["n"] += 1
+                    x["tin"] += tin
+                    x["tout"] += tout
+                    if sec:
+                        x["sec_n"] += 1
+                        x["sec"] += sec
+    with _lock:
+        for k in [k for k in list(_mstat) if k not in seen]:
+            _mstat.pop(k, None)
+        _magg.update(t=time.time(), val=out)
+    return out
+
+
+def _changes_tail(n=10):
+    """바꾼 기록 최근 n개 (최근 것부터)."""
+    try:
+        rows = MODEL_LOG.read_text(encoding="utf-8").splitlines()[-n:]
+    except OSError:
+        return []
+    out = []
+    for x in reversed(rows):
+        try:
+            out.append(json.loads(x))
+        except ValueError:
+            pass
+    return out
+
+
+def _read_settings():
+    raw = SETTINGS_FILE.read_bytes()
+    return raw, _md_tables(raw.decode("utf-8"))
+
+
+def model_settings(q):
+    """화면 2 '모델 설정': 지금 값, provider 별 사용 가능 여부(키는 있는지만), 고르기 목록, 모델별 지난 기록, 바꾼 기록."""
+    raw, t = _read_settings()
+    roles = {r[0]: dict(zip(MODEL_FIELDS, r[1:5])) for r in t.get("모델", []) if len(r) >= 5 and r[0] in ("생성", "검토")}
+    prov = {r[0]: {"url": r[1], "key": r[2], "style": r[3]} for r in t.get("provider", []) if len(r) >= 4}
+    run = {r[0]: r[1] for r in t.get("실행", []) if len(r) >= 2}
+    env, providers = _dotenv(), {}
+    for name, p in prov.items():
+        key = p["key"] if p["key"] not in ("", "-") else ""
+        providers[name] = {"style": p["style"], "key": key,
+                           "state": claude_status(bool(_q(q, "refresh")), p["url"]) if p["style"] == "claude_cli"
+                           else _key_state(key, env) if key else "필요 없음"}
+    stats, known = model_stats(bool(_q(q, "refresh"))), {k: list(v) for k, v in KNOWN_MODELS.items()}
+    for role in stats.values():                                  # 지난 기록에 있는 모델도 고르기 목록에
+        for pm in role:
+            pv, _, m = pm.partition(":")
+            if m and m not in known.setdefault(pv, []):
+                known[pv].append(m)
+    try:
+        where = SETTINGS_FILE.relative_to(BASE).as_posix()
+    except ValueError:
+        where = str(SETTINGS_FILE)
+    return {"sig": hashlib.sha1(raw).hexdigest(), "file": where, "roles": roles,
+            "run": {k: run.get(v, "") for k, v in RUN_FIELDS.items()}, "providers": providers, "known": known,
+            "stats": stats, "changes": _changes_tail(),
+            "locked": job_state("generation")["running"] or job_state("redo")["running"]}
+
+
+def _int_in(v, lo, hi, what):
+    try:
+        n = int(str(v).strip())
+    except ValueError:
+        raise ValueError(what) from None
+    if not lo <= n <= hi:
+        raise ValueError(f"{what} ({lo}~{hi})")
+    return n
+
+
+def _temperature(v, what):
+    t = str(v or "").strip()
+    if t:
+        try:
+            ok = 0 <= float(t) <= 2
+        except ValueError:
+            ok = False
+        if not ok:
+            raise ValueError(f"{what} temperature (비우거나 0~2)")
+    return t
+
+
+def save_models(b):
+    """모델 설정 저장 → (HTTP 코드, 응답). 생성·다시 만들기가 도는 중이거나, 화면을 연 뒤 파일이 바뀌었으면 저장하지 않는다."""
+    if job_state("generation")["running"] or job_state("redo")["running"]:
+        return 409, {"error": "학습데이터 생성(또는 다시 만들기)이 실행 중이라 저장하지 않았습니다 - 실행 중인 단계가 이 설정을 "
+                              "읽습니다. 생성이 끝난 뒤 저장하세요"}
+    raw, t = _read_settings()
+    if b.get("sig") != hashlib.sha1(raw).hexdigest():
+        return 409, {"error": "화면을 연 뒤 LLM_설정.md 가 바뀌었습니다 (다른 곳에서 고침) - '다시 불러오기' 뒤 저장하세요"}
+    prov = {r[0] for r in t.get("provider", []) if len(r) >= 4}
+    want = {}                                                   # (표, 첫 칸) → {칸 번호: 새 값}
+    for role in ("생성", "검토"):
+        x = (b.get("roles") or {}).get(role) or {}
+        p, m = str(x.get("provider", "")).strip(), str(x.get("model", "")).strip()
+        if not (p in prov or (role == "검토" and p == "none")) or not MODEL_NAME_RE.match(m):
+            raise ValueError(f"{role} 모델 (provider 표의 이름 + 영문·숫자·'.-_' 모델 이름)")
+        want[("모델", role)] = {2: p, 3: m, 4: _temperature(x.get("temperature"), role),
+                               5: str(_int_in(x.get("max_tokens", ""), 256, 200000, f"{role} max_tokens"))}
+    r = b.get("run") or {}
+    fb = str(r.get("fb", "")).strip() or "-"
+    if fb != "-" and not (MODEL_RE.match(fb) and fb.partition(":")[0] in prov and fb.partition(":")[2]):
+        raise ValueError("검토 대체 모델 ('provider:model' 또는 '-')")
+    want[("실행", RUN_FIELDS["fb"])] = {2: fb}
+    for k in ("conc_gen", "conc_rev"):
+        want[("실행", RUN_FIELDS[k])] = {2: str(_int_in(r.get(k, ""), 1, CONC_TOP[k], RUN_FIELDS[k]))}
+    lines, section, changes, found = raw.decode("utf-8").splitlines(keepends=True), None, [], set()
+    for i, line in enumerate(lines):
+        body = line.rstrip("\r\n")
+        s = body.strip()
+        if s.startswith("## "):
+            section = s[3:].strip()
+            continue
+        parts = body.split("|")
+        key = (section, parts[1].strip()) if s.startswith("|") and len(parts) > 3 else None
+        cells = want.get(key)
+        if not cells or max(cells) >= len(parts) - 1:
+            continue
+        found.add(key)
+        for j, val in cells.items():
+            old = parts[j].strip()
+            if old == val or (key[1] == RUN_FIELDS["fb"] and {old, val} <= {"", "-", "none"}):
+                continue
+            changes.append([f"{key[1]} {MODEL_FIELDS[j - 2]}" if section == "모델" else key[1], old, val])
+            parts[j] = f" {val} " if val else " "
+        lines[i] = "|".join(parts) + line[len(body):]           # 줄바꿈(CRLF) 그대로
+    if set(want) - found:
+        raise ValueError("LLM_설정.md 에 없는 줄: " + ", ".join(k[1] for k in set(want) - found))
+    if not changes:
+        return 200, {"changed": []}
+    tmp = SETTINGS_FILE.with_name(f"{SETTINGS_FILE.name}.{os.getpid()}.tmp")
+    tmp.write_bytes("".join(lines).encode("utf-8"))
+    for k in range(10):                                         # 다른 프로그램이 잠깐 열어 두었으면 (Windows) 조금 뒤 다시
+        try:
+            os.replace(tmp, SETTINGS_FILE)
+            break
+        except PermissionError:
+            if k == 9:
+                tmp.unlink(missing_ok=True)
+                raise
+            time.sleep(0.2)
+    MODEL_LOG.parent.mkdir(exist_ok=True)
+    with open(MODEL_LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"at": RT.now_iso(), "file": SETTINGS_FILE.name, "changes": changes}, ensure_ascii=False) + "\n")
+    return 200, {"changed": changes}
+
+
+def check_model(b):
+    """연결 확인: 고른 provider:model 에 아주 짧은 요청 1개 → (200, {ok, sec, reply·토큰 | error})."""
+    role, model = b.get("role"), str(b.get("model", "")).strip()
+    if role not in ("생성", "검토") or not MODEL_RE.match(model) or ":" not in model:
+        raise ValueError("model ('provider:model')")
+    temp = _temperature(b.get("temperature"), role)
+    mt = min(_int_in(b.get("max_tokens") or 2048, 1, 200000, "max_tokens"), 2048)
+    try:
+        r = subprocess.run([sys.executable, "-c", CHECK_CODE, str(BASE), role, model, temp, str(mt)], capture_output=True,
+                           timeout=240, cwd=str(BASE), env=dict(os.environ, PYTHONIOENCODING="utf-8"),
+                           stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except subprocess.TimeoutExpired:
+        return 200, {"ok": False, "error": "4분 안에 끝나지 않음"}
+    for line in reversed((r.stdout or b"").decode("utf-8", "replace").splitlines()):
+        if line.startswith("{"):
+            try:
+                return 200, json.loads(line)
+            except ValueError:
+                break
+    err = " ".join((r.stderr or b"").decode("utf-8", "replace").split())[-300:]
+    return 200, {"ok": False, "error": err or f"종료 코드 {r.returncode}"}
 
 
 def state():
@@ -1973,7 +2624,7 @@ def state():
             "agent": dict(job_state("agent"), status=RT.read_status("agent")),
             "last_collect": RT.read_status("collect"), "input_dates": input_dates(),
             "models": settings_summary(), "settings": dict(zip(("generate", "review", "overlap"), parallel())),
-            "step_seconds": step_summary(), "supervised": sup}
+            "step_seconds": step_summary(), "supervised": sup, "redo": job_state("redo")}
 
 
 # ── 요청 처리 ────────────────────────────────────────────────────────────
@@ -2041,6 +2692,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, verify_summary(_q(q, "date"), _q(q, "dev", "ips")))
             if u.path == "/api/data/edits":
                 return self._send(200, edits_summary(_q(q, "date")))
+            if u.path == "/api/excluded":
+                return self._send(200, excluded_summary(q))
+            if u.path == "/api/models":
+                return self._send(200, model_settings(q))
+            if u.path == "/download/excluded.csv":
+                from urllib.parse import quote
+                name, chunks = excluded_csv(q)
+                return self._stream(chunks, "text/csv; charset=utf-8",
+                                    {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
             if u.path == "/api/sup/state":
                 return self._send(200, sup_state(_q(q, "base")))
             if u.path == "/api/sup/summary":
@@ -2133,9 +2793,25 @@ class Handler(BaseHTTPRequestHandler):
             res = {d: start_verify(d, dev, mode) for d in todo}
             return 200, {"started": [d for d, r in res.items() if r == "started"],
                          "done": [d for d, r in res.items() if r == "done"]}
+        if path == "/api/models/save":           # 2. 모델 설정 저장 (LLM_설정.md, 생성 중에는 막음)
+            return save_models(b)
+        if path == "/api/models/check":          # 2. 모델 설정 '연결 확인' (요청 1개)
+            return check_model(b)
+        if path == "/api/excluded/redo":         # 2. 검토에서 뺀 샘플 '다시 만들기' = 3_3 --redo-safety (API 비용, 생성 잠금)
+            if job_state("generation")["running"] or job_state("redo")["running"]:
+                return 409, {"error": "학습데이터 생성(또는 다시 만들기)이 실행 중입니다 - 끝난 뒤 다시 누르세요"}
+            if not redo_model():
+                return 409, {"error": "LLM_설정.md 의 '검토 대체 모델' 이 비어 있습니다 (예: claude_cli:sonnet)"}
+            args, d = ["--redo-safety"], b.get("date") or "all"
+            if d != "all":
+                if d not in excluded_dates():
+                    raise ValueError("date")
+                args += ["--date", d]
+            RT.clear_stop("generation")
+            return 200, {"pid": spawn("redo", args), "args": args}
         if path == "/api/generation/start":
-            if job_state("generation")["running"]:
-                return 409, {"error": "학습데이터 생성이 이미 실행 중입니다"}
+            if job_state("generation")["running"] or job_state("redo")["running"]:
+                return 409, {"error": "학습데이터 생성(또는 다시 만들기)이 이미 실행 중입니다"}
             args = ["--set", b.get("set", "all")]
             if args[1] not in ("all", "delta"):
                 raise ValueError("set")
@@ -2162,6 +2838,8 @@ class Handler(BaseHTTPRequestHandler):
                 return 409, {"error": "실행 중인 생성이 없습니다"}
             if b.get("force"):
                 return 200, {"killed": force_kill(st["lock"].get("pid") or st["ui"].get("pid"))}
+            if "redo" in str(st["lock"].get("by", "")):     # 3_3 --redo-safety 는 중지 요청을 보지 않는다
+                return 409, {"error": "다시 만들기는 '강제 중지'로만 멈춥니다 (이미 다시 검토한 요청은 다음 생성 때 증강·학습 로그에 반영)"}
             RT.request_stop("generation")
             return 200, {"stop_requested": True}
         if path == "/api/collect/start":
@@ -2267,9 +2945,9 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
   <label>입력 날짜<select id="gDate"><option value="">가장 최근</option></select></label>
  </div>
  <div class="est" id="genEst"></div>
- <details><summary>모델 (비우면 LLM_설정.md)</summary><div class="row" style="margin-top:6px">
+ <details id="gOvrBox"><summary>이번 실행만 다른 모델 <span class="muted" id="gOvr">(저장 안 됨 · 비우면 아래 '모델 설정'의 저장된 값)</span></summary><div class="row" style="margin-top:6px">
   <label>생성 모델<input id="gGen" placeholder="예: upstage:solar-pro2"></label>
-  <label>검토 모델<input id="gRev" placeholder="예: openai:gpt-5"></label></div></details>
+  <label>검토 모델<input id="gRev" placeholder="예: claude_cli:opus"></label></div></details>
  <div class="row" style="margin-top:12px">
   <button id="bDry">건수 확인 (호출 없음)</button><button id="bPilot">파일럿 5개</button>
   <button class="primary" id="bGen">생성 시작</button><button id="bStop">중지 (지금 요청까지)</button><button class="danger" id="bKill">강제 중지</button></div>
@@ -2283,7 +2961,29 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
   <button id="bCollect">지금 1회 수집</button><button class="danger" id="bCollectKill">수집 강제 중지</button></div>
  <div class="msg muted">에이전트는 <b>켜 두는 것</b>입니다: 매일 정해진 시각에 수집하고 그 사이에는 대기합니다 (대기 = 정상, 끄려면 '에이전트 중지', 한 번만 수집하려면 '지금 1회 수집'). 시작할 때 놓친 수집이 있으면 바로 1회 수집합니다. 수집 중에도 학습데이터 생성을 함께 돌릴 수 있습니다.</div>
  <div class="msg" id="agMsg"></div><pre id="agLog"></pre></div>
-</div></section>
+</div>
+<div class="card" id="mCard"><h2>모델 설정 <span class="muted" style="font-weight:400;font-size:13px" id="mHdr"></span><a id="mReload" style="float:right;font-size:13px;font-weight:400;cursor:pointer">다시 불러오기</a></h2>
+ <div class="muted" style="font-size:12.5px">학습데이터 생성(3.2)·검토(3.3)에 쓰는 모델입니다. 저장하면 LLM_설정.md 의 해당 칸만 바뀌고 <b>다음 실행부터</b> 적용됩니다. 생성·다시 만들기가 도는 동안은 저장할 수 없습니다 (실행 중인 단계가 이 파일을 읽음). 키 값은 보이지 않고 .env 에 있는지만 봅니다. '연결 확인'은 아주 짧은 요청 1개를 보냅니다 (API 비용 또는 Claude 구독 사용량이 조금 듦). 한 번만 다른 모델로 돌리려면 위 '이번 실행만 다른 모델'을 쓰세요 (저장 안 됨).</div>
+ <div id="mBody" style="margin-top:8px;overflow-x:auto" class="muted">불러오는 중…</div>
+ <div class="row" style="margin-top:8px;align-items:center">
+  <label>생성 동시 요청 수<input id="mConcGen" type="number" min="1" max="16" style="width:70px"></label>
+  <label>검토 동시 요청 수<input id="mConcRev" type="number" min="1" max="32" style="width:70px"></label>
+  <button class="primary" id="mSave">저장</button><button id="mReset">지금 값으로 되돌리기</button><span class="msg" id="mMsg"></span></div>
+ <div id="mHint" style="font-size:12.5px;margin-top:4px"></div>
+ <details style="margin-top:6px"><summary>바꾼 기록 (최근 10)</summary><div id="mLog" style="font-size:12.5px"></div></details></div>
+<div class="card"><h2>검토에서 뺀 샘플 <span class="muted" style="font-weight:400" id="exHdr"></span><a id="exCsv" style="float:right;font-size:13px;font-weight:400">CSV 받기</a></h2>
+ <div class="muted" style="font-size:12.5px">생성한 샘플 중 검토(3.3)에서 빠진 것입니다. <b>검토 모델이 뺀 것</b>은 이유 문구로 나눕니다: <b>안전상 이유</b> = 공격 요청을 '안전하게 보존·수정할 수 없다'며 뺀 것 (gpt-6-luna 에 많음) · 룰 조건상 불가 = 룰 조건끼리 모순이거나 응답 방향 조건 등 요청으로 만들 수 없음 · 중복·다양성 · 기타. <b>코드 검사</b> = 검토 뒤 룰 조건 대조에서 라벨과 어긋나 뺀 것. 공격 유형을 누르면 그 유형의 이유를 봅니다.<br><b>다시 만들기</b> = 처음 검토 모델이 안전상 이유로 뺀 샘플이 있는 룰을 '검토 대체 모델'(LLM_설정.md)로 다시 검토하고 증강·학습 로그·진행 현황까지 다시 만듭니다 (API 비용 또는 Claude 구독 사용량). 다시 만든 샘플은 이 목록에서 빠지고, 다시 검토 뒤에도 빠진 샘플만 남습니다. 룰 조건상 불가·코드 검사 등으로만 빠진 샘플은 다시 만들지 않습니다.</div>
+ <div class="row" style="margin-top:8px;align-items:center">
+  <label>입력 날짜<select id="exDate"></select></label>
+  <label>검토 모델<select id="exModel"><option value="">전체</option></select></label>
+  <label>분류<select id="exCat"><option value="">전체</option><option>안전상 이유</option><option>룰 조건상 불가</option><option>중복·다양성</option><option>기타 검토</option><option>코드 검사</option><option>형식</option></select></label>
+  <button id="exRedo" disabled>다시 만들기</button><span class="msg" id="exRedoMsg"></span>
+ </div>
+ <div id="exRedoInfo" style="font-size:12.5px;margin-top:6px"></div>
+ <div class="vsum" id="exSum"></div>
+ <div id="exBody" style="margin-top:8px;overflow-x:auto"></div>
+ <div id="exReasons" style="margin-top:10px"></div></div>
+</section>
 
 <!-- 3. 룰별 상태 -->
 <section class="page" id="p-rules"><div class="card"><h2>룰별 상태 <a href="/download/rule_status.csv" style="float:right;font-size:13px;font-weight:400">CSV 내려받기</a></h2>
@@ -2346,7 +3046,7 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
 <div class="card"><h2>비교 결과 <span class="seg" id="sDevSeg" style="vertical-align:middle;margin-left:6px"><button data-d="ips" class="on">IPS</button><button data-d="waf">WAF</button></span> <span class="muted" style="font-weight:400" id="sResHdr"></span><a id="sXlsx" style="float:right;font-size:13px;font-weight:400">엑셀 받기</a></h2>
  <div id="sRes" class="muted">비교 결과가 없습니다.</div></div>
 <div class="card"><h2>선별 → 버전 후보 <span class="muted" style="font-weight:400" id="sSelHdr"></span></h2>
- <div class="muted" style="font-size:12.5px">기본값: <b>A 전부 + B·C 패턴당 20개</b> (제거는 항상 뺌, 패턴이 넘치면 룰을 돌아가며 고름). 바꾸면 위에서 고른 장비 기준으로 바로 다시 셉니다. 룰별 표에서 룰 단위로 빼거나 넣고, '후보 CSV 받기'로 payload 를 확인한 뒤 담으세요. 확정은 아래 버전 표에서 합니다.</div>
+ <div class="muted" style="font-size:12.5px"><b>IPS·WAF 에 같은 샘플</b>을 넣습니다: 두 장비 비교 결과를 샘플로 짝지어 <b>합친 등급</b>으로 고릅니다 (A = 어느 장비든 A · B = A 가 아니고 어느 장비든 B · C = 그 밖 · 제거 = 두 장비 모두 중복, 한 장비만 기준과 중복이면 다른 장비 등급). 패턴당 상한은 장비마다 그 장비의 피처 패턴으로 세어 고른 뒤 합칩니다. 기본값: <b>A 전부 + B·C 패턴당 20개</b> (패턴이 넘치면 룰을 돌아가며 고름). 바꾸면 바로 다시 셉니다. 룰별 표에서 룰 단위로 빼거나 넣고, '후보 CSV 받기'로 payload 를 확인한 뒤 담으세요. 확정은 아래 버전 표에서 합니다.</div>
  <div class="row" style="margin-top:8px">
   <label>A 부족한 데이터<select id="oA"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option></select></label>
   <label>B 새 패턴<select id="oB"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option></select></label>
@@ -2373,20 +3073,20 @@ const H={"Content-Type":"application/json","X-RuleData-UI":"1"};
 const $=id=>document.getElementById(id), fmt=n=>(n??0).toLocaleString("ko-KR");
 async function post(u,b){const r=await fetch(u,{method:"POST",headers:H,body:JSON.stringify(b||{})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
 async function get(u){const r=await fetch(u);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
-let S=null,P=null,flagNames={},rOff=0,page="progress";
+let S=null,P=null,M=null,flagNames={},rOff=0,page="progress";
 function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 function chip(f){return `<span class="chip f-${f}">${esc(flagNames[f]||f)}</span>`}
 /* ── 페이지 전환 ── */
 function route(){const parts=location.hash.replace(/^#\/?/,"").split("/"),h=parts[0];page={"":"progress",run:"run",rules:"rules",data:"data",features:"features",sup:"sup"}[h]||"progress";
  document.querySelectorAll(".page").forEach(s=>s.classList.toggle("on",s.id==="p-"+page));
  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.dataset.p===page));
- if(page==="rules")loadRules();if(page==="data")initData();if(page==="run"||page==="progress")loadState();if(page==="progress")loadProgress();
+ if(page==="rules")loadRules();if(page==="data")initData();if(page==="run"||page==="progress")loadState();if(page==="run"){loadExcluded();loadModels()}if(page==="progress")loadProgress();
  if(page==="features")loadFeatures(parts[1]?decodeURIComponent(parts[1]):"");if(page==="sup")loadSup()}
 window.addEventListener("hashchange",route);
 /* ── 2. 생성·수집 ── */
-async function loadState(){S=await get("/api/state");const g=S.generation,c=S.collect,a=S.agent,run=g.run;
+async function loadState(){S=await get("/api/state");const g=S.generation,c=S.collect,a=S.agent,run=g.run,rdo=S.redo||{},redo=String((g.lock||{}).by||"").includes("redo");
  const pct=g.running&&run&&run.state==="running"?run.pct+"%":"";
- $("hdr").textContent=`입력 ${S.input_dates.at(-1)||"-"} · 생성 ${S.models["생성"]||"?"} / 검토 ${S.models["검토"]||"?"} · ${S.now.replace("T"," ")}`+(g.running?` · 생성 실행 중 ${pct}`:"")+(a.running?((a.status||{}).state==="수집 중"?" · 수집 중":" · 수집 에이전트 켜짐 (대기)"):"");
+ $("hdr").textContent=`입력 ${S.input_dates.at(-1)||"-"} · 생성 ${S.models["생성"]||"?"} / 검토 ${S.models["검토"]||"?"} · ${S.now.replace("T"," ")}`+(g.running?` · ${redo?"다시 만들기":"생성"} 실행 중 ${pct}`:"")+(a.running?((a.status||{}).state==="수집 중"?" · 수집 중":" · 수집 에이전트 켜짐 (대기)"):"");
  $("navRun").hidden=!(g.running||c.running||(a.running&&(a.status||{}).state==="수집 중"));$("navPct").textContent=pct;   // 대기 중인 에이전트는 표시 안 함
  document.title=(pct?`(${pct}) `:"")+"Snort 룰 학습데이터";const sv=S.supervised||{};$("navSup").hidden=!sv.running;$("navSupPct").textContent=sv.running&&sv.pct!=null?Math.floor(sv.pct)+"%":"";
  if(page==="progress"){const show=g.running||(run&&!run.error);$("runCard").hidden=!show;
@@ -2394,9 +3094,10 @@ async function loadState(){S=await get("/api/state");const g=S.generation,c=S.co
  if(page!=="run")return;
  $("genRun").innerHTML=runHtml(g);
  const sel=$("gDate");if(sel.options.length-1!==S.input_dates.length){sel.innerHTML='<option value="">가장 최근</option>'+S.input_dates.slice().reverse().map(d=>`<option>${d}</option>`).join("")}
- $("genDot").className="dot"+(g.running?" on":"");
- $("genStatus").textContent=g.running?(g.starting?"시작하는 중…":`실행 중 · 단계 ${g.lock.step||"-"} · 입력 ${g.lock.input_date||"-"} · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작`+(g.stop_requested?" · 중지 요청됨":"")):(c.running||(a.running&&(a.status||{}).state==="수집 중")?"대기 · 지금 수집 중이지만 생성을 함께 시작할 수 있습니다 (시작할 때의 입력 날짜를 끝까지 씀)":"대기");
- for(const id of["bDry","bPilot","bGen"])$(id).disabled=g.running;for(const id of["bStop","bKill"])$(id).disabled=!g.running;
+ $("genDot").className="dot"+(g.running||rdo.starting?" on":"");
+ $("genStatus").textContent=rdo.starting&&!g.running?"다시 만들기 시작하는 중… (다시 검토할 요청을 찾는 중, 1분쯤)":g.running&&redo?`다시 만들기 실행 중 (검토에서 뺀 샘플 다시 검토) · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작 · 멈추려면 '강제 중지'`:g.running?(g.starting?"시작하는 중…":`실행 중 · 단계 ${g.lock.step||"-"} · 입력 ${g.lock.input_date||"-"} · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작`+(g.stop_requested?" · 중지 요청됨":"")):(c.running||(a.running&&(a.status||{}).state==="수집 중")?"대기 · 지금 수집 중이지만 생성을 함께 시작할 수 있습니다 (시작할 때의 입력 날짜를 끝까지 씀)":"대기");
+ for(const id of["bDry","bPilot","bGen"])$(id).disabled=g.running||rdo.starting;$("bStop").disabled=!g.running||redo;$("bKill").disabled=!g.running;
+ if(EX)exRedoUi();if(M)mHints();
  if(document.activeElement!==$("gN"))estimate();
  const ast=a.status||{},busy=c.running||(a.running&&ast.state==="수집 중");$("agDot").className="dot"+(busy?" on":a.running?" idle":"");
  $("agStatus").innerHTML=!a.running?(c.running?"<b>지금 1회 수집 중</b>":"에이전트 꺼짐"):busy?`<b>에이전트 켜짐 · 지금 수집 중</b> (매일 ${esc(a.lock.at||ast.at||"?")})`+(a.stop_requested?" · 중지 요청됨 (이번 수집을 마치고 꺼짐)":""):
@@ -2419,7 +3120,7 @@ function runHtml(g){const r=g.run;
  const head=live?`남은 시간 <b>약 ${hms(r.remaining_s)}</b> · <b>${clock(r.remaining_s)}</b> 쯤 끝날 예상 · 경과 ${hms(r.elapsed_s)}`:`<b>${r.state==="done"?"끝남":"중단됨 (끝까지 못 감)"}</b> · 걸린 시간 ${hms(r.elapsed_s)}`;
  return `<div class="row" style="align-items:center;gap:16px;flex-wrap:nowrap"><div class="pct">${r.pct}%</div><div style="flex:1;min-width:0">
   <div class="bar${live?" live":""}" style="margin:4px 0 6px"><i style="width:${r.pct}%"></i></div>
-  <div style="font-size:13px">${head}</div><div class="muted" style="font-size:12.5px">${esc(r.started_at)} 시작${r.dry_run?" · 건수 확인 (dry-run, 호출 없음)":""}${r.by!=="3_0"?` · ${esc(r.by)} 단독 실행`:""}${r.stop_requested?" · <b>중지 요청됨</b> (지금 요청까지 하고 멈춤)":""}</div></div></div>
+  <div style="font-size:13px">${head}</div><div class="muted" style="font-size:12.5px">${esc(r.started_at)} 시작${r.dry_run?" · 건수 확인 (dry-run, 호출 없음)":""}${r.by!=="3_0"?(r.by.includes("redo")?" · 다시 만들기 (검토에서 뺀 샘플 다시 검토)":` · ${esc(r.by)} 단독 실행`):""}${r.stop_requested?" · <b>중지 요청됨</b> (지금 요청까지 하고 멈춤)":""}</div></div></div>
   <div class="steps">${r.steps.map(s=>`<span class="step ${s.status}" title="${word[s.status]}">${icon[s.status]} ${s.key} ${esc(s.name)}${s.detail?` <b>${s.detail}</b>`:""}</span>`).join("")}</div>
   ${live&&r.current?`<div class="runnow">지금: <b>${esc(r.current)}</b></div>`:""}
   ${r.dry_run?"":`<div class="kv" style="margin-top:6px"><b>생성</b><span>${fmt(G.ok)}개 성공 · ${fmt(G.fail)}개 실패 / 이번 ${fmt(G.target)}개${G.ok+G.fail?` · 약 ${hms(G.sec_per_req)}마다 1개 완료 · 토큰 ${fmt(G.tokens_in+G.tokens_out)} (입력 ${fmt(G.tokens_in)} / 출력 ${fmt(G.tokens_out)})`:""}</span>
@@ -2435,15 +3136,22 @@ function estimate(){const el=$("genEst");if(!P){el.textContent="예상: 진행 �
  const asked=+$("gN").value||0,all=asked===0,n=all?left:Math.min(asked,left);
  if(!av.generate_seconds){el.innerHTML="<b>예상</b> 생성 기록이 아직 없어 계산할 수 없습니다 — '파일럿 5개'를 먼저 돌리면 실제 평균으로 계산합니다.";return}
  // 동시 처리: 생성은 pg 개씩, 검토는 pr 개씩. 함께 진행하면 생성된 요청부터 바로 검토 → 늦게 끝나는 쪽 기준
- const par=(S&&S.settings)||{generate:1,review:1,overlap:false},g1=av.generate_seconds||0,r1=av.review_seconds||0;
+ // 모델: '이번 실행만' 입력 > 저장된 설정. 그 모델의 지난 기록(5건 이상)이 있으면 그 평균, 없으면 전체 평균(다른 모델 포함)
+ const ov={g:$("gGen").value.trim(),r:$("gRev").value.trim()},gm=ov.g||(S&&S.models["생성"])||"생성 모델",rm=ov.r||(S&&S.models["검토"])||"검토 모델",noRev=rm==="none";
+ const raw=(role,m)=>(((M&&M.stats)||{})[role]||{})[m],ok5=h=>h&&h.n>=5?h:null,hg=ok5(raw("생성",gm)),hr=ok5(raw("검토",rm));
+ const par=(S&&S.settings)||{generate:1,review:1,overlap:false},g1=hg&&hg.sec_n>=5?hg.sec/hg.sec_n:av.generate_seconds||0,r1=noRev?0:hr&&hr.sec_n>=5?hr.sec/hr.sec_n:av.review_seconds||0;
+ const warn=[];if(M)for(const [role,m,h] of [["생성",gm,hg],...(noRev?[]:[["검토",rm,hr]])]){const n0=(raw(role,m)||{}).n||0;
+  if(!h)warn.push(`${role} ${esc(m)}: 지난 기록 ${n0?fmt(n0)+"건뿐":"없음"} → 시간·토큰을 다른 모델을 포함한 전체 평균으로 계산 (실제와 다를 수 있음)`);
+  else if(h.sec_n<5)warn.push(`${role} ${esc(m)}: 걸린 시간 기록이 없어 시간은 전체 평균으로 계산`)}
+ $("gOvr").textContent=ov.g||ov.r?`(지금 입력: ${[ov.g&&"생성 "+ov.g,ov.r&&"검토 "+ov.r].filter(Boolean).join(" · ")} - 이번 실행만, 저장 안 됨)`:`(저장 안 됨 · 비우면 저장된 값: 생성 ${(S&&S.models["생성"])||"?"} / 검토 ${(S&&S.models["검토"])||"?"})`;
+ if(ov.g||ov.r)$("gOvrBox").open=true;
  const tg=Math.ceil(n/par.generate)*g1,tr=Math.ceil(n/par.review)*r1,sec=!n?0:par.overlap?Math.max(tg+r1,g1+tr):tg+tr;
  // 준비·마무리: 지난 실행 기록 (증강은 요청 수에 비례). 아직 생성을 돌리지 않은 입력 날짜면 기존 로그 대조·요청 파일 만들기로 준비가 길다
  const ss=(S&&S.step_seconds)||{},day=$("gDate").value||((S&&S.input_dates)||[]).slice(-1)[0],first=(ss.first_dates||[]).includes(day);
  const prep=!n?0:first?(ss.prep_first??1240):(ss.prep??60),fin=!n?0:(ss.augment_per_request??0.6)*n+(ss.post??40);
- const gi=n*(av.generator_input_tokens||0),go=n*(av.generator_output_tokens||0),ri=n*(av.reviewer_input_tokens||0),ro=n*(av.reviewer_output_tokens||0);
- const gm=(S&&S.models["생성"])||"생성 모델",rm=(S&&S.models["검토"])||"검토 모델";
- el.innerHTML=`<b>예상</b> 요청 ${fmt(n)}개${all?" (남은 전부)":""} → 시간 <b>${dur(sec+prep+fin)}</b> <span class="muted">(생성·검토 ${dur(sec)} + 준비 ${dur(prep)}${first?" (이 입력 날짜의 첫 실행 - 기존 데이터 대조·요청 파일 만들기)":""} + 마무리 ${dur(fin)} · 동시 최대 생성 ${par.generate}개·검토 ${par.review}개${par.overlap?" · 생성·검토 함께":""}, 하나씩이면 ${dur(n*(g1+r1))} · API 속도 제한에 걸리면 더 걸림)</span><br>토큰 합계 <b>${fmt(gi+go+ri+ro)}</b> = 생성 ${esc(gm)} <b>${fmt(gi+go)}</b> (입력 ${fmt(gi)} / 출력 ${fmt(go)}) + 검토 ${esc(rm)} <b>${fmt(ri+ro)}</b> (입력 ${fmt(ri)} / 출력 ${fmt(ro)})<div class="muted">지금까지 생성 ${av.generated_requests}건·검토 ${av.reviewed_requests}건의 실제 평균(재시도 포함, 요청 1개 생성 ${Math.round(g1)}초·검토 ${Math.round(r1)}초) 기준 · 이 세트의 남은 요청 ${fmt(left)}개${!all&&asked>left?" (입력한 수가 남은 요청보다 많아 남은 수로 계산)":""}</div>`}
-$("gN").oninput=estimate;$("gSet").onchange=estimate;
+ const gi=Math.round(n*(hg?hg.tin/hg.n:av.generator_input_tokens||0)),go=Math.round(n*(hg?hg.tout/hg.n:av.generator_output_tokens||0)),ri=noRev?0:Math.round(n*(hr?hr.tin/hr.n:av.reviewer_input_tokens||0)),ro=noRev?0:Math.round(n*(hr?hr.tout/hr.n:av.reviewer_output_tokens||0));
+ el.innerHTML=`<b>예상</b>${ov.g||ov.r?' <span class="warn">(이번 실행만 바꾼 모델)</span>':""} 요청 ${fmt(n)}개${all?" (남은 전부)":""} → 시간 <b>${dur(sec+prep+fin)}</b> <span class="muted">(생성·검토 ${dur(sec)} + 준비 ${dur(prep)}${first?" (이 입력 날짜의 첫 실행 - 기존 데이터 대조·요청 파일 만들기)":""} + 마무리 ${dur(fin)} · 동시 최대 생성 ${par.generate}개·검토 ${par.review}개${par.overlap?" · 생성·검토 함께":""}, 하나씩이면 ${dur(n*(g1+r1))} · API 속도 제한에 걸리면 더 걸림)</span><br>토큰 합계 <b>${fmt(gi+go+ri+ro)}</b> = 생성 ${esc(gm)} <b>${fmt(gi+go)}</b> (입력 ${fmt(gi)} / 출력 ${fmt(go)}) + 검토 ${esc(rm)} <b>${fmt(ri+ro)}</b> (입력 ${fmt(ri)} / 출력 ${fmt(ro)})<div class="muted">기준: 생성 ${hg?`${esc(gm)} ${fmt(hg.n)}건`:`전체 ${av.generated_requests}건`} · 검토 ${noRev?"생략":hr?`${esc(rm)} ${fmt(hr.n)}건`:`전체 ${av.reviewed_requests}건`}의 실제 평균 (재시도 포함, 요청 1개 생성 ${Math.round(g1)}초·검토 ${Math.round(r1)}초) · 이 세트의 남은 요청 ${fmt(left)}개${!all&&asked>left?" (입력한 수가 남은 요청보다 많아 남은 수로 계산)":""}</div>${warn.length?`<div class="warn">${warn.join("<br>")}</div>`:""}`}
+$("gN").oninput=estimate;$("gSet").onchange=estimate;$("gGen").oninput=$("gRev").oninput=estimate;
 async function act(msgId,fn){try{const r=await fn();$(msgId).textContent="요청함 "+(r.pid?`(PID ${r.pid})`:"");setTimeout(loadState,800)}catch(e){$(msgId).textContent="실패: "+e.message}}
 $("bDry").onclick=()=>act("genMsg",()=>post("/api/generation/start",genBody({dry_run:true})));
 $("bPilot").onclick=()=>act("genMsg",()=>post("/api/generation/start",genBody({max_requests:5})));
@@ -2454,6 +3162,98 @@ $("bAgStart").onclick=()=>act("agMsg",()=>post("/api/agent/start",{at:$("agAt").
 $("bAgStop").onclick=()=>act("agMsg",()=>post("/api/agent/stop",{}));
 $("bCollect").onclick=()=>act("agMsg",()=>post("/api/collect/start",{}));
 $("bCollectKill").onclick=()=>{if(confirm("수집을 바로 멈춥니다. 진행할까요?"))act("agMsg",()=>post("/api/collect/stop",{}))};
+/* ── 2. 검토에서 뺀 샘플 (3.3 의 rejected: 검토 모델 drop · 코드 검사) ── */
+let EX=null,exType="";
+async function loadExcluded(){const qs=new URLSearchParams({date:$("exDate").value||"",model:$("exModel").value,cat:$("exCat").value,type:exType});
+ $("exBody").style.opacity=.5;let r;try{r=await get("/api/excluded?"+qs)}catch(e){$("exBody").innerHTML=`<div class="muted">불러오지 못했습니다: ${esc(e.message)}</div>`;return}finally{$("exBody").style.opacity=1}
+ EX=r;const cs=r.cats;
+ const dopt=["all",...r.dates.slice().reverse()].map(d=>`<option value="${d}"${d===r.date?" selected":""}>${d==="all"?"전체 날짜":d}</option>`).join("");if($("exDate").innerHTML!==dopt)$("exDate").innerHTML=dopt;
+ const mopt='<option value="">전체</option>'+r.models.map(m=>`<option${m===r.model?" selected":""}>${esc(m)}</option>`).join("");if($("exModel").innerHTML!==mopt)$("exModel").innerHTML=mopt;
+ $("exHdr").textContent=`· ${r.date==="all"?"전체 날짜":r.date} · ${fmt(r.total)}개${r.model?" · "+r.model:""}`;
+ $("exSum").innerHTML=cs.map(c=>`<span class="chip${r.cat===c?" c-RULE":""}" data-xc="${esc(c)}" style="cursor:pointer">${esc(c)} ${fmt(r.by_cat[c]||0)}</span>`).join("")+
+  `<span class="muted">조건에 맞는 ${fmt(r.sel)}개 (공격 ${fmt(r.sel_label.anomalies)} / 정상 ${fmt(r.sel_label.normal)}) · 룰 ${fmt(r.rules)}개 · <b>공격 샘플이 모두 빠진 룰 ${fmt(r.lost_n)}개</b></span>`+
+  (exType?` <span class="chip c-CHECK" data-xt="" style="cursor:pointer">공격 유형: ${esc(exType)} ✕</span>`:"");
+ $("exBody").innerHTML=r.types.length?`<table class="mini"><thead><tr><th>공격 유형</th><th>method (IPS)</th><th class="n">뺀 샘플</th>${cs.map(c=>`<th class="n">${esc(c)}</th>`).join("")}<th class="n">공격</th><th class="n">정상</th><th class="n">룰</th><th class="n">공격이 모두<br>빠진 룰</th><th class="n">다시 만들기<br>대상</th></tr></thead><tbody>${r.types.map(t=>`<tr class="${t.type===exType?"hl":""}" data-xt="${esc(t.type)}" style="cursor:pointer"><td class="nw">${esc(t.name)} <span class="muted">${esc(t.type)}</span></td><td>${esc(t.method)}</td><td class="n"><b>${fmt(t.n)}</b></td>${cs.map(c=>`<td class="n">${t.cats[c]?fmt(t.cats[c]):""}</td>`).join("")}<td class="n">${fmt(t.att)}</td><td class="n">${fmt(t.norm)}</td><td class="n">${fmt(t.rules)}</td><td class="n">${t.lost?fmt(t.lost):""}</td><td class="n">${t.redo?fmt(t.redo):""}</td></tr>`).join("")}</tbody></table>`:'<div class="muted">빠진 샘플이 없습니다.</div>';
+ exRedoUi();
+ $("exReasons").innerHTML=(r.reasons.length?`<h4 style="margin:6px 0">${exType?esc(exType)+" · ":""}이유 상위 ${r.reasons.length}개 <span class="muted" style="font-weight:400">(검토 모델·코드 검사가 쓴 문구 그대로)</span></h4><table class="mini"><thead><tr><th class="n">수</th><th>분류</th><th>이유</th><th>룰 (예)</th></tr></thead><tbody>${r.reasons.map(x=>`<tr><td class="n">${fmt(x.n)}</td><td class="nw">${esc(x.cat)}</td><td class="reason">${esc(x.reason)}</td><td class="nw muted">${x.rules.map(esc).join(", ")}${x.rule_n>3?` 외 ${x.rule_n-3}`:""}</td></tr>`).join("")}</tbody></table>`:"")+
+  (r.lost_n?`<details style="margin-top:6px"><summary>공격 샘플이 모두 빠진 룰 ${fmt(r.lost_n)}개 (검토 뒤 공격 씨앗이 없어 증강도 못 함)</summary><div class="muted" style="font-size:12.5px;word-break:break-all">${r.lost_rules.map(esc).join(", ")}${r.lost_n>r.lost_rules.length?" …":""}</div></details>`:"");
+ $("exCsv").href="/download/excluded.csv?"+new URLSearchParams({date:r.date,model:r.model,cat:r.cat,type:exType})}
+$("exDate").onchange=$("exModel").onchange=$("exCat").onchange=()=>loadExcluded();
+document.getElementById("p-run").addEventListener("click",e=>{const c=e.target.closest("[data-xc]");if(c){$("exCat").value=$("exCat").value===c.dataset.xc?"":c.dataset.xc;loadExcluded();return}
+ const t=e.target.closest("[data-xt]");if(t){exType=exType===t.dataset.xt?"":t.dataset.xt;loadExcluded()}});
+/* 다시 만들기 (3_3 --redo-safety): 대상·결과·버튼. 생성과 같은 잠금이라 생성이 돌면 누를 수 없음 */
+function exRedoUi(){const rd=EX.redo||{},g=(S&&S.generation)||{},st=((S&&S.redo)||{}).starting,mine=st||String((g.lock||{}).by||"").includes("redo"),busy=g.running||st;
+ const b=$("exRedo"),scope=EX.date==="all"?"전체 날짜":EX.date,parts=[];
+ b.textContent=rd.cand_req?`다시 만들기 (요청 ${fmt(rd.cand_req)}개)`:"다시 만들기";b.disabled=!rd.model||!rd.cand_req||busy;
+ if(mine)parts.push(`<b>다시 만들기 실행 중</b> - 다시 검토한 요청부터 이 목록에서 빠집니다 (1분마다 새로). 학습 로그(08_dataset)에는 끝날 때 한 번에 반영 · 진행은 위 '학습데이터 생성'`);
+ else if(busy)parts.push("학습데이터 생성이 실행 중이라 끝난 뒤 다시 만들 수 있습니다");
+ parts.push(!rd.model?"LLM_설정.md 의 '검토 대체 모델' 이 비어 있어 다시 만들 수 없습니다":rd.cand_req?`<b>다시 만들 수 있음</b> (${esc(scope)}): 요청 ${fmt(rd.cand_req)}개 · 룰 ${fmt(rd.cand_rules)}개 · 그 룰에서 뺀 샘플 ${fmt(rd.cand_n)}개 (공격 ${fmt(rd.cand_att)}) → ${esc(rd.model)} 로 다시 검토`:`다시 만들 것이 없습니다 (${esc(scope)})`);
+ if(rd.done_req)parts.push(`<b>다시 만든 요청 ${fmt(rd.done_req)}개</b> (마지막 ${esc(rd.last_at.replace("T"," "))}): 학습 샘플 <b>${rd.removed<0?"":"+"}${fmt(rd.removed)}개</b> (검토 통과, 증강 전 · 이 목록에서 빠짐) · 다시 검토 뒤에도 빠진 ${fmt(rd.left)}개는 목록에 남음`);
+ $("exRedoInfo").innerHTML=parts.join("<br>")}
+$("exRedo").onclick=()=>{const rd=(EX&&EX.redo)||{},d=EX?EX.date:"all",cli=String(rd.model).startsWith("claude_cli:");
+ const cost=(cli?"Claude 구독 사용량을 씁니다 (로그인이 안 됐거나 사용 한도에 걸리면 그 실행은 멈춤)":"API 비용이 듭니다")+(rd.avg_tokens?` · 요청당 약 ${fmt(rd.avg_tokens)} 토큰 → 약 ${fmt(rd.avg_tokens*rd.cand_req)} 토큰 (이 모델로 다시 만든 ${fmt(rd.avg_n)}개 평균)`:"");
+ if(!confirm(`${d==="all"?"전체 날짜":d}: 요청 ${fmt(rd.cand_req)}개 (룰 ${fmt(rd.cand_rules)}개)를 ${rd.model} 로 다시 검토해 학습데이터를 다시 만듭니다.\n안전상 이유로 뺀 샘플이 있는 룰만 다시 검토하고, 끝나면 증강·학습 로그·진행 현황까지 다시 만듭니다.\n${cost}. 진행할까요?`))return;
+ act("exRedoMsg",()=>post("/api/excluded/redo",{date:d}))};
+/* ── 2. 모델 설정 (LLM_설정.md 의 생성·검토·검토 대체 모델, 동시 요청 수) ── */
+const MROWS=[["gen","생성"],["rev","검토"],["fb","검토 대체"]];
+function mVal(k){return {provider:$("mP_"+k).value,model:$("mM_"+k).value.trim()}}
+async function loadModels(refresh){let r;try{r=await get("/api/models"+(refresh?"?refresh=1":""))}catch(e){$("mBody").innerHTML=`<div class="muted">불러오지 못했습니다: ${esc(e.message)}</div>`;return}
+ M=r;renderModels();estimate()}
+function mOpts(sel,k){const names=Object.keys(M.providers).filter(p=>p!=="mock"||p===sel);if(sel&&!names.includes(sel)&&sel!=="none"&&sel!=="-")names.push(sel);
+ return names.map(p=>`<option${p===sel?" selected":""}>${esc(p)}</option>`).join("")+(k==="rev"?`<option value="none"${sel==="none"?" selected":""}>none (검토 생략)</option>`:"")+(k==="fb"?`<option value="-"${sel==="-"?" selected":""}>사용 안 함</option>`:"")}
+function renderModels(){const R=M.roles,Z={provider:"",model:"",temperature:"",max_tokens:""},fb=String(M.run.fb||"").trim(),on=fb.includes(":");
+ const row=(k,name,v)=>`<tr><td class="nw"><b>${name}</b></td><td><select id="mP_${k}" data-mk="${k}">${mOpts(v.provider,k)}</select></td><td><input id="mM_${k}" list="mL_${k}" value="${esc(v.model)}" style="width:160px"><datalist id="mL_${k}"></datalist></td>`+
+  (k==="fb"?'<td colspan="2" class="muted">검토와 같음</td>':`<td><input id="mT_${k}" value="${esc(v.temperature)}" placeholder="비움" style="width:56px"></td><td><input id="mX_${k}" value="${esc(v.max_tokens)}" style="width:74px"></td>`)+
+  `<td id="mS_${k}"></td><td id="mH_${k}"></td><td class="nw"><button data-mc="${k}">연결 확인</button><div id="mC_${k}" style="font-size:12px;max-width:340px;white-space:normal"></div></td></tr>`;
+ $("mBody").className="";
+ $("mBody").innerHTML=`<table class="mini"><thead><tr><th>역할</th><th>provider</th><th>model</th><th>temperature</th><th>max_tokens</th><th>사용 가능</th><th>지난 기록 (요청당)</th><th></th></tr></thead><tbody>`+
+  row("gen","생성",R["생성"]||Z)+row("rev","검토",R["검토"]||Z)+row("fb","검토 대체",on?{provider:fb.slice(0,fb.indexOf(":")),model:fb.slice(fb.indexOf(":")+1)}:{provider:"-",model:""})+"</tbody></table>";
+ $("mConcGen").value=M.run.conc_gen;$("mConcRev").value=M.run.conc_rev;$("mHdr").textContent="· "+M.file;
+ for(const [k] of MROWS)mRow(k);
+ $("mLog").innerHTML=M.changes.length?`<table class="mini"><tbody>${M.changes.map(c=>`<tr><td class="nw muted">${esc(String(c.at).replace("T"," "))}</td><td>${(c.changes||[]).map(x=>`${esc(x[0])}: ${esc(x[1]||"(빈칸)")} → <b>${esc(x[2]||"(빈칸)")}</b>`).join("<br>")}</td></tr>`).join("")}</tbody></table>`:'<div class="muted">아직 없음</div>';
+ mHints()}
+function mAvail(p){const v=M.providers[p];if(!v)return '<span class="bad">provider 표에 없음</span>';
+ if(v.style==="claude_cli"){const c=v.state||{};return !c.exe?`<span class="bad">claude 실행 파일 없음</span>${c.error?` <span class="muted">${esc(c.error)}</span>`:""}`:c.logged_in?`<span class="ok">로그인됨</span> <span class="muted">(${esc([c.method,c.plan,c.version&&"v"+c.version].filter(Boolean).join(" · "))})</span>`:c.logged_in===false?'<span class="bad">로그인 필요</span> <span class="muted">(터미널에서 claude → /login)</span>':`<span class="warn">${esc(c.error||"확인 못 함")}</span>`}
+ if(v.style==="mock")return '<span class="muted">가짜 응답 (흐름 시험용)</span>';
+ return v.state==="있음"?`<span class="ok">.env ${esc(v.key)} 있음</span>`:v.state==="형식 오류"?`<span class="bad">.env ${esc(v.key)} 값에 한글·공백</span>`:`<span class="bad">.env ${esc(v.key)} 없음</span>`}
+function mRow(k){const v=mVal(k),off=v.provider==="none"||v.provider==="-",cli=(M.providers[v.provider]||{}).style==="claude_cli";
+ $("mL_"+k).innerHTML=((M.known||{})[v.provider]||[]).map(x=>`<option value="${esc(x)}">`).join("");$("mM_"+k).disabled=off;
+ if(k!=="fb")for(const f of["mT_","mX_"]){$(f+k).disabled=off||cli;$(f+k).title=cli?"claude_cli 는 쓰지 않음 (CLI 기본값)":""}
+ const h=(((M.stats||{})[k==="gen"?"생성":k==="rev"?"검토":"대체"])||{})[`${v.provider}:${v.model}`];
+ $("mS_"+k).innerHTML=off?'<span class="muted">-</span>':mAvail(v.provider);
+ $("mH_"+k).innerHTML=off?"":h?`${fmt(h.n)}건${h.sec_n?` · ${Math.round(h.sec/h.sec_n)}초`:""} · 토큰 ${fmt(Math.round(h.tin/h.n))} / ${fmt(Math.round(h.tout/h.n))}`+(k==="fb"?' <span class="muted">(일부 룰만)</span>':""):'<span class="warn">기록 없음</span>'}
+function mHints(){if(!M||!$("mP_gen"))return;const h=[],g=mVal("gen"),r=mVal("rev"),f=mVal("fb"),lock=M.locked||(S&&(S.generation.running||(S.redo||{}).starting));
+ if(lock)h.push("<b>학습데이터 생성(또는 다시 만들기)이 실행 중이라 저장할 수 없습니다</b> - 생성이 끝난 뒤 저장하세요 (실행 중인 단계가 이 파일을 읽음)");
+ for(const [k,name] of MROWS){const v=mVal(k),pv=M.providers[v.provider];if(!pv||v.provider==="-"||v.provider==="none")continue;
+  if(pv.key&&pv.state!=="있음")h.push(`${name} ${esc(v.provider)}: .env 에 ${esc(pv.key)} 가 ${pv.state==="형식 오류"?"올바르지 않아":"없어"} 실행이 실패합니다`);
+  if(pv.style==="claude_cli"&&!(pv.state||{}).logged_in)h.push(`${name} claude_cli: ${(pv.state||{}).exe?"로그인이 필요합니다 (터미널에서 claude → /login)":"claude 실행 파일을 찾지 못했습니다"}`)}
+ for(const [k,name] of [["gen","생성"],["rev","검토"]]){const v=mVal(k);if(v.provider==="openai"&&$("mT_"+k).value.trim())h.push(`${name} openai: 추론 모델(gpt-5 등)은 temperature 를 받지 않을 수 있습니다 - 비워 두기를 권장`)}
+ if(r.provider==="claude_cli"&&+$("mConcRev").value>8)h.push("검토 claude_cli: 호출마다 claude 프로세스가 뜨고 구독 사용 한도를 사람의 Claude 사용과 함께 써서 검토 동시 요청 수는 4~8 을 권장");
+ if(r.provider==="none")h.push("검토 none: 검토 모델 없이 코드 검사만 합니다");
+ if(f.provider!=="-"&&r.provider!=="none")h.push(`${f.provider}:${f.model}`===`${r.provider}:${r.model}`?"검토 대체 모델이 검토 모델과 같으면 보통 실행에서는 대체 검토를 하지 않고 '다시 만들기'에서만 씁니다":"검토 대체 모델이 검토 모델과 다르면 보통 실행에서도 거절·안전 사유로 뺀 룰을 그 모델로 다시 검토합니다 (그 모델의 비용·사용량이 듦)");
+ $("mHint").innerHTML=h.map(x=>`<div class="warn">${x}</div>`).join("");$("mSave").disabled=!!lock}
+function mBody(){const b={sig:M.sig,roles:{},run:{}};
+ for(const [k,name] of [["gen","생성"],["rev","검토"]]){const v=mVal(k);b.roles[name]={provider:v.provider,model:v.model,temperature:$("mT_"+k).value.trim(),max_tokens:$("mX_"+k).value.trim()}}
+ const f=mVal("fb");b.run={fb:f.provider==="-"?"-":`${f.provider}:${f.model}`,conc_gen:$("mConcGen").value.trim(),conc_rev:$("mConcRev").value.trim()};return b}
+$("mSave").onclick=async()=>{if(!M||!$("mP_gen"))return;const b=mBody(),R=M.roles,diff=[],blank=x=>x||"(빈칸)";
+ for(const name of["생성","검토"])for(const f of["provider","model","temperature","max_tokens"]){const o=String((R[name]||{})[f]||""),n=b.roles[name][f];if(o!==n)diff.push(`${name} ${f}: ${blank(o)} → ${blank(n)}`)}
+ const fo=String(M.run.fb||"").trim();if(fo!==b.run.fb&&!(["","-","none"].includes(fo)&&b.run.fb==="-"))diff.push(`검토 대체 모델: ${blank(fo)} → ${b.run.fb==="-"?"사용 안 함 (-)":b.run.fb}`);
+ for(const [k,name] of [["conc_gen","생성 동시 요청 수"],["conc_rev","검토 동시 요청 수"]])if(String(M.run[k])!==b.run[k])diff.push(`${name}: ${M.run[k]} → ${b.run[k]}`);
+ if(!diff.length){$("mMsg").textContent="바뀐 것이 없습니다";return}
+ if(!confirm(`LLM_설정.md 를 바꿉니다 (다음 생성·검토 실행부터 적용):\n\n${diff.join("\n")}\n\n저장할까요?`))return;
+ try{const r=await post("/api/models/save",b);$("mMsg").textContent=r.changed.length?`저장함 (${r.changed.length}개 칸) - 다음 실행부터 적용`:"바뀐 것이 없습니다";await loadModels();loadState()}catch(e){$("mMsg").textContent="저장 못 함: "+e.message}};
+$("mReset").onclick=()=>{if(M){renderModels();$("mMsg").textContent="지금 값으로 되돌림"}};
+$("mReload").onclick=()=>{$("mMsg").textContent="다시 불러오는 중… (claude 로그인 확인 포함)";loadModels(true).then(()=>$("mMsg").textContent="")};
+$("mCard").addEventListener("change",e=>{const k=e.target.dataset.mk;if(k){const l=(M.known||{})[e.target.value]||[];if(l.length&&!l.includes($("mM_"+k).value.trim()))$("mM_"+k).value=l[0];mRow(k)}mHints()});
+$("mCard").addEventListener("input",e=>{const id=e.target.id||"";if(id.startsWith("mM_"))mRow(id.slice(3));mHints()});
+$("mCard").addEventListener("click",async e=>{const btn=e.target.closest("[data-mc]");if(!btn||!M)return;const k=btn.dataset.mc,v=mVal(k),pv=M.providers[v.provider]||{},out=$("mC_"+k);
+ if(v.provider==="-"||v.provider==="none"||!v.model){out.textContent="모델을 고르세요";return}
+ const t=k==="gen"?"gen":"rev",cost=pv.style==="claude_cli"?"Claude 구독 사용량을 조금 씁니다 (claude 프로세스 1개, 10~30초)":pv.style==="mock"?"가짜 응답이라 비용이 없습니다":"API 요청 1개라 비용이 아주 조금 듭니다";
+ if(!confirm(`${v.provider}:${v.model} 에 아주 짧은 요청 1개('OK' 라고 답하기)를 보내 연결을 확인합니다.\n${cost}. 진행할까요?`))return;
+ out.textContent="확인 중… (최대 2분)";btn.disabled=true;
+ try{const r=await post("/api/models/check",{role:k==="gen"?"생성":"검토",model:`${v.provider}:${v.model}`,temperature:$("mT_"+t).value.trim(),max_tokens:$("mX_"+t).value.trim()});
+  out.innerHTML=r.ok?`<span class="ok">연결됨</span> ${r.sec}초 · ${r.reply?`응답 '${esc(r.reply)}'`:"빈 응답"}${r.cut?" (출력 한도에서 잘림)":""} · 토큰 ${fmt(r.in||0)} / ${fmt(r.out||0)}`:`<span class="bad">실패</span> ${r.sec!=null?r.sec+"초 · ":""}${esc(r.error||"")}`}
+ catch(err){out.textContent="실패: "+err.message}finally{btn.disabled=false}});
 /* ── 1. 진행 현황 ── */
 function bar(p){return `<div class="bar"><i style="width:${Math.min(100,p)}%"></i></div>`}
 async function loadProgress(){const r=await get("/api/progress");P=r.data;
@@ -2673,22 +3473,25 @@ async function loadSupRes(){if(!SS||!SS.base)return;let r;try{r=await get(`/api/
 function sPreviewSoon(){clearTimeout(sPvT);sPvT=setTimeout(sPreview,250)}
 async function sPreview(){clearTimeout(sPvT);if(!SS||!SS.base)return;let r;
  try{r=await post("/api/sup/preview",Object.assign({base:SS.base,dev:sDev,view:$("sView").value},sSpec()))}catch(e){$("sPrev").innerHTML=`<div class="muted">미리 보기 실패: ${esc(e.message)}</div>`;return}
- if(r.none){sPv=null;$("sPrev").innerHTML='<div class="muted">이 장비의 비교 결과가 없습니다.</div>';$("sRules").innerHTML="";$("sRuleCnt").textContent="";$("sSelHdr").textContent="";$("cDates").innerHTML=$("cSrc").innerHTML=$("sHold").innerHTML="";return}
+ if(r.none){sPv=null;$("sPrev").innerHTML=`<div class="muted">IPS·WAF 비교 결과가 둘 다 있어야 공통 선별을 볼 수 있습니다${r.missing&&r.missing.length?` (없음: ${esc(r.missing.join("·"))})`:""}.</div>`;$("sRules").innerHTML="";$("sRuleCnt").textContent="";$("sSelHdr").textContent="";$("cDates").innerHTML=$("cSrc").innerHTML=$("sHold").innerHTML="";return}
  sPv=r;renderConds(r);renderHold(r);const vw=r.view;
- $("sSelHdr").textContent=vw?`· ${sDev.toUpperCase()} 보류 데이터만 (${HOLDT[vw]}) ${fmt(r.cand)}개 · 그중 지금 선별에 들어간 것 ${fmt(r.hold[vw][1])}개`
-  :`· ${sDev.toUpperCase()} 후보 ${fmt(r.cand)}개 중 선택 ${fmt(r.sel)}개 (공격 ${fmt(r.sel_label["공격"])} / 정상 ${fmt(r.sel_label["정상"])})`;
+ $("sSelHdr").textContent=vw?`· IPS·WAF 공통 · 보류 데이터만 (${HOLDT[vw]}) ${fmt(r.cand)}개 · 그중 지금 선별에 들어간 것 ${fmt(r.hold[vw][1])}개`
+  :`· IPS·WAF 공통 후보 ${fmt(r.cand)}개 중 선택 ${fmt(r.sel)}개 (공격 ${fmt(r.sel_label["공격"])} / 정상 ${fmt(r.sel_label["정상"])}) → 두 장비에 같은 샘플`;
+ const ovl=r.overlap,os=r.one_side||{},ovr=k=>{const o=ovl[k];return `<b>${k}</b> 둘 다 ${fmt(o.cand[0])} · IPS 만 ${fmt(o.cand[1])} · WAF 만 ${fmt(o.cand[2])} <span class="muted">(선택 ${fmt(o.sel[0])} · ${fmt(o.sel[1])} · ${fmt(o.sel[2])})</span>`};
+ const ovHtml=ovl?`<div class="est" style="margin-bottom:8px">합친 등급이 어느 장비에서 왔는지 (후보 기준): ${ovr("A")} &nbsp;|&nbsp; ${ovr("B")}`+
+  ((os.ips_only||os.waf_only||os.label_mismatch)?`<div class="muted">한쪽 비교 결과에만 있는 샘플 IPS ${fmt(os.ips_only)} · WAF ${fmt(os.waf_only)}${os.label_mismatch?` · label 이 다른 샘플 ${fmt(os.label_mismatch)}`:""} → 공통 선별에서 뺌 (두 장비 모두 '새로 생긴 데이터만 비교'를 하면 맞춰짐)</div>`:"")+"</div>":"";
  const bg=r.by_grade,f=(g,l)=>bg.find(x=>x[0]===g&&x[1]===l)||[g,l,0,0];
  const rowsG=["제거","A","B","C"].map(g=>{const a=f(g,"공격"),n=f(g,"정상");return `<tr><td>${gchip(g)}</td><td class="n">${fmt(a[2])}</td><td class="n"><b>${fmt(a[3])}</b></td><td class="n">${fmt(n[2])}</td><td class="n"><b>${fmt(n[3])}</b></td></tr>`}).join("");
  const why=Object.entries(r.why).filter(([k,v])=>v).map(([k,v])=>`<tr><td>${esc(k)}</td><td class="n">${fmt(v)}</td></tr>`).join("");
  const by=(rows,label,tcol)=>`<table class="mini"><thead><tr><th>${label}</th><th class="n">후보</th><th class="n">선택</th><th class="n">공격</th><th class="n">정상</th>${tcol?"<th>빼기</th>":""}</tr></thead><tbody>${rows.map(x=>`<tr><td>${esc(x[0])}</td><td class="n">${fmt(x[1])}</td><td class="n"><b>${fmt(x[2])}</b></td><td class="n">${fmt(x[3])}</td><td class="n">${fmt(x[4])}</td>${tcol?`<td><input type="checkbox" data-t="${esc(x[0])}"${sO.types[x[0]]?" checked":""}></td>`:""}</tr>`).join("")}</tbody></table>`;
- $("sPrev").innerHTML=`<div class="tw"><div><h4>등급별 (${vw?"보류 데이터 → 그중 지금 선별에 들어간 것":"후보 → 선택"})</h4><table class="mini"><thead><tr><th>등급</th><th class="n">공격 후보</th><th class="n">공격 선택</th><th class="n">정상 후보</th><th class="n">정상 선택</th></tr></thead><tbody>${rowsG}<tr><td><b>합계</b></td><td class="n" colspan="4">${vw?`<b>${fmt(r.hold[vw][1])}</b> / 보류 데이터 ${fmt(r.cand)}`:`<b>${fmt(r.sel)}</b> / 후보 ${fmt(r.cand)}`}</td></tr></tbody></table>
+ $("sPrev").innerHTML=ovHtml+`<div class="tw"><div><h4>등급별 (${vw?"보류 데이터 → 그중 지금 선별에 들어간 것":"합친 등급 · 후보 → 선택"})</h4><table class="mini"><thead><tr><th>등급</th><th class="n">공격 후보</th><th class="n">공격 선택</th><th class="n">정상 후보</th><th class="n">정상 선택</th></tr></thead><tbody>${rowsG}<tr><td><b>합계</b></td><td class="n" colspan="4">${vw?`<b>${fmt(r.hold[vw][1])}</b> / 보류 데이터 ${fmt(r.cand)}`:`<b>${fmt(r.sel)}</b> / 후보 ${fmt(r.cand)}`}</td></tr></tbody></table>
   ${vw?`<div class="est">보류 데이터만 보는 중입니다 (${HOLDT[vw]}). 표·룰별 표·CSV 가 이 데이터만 셉니다. 보류 옵션을 켜면 '지금 선별에 들어간 것'이 빠집니다. <a data-hv="">선별 전체로 돌아가기</a></div>`
    :`<h4>뺀 이유</h4><table class="mini"><tbody>${why||'<tr><td class="muted">없음</td></tr>'}</tbody></table>`}</div>
   <div><h4>공격 유형별 (빼기 = 그 유형 모두 뺌)</h4>${by(r.by_type,"공격 유형",true)}</div>
   <div><h4>출처별</h4>${by(r.by_source,"출처")}<h4>날짜별</h4>${by(r.by_date,"날짜")}</div></div>`;
  $("sPrev").querySelectorAll("[data-t]").forEach(c=>c.onchange=()=>{if(c.checked)sO.types[c.dataset.t]="exclude";else delete sO.types[c.dataset.t];sPreviewSoon()});
  renderRules();
- $("sCand").textContent=vw?"보류 데이터 CSV 받기 (지금 장비)":"후보 CSV 받기 (지금 장비)";
+ $("sCand").textContent=vw?"보류 데이터 CSV 받기 (IPS·WAF 공통)":"후보 CSV 받기 (IPS·WAF 공통)";
  $("sCand").href="/download/sup/candidates?"+new URLSearchParams({base:SS.base,dev:sDev,spec:JSON.stringify(sSpec()),view:vw||""})}
 const HOLDT={rule:"'정합 (룰 기준)' 공격",pyua:"python-requests UA 정상"};
 function renderHold(r){const h=r.hold||{},one=k=>{const x=h[k]||[0,0,0,0,0,0];
@@ -2713,14 +3516,17 @@ function vDesc(x){if(x.kind==="external")return esc(x.note||"");const o=x.option
   `<br>날짜 ${c.dates&&c.dates.length?esc(c.dates.join(", ")):"전부"} · 출처 ${c.sources&&c.sources.length?esc(c.sources.join(", ")):"전부"}`+(Object.keys(ov.rules||{}).length?` · 룰 조정 ${Object.keys(ov.rules).length}개`:"")+(Object.keys(ov.types||{}).length?` · 유형 빼기 ${esc(Object.keys(ov.types).join(", "))}`:"")}
 function renderVers(){const vs=SS.versions;$("sVerHdr").textContent=vs.length?`· ${vs.length}개 (확정 ${vs.filter(x=>x.status==="final").length})`:"";
  if(!vs.length){$("sVers").innerHTML='<div class="muted">버전이 없습니다 - 아래에서 기준 버전(기존 학습데이터)을 등록하세요.</div>';return}
- const dv=(x,d)=>{const c=x.dev[d]||{};if(x.status==="draft"&&c.draft)return `<span class="muted">추가 후보</span> <b>${fmt(c.draft.sel)}</b><div class="muted">공격 ${fmt(c.draft.sel_label["공격"])} / 정상 ${fmt(c.draft.sel_label["정상"])}</div>`;
+ const dv=(x,d)=>{const c=x.dev[d]||{};if(x.status==="draft"&&c.draft)return `<span class="muted">추가 후보</span> <b>${fmt(c.draft.sel)}</b><div class="muted">공격 ${fmt(c.draft.sel_label["공격"])} / 정상 ${fmt(c.draft.sel_label["정상"])}</div>`+(x.mode==="combined"?'<div class="muted">IPS·WAF 같은 샘플</div>':'<div class="muted">장비별 (예전 방식)</div>');
    if(c.rows==null)return '<span class="muted">-</span>';const l=c.label||{};return `${fmt(c.rows)}<div class="muted">공격 ${fmt(l.anomalies)} / 정상 ${fmt(l.normal)}</div>`+(c.added!=null?`<div class="muted">기준 + 추가 ${fmt(c.added)}</div>`:"")};
- $("sVers").innerHTML=`<table class="mini"><thead><tr><th>버전</th><th>기준</th><th>상태</th><th>IPS 행</th><th>WAF 행</th><th>조건·선별</th><th>시각</th><th></th></tr></thead><tbody>${vs.map(x=>`<tr><td class="nw"><b>${esc(x.name)}</b>${x.tag?` <span class="muted">${esc(x.tag)}</span>`:""}</td><td class="nw">${esc(x.base||"-")}</td><td>${x.status==="final"?'<span class="chip c-OK">확정</span>':'<span class="chip c-CHECK">초안</span>'}</td><td class="nw">${dv(x,"ips")}</td><td class="nw">${dv(x,"waf")}</td><td class="reason">${vDesc(x)}</td><td class="muted nw">${esc((x.finalized_at||x.updated_at||x.created_at||"").replace("T"," ").slice(0,16))}</td><td class="nw">${x.status==="draft"?`<button class="sm" data-v="load" data-n="${esc(x.name)}">불러오기</button><button class="sm primary" data-v="final" data-n="${esc(x.name)}">확정</button><button class="sm danger" data-v="del" data-n="${esc(x.name)}">삭제</button>`:x.kind==="external"?'<span class="muted">등록한 기준</span>':`<span class="muted">11_supervised/versions/${esc(x.name)}/</span>`}</td></tr>`).join("")}</tbody></table>`}
+ $("sVers").innerHTML=`<table class="mini"><thead><tr><th>버전</th><th>기준</th><th>상태</th><th>IPS 행</th><th>WAF 행</th><th>조건·선별</th><th>시각</th><th></th></tr></thead><tbody>${vs.map(x=>`<tr><td class="nw"><b>${esc(x.name)}</b>${x.tag?` <span class="muted">${esc(x.tag)}</span>`:""}</td><td class="nw">${esc(x.base||"-")}</td><td>${x.status==="final"?'<span class="chip c-OK">확정</span>':'<span class="chip c-CHECK">초안</span>'}</td><td class="nw">${dv(x,"ips")}</td><td class="nw">${dv(x,"waf")}</td><td class="reason">${vDesc(x)}</td><td class="muted nw">${esc((x.finalized_at||x.updated_at||x.created_at||"").replace("T"," ").slice(0,16))}</td><td class="nw">${x.status==="draft"?`<button class="sm" data-v="load" data-n="${esc(x.name)}">불러오기</button>`+(x.mode==="combined"?`<button class="sm primary" data-v="final" data-n="${esc(x.name)}">확정</button>`:`<button class="sm primary" data-v="resave" data-n="${esc(x.name)}" title="옵션·조정은 그대로, IPS·WAF 에 같은 샘플을 넣는 방식으로 다시 계산">새 방식으로 다시 담기</button>`)+`<button class="sm danger" data-v="del" data-n="${esc(x.name)}">삭제</button>`+(x.mode==="combined"?"":'<div class="muted" style="font-size:12px;white-space:normal;max-width:240px">장비별로 따로 고른 예전 초안 - 다시 담아야 확정됩니다</div>'):x.kind==="external"?'<span class="muted">등록한 기준</span>':`<span class="muted">11_supervised/versions/${esc(x.name)}/</span>`}</td></tr>`).join("")}</tbody></table>`}
 $("sVers").addEventListener("click",async e=>{const b=e.target.closest("button[data-v]");if(!b)return;const name=b.dataset.n,x=SS.versions.find(v=>v.name===name);
  try{if(b.dataset.v==="load"){sSetForm(Object.assign({},SS.options,x.options),x.conditions,x.overrides);$("sVName").value=name;sPreview();$("sSaveMsg").textContent=`'${name}' 초안을 불러왔습니다`;return}
   if(b.dataset.v==="del"){if(!confirm(`초안 '${name}' 을 지웁니다. 진행할까요?`))return;await post("/api/sup/delete",{name});loadSup();return}
-  const msg=["ips","waf"].map(d=>x.dev[d]&&x.dev[d].draft?`${d.toUpperCase()} 추가 ${fmt(x.dev[d].draft.sel)}개`:"").filter(Boolean).join(", ");
-  if(!confirm(`'${name}' 을 확정합니다 (${msg}).\n기준 '${x.base}' + 추가 샘플로 IPS·WAF 학습 파일(CSV)·로그를 만듭니다 (장비마다 약 0.5GB, 디스크 여유 ${SS.disk_free_gb}GB).\n저장한 뒤 비교 결과·학습데이터가 바뀌었으면 확정하지 않습니다. 확정한 버전은 고칠 수 없고 다음 버전의 기준이 됩니다. 진행할까요?`))return;
+  if(b.dataset.v==="resave"){   // 예전 장비별 초안 → 같은 옵션·조정으로 IPS·WAF 공통 선별 다시 계산
+   const r=await post("/api/sup/save",{name,base:x.base,conditions:x.conditions,options:x.options,overrides:x.overrides});
+   $("sSaveMsg").textContent=`'${name}' 을 새 방식으로 다시 담았습니다: IPS·WAF 같은 샘플 ${fmt(r.draft_counts.ips.sel)}개`;loadSup();return}
+  const n=x.dev.ips&&x.dev.ips.draft?x.dev.ips.draft.sel:0;
+  if(!confirm(`'${name}' 을 확정합니다 (IPS·WAF 에 같은 추가 샘플 ${fmt(n)}개).\n기준 '${x.base}' + 추가 샘플로 IPS·WAF 학습 파일(CSV)·로그를 각각 만듭니다 (장비마다 약 0.5GB, 디스크 여유 ${SS.disk_free_gb}GB).\n저장한 뒤 두 장비의 비교 결과·학습데이터가 바뀌었으면 확정하지 않습니다. 확정한 버전은 고칠 수 없고 다음 버전의 기준이 됩니다. 진행할까요?`))return;
   await post("/api/sup/finalize",{name});setTimeout(loadSup,800)}catch(err){alert("실패: "+err.message)}});
 function renderReg(){if($("sReg").dataset.done)return;$("sReg").dataset.done="1";const d=SS.defaults,fc=SS.feature_code||{};
  $("sReg").innerHTML=`<div class="muted" style="font-size:12.5px;margin:6px 0">첫 기준 버전(예: 26 상반기 = v26.02.02)의 파일 위치를 넣습니다. 공개본을 받아 쓸 때 넣을 것: 사용자 룰(<code>00_custom_rules</code>), 기존 학습 로그(<code>06_기존 데이터/{ips,waf}_*_raw.log</code>), 기준 학습데이터(표준모델 학습 형식 CSV: method, payload, label, {장비}_payload_* 피처 → <code>06_기존 데이터/학습데이터/</code>), 표준모델 피처 파일(노트북을 변환한 .py, '# 1) 피처 생성' 앞에 정규식 사전 → <code>06_기존 데이터/피처 코드/</code>).</div>
@@ -2734,16 +3540,18 @@ async function sRun(mode){if(mode==="all"&&!confirm("피처·기준 모델을 �
 $("sRunNew").onclick=()=>sRun("new");$("sRunAll").onclick=()=>sRun("all");$("sInc").onchange=sEstimate;
 $("sStop").onclick=async()=>{try{await post("/api/sup/stop",{});loadSup()}catch(e){alert("실패: "+e.message)}};
 $("sBase").onchange=()=>{sPv=null;sResInit=false;loadSup()};
-$("sDevSeg").addEventListener("click",e=>{const b=e.target.closest("button[data-d]");if(!b)return;sDev=b.dataset.d;$("sDevSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));loadSupRes();sPreview()});
+$("sDevSeg").addEventListener("click",e=>{const b=e.target.closest("button[data-d]");if(!b)return;sDev=b.dataset.d;$("sDevSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));loadSupRes()});   // 선별은 IPS·WAF 공통이라 그대로
 for(const id of["oA","oB","oC","oBad","oRule","oPy"])$(id).onchange=sPreviewSoon;
 let sRq;$("sRuleQ").oninput=()=>{clearTimeout(sRq);sRq=setTimeout(renderRules,200)};$("sRuleF").onchange=renderRules;
 $("sSave").onclick=async()=>{const name=$("sVName").value.trim();if(!name){$("sSaveMsg").textContent="버전 이름을 넣으세요 (예: 26 하반기)";return}
  if(SS.versions.some(v=>v.name===name&&v.status==="draft")&&!confirm(`초안 '${name}' 을 지금 선별로 덮어씁니다. 진행할까요?`))return;
- try{const r=await post("/api/sup/save",Object.assign({name,base:SS.base},sSpec()));$("sSaveMsg").textContent=`'${name}' 에 담았습니다: `+["ips","waf"].map(d=>`${d.toUpperCase()} ${fmt(r.draft_counts[d].sel)}개`).join(" · ")+" → 아래 버전 표에서 확인 후 확정";loadSup()}catch(e){$("sSaveMsg").textContent="실패: "+e.message}};
+ try{const r=await post("/api/sup/save",Object.assign({name,base:SS.base},sSpec()));$("sSaveMsg").textContent=`'${name}' 에 담았습니다: IPS·WAF 같은 샘플 ${fmt(r.draft_counts.ips.sel)}개 → 아래 버전 표에서 확인 후 확정`;loadSup()}catch(e){$("sSaveMsg").textContent="실패: "+e.message}};
 /* ── 주기적 갱신 ── */
 let lastRunning=false,ticks=0;
 async function tick(){try{await loadState();const running=S.generation.running;
  if((lastRunning&&!running)||(running&&++ticks%20===0)){await post("/api/progress/refresh");setTimeout(()=>{loadProgress();if(page==="rules")loadRules()},4000)}
+ if(lastRunning&&!running&&page==="run")setTimeout(()=>{loadExcluded();loadModels(true)},5000);   // 생성이 끝나면 검토에서 뺀 샘플·모델별 기록도 새로
+ if(running&&ticks%20===0&&page==="run"&&String((S.generation.lock||{}).by||"").includes("redo"))loadExcluded();   // 다시 만들기 중에는 1분마다
  lastRunning=running}catch(e){$("hdr").textContent="화면 서버에 연결할 수 없습니다 ("+e.message+")"}}
 (async()=>{route();await loadProgress();await tick();setInterval(tick,3000);setInterval(()=>{if(page==="progress")loadProgress()},15000);
  if(!P||(Date.now()-new Date(P.computed_at))>5*60e3){await post("/api/progress/refresh");setTimeout(loadProgress,4000)}})();

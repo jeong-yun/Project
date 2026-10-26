@@ -78,6 +78,8 @@ SEP = "|||"
 LABELS = {"anomalies", "normal"}
 FORMAT = 3              # 출력 형식 판 (바뀌면 다음 실행에서 모든 날짜를 다시 변환). 2 = 요청 줄 역슬래시 %5C, sk, 수정·삭제
                         # 3 = payload 가 '|' 로 끝나면 끝에 줄바꿈 (구분자 '|||' 와 붙어 label 이 '|anomalies' 로 읽히지 않게)
+                        # (2026-10-26 주소를 바꾼 normal 의 다른 공격 룰 확인은 판을 올리지 않음: 바뀌는 줄이 10-21·10-26 각 3줄뿐이라
+                        #  모든 날짜를 다시 변환하지 않고, 그 날짜를 다시 변환할 때 적용)
 EDITS_NAME = "edits.json"
 # 요청 줄에서 로그 표기(줄바꿈 '\n', 제어문자 '\x00')로 읽힐 글자 역슬래시
 AMBIG_BS = re.compile(r"\\(?=n|x(?:0[0-9b-f]|1[0-9a-f]|7f))")
@@ -276,6 +278,7 @@ def realistic_addresses(http, seed):
 
 
 _check = {}
+ADDR_RETRIES = 5        # 주소를 바꾼 normal 이 다른 공격 룰·흔적에 새로 걸리면 다른 씨앗으로 다시 뽑는 횟수
 
 
 def same_verdict(old, new, label, conditions):
@@ -286,6 +289,50 @@ def same_verdict(old, new, label, conditions):
         spec.loader.exec_module(_check["C"])
     lc, rule = _check["C"].local_check, {"conditions": conditions}
     return lc({"label": label, "http": old}, rule)["result"] == lc({"label": label, "http": new}, rule)["result"]
+
+
+def cross_hits(http, rid):
+    """normal 이 걸리는 다른 공격 룰·공격 흔적 (3.4 의 normal 교차 검사와 같은 기준, 처음 쓸 때 한 번 준비).
+    LLM_설정.md 'normal 교차 검사' 가 '아니오' 거나 준비하지 못하면 빈 집합."""
+    if "cross" not in _check:
+        try:
+            spec = importlib.util.spec_from_file_location("augment_14", BASE_DIR / "3_4_augment.py")
+            aug = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(aug)
+            _, _, run = aug.C.load_settings()
+            in_dir = aug.C.latest_input_dir()
+            _check["cross"] = aug.make_cross_check(in_dir, run, log) if in_dir else None
+        except Exception as e:
+            log.warning("[데이터셋] normal 교차 검사를 준비하지 못함 - 주소를 바꾼 normal 의 다른 공격 룰 확인 생략: %s", e)
+            _check["cross"] = None
+    return set(_check["cross"](http, rid)) if _check["cross"] else set()
+
+
+def checked_addresses(http, seed, label, rid, conditions):
+    """문서용 주소를 바꾼 http 가 판정을 바꾸지 않는지 확인 → (쓸 http, 바꾼 곳 수 | -1 = 바꾸면 판정이 달라져 원래대로).
+    - 이 룰의 코드 검사 결과가 같아야 한다.
+    - normal 은 다른 공격 룰·공격 흔적(3.4 normal 교차 검사)에 새로 걸리지 않아야 한다. 걸리면 다른 씨앗으로 다시 뽑고
+      (최대 ADDR_RETRIES 번), 그래도 걸리면 원래대로. 예 (2026-10-26): example.com → updateassets.biz 가
+      Netscaler SQLi 룰(et:1:2020732, 대소문자 무시 'UPDATE.+SET')에 걸림 (정상 3줄, 10-21 에도 3줄)."""
+    new, n = realistic_addresses(http, seed)
+    if not n:
+        return http, 0
+    if not same_verdict(http, new, label, conditions):
+        return http, -1
+    if label != "normal":
+        return new, n
+    before = None                                           # 바꾸기 전에 걸리던 것 (바꾼 뒤 걸리는 게 있을 때만 셈)
+    for k in range(ADDR_RETRIES + 1):
+        if k:
+            new, n = realistic_addresses(http, _h(seed, "addr", k))
+            if not n or not same_verdict(http, new, label, conditions):
+                continue
+        hits = cross_hits(new, rid)
+        if hits and before is None:
+            before = cross_hits(http, rid)
+        if not hits or not hits - before:
+            return new, n
+    return http, -1
 
 
 # ── LLM 출력 읽기 ───────────────────────────────────────────────────────
@@ -398,10 +445,8 @@ def collect_events(results, rejected, st, mapping, rules, edits=None):
             http = normalize_http(http)
             n_addr = 0
             if "payload" not in edited and st["문서용 주소 바꾸기"].strip() in ("예", "yes", "y", "true", "1"):
-                new, n_addr = realistic_addresses(http, seed)
-                if n_addr and not same_verdict(http, new, label, rule.get("conditions", [])):
-                    new, n_addr = http, -1                  # 바꾸면 룰 판정이 달라짐 → 원래대로 (표시만)
-                http = new
+                # 바꾸면 룰 판정이 달라지거나 normal 이 다른 공격 룰에 새로 걸리면(다시 뽑아도) 원래대로 (n_addr = -1, 표시만)
+                http, n_addr = checked_addresses(http, seed, label, rid, rule.get("conditions", []))
             if http.rstrip("\n").endswith("|"):             # 끝 '|' 가 로그 구분자와 붙음 (…'|id||||anomalies) → 끝에 줄바꿈
                 fixed = end_newline(http)
                 if not same_verdict(http, fixed, label, rule.get("conditions", [])):

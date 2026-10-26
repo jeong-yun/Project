@@ -3,6 +3,13 @@
 화면(0_0_run_ui.py)도 선별 미리 보기에 이 모듈을 쓰므로 맨 위에서는 표준 라이브러리만 불러온다 (확정은 실행기가 pandas 로).
 → 화면의 미리 보기와 확정이 같은 select() 를 써서, 사람이 본 수와 내보내는 샘플이 같다.
 
+IPS·WAF 공통 선별 (2026-10-26~): 두 장비에 **같은 신규 샘플**을 넣는다 (각 장비의 부족한 부분·신규 부분을 합침).
+  - 두 장비의 비교 결과(5.5 <장비>_table.json)를 샘플 지문 sk 로 짝짓는다 (combine). 한쪽 표에만 있는 샘플은 뺀다 (수는 화면에).
+  - 합친 등급: 제거 = 신규 내부 중복이거나 두 장비 모두 기준과 중복 / A = 어느 장비든 A / B = A 가 아니고 어느 장비든 B / C.
+    한쪽 장비만 기준과 중복이면(그 장비에서 제거) 다른 장비의 등급을 따른다. 장비별 등급은 gi·gw 로 남긴다.
+  - 패턴당 상한(B·C): 피처 패턴이 장비마다 달라, 장비마다 그 장비 패턴으로 (합친 등급·label·패턴) 상한만큼 고른 뒤 합친다
+    → 두 장비 모두 패턴마다 상한까지는 들어가고, 한 장비에서 상한을 넘는 것은 다른 장비가 필요로 한 샘플뿐이다.
+  - 조건(날짜·출처)·보류 옵션·'불일치' 빼기·룰·유형 조정은 합친 목록에 한 번 적용한다.
 선별 기본값 (화면에서 바꿀 수 있고, 확정 전에 사람이 룰·공격 유형 단위로 최종 판단)
   제거  항상 뺌 (중복)
   A     전부 (기준 모델이 틀림 = 기준 데이터에 부족한 데이터)
@@ -12,14 +19,16 @@
   - '불일치'(4. 화면 검증) 빼기: 기본 켬.  보류 옵션(담당관 회신 전, 기본 끔): '정합 (룰 기준)' 공격 빼기, python-requests UA 정상 빼기.
   - 룰·공격 유형 조정: 빼기(그 샘플 모두 뺌) / 넣기(상한 없이 제거 외 모두 넣음, 룰만).
 버전
-  초안   이름, 기준 버전, 조건(날짜·출처), 선별 옵션, 룰·유형 조정 + 저장할 때의 비교 스냅숏(장비별)
-  확정   비교 스냅숏이 지금 비교 결과와 같고 그 뒤 학습데이터가 바뀌지 않았을 때만 내보낸다 (사람이 확인한 그대로)
+  초안   이름, 기준 버전, 조건(날짜·출처), 선별 옵션, 룰·유형 조정 + 저장할 때의 비교 스냅숏(장비별), mode = combined
+         (예전 장비별 초안은 '새 방식으로 다시 담기' 를 해야 확정된다 - 옵션·조정은 그대로)
+  확정   두 장비의 비교 스냅숏이 지금 비교 결과와 같고 그 뒤 학습데이터가 바뀌지 않았을 때만 내보낸다 (사람이 확인한 그대로).
+         고른 샘플 하나의 목록을 IPS·WAF 각각의 로그 줄·피처 코드로 내보낸다 (두 장비의 추가 샘플·비교한 샘플이 같음)
          11_supervised/versions/<이름>/
            <장비>_train.csv       기준 학습 파일 + 추가 샘플 (method, payload, label, 표준모델 피처 = 표준모델 학습 형식)
            <장비>_raw.log         기준 원본 로그 + 추가 샘플 로그 줄 (|||, 8필드)   ← 로그 형식 파일은 여기서만 만든다
-           <장비>_added.csv       추가한 샘플 (날짜·줄·룰·등급·근거·payload)
+           <장비>_added.csv       추가한 샘플 (날짜·줄·sk·룰·합친 등급 grade·이 장비 등급 grade_dev·근거·payload)
            <장비>_considered.txt  이번 버전에서 비교한 샘플 지문 (다음 비교에서 뺌)
-           manifest.json          기준·조건·옵션·수·파일 크기·sha256
+           manifest.json          기준·조건·옵션·mode·수·파일 크기·sha256 + samples(추가·비교한 수, 추가 샘플 지문 목록의 sha1)
          확정한 버전은 다음 버전(예: 27 상반기)의 기준이 된다.
 """
 
@@ -81,8 +90,85 @@ def norm_overrides(o):
     return {"rules": rules, "types": types}
 
 
+def combine(ti, tw):
+    """IPS·WAF 비교 표 → 두 장비에 같은 샘플을 넣는 공통 선별용 표 (select·preview 가 그대로 쓰는 모양).
+    샘플 지문 sk 로 짝짓고 줄 순서는 IPS 표(날짜·줄 순서). 한쪽 표에만 있거나 label 이 다른 샘플은 뺀다 (one_side).
+    합친 등급: 두 장비 모두 제거면 제거 (신규 내부 중복은 payload 가 같아 두 장비가 같이 제거, 아니면 두 장비 모두 기준과 중복)
+    / 한쪽만 제거(그 장비 기준과 중복)면 다른 장비 등급 / 아니면 어느 장비든 A → A, 어느 장비든 B → B, 그 밖 C.
+    pats = [IPS 패턴, WAF 패턴] (상한을 장비마다 그 장비 패턴으로 셈), gi·gw = 장비별 등급, iidx·widx = 장비 표의 줄 번호."""
+    if ti.get("base") != tw.get("base"):
+        raise ValueError("IPS·WAF 비교 결과의 기준 버전이 다릅니다 - 둘 다 같은 기준으로 비교하세요")
+    if "sk" not in ti or "sk" not in tw:
+        raise ValueError("비교 결과에 샘플 지문(sk)이 없습니다 - '새로 생긴 데이터만 비교'를 한 번 다시 하세요")
+    pos = {}
+    for j, s in enumerate(tw["sk"]):
+        pos.setdefault(s or f"{tw['dates'][tw['date'][j]]}:{tw['line'][j]}", j)
+    keys = ("date", "line", "y", "rule", "type", "src", "llm")
+    out = {k: [] for k in keys + ("g", "gi", "gw", "pat", "pat_w", "fl", "iidx", "widx", "wline", "sk")}
+    cons, n_ips_only, n_mismatch, used = [], 0, 0, 0
+    GI, GW, FI, FW, KI, KW = ti["g"], tw["g"], ti["fl"], tw["fl"], ti["cons"], tw["cons"]
+    for i, s in enumerate(ti["sk"]):
+        j = pos.get(s or f"{ti['dates'][ti['date'][i]]}:{ti['line'][i]}")
+        if j is None:
+            n_ips_only += 1
+            continue
+        if ti["y"][i] != tw["y"][j]:
+            n_mismatch += 1
+            continue
+        used += 1
+        gi, gw = GI[i], GW[j]
+        if gi == 0 and gw == 0:
+            g = 0
+        else:
+            gs = [x for x in (gi, gw) if x]                  # 제거인 장비는 빼고
+            g = 1 if 1 in gs else 2 if 2 in gs else 3
+        for k in keys:
+            out[k].append(ti[k][i])
+        out["g"].append(g)
+        out["gi"].append(gi)
+        out["gw"].append(gw)
+        out["pat"].append(ti["pat"][i])
+        out["pat_w"].append(tw["pat"][j])
+        out["fl"].append(FI[i] | FW[j])
+        out["iidx"].append(i)
+        out["widx"].append(j)
+        out["wline"].append(tw["line"][j])
+        out["sk"].append(s)
+        ci, cw = KI[i], KW[j]
+        cons.append("4" if "4" in (ci, cw) else "2" if "2" in (ci, cw) else ci if ci != "0" else cw)
+    out.update({"base": ti["base"], "dev": "ips+waf", "combined": True, "n": used, "cons": "".join(cons),
+                "dates": ti["dates"], "rules": ti["rules"], "types": ti["types"], "sources": ti["sources"],
+                "snapshot": f"{ti.get('snapshot')}+{tw.get('snapshot')}", "snapshots": {"ips": ti.get("snapshot"),
+                                                                                         "waf": tw.get("snapshot")},
+                "one_side": {"ips_only": n_ips_only, "waf_only": tw["n"] - used - n_mismatch, "label_mismatch": n_mismatch}})
+    out["pats"] = [out["pat"], out["pat_w"]]
+    return out
+
+
+def _round_robin(idx, cap, R, L):
+    """같은 (등급·label·패턴) 묶음에서 cap 개: 룰을 돌아가며 (룰마다 LLM 먼저, 날짜·줄 순) 0번째, 1번째 … 순서로."""
+    by_rule = {}
+    for i in idx:
+        lst = by_rule.get(R[i])
+        if lst is None:
+            by_rule[R[i]] = [i]
+        else:
+            lst.append(i)
+    lists = [[i for i in x if L[i]] + [i for i in x if not L[i]] for x in by_rule.values()]
+    picked, k = [], 0
+    while len(picked) < cap:
+        for lst in lists:
+            if k < len(lst):
+                picked.append(lst[k])
+                if len(picked) == cap:
+                    break
+        k += 1
+    return picked
+
+
 def select(t, conditions=None, options=None, overrides=None):
-    """화면 선별용 표(5.5 의 <장비>_table.json) → (고른 줄 번호 목록, 조건 안의 줄 번호 목록, 뺀 이유별 수)."""
+    """선별용 표(5.5 <장비>_table.json 또는 combine 한 공통 표) → (고른 줄 번호 목록, 조건 안의 줄 번호 목록, 뺀 이유별 수).
+    상한(B·C): 표에 장비별 패턴(pats)이 있으면 장비마다 그 장비 패턴으로 묶어 상한만큼 고른 뒤 합친다."""
     cond, opts, ov = norm_conditions(conditions), norm_options(options), norm_overrides(overrides)
     every = not cond["dates"] and not cond["sources"]
     date_ok = [not cond["dates"] or d in cond["dates"] for d in t["dates"]]
@@ -91,12 +177,11 @@ def select(t, conditions=None, options=None, overrides=None):
     type_ex = [ov["types"].get(x) == "exclude" for x in t["types"]]
     caps = [None, opts["A"], opts["B"], opts["C"]]
     ex_bad, ex_rule, ex_py = opts["exclude_bad"], opts["exclude_rule_based"], opts["exclude_python_ua_normal"]
-    n_dup = n_ex = n_bad = n_rule = n_py = n_grade = n_cap = 0
-    sel, cand, groups = [], [], {}
-    R, L = t["rule"], t["llm"]
+    n_dup = n_ex = n_bad = n_rule = n_py = n_grade = 0
+    sel, cand, capped = [], [], []
+    R, L, G, Y = t["rule"], t["llm"], t["g"], t["y"]
     # 표의 줄은 날짜·줄 순서 (5.5) → 줄 번호 순서가 곧 날짜·줄 순서
-    for i, d, s, g, y, p, r, ty, k, fl in zip(range(t["n"]), t["date"], t["src"], t["g"], t["y"], t["pat"], R, t["type"],
-                                              t["cons"], t["fl"]):
+    for i, d, s, g, y, r, ty, k, fl in zip(range(t["n"]), t["date"], t["src"], G, Y, R, t["type"], t["cons"], t["fl"]):
         if not every and not (date_ok[d] and src_ok[s]):
             continue
         cand.append(i)
@@ -117,36 +202,22 @@ def select(t, conditions=None, options=None, overrides=None):
         elif caps[g] == 0:
             n_grade += 1
         else:
-            key = (p << 3) | (g << 1) | y                # 등급·label·패턴
+            capped.append(i)
+    chosen = set()
+    for P in (t.get("pats") or [t["pat"]]):              # 장비별 패턴마다 (한 장비 표면 그 표의 패턴 하나)
+        groups = {}
+        for i in capped:
+            key = (P[i] << 3) | (G[i] << 1) | Y[i]       # 등급·label·패턴
             lst = groups.get(key)
             if lst is None:
                 groups[key] = [i]
             else:
                 lst.append(i)
-    for key, idx in groups.items():
-        cap = caps[(key >> 1) & 3]
-        if len(idx) <= cap:
-            sel.extend(idx)
-            continue
-        # 룰을 돌아가며: 룰마다 (LLM 먼저, 날짜·줄 순) 줄을 세우고 0번째, 1번째 … 순서로 cap 개
-        by_rule = {}
-        for i in idx:
-            lst = by_rule.get(R[i])
-            if lst is None:
-                by_rule[R[i]] = [i]
-            else:
-                lst.append(i)
-        lists = [[i for i in x if L[i]] + [i for i in x if not L[i]] for x in by_rule.values()]
-        picked, k = [], 0
-        while len(picked) < cap:
-            for lst in lists:
-                if k < len(lst):
-                    picked.append(lst[k])
-                    if len(picked) == cap:
-                        break
-            k += 1
-        sel.extend(picked)
-        n_cap += len(idx) - cap
+        for key, idx in groups.items():
+            cap = caps[(key >> 1) & 3]
+            chosen.update(idx if len(idx) <= cap else _round_robin(idx, cap, R, L))
+    sel.extend(chosen)
+    n_cap = len(capped) - len(chosen)
     sel.sort()
     why = {"제거 (중복)": n_dup, "'불일치'": n_bad, "'정합 (룰 기준)' 공격 (보류)": n_rule,
            "python-requests UA 정상 (보류)": n_py, "룰·유형 빼기": n_ex, "등급 빼기": n_grade, "패턴당 상한 초과": n_cap}
@@ -176,6 +247,18 @@ def preview(t, conditions=None, options=None, overrides=None, view=""):
         for i in idx:
             h[2 + G[i]] += 1
     unverified = sum(1 for i in cand if Y[i] and K[i] == "0")    # 검증 전이라 정합성을 모르는 공격
+    overlap = None
+    if t.get("combined"):                                # 합친 A·B 가 어느 장비에서 온 것인지 [둘 다, IPS 만, WAF 만] (후보·선택)
+        GI, GW = t["gi"], t["gw"]
+        overlap = {x: {"cand": [0, 0, 0], "sel": [0, 0, 0]} for x in ("A", "B")}
+        for i in cand:
+            g = G[i]
+            if g in (1, 2):
+                a, b = GI[i] == g, GW[i] == g
+                o = overlap["A" if g == 1 else "B"]
+                k = 0 if a and b else 1 if a else 2
+                o["cand"][k] += 1
+                o["sel"][k] += on[i]
     if view in HOLD:
         cand = rows_of[view]
     nt, ns, nd, nr = len(t["types"]), len(t["sources"]), len(t["dates"]), len(t["rules"])
@@ -212,7 +295,8 @@ def preview(t, conditions=None, options=None, overrides=None, view=""):
             "by_grade": by_grade, "why": why, "by_type": by(tc, t["types"]), "by_source": by(sc, t["sources"]),
             "by_date": by(dc, t["dates"]), "rules": rule_rows, "snapshot": t.get("snapshot"),
             "all_dates": t["dates"], "all_sources": t["sources"], "hold": hold, "unverified_att": unverified,
-            "view": view if view in HOLD else "",
+            "view": view if view in HOLD else "", "combined": bool(t.get("combined")), "overlap": overlap,
+            "one_side": t.get("one_side"),
             "options": norm_options(options), "conditions": norm_conditions(conditions), "overrides": ov}
 
 
@@ -221,10 +305,17 @@ def read_table(base_name, dev):
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
+def combined_table(base_name):
+    """두 장비 비교 결과를 짝지은 공통 선별 표 (둘 중 하나라도 없으면 None)."""
+    ti, tw = read_table(base_name, "ips"), read_table(base_name, "waf")
+    return combine(ti, tw) if ti and tw else None
+
+
 # ── 버전 목록 (초안 저장·삭제, 기준 등록) ─────────────────────────────────
 
 def save_draft(name, base_name, conditions, options, overrides, tables):
-    """초안 저장 (tables = {장비: 표}, 저장할 때의 비교 스냅숏·선택 수를 함께 남김)."""
+    """초안 저장 (tables = {장비: 표}). IPS·WAF 공통 선별 하나로 고르고 (mode = combined), 저장할 때의 장비별 비교 스냅숏과
+    선택 수(두 장비 같음)를 함께 남긴다."""
     C.check_name(name)
     v = C.load_versions()
     base = C.get_version(v, base_name)
@@ -233,16 +324,17 @@ def save_draft(name, base_name, conditions, options, overrides, tables):
     cur = next((x for x in v["versions"] if x["name"] == name), None)
     if cur and cur.get("status") == "final":
         raise ValueError(f"'{name}' 은 이미 확정된 버전입니다 - 다른 이름을 쓰세요")
-    if not tables:
-        raise ValueError("비교 결과가 없습니다 - 먼저 비교를 실행하세요")
-    snap, counts = {}, {}
-    for dev, t in tables.items():
+    if not tables or any(d not in tables for d in C.DEVICES):
+        raise ValueError("IPS·WAF 비교 결과가 둘 다 있어야 합니다 - 먼저 두 장비 모두 비교하세요")
+    for t in tables.values():
         if t["base"] != base_name:
             raise ValueError("비교 결과의 기준 버전이 다릅니다")
-        pv = preview(t, conditions, options, overrides)
-        snap[dev] = t["snapshot"]
-        counts[dev] = {"cand": pv["cand"], "sel": pv["sel"], "sel_label": pv["sel_label"], "by_grade": pv["by_grade"]}
-    item = {"name": name, "base": base_name, "status": "draft", "conditions": norm_conditions(conditions),
+    pv = preview(combine(tables["ips"], tables["waf"]), conditions, options, overrides)
+    snap = {dev: tables[dev]["snapshot"] for dev in C.DEVICES}
+    one = {"cand": pv["cand"], "sel": pv["sel"], "sel_label": pv["sel_label"], "by_grade": pv["by_grade"],
+           "overlap": pv["overlap"], "one_side": pv["one_side"]}
+    counts = {dev: dict(one) for dev in C.DEVICES}
+    item = {"name": name, "base": base_name, "status": "draft", "mode": "combined", "conditions": norm_conditions(conditions),
             "options": norm_options(options), "overrides": norm_overrides(overrides), "snapshot": snap,
             "draft_counts": counts, "created_at": (cur or {}).get("created_at") or C.now_iso(), "updated_at": C.now_iso()}
     if cur:
@@ -292,6 +384,7 @@ def version_rows():
     rows = []
     for x in v["versions"]:
         r = {"name": x["name"], "tag": x.get("tag", ""), "base": x.get("base", ""), "status": x.get("status"),
+             "mode": x.get("mode", ""),                 # combined = IPS·WAF 공통 선별 ('' = 예전 장비별 초안·확정)
              "kind": x.get("kind", ""), "created_at": x.get("created_at", ""), "finalized_at": x.get("finalized_at", ""),
              "updated_at": x.get("updated_at", ""), "conditions": x.get("conditions"), "options": x.get("options"),
              "overrides": x.get("overrides"), "snapshot": x.get("snapshot"), "note": x.get("note", ""), "dev": {}}
@@ -437,6 +530,9 @@ def finalize(name, ctx):
     devs = [d for d in C.DEVICES if d in (ver.get("snapshot") or {})]
     if not devs:
         raise ValueError("초안에 비교 결과가 없습니다")
+    if ver.get("mode") != "combined" or devs != list(C.DEVICES):
+        raise ValueError("예전 방식(장비별 선별)으로 담은 초안입니다 - 화면 6 버전 표의 '새 방식으로 다시 담기'를 누르세요 "
+                         "(옵션·조정은 그대로 이어받고 IPS·WAF 에 같은 샘플을 넣음)")
     ctx.step("check", CHECK_TEXT)
     _check_ready(v, ver)
     need = 0
@@ -453,23 +549,31 @@ def finalize(name, ctx):
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
-    manifest = {"name": name, "base": base["name"], "conditions": ver["conditions"], "options": ver["options"],
-                "overrides": ver["overrides"], "snapshot": ver["snapshot"], "created_at": ver.get("created_at"),
-                "finalized_at": None, "dev": {}}
-    counts, files = {}, {}
+    manifest = {"name": name, "base": base["name"], "mode": "combined", "conditions": ver["conditions"],
+                "options": ver["options"], "overrides": ver["overrides"], "snapshot": ver["snapshot"],
+                "created_at": ver.get("created_at"), "finalized_at": None, "dev": {}}
+    counts, files, tc, picked = {}, {}, None, {}
     try:
         for dev in devs:
             ctx.check()
             ctx.step(f"{dev}:select", final_step_text(dev, "select"))
-            ctx.sub(0, 3, "선별용 표 읽기")
-            t = read_table(base["name"], dev)
-            ctx.sub(1, 3, f"선별 ({t['n']:,}행)")
-            sel, cand, why = select(t, ver["conditions"], ver["options"], ver["overrides"])
+            if tc is None:                                  # IPS·WAF 공통 선별 (한 번만, 두 장비가 같은 샘플)
+                ctx.sub(0, 3, "선별용 표 읽기 (IPS·WAF 짝짓기)")
+                tc = combined_table(base["name"])
+                ctx.sub(1, 3, f"공통 선별 ({tc['n']:,}개)")
+                sel, cand, why = select(tc, ver["conditions"], ver["options"], ver["overrides"])
             ctx.sub(2, 3, "샘플별 등급 읽기 (rows.parquet)")
             R = pd.read_parquet(C.compared_files(base["name"], dev)["rows"])
-            if len(R) != t["n"]:
+            t_n = (C.read_json(C.compared_files(base["name"], dev)["summary"], {}) or {}).get("rows")
+            if t_n is not None and len(R) != t_n:
                 raise ValueError(f"{dev.upper()} 비교 결과 파일이 서로 맞지 않습니다 - 다시 비교하세요")
-            A = R.iloc[sel].reset_index(drop=True)
+            ix = tc["iidx" if dev == "ips" else "widx"]     # 공통 표의 줄 → 이 장비 표(= rows.parquet)의 줄
+            A = R.iloc[[ix[k] for k in sel]].reset_index(drop=True)
+            picked[dev] = A["sk"].tolist()
+            if dev != devs[0] and picked[dev] != picked[devs[0]]:
+                raise ValueError("IPS·WAF 추가 샘플이 서로 다릅니다 - 비교 결과를 다시 만드세요")
+            A["grade_dev"] = A["grade"]                     # 이 장비의 등급 (목록에 남김)
+            A["grade"] = [C.GRADES[tc["g"][k]] for k in sel]   # 공통 등급 (선별 기준)
             # 고른 줄의 로그 (날짜별로 한 번 읽음) - 내용 지문이 비교 때와 같은지 확인
             ctx.step(f"{dev}:lines", final_step_text(dev, "lines", len(A)))
             lines = {}
@@ -553,12 +657,12 @@ def finalize(name, ctx):
             ctx.step(f"{dev}:list", final_step_text(dev, "list"))
             ctx.sub(0, 2, f"추가 샘플 목록 ({dev}_added.csv)")
             add = A[["date", "line", "sk", "ck", "rule_id", "source", "method", "label", "attack_type", "origin", "cons",
-                     "grade", "holdout", "new_pat", "wrong_rf", "wrong_lg"]].copy()
+                     "grade", "grade_dev", "holdout", "new_pat", "wrong_rf", "wrong_lg"]].copy()
             add["payload"] = payload
             add.to_csv(tmp / f"{dev}_added.csv", index=False, encoding="utf-8-sig")
             ctx.sub(1, 2, f"비교한 샘플 지문 ({dev}_considered.txt)")
             ck_all = R["ck"].to_numpy()
-            (tmp / f"{dev}_considered.txt").write_text("\n".join(ck_all[i] for i in cand) + "\n", encoding="utf-8")
+            (tmp / f"{dev}_considered.txt").write_text("\n".join(ck_all[ix[k]] for k in cand) + "\n", encoding="utf-8")
             base_cnt = (base.get("counts") or {}).get(dev) or {}
             lab = A["label"].value_counts()
             gl = A.groupby(["grade", "label"]).size()
@@ -583,6 +687,9 @@ def finalize(name, ctx):
                                     "files": hashed}
         ctx.step("move", MOVE_TEXT)
         manifest["finalized_at"] = C.now_iso()
+        sks = sorted(picked[devs[0]])                       # 두 장비에 같은 샘플 (지문 목록의 sha1 로 남김)
+        manifest["samples"] = {"added": len(sks), "considered": len(cand), "one_side": tc["one_side"],
+                               "sk_sha1": hashlib.sha1("\n".join(sks).encode()).hexdigest()}
         C.write_json(tmp / "manifest.json", manifest)
         _rename_dir(tmp, out, ctx)
     except BaseException:
