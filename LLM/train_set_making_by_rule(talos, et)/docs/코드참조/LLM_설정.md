@@ -11,11 +11,16 @@
 | 역할 | provider | model | temperature | max_tokens | 설명 |
 | --- | --- | --- | --- | --- | --- |
 | 생성 | upstage | solar-pro2 | 0.8 | 12000 | 룰 → 씨앗 샘플 생성 (`LLM_프롬프트.md`). 다양성을 위해 temperature 를 조금 높게 |
-| 검토 | openai | gpt-6-luna | | 32000 | 생성 결과 검토·수정 (`LLM_검토_프롬프트.md`). 추론 토큰도 max_tokens 에 포함되므로 넉넉하게. provider 를 `none` 으로 하면 검토 생략 |
+| 검토 | claude_cli | sonnet | | 32000 | 생성 결과 검토·수정 (`LLM_검토_프롬프트.md`). provider 를 `none` 으로 하면 검토 생략. `claude_cli` 는 max_tokens·temperature 를 쓰지 않음 (CLI 기본값) |
 
 - `temperature`를 비워 두면 보내지 않는다 (추론 모델은 temperature 를 지원하지 않음).
 - 검토 모델은 2026-10-22 에 `gpt-5` → `gpt-6-luna` 로 바꿨다. 같은 20건 비교에서 검토 비용 1/20 (요청당 $0.0048 vs $0.0988), 남은 샘플 97.0% vs 96.0%, 코드 검사 실패 샘플을 고쳐 살린 비율 88.9% vs 84.6% (지시문 보강 뒤, `docs/보고용/검토모델_비교_2026-10-22.md`). 더 정밀하게 보려면 `gpt-6.1-sol`(요청당 약 $0.08) 이나 `gpt-5` 로 바꾼다.
-- 나중에 Claude 를 쓰려면 provider 를 `anthropic`, model 을 예: `claude-sonnet-5-5`로 바꾸고 `.env`에 `ANTHROPIC_API_KEY`를 넣는다.
+- 2026-10-26 OpenAI 크레딧이 떨어져 검토를 `claude_cli` · `sonnet` (Claude Sonnet 5.5, 이 PC 의 Claude 로그인)으로 바꿨다.
+  - 같은 요청 10개에서 gpt-5 와 남은 샘플이 같았다 (공격 242 · 정상 140, 안전 사유로 뺀 샘플 0). 응답 1번에 약 2~3분이다.
+  - 요청 12번 중 2번은 안전 분류기가 응답을 끊어 다시 보냈다 (`docs/보고용/진행보고.md` 2026-10-26 의 7).
+  - 다른 모델: `opus` 는 더 정밀하지만 구독 사용 한도를 더 빨리 쓴다. `haiku` 는 빠르지만 시험하지 않았다.
+  - 명령줄로 고를 수도 있다: `--reviewer claude_cli:opus`.
+- Claude API 키로 쓰려면 provider 를 `anthropic`, model 을 예: `claude-sonnet-5-5`로 바꾸고 `.env`에 `ANTHROPIC_API_KEY`를 넣는다 (토큰마다 과금).
 
 ## provider
 
@@ -24,9 +29,16 @@
 | upstage | https://api.upstage.ai/v1/chat/completions | UPSTAGE_API_KEY | openai |
 | openai | https://api.openai.com/v1/chat/completions | OPENAI_API_KEY | openai |
 | anthropic | https://api.anthropic.com/v1/messages | ANTHROPIC_API_KEY | anthropic |
+| claude_cli | - | - | claude_cli |
 | mock | - | - | mock |
 
-- `형식`: `openai` = OpenAI 호환 Chat Completions (UpStage Solar도 이 형식), `anthropic` = Claude Messages API, `mock` = 키 없이 흐름만 시험하는 가짜 응답
+- `형식`: `openai` = OpenAI 호환 Chat Completions (UpStage Solar도 이 형식), `anthropic` = Claude Messages API, `claude_cli` = Claude Code CLI(`claude -p`), `mock` = 키 없이 흐름만 시험하는 가짜 응답
+- `claude_cli` 는 API 키가 아니라 **이 PC 에 로그인된 Claude 계정(구독)**으로 부른다.
+  - 구독 사용 한도는 사람이 직접 쓰는 Claude 대화·Claude Code 와 함께 쓴다. 요청 수백 개를 검토하면 한도에 걸릴 수 있어 나눠서 돌린다.
+  - 한도에 걸리거나 로그인이 안 돼 있으면 그 실행은 멈추고, 다음 실행 때 남은 것부터 이어서 한다.
+  - 실행 파일은 `API 주소` 칸에 `claude.exe` 경로를 적거나 `.env` 의 `CLAUDE_CLI_PATH` 로 정한다. 비우면 PATH → `~/.local/bin` → 데스크톱 앱에 들어 있는 Claude Code(가장 최근 버전) 순서로 찾는다.
+  - 호출 1번 = `claude` 프로세스 1개다 (시작 약 10초, 메모리를 씀). 도구·CLAUDE.md·훅·플러그인·MCP·세션 기록 없이 지시문만으로 답하게 한다 (`--safe-mode --tools ""` 등).
+  - model 은 `sonnet`·`opus`·`haiku` 또는 전체 이름 (예: `claude-sonnet-5-5`).
 
 ## 실행
 
@@ -51,8 +63,9 @@
 | 정규식 예시 | 예 | `예` = 생성 요청의 룰마다 정규식 조건에 **실제로 맞는 짧은 예시**(코드가 만들고 확인)를 `regex_examples` 로 붙인다. 생성 모델이 정규식을 잘못 읽어 코드 검사에 실패하는 일을 줄인다 (예: XSS 룰 52개의 `<.+\/script` 는 보통의 `</script>` 와 맞지 않음, RFI 룰 58개의 `=\s*(https?\|ftps?\|php)\:\/` 에 `data://` 를 씀). `아니오` = 붙이지 않음 (비교용) |
 | 판정 불가 처리 | drop | 룰 조건을 코드로 확인할 수 없는 샘플(정규식 해석 불가). `drop` = 뺌 (룰이 탐지하는지 확인된 것만 남김), `keep` = 남김 |
 | 재시도 횟수 | 3 | API 오류(5xx·네트워크)·JSON 형식 오류 시 다시 시도. 생성 응답이 출력 한도에서 잘리면(반복 루프) 잘린 룰만 다시 요청. 속도 제한(429)은 이 횟수와 따로 최대 6번 기다렸다 다시 보냄 |
-| 응답 대기 시간 | 600 | 초 (추론 모델은 시간이 길 수 있음) |
+| 응답 대기 시간 | 1200 | 초 (추론 모델은 시간이 길 수 있음). 2026-10-26 600 → 1200: gpt-5 대체 검토에서 큰 payload 를 고쳐 쓰는 요청이 10분을 넘겨 끊기고 처음부터 다시 보내는 일이 잦았음 (재검토 중 14번 이상) |
 | 생성 동시 요청 수 | 15 | 생성 모델에 **동시에** 보내는 요청 수의 **최대값** (1 = 예전처럼 하나씩). 4개부터 시작해 성공할 때마다 1개씩 늘리고, 속도 제한(429)·과부하(503)가 오면 반으로 줄인 뒤 2분 동안 늘리지 않는다 (자동 조절, 로그의 '동시 요청 a → b'). 시작할 때 로그의 'API 한도'(계정의 분당 요청·토큰 한도)를 보고 정한다. 2026-10-26 10 → 15 (그때까지 모든 실행에서 속도 제한 0번, 생성이 병목) |
-| 검토 동시 요청 수 | 20 | 검토 모델에 동시에 보내는 요청 수의 최대값 (자동 조절은 위와 같음). OpenAI 는 요청마다 '입력 + max_tokens' 를 분당 토큰 한도에서 미리 잡으므로, 429 가 자주 나면 이 값이나 검토 max_tokens 를 줄인다. 2026-10-26 12 → 20 (gpt-6-luna 한도 분당 요청 30,000·토큰 1.8억, 속도 제한 0번) |
+| 검토 동시 요청 수 | 4 | 검토 모델에 동시에 보내는 요청 수의 최대값 (자동 조절은 위와 같음, 32 가 상한). 검토 대체 모델도 따로 같은 최대값. OpenAI 는 요청마다 '입력 + max_tokens' 를 분당 토큰 한도에서 미리 잡으므로, 429 가 자주 나면 이 값이나 검토 max_tokens 를 줄인다. 2026-10-26 12 → 20 (gpt-6-luna 한도 분당 요청 30,000·토큰 1.8억, 속도 제한 0번) → 32 (gpt-5 대체 검토는 응답 1개에 3~7분이라 동시 수가 속도를 정함, gpt-5 한도 분당 요청 15,000·토큰 4,000만) → 4 (검토를 `claude_cli` 로 바꿈: 호출마다 claude 프로세스가 뜨고, 구독 사용 한도를 사람의 Claude 사용과 함께 씀. 시험은 6개 동시로 문제없었음) |
 | 생성·검토 동시 진행 | 예 | `예` = 3.2(생성)와 3.3(검토)을 함께 돌려 **생성된 요청부터 바로 검토**. `아니오` = 생성을 모두 마친 뒤 검토 (예전 방식) |
-| 검토 추론 강도 |  | 추론 모델(gpt-5 등)의 `reasoning_effort`: `minimal`·`low`·`medium`·`high`. 비우면 보내지 않음 (모델 기본 = `medium`). `low` 로 하면 검토가 더 빨라지지만 판단 정확도가 낮아질 수 있어, 소량으로 비교해 보고 정한다. OpenAI 검토 모델에만 적용 |
+| 검토 추론 강도 |  | 추론 모델(gpt-5 등)의 `reasoning_effort`: `minimal`·`low`·`medium`·`high`. 비우면 보내지 않음 (모델 기본 = `medium`). `low` 로 하면 검토가 더 빨라지지만 판단 정확도가 낮아질 수 있어, 소량으로 비교해 보고 정한다. OpenAI 검토 모델에만 적용 (`claude_cli` 에는 안 씀) |
+| 검토 대체 모델 | claude_cli:sonnet | 검토 모델이 응답 전체를 거절하거나 '안전하게 고칠 수 없다' 며 샘플을 뺀 **룰만** 이 모델로 다시 검토한다 (거절하면 같은 모델로 다시 보내지 않음). 룰 조건상 만들 수 없어 뺀 것은 그대로. 비우거나 `-` 면 쓰지 않음. **검토 모델과 같으면 보통 실행에서는 쓰지 않고**(거절하면 같은 모델로 다시 보냄) `--redo-safety` 에서만 쓴다. 2026-10-26 추가: gpt-6-luna 가 위험 유형(명령 주입·RCE·인증 우회·오버플로·역직렬화 등) 샘플을 20~30% 뺐고, 같은 요청 30개를 gpt-5 로 검토하면 0개 (남은 샘플 56% → 91%). 이미 검토한 것은 `python 3_3_review.py --redo-safety`. 같은 날 OpenAI 크레딧이 떨어져 `openai:gpt-5` → `claude_cli:sonnet` |
