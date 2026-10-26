@@ -27,6 +27,7 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -308,14 +309,108 @@ def version_rows():
     return rows
 
 
+# ── 확정 실행 계획 (화면 6 의 전체 진행률: 단계마다 예상 시간) ─────────────────
+
+CHECK_TEXT = "확정 전 확인 (비교 스냅숏·학습데이터 변경·디스크)"
+MOVE_TEXT = "마무리 (버전 폴더로 옮기기·버전 목록 저장)"
+FINAL_STEPS = (("select", "선별"), ("lines", "로그 줄"), ("log", "로그"), ("csv", "학습 파일"), ("list", "목록"), ("hash", "지문"))
+
+
+def final_step_text(dev, step, n=0, csv_name="", log_name=""):
+    """확정 단계 이름 (확정할 때와 실행 계획이 같은 글을 씀). n = 추가 샘플 수."""
+    D = dev.upper()
+    return {"select": f"{D} 선별 (초안 조건 그대로)", "lines": f"{D} 추가 샘플 {n:,}개의 로그 줄 읽기",
+            "log": f"{D} 로그 내보내기 (기준 {log_name} + 추가 {n:,}줄)",
+            "csv": f"{D} 학습 파일 내보내기 (기준 {csv_name} + 추가 {n:,}행)",
+            "list": f"{D} 추가 샘플 목록·비교한 샘플 지문", "hash": f"{D} 파일 지문(sha256)"}[step]
+
+
+def _std_csv(csv_p, dev):
+    """기준 학습 파일이 표준 학습 형식(method, payload, label, 피처 열 이름순)이라 그대로 복사하는지 (첫 줄만 봄)."""
+    import csv
+    with open(csv_p, encoding="utf-8", newline="") as f:
+        head = next(csv.reader([f.readline()]), [])
+    feats = head[3:]
+    return head[:3] == ["method", "payload", "label"] and feats == sorted(feats) and all(
+        c.startswith(f"{dev}_payload_") for c in feats)
+
+
+def finalize_plan(name, timing=None, est=None):
+    """확정 실행 계획 [{key, dev, short, text, expected_s, tkey}]: 지난 확정 시간(cache/timing.json, 최근 3번 중앙값),
+    없으면 파일 크기·수로 어림 (복사 약 150MB/초, 표준 열만 다시 쓰기 약 15MB/초, sha256 약 400MB/초)."""
+    timing = C.read_json(C.CACHE / "timing.json", {}) if timing is None else timing
+    v = C.load_versions()
+    ver = C.get_version(v, name)
+    base = C.get_version(v, ver["base"])
+    mb = lambda p: p.stat().st_size / 2 ** 20 if p.is_file() else 0.0
+    past = lambda tk, guess: C.past_median(timing, tk) or timing.get(tk) or guess
+    plan = [{"key": "prep", "dev": "", "short": "준비", "text": "준비 (계산 모듈 읽기)",
+             "expected_s": past("finalize:prep", 3.0), "tkey": "finalize:prep"},
+            {"key": "check", "dev": "", "short": "확인", "text": CHECK_TEXT, "expected_s": past("finalize:check", 3.0),
+             "tkey": "finalize:check"}]
+    for dev in C.DEVICES:
+        if dev not in (ver.get("snapshot") or {}):
+            continue
+        csv_p, log_p = C.version_files(v, base, dev)
+        n = int((((ver.get("draft_counts") or {}).get(dev)) or {}).get("sel") or 0)
+        rows = (C.read_json(C.compared_files(base["name"], dev)["summary"], {}) or {}).get("rows") or 0
+        logs = sum(st[1] for st in (C.log_stat(d, dev) for d in C.dataset_dates()) if st) / 2 ** 20
+        copy = mb(csv_p) / (150 if csv_p.is_file() and _std_csv(csv_p, dev) else 15)
+        guess = {"select": 3 + rows * 2e-5, "lines": 2 + logs / 60, "log": 1 + mb(log_p) / 150,
+                 "csv": 10 + copy + n * 3e-4, "list": 1 + rows * 1e-5 + n * 1e-4, "hash": 1 + (mb(csv_p) + mb(log_p)) / 400}
+        for step, short in FINAL_STEPS:
+            tk = f"finalize:{dev}:{step}"
+            plan.append({"key": f"{dev}:{step}", "dev": dev, "short": short,
+                         "text": final_step_text(dev, step, n, csv_p.name, log_p.name),
+                         "expected_s": round(past(tk, guess[step]), 1), "tkey": tk})
+    plan.append({"key": "move", "dev": "", "short": "마무리", "text": MOVE_TEXT, "expected_s": past("finalize:move", 2.0),
+                 "tkey": "finalize:move"})
+    return plan
+
+
 # ── 확정 (실행기에서, pandas 사용) ───────────────────────────────────────
 
-def _sha256(p):
+def _sha256(p, ctx=None):
     h = hashlib.sha256()
+    total, done = Path(p).stat().st_size, 0
     with open(p, "rb") as f:
         for b in iter(lambda: f.read(1 << 20), b""):
             h.update(b)
+            done += len(b)
+            if ctx is not None:
+                ctx.progress(done >> 20, max(1, total >> 20), unit="MB")
     return h.hexdigest()
+
+
+def _copy(src, dst, ctx, what):
+    """파일 복사 (shutil.copyfile 과 같은 내용, 8MB 씩 읽어 진행 보고)."""
+    total, done = Path(src).stat().st_size, 0
+    with open(src, "rb") as fi, open(dst, "wb") as fo:
+        for b in iter(lambda: fi.read(8 << 20), b""):
+            fo.write(b)
+            done += len(b)
+            ctx.progress(done >> 20, max(1, total >> 20), unit="MB", what=what)
+
+
+def _rename_dir(src, dst, ctx, wait_s=60.0):
+    """임시 폴더 → 버전 폴더. 막 쓴 큰 파일을 백신 검사 등이 잠깐 잡고 있으면 Windows 가 이름 바꾸기를
+    '액세스가 거부되었습니다'(PermissionError) 로 막는다 (이 PC 에서 약 470MB 를 쓴 직후 4초쯤)
+    → 잠깐씩(0.25초부터 2초까지 늘려) 기다리며 다시, 모두 wait_s 초까지."""
+    t0, k = time.monotonic(), 0
+    while True:
+        try:
+            src.rename(dst)
+            break
+        except PermissionError as e:
+            waited = time.monotonic() - t0
+            if waited >= wait_s:
+                raise PermissionError(f"{dst.name} 폴더로 옮기지 못했습니다 - {wait_s:.0f}초 동안 폴더가 잠겨 있었습니다 "
+                                      f"(그 폴더를 연 탐색기 창·백신 검사를 확인하고 다시 확정하세요): {e}") from e
+            k += 1
+            ctx.progress(0, 0, text=f"폴더가 잠겨 있어 기다렸다 다시 ({k}번째 · {waited:.0f}초)")
+            time.sleep(min(2.0, 0.25 * k))
+    if k:
+        ctx.log(f"  버전 폴더로 옮기기: 폴더가 잠겨 {k}번 다시 해서 됨 ({time.monotonic() - t0:.1f}초)")
 
 
 def _check_ready(v, ver):
@@ -342,7 +437,7 @@ def finalize(name, ctx):
     devs = [d for d in C.DEVICES if d in (ver.get("snapshot") or {})]
     if not devs:
         raise ValueError("초안에 비교 결과가 없습니다")
-    ctx.step("check", "확정 전 확인 (비교 스냅숏·학습데이터 변경·디스크)")
+    ctx.step("check", CHECK_TEXT)
     _check_ready(v, ver)
     need = 0
     for dev in devs:
@@ -365,17 +460,23 @@ def finalize(name, ctx):
     try:
         for dev in devs:
             ctx.check()
-            ctx.step(f"{dev}:select", f"{dev.upper()} 선별 (초안 조건 그대로)")
+            ctx.step(f"{dev}:select", final_step_text(dev, "select"))
+            ctx.sub(0, 3, "선별용 표 읽기")
             t = read_table(base["name"], dev)
+            ctx.sub(1, 3, f"선별 ({t['n']:,}행)")
             sel, cand, why = select(t, ver["conditions"], ver["options"], ver["overrides"])
+            ctx.sub(2, 3, "샘플별 등급 읽기 (rows.parquet)")
             R = pd.read_parquet(C.compared_files(base["name"], dev)["rows"])
             if len(R) != t["n"]:
                 raise ValueError(f"{dev.upper()} 비교 결과 파일이 서로 맞지 않습니다 - 다시 비교하세요")
             A = R.iloc[sel].reset_index(drop=True)
             # 고른 줄의 로그 (날짜별로 한 번 읽음) - 내용 지문이 비교 때와 같은지 확인
-            ctx.step(f"{dev}:lines", f"{dev.upper()} 추가 샘플 {len(A):,}개의 로그 줄 읽기")
+            ctx.step(f"{dev}:lines", final_step_text(dev, "lines", len(A)))
             lines = {}
-            for date, grp in A.groupby("date"):
+            groups = list(A.groupby("date"))
+            w = [(C.log_stat(date, dev) or [None, 0])[1] for date, _ in groups]       # 날짜마다 로그 전체를 읽음
+            for k, (date, grp) in enumerate(groups):
+                ctx.sub(k, len(groups), f"날짜 {k + 1}/{len(groups)} ({date}) · 찾은 줄 {len(lines):,}/{len(A):,}", w)
                 want = set(grp["line"].tolist())
                 with open(C.log_path(date, dev), "rb") as f:
                     for i, line in enumerate(x for x in f if x.strip()):
@@ -388,9 +489,9 @@ def finalize(name, ctx):
                 raise ValueError(f"{dev.upper()} 로그 줄 {bad}개가 비교할 때와 다릅니다 - 다시 비교하세요")
             # 원본 로그 = 기준 원본 로그 + 추가 줄
             csv_p, log_p = C.version_files(v, base, dev)
-            ctx.step(f"{dev}:log", f"{dev.upper()} 로그 내보내기 (기준 {log_p.name} + 추가 {len(raw):,}줄)")
+            ctx.step(f"{dev}:log", final_step_text(dev, "log", len(raw), log_name=log_p.name))
             lp = tmp / f"{dev}_raw.log"
-            shutil.copyfile(log_p, lp)
+            _copy(log_p, lp, ctx, "기준 로그 복사")
             with open(lp, "rb+") as f:
                 f.seek(0, 2)
                 if f.tell():
@@ -401,7 +502,7 @@ def finalize(name, ctx):
                         f.write(b"\n")
                 f.write(("\n".join(raw) + "\n").encode("utf-8") if raw else b"")
             # 학습 파일 = 기준 학습 파일(표준 열만) + 추가 샘플 (payload 는 학습 파일 형식, 표준모델 피처는 원본 코드와 같은 값)
-            ctx.step(f"{dev}:csv", f"{dev.upper()} 학습 파일 내보내기 (기준 {csv_p.name} + 추가 {len(A):,}행)")
+            ctx.step(f"{dev}:csv", final_step_text(dev, "csv", len(A), csv_name=csv_p.name))
             ns = F.load_legacy(C.feature_code(v, dev))
             names = F.legacy_names(ns)
             head = list(pd.read_csv(csv_p, nrows=0).columns)
@@ -409,14 +510,22 @@ def finalize(name, ctx):
             if sorted(std[3:]) != names:
                 raise ValueError(f"{dev.upper()} 기준 학습 파일의 피처 열이 표준모델 피처 파일과 다릅니다")
             cp = tmp / f"{dev}_train.csv"
+            what = "기준 학습 파일 복사" if head == std else "기준 학습 파일 (표준 열만) 쓰기"
+            w = [csv_p.stat().st_size / 2 ** 20 / (150 if head == std else 15), 8, 1 + len(A) * 3e-4]   # 하위 단계 예상 비율
+            if len(A):
+                ctx.sub(0, 3, what, w)
             if head == std:                                 # 표준 학습 형식이면 그대로 복사
-                shutil.copyfile(csv_p, cp)
+                _copy(csv_p, cp, ctx, "" if len(A) else what)
             else:                                           # 다른 열(proba 등)이 있으면 표준 열만
-                first = True
+                first, done = True, 0
+                total = ((base.get("counts") or {}).get(dev) or {}).get("rows") or 0
                 for ch in pd.read_csv(csv_p, usecols=std, chunksize=50000, dtype=str, keep_default_na=False):
                     ch[std].to_csv(cp, mode="w" if first else "a", header=first, index=False, lineterminator="\n")
                     first = False
+                    done += len(ch)
+                    ctx.progress(done, max(done, total), what="" if len(A) else what)
             if len(A):
+                ctx.sub(1, 3, "피처 캐시 읽기", w)
                 fd = C.CACHE / "features" / dev / F.code_hash(C.feature_code(v, dev))
                 fc = pd.concat([pd.read_parquet(p, columns=["pk"] + names) for p in sorted(fd.glob("part-*.parquet"))],
                                ignore_index=True).drop_duplicates("pk", keep="last").set_index("pk")
@@ -426,6 +535,7 @@ def finalize(name, ctx):
                     extra = F.compute_chunk(dev, str(C.feature_code(v, dev)), list(todo.values()))[names]
                     extra.index = list(todo.keys())
                     fc = pd.concat([fc, extra])
+                ctx.sub(2, 3, f"추가 샘플 {len(A):,}행 쓰기", w)
                 X = fc.loc[A["pk"].to_numpy(), names].reset_index(drop=True)
                 ints = set(ns["regex_dict_comb"]) | set(ns["regex_dict_count"])
                 for c in names:
@@ -440,11 +550,13 @@ def finalize(name, ctx):
                         f.write(b"\n")
                 new.to_csv(cp, mode="a", header=False, index=False, lineterminator="\n")
             # 추가한 샘플 목록·이번에 비교한 샘플 지문
-            ctx.step(f"{dev}:list", f"{dev.upper()} 추가 샘플 목록·비교한 샘플 지문")
+            ctx.step(f"{dev}:list", final_step_text(dev, "list"))
+            ctx.sub(0, 2, f"추가 샘플 목록 ({dev}_added.csv)")
             add = A[["date", "line", "sk", "ck", "rule_id", "source", "method", "label", "attack_type", "origin", "cons",
                      "grade", "holdout", "new_pat", "wrong_rf", "wrong_lg"]].copy()
             add["payload"] = payload
             add.to_csv(tmp / f"{dev}_added.csv", index=False, encoding="utf-8-sig")
+            ctx.sub(1, 2, f"비교한 샘플 지문 ({dev}_considered.txt)")
             ck_all = R["ck"].to_numpy()
             (tmp / f"{dev}_considered.txt").write_text("\n".join(ck_all[i] for i in cand) + "\n", encoding="utf-8")
             base_cnt = (base.get("counts") or {}).get(dev) or {}
@@ -461,13 +573,18 @@ def finalize(name, ctx):
                 "considered": len(cand), "why": why, "methods": base_cnt.get("methods")}
             files[dev] = {k: str(out / f"{dev}_{k}{ext}") for k, ext in (("train", ".csv"), ("raw", ".log"),
                                                                            ("added", ".csv"))}
-            ctx.step(f"{dev}:hash", f"{dev.upper()} 파일 지문(sha256)")
+            ctx.step(f"{dev}:hash", final_step_text(dev, "hash"))
+            fl = sorted(tmp.glob(f"{dev}_*"))
+            w, hashed = [p.stat().st_size for p in fl], {}
+            for k, p in enumerate(fl):
+                ctx.sub(k, len(fl), f"{p.name} ({k + 1}/{len(fl)})", w)
+                hashed[p.name] = {"bytes": p.stat().st_size, "sha256": _sha256(p, ctx)}
             manifest["dev"][dev] = {"counts": counts[dev], "base_files": {"train_csv": str(csv_p), "raw_log": str(log_p)},
-                                    "files": {p.name: {"bytes": p.stat().st_size, "sha256": _sha256(p)}
-                                              for p in sorted(tmp.glob(f"{dev}_*"))}}
+                                    "files": hashed}
+        ctx.step("move", MOVE_TEXT)
         manifest["finalized_at"] = C.now_iso()
         C.write_json(tmp / "manifest.json", manifest)
-        tmp.rename(out)
+        _rename_dir(tmp, out, ctx)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise

@@ -574,8 +574,79 @@ def _compile(pattern, flags):
         return None
 
 
+# 역추적이 폭발할 수 있는 모양의 정규식 (2026-10-26 추가). 예: et:1:2072556 의 (?:Content-Disposition\x3a\x20form-data.{,4096}){100,}
+# 는 form-data 부분이 몰린 요청(35개)에서 경우의 수가 2^35 쯤 되어 끝나지 않아 3.1a 가 멈췄다. Snort 는 PCRE 검사 한도로 멈추지만
+# 파이썬 re 에는 한도가 없다. 그래서 '반복 안의 반복'·'반복 안의 선택(|)' 이 있는 정규식(지금 룰의 약 7.5%)만 시간 제한이 되는
+# regex 모듈(pip install regex)로 검사하고, 제한 시간을 넘으면 그 조건은 판단 불가(None, 정규식을 해석하지 못할 때와 같음)로 둔다.
+# 그 밖의 정규식은 지금처럼 re 로 검사한다 (결과 그대로). regex 모듈이 없으면 위험한 모양의 정규식은 검사하지 않고 판단 불가.
+try:
+    import regex as _regex
+except ImportError:
+    _regex = None
+REGEX_TIMEOUT = 1.0                         # 위험한 모양 정규식의 검사 1번 최대 시간(초)
+REGEX_TIMEOUTS = collections.Counter()      # 시간 제한으로 판단 불가가 된 정규식 → 횟수 (단계가 끝날 때 로그)
+_SKIP = object()
+
+
+def _risky(items, in_rep=False):
+    """정규식 구문 트리에 반복 안의 반복, 또는 반복 안의 선택(|)이 있는지."""
+    reps = (_sre_c.MAX_REPEAT, _sre_c.MIN_REPEAT, getattr(_sre_c, "POSSESSIVE_REPEAT", None))
+    for op, av in items:
+        if op in reps:
+            many = av[1] == _sre_c.MAXREPEAT or av[1] > 1
+            if (many and in_rep) or _risky(av[2], in_rep or many):
+                return True
+        elif op is _sre_c.SUBPATTERN:
+            if _risky(av[-1], in_rep):
+                return True
+        elif op is _sre_c.BRANCH:
+            if in_rep or any(_risky(b, in_rep) for b in av[1]):
+                return True
+        elif op in (_sre_c.ASSERT, _sre_c.ASSERT_NOT):
+            if _risky(av[1], in_rep):
+                return True
+        elif op is getattr(_sre_c, "ATOMIC_GROUP", None):
+            if _risky(av, in_rep):
+                return True
+    return False
+
+
+@functools.lru_cache(maxsize=None)
+def _guarded(pattern, flags):
+    """위험한 모양이면 시간 제한 검사기(regex 모듈), regex 모듈이 없으면 _SKIP, 아니면 None (re 로 검사)."""
+    try:
+        if not _risky(_sre_parse.parse(pattern, flags).data):
+            return None
+    except Exception:
+        return None
+    if _regex is None:
+        return _SKIP
+    fl = _regex.V0
+    for a, b in ((re.I, _regex.I), (re.S, _regex.S), (re.M, _regex.M), (re.X, _regex.X)):
+        if flags & a:
+            fl |= b
+    try:
+        return _regex.compile(pattern, fl)
+    except Exception:
+        return _SKIP
+
+
+def regex_search(rx, pattern, flags, text):
+    """정규식 검사 한 번 → 맞으면 True, 아니면 False, 시간 제한을 넘었거나 검사하지 않으면 None."""
+    g = _guarded(pattern, flags)
+    if g is None:
+        return rx.search(text) is not None
+    if g is _SKIP:
+        return None
+    try:
+        return g.search(text, timeout=REGEX_TIMEOUT) is not None
+    except TimeoutError:
+        REGEX_TIMEOUTS[pattern] += 1
+        return None
+
+
 def check_condition(c, parts):
-    """조건 하나를 만족하면 True, 아니면 False, 판단 불가(정규식 오류)면 None."""
+    """조건 하나를 만족하면 True, 아니면 False, 판단 불가(정규식 오류·검사 시간 초과)면 None."""
     where = c.get("in", "payload")
     texts = _variants(parts.get(where, parts["payload"]), where)
     if c["type"] == "content":
@@ -589,7 +660,15 @@ def check_condition(c, parts):
         rx = _compile(c["pattern"], flags)
         if rx is None:
             return None
-        found = any(rx.search(t) for t in texts)
+        found, unknown = False, False
+        for t in texts:
+            r = regex_search(rx, c["pattern"], flags, t)
+            if r:
+                found = True
+                break
+            unknown = unknown or r is None
+        if not found and unknown:
+            return None
     return (not found) if c.get("negated") else found
 
 
@@ -830,7 +909,7 @@ def regex_examples(pattern, flags="", n=3):
             if k == 0:
                 continue
             break
-        if s and s not in found and rx.search(s):
+        if s and s not in found and regex_search(rx, pattern, fl, s):
             found.append(s)
             if len(found) >= n:
                 break

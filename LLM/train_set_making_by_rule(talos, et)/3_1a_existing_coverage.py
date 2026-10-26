@@ -195,6 +195,10 @@ def main(argv=None):
                 c["examples"].append(text)
         if n % 50000 == 0:
             log.info("  ... %d / %d payload 대조 (%.0f초)", n, len(attack), time.time() - started)
+    if C.REGEX_TIMEOUTS:         # 역추적이 폭발하는 정규식: 시간 제한을 넘은 조건은 판단 불가로 셈 (3_0a_common.regex_search)
+        rid = {c["pattern"]: r["id"] for r in rules for c in r["conditions"] if c["type"] == "regex"}
+        log.warning("  정규식 검사 시간 초과 %d번 - 그 조건은 판단 불가로 셈: %s", sum(C.REGEX_TIMEOUTS.values()),
+                    ", ".join(f"{rid.get(p, '?')} {k}번" for p, k in C.REGEX_TIMEOUTS.most_common(5)))
 
     # 4) 저장
     out.mkdir(parents=True, exist_ok=True)

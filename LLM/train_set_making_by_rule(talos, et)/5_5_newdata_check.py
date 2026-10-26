@@ -51,7 +51,16 @@ class Ctx:
     def step(self, key, text):
         print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
 
-    def progress(self, done, total=None, eta_s=None, unit="행"):
+    def progress(self, done, total=None, eta_s=None, unit="행", what="", text=None):
+        pass
+
+    def sub(self, k, n, text, weights=None):          # 하위 단계 k/n (예: 날짜 2/4, 모델 예측 3/4)
+        pass
+
+    def estimate(self, dev, **facts):                 # 실행 중에 안 값 → 남은 단계 예상 시간 (실행기)
+        pass
+
+    def note(self, key, value, hist=False):           # 다음 실행의 예상에 쓸 값 (실행기가 timing.json 에)
         pass
 
     def check(self):
@@ -98,7 +107,7 @@ def load_base(v, ver, dev, ctx):
         parts.append(part)
         done += len(ch)
         rate = done / max(1e-6, time.monotonic() - t0)
-        ctx.progress(done, max(est, done), (max(est, done) - done) / rate)
+        ctx.progress(done, max(est, done), (max(est, done) - done) / rate, what="기준 데이터")
     B = pd.concat(parts, ignore_index=True)
     for c in ("method", "label", "ua"):
         B[c] = B[c].astype("category")
@@ -120,19 +129,22 @@ def base_models(ver, dev, B, cols, mode, ctx):
     d.mkdir(parents=True, exist_ok=True)
     key = C.read_json(C.CACHE / "base" / f"{ver['name']}_{dev}.json", {})
     y = (B["label"] == "anomalies").to_numpy()
-    out, todo = {}, []
+    out, todo, i, n = {}, [], 0, 2 * len(cols)          # i/n = 진행 보고 (읽은·학습한 모델 수)
     for cfg, cs in cols.items():
         for m in ("rf", "lgbm"):
             p = d / f"{dev}_{cfg}_{m}.joblib"
             meta = C.read_json(p.with_suffix(".json"), {})
             if mode != "all" and p.exists() and meta == dict(key, cols=cs):
+                ctx.sub(i, n, f"저장해 둔 모델 읽기 {i + 1}/{n} ({m.upper()} {cfg})")
                 out[(cfg, m)] = joblib.load(p)
+                i += 1
             else:
                 todo.append((cfg, m, cs, p))
     t0 = time.monotonic()
     for k, (cfg, m, cs, p) in enumerate(todo):
         ctx.check()
-        ctx.progress(k, len(todo), None, unit="모델")
+        ctx.sub(i, n, f"모델 학습 {i + 1}/{n} ({m.upper()} {cfg})")
+        i += 1
         model = C.make_model(m).fit(B[cs].to_numpy(dtype=np.float32), y)
         joblib.dump(model, p, compress=3)
         C.write_json(p.with_suffix(".json"), dict(key, cols=cs))
@@ -143,16 +155,23 @@ def base_models(ver, dev, B, cols, mode, ctx):
 
 # ── 신규 학습데이터 + 피처 ───────────────────────────────────────────────
 
-def read_samples(dev, dates=None):
-    """08_dataset 의 모든(또는 고른) 날짜 → 샘플 표 (날짜·줄 순서), 날짜별 로그 상태."""
+def read_samples(dev, dates=None, ctx=None):
+    """08_dataset 의 모든(또는 고른) 날짜 → 샘플 표 (날짜·줄 순서), 날짜별 로그 상태.
+    진행 보고: 날짜 k/K (예상 비율 = 로그 크기) → 샘플 지문 계산."""
+    ctx = ctx or Ctx()
     cols, stats = {c: [] for c in C.SAMPLE_COLS}, {}
-    for d in dates or C.dataset_dates():
+    dates = dates or C.dataset_dates()
+    w = [(C.log_stat(d, dev) or [None, 0])[1] for d in dates]
+    w.append(0.05 * sum(w))
+    for i, d in enumerate(dates):
+        ctx.sub(i, len(w), f"날짜 {i + 1}/{len(dates)} ({d}) · 읽은 행 {len(cols['date']):,}", w)
         got, stat = C.read_dataset(d, dev)
         if stat is None:
             continue
         stats[d] = stat
         for k in cols:
             cols[k].extend(got[k])
+    ctx.sub(len(dates), len(w), f"샘플 지문 계산 ({len(cols['date']):,}행)", w)
     S = pd.DataFrame(cols)
     S["ck"] = [C.sample_key(a, b, c) for a, b, c in zip(S["label"], S["rule_id"], S["payload_raw"])]
     S["pk"] = [C.payload_key(p) for p in S["payload_raw"]]
@@ -173,6 +192,7 @@ def load_feature_cache(d):
 
 def features_for(S, dev, code, mode, ctx):
     """샘플 표의 각 줄 피처 (캐시에 없는 payload 만 계산). mode=all 이면 모두 다시 계산."""
+    t_in = time.monotonic()                              # 계산 밖의 시간(캐시 읽기·합치기) → 다음 실행의 예상
     d = _feature_dir(dev, code)
     for old in d.parent.glob("*"):                       # 피처 파일·신규 후보가 바뀌어 쓰지 않는 캐시
         if old != d and old.is_dir():
@@ -188,6 +208,7 @@ def features_for(S, dev, code, mode, ctx):
     todo = S.loc[~S["pk"].isin(have), ["pk", "payload_raw"]].drop_duplicates("pk")
     n, t0, done = len(todo), time.monotonic(), 0
     ctx.log(f"  피처: 전체 payload {S['pk'].nunique():,}개 중 새로 계산 {n:,}개 (캐시 {len(have):,}개)")
+    ctx.estimate(dev, n_new=n)
     stamp = time.strftime("%Y%m%d%H%M%S")
     chunks = [todo.iloc[s:s + CHUNK] for s in range(0, n, CHUNK)]
 
@@ -199,9 +220,12 @@ def features_for(S, dev, code, mode, ctx):
         nonlocal done
         done += rows
         rate = done / max(1e-6, time.monotonic() - t0)
-        ctx.progress(done, n, (n - done) / rate if done else None)
+        ctx.progress(done, n, (n - done) / rate if done else None, unit="개", what="피처")
 
-    ctx.progress(0, n, None)
+    if n:
+        ctx.progress(0, n, None, unit="개", what="피처")
+    else:
+        ctx.progress(0, 0, text=f"새로 계산할 payload 없음 · 캐시에서 읽기 ({len(have):,}개)")
     if ctx.pool is not None and len(chunks) > 1:
         from concurrent.futures import FIRST_COMPLETED, wait
         pending, k = {}, 0
@@ -227,28 +251,35 @@ def features_for(S, dev, code, mode, ctx):
             ctx.check()
             save(k, ch, F.compute_chunk(dev, str(code), ch["payload_raw"].tolist()))
             tick(len(ch))
+    t1 = time.monotonic()
     if n:
         timing = C.read_json(C.CACHE / "timing.json", {})
         timing[f"feat_rows_per_sec_{dev}"] = round(n / max(1e-6, time.monotonic() - t0), 1)
         C.write_json(C.CACHE / "timing.json", timing)
+        ctx.progress(n, n, 0, unit="개", what="피처", text=f"피처 {n:,}/{n:,}개 · 캐시 합치기")
     parts = sorted(d.glob("part-*.parquet"))
     cache = load_feature_cache(d)
     if len(parts) > 30:                                  # 작은 파일이 많아지면 하나로 합침
         cache.reset_index().to_parquet(d / f"part-{stamp}-all.parquet", index=False)
         for p in parts:
             p.unlink()
-    return cache.loc[S["pk"].to_numpy()].reset_index(drop=True)
+    out = cache.loc[S["pk"].to_numpy()].reset_index(drop=True)
+    ctx.note(f"compare:{dev}:feat:fixed", round((t0 - t_in) + (time.monotonic() - t1), 1), hist=True)
+    return out
 
 
 # ── 등급 ────────────────────────────────────────────────────────────────
 
-def grade(S, Fz, B, models, cols, dev):
-    """샘플 표 + 피처 → 등급·근거 열을 붙인 표 (S 와 같은 순서)."""
+def grade(S, Fz, B, models, cols, dev, ctx=None):
+    """샘플 표 + 피처 → 등급·근거 열을 붙인 표 (S 와 같은 순서). 진행 보고: 모델 예측 k/4 → 패턴·중복 계산."""
+    ctx = ctx or Ctx()
     y = S["label"].eq("anomalies").to_numpy()
     yB = B["label"].eq("anomalies").to_numpy()
     R = S.drop(columns=["payload_raw"]).copy()
-    for (cfg, m), model in models.items():
+    for k, ((cfg, m), model) in enumerate(models.items()):
+        ctx.sub(k, len(models) + 1, f"모델 예측 {k + 1}/{len(models)} ({m.upper()} {cfg})")
         R[f"p_{m}{cfg}"] = model.predict_proba(Fz[cols[cfg]].to_numpy(dtype=np.float32))[:, 1].astype("float32")
+    ctx.sub(len(models), len(models) + 1, "패턴·중복 계산")
     wrong_rf = (R["p_rf43"].to_numpy() >= 0.5) != y
     wrong_lg = (R["p_lgbm43"].to_numpy() >= 0.5) != y
     # 패턴 (43개 피처 on/off): 기준 데이터에 있는지, 기준에서는 반대 라벨만 있었는지
@@ -487,7 +518,8 @@ def compare_dev(v, base, dev, mode, include_compared, ctx):
     code = C.feature_code(v, dev)
     ns = F.load_legacy(code)
     names34 = F.legacy_names(ns)
-    ctx.step(f"{dev}:base", f"{dev.upper()} 기준 데이터 읽기 ({base['name']})")
+    text = lambda step: C.compare_step_text(dev, step, base["name"], mode)      # 실행 계획(5.0a compare_plan)과 같은 이름
+    ctx.step(f"{dev}:base", text("base"))
     B = load_base(v, base, dev, ctx)
     cols34 = sorted(c for c in B.columns if c.startswith(f"{dev}_payload_") and c not in F.v2_cols(dev))
     if cols34 != names34:
@@ -499,12 +531,12 @@ def compare_dev(v, base, dev, mode, include_compared, ctx):
         if x["name"] == base["name"]:
             x.setdefault("counts", {})[dev] = base_counts(B)
     C.save_versions(v_now)
-    ctx.step(f"{dev}:model", f"{dev.upper()} 기준 모델 (RF·LGBM, 처음 한 번 학습)")
+    ctx.step(f"{dev}:model", text("model"))
     t0 = time.monotonic()
     models = base_models(base, dev, B, cols, mode, ctx)
     models_info = {"train_s": round(time.monotonic() - t0, 1)}
-    ctx.step(f"{dev}:read", f"{dev.upper()} 신규 학습데이터 읽기")
-    S, stats = read_samples(dev)
+    ctx.step(f"{dev}:read", text("read"))
+    S, stats = read_samples(dev, ctx=ctx)
     scope = {"all": int(len(S)), "excluded": 0, "include_compared": include_compared}
     if not include_compared:
         done = C.considered_keys(v, base["name"], dev)
@@ -514,19 +546,26 @@ def compare_dev(v, base, dev, mode, include_compared, ctx):
             S = S.loc[keep].reset_index(drop=True)
     if S.empty:
         raise RuntimeError(f"{dev.upper()} 비교할 신규 학습데이터가 없습니다")
-    ctx.step(f"{dev}:feat", f"{dev.upper()} 피처 계산 (새 샘플만)" if mode != "all" else f"{dev.upper()} 피처 계산 (전체)")
+    ctx.estimate(dev, n_rows=len(S))                     # 읽은 뒤: 등급·저장 예상 시간을 실제 행 수로
+    ctx.note(f"compare:{dev}:rows", len(S))
+    ctx.note(f"compare:{dev}:read_bytes", sum(st[1] for st in stats.values()))
+    ctx.step(f"{dev}:feat", text("feat"))
     Fz = features_for(S, dev, code, mode, ctx)
-    ctx.step(f"{dev}:grade", f"{dev.upper()} 등급 매기기")
-    R = grade(S, Fz, B, models, cols, dev)
+    ctx.step(f"{dev}:grade", text("grade"))
+    R = grade(S, Fz, B, models, cols, dev, ctx)
     snap = snapshot_id(R)
-    ctx.step(f"{dev}:save", f"{dev.upper()} 결과 저장")
+    ctx.step(f"{dev}:save", text("save"))
     files = C.compared_files(base["name"], dev)
     files["rows"].parent.mkdir(parents=True, exist_ok=True)
+    ctx.sub(0, 4, f"샘플별 등급 저장 ({files['rows'].name})")
     R.to_parquet(files["rows"], index=False)
+    ctx.sub(1, 4, f"화면 선별용 표 저장 ({files['table'].name})")
     write_table(files["table"], R, base["name"], dev, snap)
+    ctx.sub(2, 4, "요약 계산")
     summ = summarize(R, B, S, Fz, cols, dev, base, stats, scope, models_info)
     summ["snapshot"] = snap
     summ["mode"] = mode
+    ctx.sub(3, 4, f"엑셀 저장 ({files['report'].name})")
     write_report(files["report"], summ, examples(R, S))
     C.write_json(files["summary"], summ)
     g = R["grade"].value_counts()

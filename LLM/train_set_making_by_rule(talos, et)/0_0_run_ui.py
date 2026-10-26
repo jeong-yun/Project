@@ -1785,6 +1785,16 @@ def sup_table(base, dev):
     return t
 
 
+def sup_status():
+    """비교·확정 상태 파일. 실행기가 2초마다 바꿔 쓰는 순간에 읽으면 비어 올 수 있어 잠깐 뒤 다시 읽는다."""
+    for _ in range(3):
+        st = RT.read_status("supervised")
+        if st or not (RT.RUN_DIR / "supervised.json").exists():
+            return st
+        time.sleep(0.05)
+    return st
+
+
 def _sup_base(q_base):
     C, _ = sup_mods()
     v = C.load_versions()
@@ -1795,38 +1805,26 @@ def _sup_base(q_base):
 
 
 def sup_state(q_base=""):
-    """화면 6: 버전 목록, 실행 상태, 넣을 것, 장비별 비교 결과 상태(그 뒤 바뀐 날짜), 새로 비교할 양 추정."""
+    """화면 6: 버전 목록, 실행 상태, 넣을 것, 장비별 비교 결과 상태(그 뒤 바뀐 날짜), 새로 비교할 양 추정,
+    비교 예상 시간 (plans: 실행기가 처음 만드는 실행 계획과 같은 계산 = 5.0a compare_plan)."""
     C, V = sup_mods()
     v, finals, base = _sup_base(q_base)
     timing = C.read_json(C.CACHE / "timing.json", {})
     rows_by_date = {d["date"]: d["events"] for d in dataset_dates()}
     out = {"versions": V.version_rows(), "finals": finals, "base": base, "job": job_state("supervised"),
-           "status": RT.read_status("supervised"), "problems": C.setup_problems(v, base or None),
+           "status": sup_status(), "problems": C.setup_problems(v, base or None),
            "feature_code": v.get("feature_code"), "defaults": C.default_sources(), "dates": sorted(rows_by_date),
-           "disk_free_gb": round(C.disk_free_gb(), 1), "timing": timing, "dev": {},
-           "options": V.DEFAULT_OPTIONS, "option_text": V.OPTION_TEXT, "grades": C.GRADE_TEXT}
+           "disk_free_gb": round(C.disk_free_gb(), 1), "timing": timing, "dev": C.compare_estimate(base, rows_by_date),
+           "options": V.DEFAULT_OPTIONS, "option_text": V.OPTION_TEXT, "grades": C.GRADE_TEXT, "plans": {}}
     for dev in C.DEVICES:
-        f = C.compared_files(base, dev) if base else None
-        s = C.read_json(f["summary"], None) if f else None
-        d = {"has": bool(s), "total": sum(rows_by_date.values())}
-        prev = {}
-        if s:
-            ls = s.get("log_stats") or {}
-            d.update(created_at=s.get("created_at"), rows=s.get("rows"), snapshot=s.get("snapshot"), mode=s.get("mode"),
-                     changed=[x for x, st in ls.items() if C.log_stat(x, dev) != st],
-                     new_dates=[x for x in rows_by_date if x not in ls and C.log_path(x, dev)])
-            t = (s.get("tables") or {}).get("날짜별") or {}
-            k = (t.get("cols") or [""]).index("합계") if "합계" in (t.get("cols") or []) else None
-            prev = {r[0]: r[k] for r in t.get("rows", [])} if k is not None else {}
-            d["est_new"] = sum(n if x in d["new_dates"] else max(0, n - prev.get(x, 0)) for x, n in rows_by_date.items()
-                               if x in d["new_dates"] or x in d["changed"])
-        else:
-            d["est_new"] = d["total"]
-        cache = C.CACHE / "base" / f"{base}_{dev}.parquet"
-        d["base_cached"] = cache.exists()
-        d["models_cached"] = len(list((C.CACHE / "models" / base).glob(f"{dev}_*.joblib"))) >= 4 if base else False
-        d["rate"] = timing.get(f"feat_rows_per_sec_{dev}")
-        out["dev"][dev] = d
+        out["dev"][dev]["rate"] = timing.get(f"feat_rows_per_sec_{dev}")
+    for mode in ("new", "all") if base else ():
+        for inc in (False, True):                       # ' 이미 비교한 데이터도 다시 비교' 체크 여부
+            plan = C.compare_plan(base, C.DEVICES, mode, inc, timing, out["dev"])
+            out["plans"][mode + ("_inc" if inc else "")] = {
+                "total_s": round(sum(p["expected_s"] for p in plan)),
+                "dev": {d: {"s": round(sum(p["expected_s"] for p in plan if p["dev"] == d)),
+                            "new": next((p.get("n", 0) for p in plan if p["key"] == f"{d}:feat"), 0)} for d in C.DEVICES}}
     return out
 
 
@@ -1969,11 +1967,13 @@ def state():
         run = run_progress()
     except Exception as e:              # 진행률 계산이 실패해도 화면은 계속
         run = {"error": f"{type(e).__name__}: {e}"}
+    sup = job_state("supervised")
+    sup["pct"] = sup_status().get("overall_pct") if sup["running"] else None      # 메뉴 6. 옆 %
     return {"now": RT.now_iso(), "generation": dict(job_state("generation"), run=run), "collect": job_state("collect"),
             "agent": dict(job_state("agent"), status=RT.read_status("agent")),
             "last_collect": RT.read_status("collect"), "input_dates": input_dates(),
             "models": settings_summary(), "settings": dict(zip(("generate", "review", "overlap"), parallel())),
-            "step_seconds": step_summary(), "supervised": job_state("supervised")}
+            "step_seconds": step_summary(), "supervised": sup}
 
 
 # ── 요청 처리 ────────────────────────────────────────────────────────────
@@ -2249,7 +2249,7 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
 @media (max-width:480px){main{padding:10px}.grid{grid-template-columns:1fr}}
 </style></head><body>
 <header><div class="top"><h1>Snort 룰 학습데이터</h1><span class="sub" id="hdr"></span></div>
-<nav><a href="#/" data-p="progress">1. 진행 현황</a><a href="#/run" data-p="run">2. 생성·수집<span class="run" id="navRun" hidden></span><span class="navpct" id="navPct"></span></a><a href="#/rules" data-p="rules">3. 룰별 상태</a><a href="#/data" data-p="data">4. 신규 학습 데이터</a><a href="#/features" data-p="features">5. 피처</a><a href="#/sup" data-p="sup">6. 기존 학습데이터와 비교<span class="run" id="navSup" hidden></span></a></nav></header>
+<nav><a href="#/" data-p="progress">1. 진행 현황</a><a href="#/run" data-p="run">2. 생성·수집<span class="run" id="navRun" hidden></span><span class="navpct" id="navPct"></span></a><a href="#/rules" data-p="rules">3. 룰별 상태</a><a href="#/data" data-p="data">4. 신규 학습 데이터</a><a href="#/features" data-p="features">5. 피처</a><a href="#/sup" data-p="sup">6. 기존 학습데이터와 비교<span class="run" id="navSup" hidden></span><span class="navpct" id="navSupPct"></span></a></nav></header>
 <main>
 <!-- 1. 진행 현황 -->
 <section class="page" id="p-progress">
@@ -2388,7 +2388,7 @@ async function loadState(){S=await get("/api/state");const g=S.generation,c=S.co
  const pct=g.running&&run&&run.state==="running"?run.pct+"%":"";
  $("hdr").textContent=`입력 ${S.input_dates.at(-1)||"-"} · 생성 ${S.models["생성"]||"?"} / 검토 ${S.models["검토"]||"?"} · ${S.now.replace("T"," ")}`+(g.running?` · 생성 실행 중 ${pct}`:"")+(a.running?((a.status||{}).state==="수집 중"?" · 수집 중":" · 수집 에이전트 켜짐 (대기)"):"");
  $("navRun").hidden=!(g.running||c.running||(a.running&&(a.status||{}).state==="수집 중"));$("navPct").textContent=pct;   // 대기 중인 에이전트는 표시 안 함
- document.title=(pct?`(${pct}) `:"")+"Snort 룰 학습데이터";$("navSup").hidden=!(S.supervised&&S.supervised.running);
+ document.title=(pct?`(${pct}) `:"")+"Snort 룰 학습데이터";const sv=S.supervised||{};$("navSup").hidden=!sv.running;$("navSupPct").textContent=sv.running&&sv.pct!=null?Math.floor(sv.pct)+"%":"";
  if(page==="progress"){const show=g.running||(run&&!run.error);$("runCard").hidden=!show;
   if(show){$("runTitle").textContent=(g.running?"지금 실행 중인 학습데이터 생성":"마지막 학습데이터 생성")+(run&&run.gen&&!run.dry_run?` (이번 실행: ${run.asked?`요청 ${fmt(run.asked)}개`:"남은 요청 전부"})`:"");$("runBody").innerHTML=runHtml(g)}}
  if(page!=="run")return;
@@ -2630,15 +2630,30 @@ async function loadSup(){let s;try{s=await get("/api/sup/state?base="+encodeURIC
  sRunWas=run;
  try{$("sLog").textContent=(await get("/api/log?job=supervised&lines=80")).text;$("sLog").scrollTop=1e9}catch(e){}}
 function sEstimate(){const s=SS;if(!s||!s.base){$("sEst").innerHTML="";return}
- const t=s.timing||{},line=mode=>{let sec=0;const parts=[];for(const d of["ips","waf"]){const x=s.dev[d],n=mode==="all"?x.total:x.est_new;
-   let ss=n?n/(x.rate||120)+60:20;if(!x.base_cached)ss+=t[`compare:${d}:base`]||200;if(!x.models_cached||mode==="all")ss+=t[`compare:${d}:model`]||240;sec+=ss;parts.push(`${d.toUpperCase()} ${fmt(n)}개`)}
-  return `피처 계산 ${parts.join(" · ")} → <b>${dur(sec)}</b>`};
+ const line=mode=>{const p=(s.plans||{})[mode+($("sInc").checked?"_inc":"")];if(!p)return "-";   // 실행기가 처음 만드는 실행 계획과 같은 계산 (5.0a compare_plan)
+  return `피처 계산 ${["ips","waf"].map(d=>`${d.toUpperCase()} ${fmt(p.dev[d].new)}개`).join(" · ")} → <b>${dur(p.total_s)}</b>`};
  const ch=["ips","waf"].map(d=>{const x=s.dev[d];if(!x.has)return `${d.toUpperCase()} 아직 비교 안 함`;
    const bad=(x.changed||[]).concat(x.new_dates||[]);return `${d.toUpperCase()} ${esc((x.created_at||"").replace("T"," "))} 비교 (${fmt(x.rows)}행)`+(bad.length?` · <b>그 뒤 바뀌거나 새로 생긴 날짜 ${esc(bad.join(", "))}</b> → 다시 비교해야 이 데이터가 들어갑니다`:" · 그 뒤 변경 없음")}).join("<br>");
- $("sEst").innerHTML=`${ch}<div style="margin-top:4px"><b>예상</b> 새로 생긴 데이터만: ${line("new")} · 전체 다시: ${line("all")}<div class="muted">피처는 샘플마다 한 번만 계산해 저장하고, 기준 데이터·기준 모델은 처음 한 번만 준비합니다. 생성 중이면 CPU 를 나눠 써서 더 걸립니다.</div></div>`}
-function sJobView(run,st){const el=$("sJob");if(!st||!st.state){el.innerHTML="";return}
- const steps=(st.steps||[]).map((x,i,a)=>{const live=run&&i===a.length-1;return `<span class="step ${x.sec!=null&&!live?"done":live?"running":"fail"}">${x.sec!=null&&!live?"✔":live?"●":"✘"} ${esc(x.text)}${x.sec!=null&&!live?` <b>${hms(x.sec)}</b>`:""}</span>`}).join("");
+ $("sEst").innerHTML=`${ch}<div style="margin-top:4px"><b>예상</b> 새로 생긴 데이터만: ${line("new")} · 전체 다시: ${line("all")}<div class="muted">단계별 예상 = 지난 실행 시간 (실행 중에는 실제 속도로 고침). 피처는 샘플마다 한 번만 계산해 저장하고, 기준 데이터·기준 모델은 처음 한 번만 준비합니다. 생성 등 다른 계산이 돌면 CPU 를 나눠 써서 더 걸립니다.</div></div>`}
+function isoClock(x){if(!x)return "";const d=new Date(x);return isNaN(d)||d.toDateString()===new Date().toDateString()?x.slice(11,16):`${d.getMonth()+1}/${d.getDate()} ${x.slice(11,16)}`}
+function sJobView(run,st){const el=$("sJob");if(!st||!st.state){if(!run)el.innerHTML="";return}   // 실행 중에 비어 오면 지난 화면 그대로
  const what=st.cmd==="finalize"?`버전 확정 '${esc(st.version||"")}'`:`비교 (기준 ${esc(st.base||"")} · ${(st.devs||[]).map(d=>d.toUpperCase()).join("·")} · ${st.mode==="all"?"전체 다시":"새로 생긴 데이터만"})`;
+ if(!st.plan){sJobOld(el,run,st,what);return}
+ // 실행 계획 (5.0 RunCtx): 전체 % · 남은 시간 · 끝날 시각, 단계 = 끝남(✔ 실제 시간) / 진행 중(● 지금 진행 수) / 대기(○ 예상 시간)
+ const live=run&&st.state==="running",pct=st.state==="done"?100:Math.floor(st.overall_pct||0),icon={done:"✔",running:"●",wait:"○",skip:"–"};
+ const chip=p=>{const stop=p.state==="running"&&!live,tail=p.state==="done"?hms(p.sec):p.state==="running"?(live?(st.detail||hms(p.sec)+"째")+(st.eta_s!=null?` · 약 ${hms(st.eta_s)} 남음`:""):hms(p.sec)):p.state==="wait"?"약 "+hms(p.expected_s):"";
+  return `<span class="step ${stop?"fail":p.state}">${stop?"✘":icon[p.state]||""} ${esc(p.text)}${tail?` <b>${esc(tail)}</b>`:""}</span>`};
+ const grp=[];for(const p of st.plan.filter(p=>p.state==="running"||p.state==="wait")){const g=p.dev?p.dev.toUpperCase()+" ":"",l=grp[grp.length-1];if(l&&l[0]===g)l[1].push(p.short);else grp.push([g,[p.short]])}
+ const left=grp.map(([g,a])=>g+a.join(" → ")).join(" · ");
+ const head=live?`<b>${what} 중</b> · 전체 <b>${pct}%</b> · 남은 약 <b>${hms(st.eta_total_s)}</b> · <b>${isoClock(st.finish_at)}</b> 쯤 끝남 · 경과 ${hms(st.elapsed_s)}${SS.job.stop_requested?" · <b>중지 요청됨</b>":""}`
+  :st.state==="done"?`<b>${what} 끝남</b> · ${esc((st.finished_at||"").replace("T"," "))} · 걸린 시간 <b>${hms(st.elapsed_s)}</b>${st.first_eta_s!=null?` <span class="muted">(시작할 때 예상 ${hms(st.first_eta_s)} · ${isoClock(st.first_finish_at)} 끝날 예상)</span>`:""}`
+  :st.state==="stopped"?`<b>${what} 중지됨</b> · ${pct}% 에서 멈춤 · `+(st.cmd==="finalize"?"만들던 파일은 지움":"계산한 피처는 저장됨 → '새로 생긴 데이터만 비교'로 이어서 할 수 있음")
+  :st.state==="fail"?`<b>${what} 실패</b> · ${esc(st.error||"")} <span class="muted">(실행 로그 확인)</span>`:`<b>${what}</b> 끝나지 않음 (화면 밖에서 멈춤)`;
+ el.innerHTML=`<div class="row" style="align-items:center;gap:16px;flex-wrap:nowrap"><div class="pct">${pct}%</div><div style="flex:1;min-width:0">
+  <div class="bar${live?" live":""}" style="margin:4px 0 6px"><i style="width:${pct}%"></i></div><div style="font-size:13px">${head}</div>
+  ${live&&left?`<div class="runnow">남은 일: ${esc(left)}</div>`:""}</div></div><div class="steps">${st.plan.map(chip).join("")}</div>`}
+function sJobOld(el,run,st,what){   // 예전 실행기가 쓴 상태 (실행 계획 없이 단계만)
+ const steps=(st.steps||[]).map((x,i,a)=>{const live=run&&i===a.length-1;return `<span class="step ${x.sec!=null&&!live?"done":live?"running":"fail"}">${x.sec!=null&&!live?"✔":live?"●":"✘"} ${esc(x.text)}${x.sec!=null&&!live?` <b>${hms(x.sec)}</b>`:""}</span>`}).join("");
  let head="";
  if(run){const pr=st.total?`${fmt(st.done)} / ${fmt(st.total)}${st.unit||""}`:st.done!=null?`${fmt(st.done)}${st.unit||""}`:"";
   head=`<b>${what} 중</b> · ${esc(st.step||"")} ${pr}${st.eta_s!=null?` · 이 단계 남은 시간 약 <b>${hms(st.eta_s)}</b> (${clock(st.eta_s)} 쯤)`:""}${SS.job.stop_requested?" · <b>중지 요청됨</b>":""}`+
@@ -2716,7 +2731,7 @@ function renderReg(){if($("sReg").dataset.done)return;$("sReg").dataset.done="1"
   try{await post("/api/sup/register",{name:$("rgName").value.trim(),tag:$("rgTag").value.trim(),files,feature_code:code});$("rgMsg").textContent="등록했습니다";loadSup()}catch(e){$("rgMsg").textContent="실패: "+e.message}}}
 async function sRun(mode){if(mode==="all"&&!confirm("피처·기준 모델을 모두 다시 계산합니다 (IPS·WAF, 수십 분). 진행할까요?"))return;
  try{await post("/api/sup/compare",{base:SS.base,mode,include_compared:$("sInc").checked});setTimeout(loadSup,800)}catch(e){alert("실패: "+e.message)}}
-$("sRunNew").onclick=()=>sRun("new");$("sRunAll").onclick=()=>sRun("all");
+$("sRunNew").onclick=()=>sRun("new");$("sRunAll").onclick=()=>sRun("all");$("sInc").onchange=sEstimate;
 $("sStop").onclick=async()=>{try{await post("/api/sup/stop",{});loadSup()}catch(e){alert("실패: "+e.message)}};
 $("sBase").onchange=()=>{sPv=null;sResInit=false;loadSup()};
 $("sDevSeg").addEventListener("click",e=>{const b=e.target.closest("button[data-d]");if(!b)return;sDev=b.dataset.d;$("sDevSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));loadSupRes();sPreview()});

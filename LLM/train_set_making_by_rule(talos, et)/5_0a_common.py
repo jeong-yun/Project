@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import statistics
 import time
 from pathlib import Path
 
@@ -266,3 +267,155 @@ def make_model(name):
         return RandomForestClassifier(n_estimators=100, n_jobs=-1, random_state=SEED)
     from lightgbm import LGBMClassifier
     return LGBMClassifier(n_estimators=500, learning_rate=0.05, num_leaves=63, random_state=SEED, n_jobs=-1, verbose=-1)
+
+
+# ── 비교 실행 계획 (화면 6 의 '예상'과 실행기의 전체 진행률이 같은 계산을 쓴다) ─────────────
+
+COMPARE_STEPS = (("base", "기준 데이터"), ("model", "기준 모델"), ("read", "읽기"), ("feat", "피처"), ("grade", "등급"),
+                 ("save", "저장"))
+
+
+def compare_step_text(dev, step, base_name="", mode="new"):
+    """비교 단계 이름 (5.5 가 단계를 시작할 때와 실행 계획이 같은 글을 쓴다)."""
+    D = dev.upper()
+    return {"base": f"{D} 기준 데이터 읽기 ({base_name})", "model": f"{D} 기준 모델 (RF·LGBM, 처음 한 번 학습)",
+            "read": f"{D} 신규 학습데이터 읽기", "feat": f"{D} 피처 계산 ({'전체' if mode == 'all' else '새 샘플만'})",
+            "grade": f"{D} 등급 매기기", "save": f"{D} 결과 저장"}[step]
+
+
+def base_cache_ok(ver, dev):
+    """기준 데이터 캐시(5.5 load_base)가 지금 학습 파일 그대로인지 (위치·크기·수정 시각)."""
+    csv_p, _ = version_files(None, ver, dev)
+    meta = read_json(CACHE / "base" / f"{ver['name']}_{dev}.json", None) or {}
+    try:
+        st = csv_p.stat()
+    except OSError:
+        return False
+    return ((CACHE / "base" / f"{ver['name']}_{dev}.parquet").exists() and meta.get("src") == str(csv_p)
+            and meta.get("size") == st.st_size and meta.get("mtime") == st.st_mtime)
+
+
+def models_cache_ok(ver, dev):
+    """기준 모델 4개(5.5 base_models)를 지금 기준 데이터 캐시로 학습해 저장해 두었는지."""
+    key = read_json(CACHE / "base" / f"{ver['name']}_{dev}.json", None)
+    if not key:
+        return False
+    for cfg in ("34", "43"):
+        for m in ("rf", "lgbm"):
+            p = CACHE / "models" / ver["name"] / f"{dev}_{cfg}_{m}.joblib"
+            meta = read_json(p.with_suffix(".json"), None) or {}
+            meta.pop("cols", None)
+            if not p.exists() or meta != key:
+                return False
+    return True
+
+
+def dataset_rows():
+    """08_dataset 날짜별 줄 수 (날짜 폴더 summary.json 의 events, 두 장비가 같음)."""
+    return {d: int((read_json(DATASET / d / "summary.json", {}) or {}).get("events") or 0) for d in dataset_dates()}
+
+
+def compare_estimate(base_name, rows_by_date=None):
+    """비교 전 장비별 상태·추정 (화면 6 과 실행기의 처음 계획이 같이 씀): 지난 비교(시각·행 수·스냅숏), 그 뒤 바뀌거나
+    새로 생긴 날짜, 새로 비교할 행 수 추정(est_new), 전체 행 수·로그 크기, 확정된 버전에서 이미 비교한 샘플 수(어림),
+    기준 데이터·기준 모델 캐시가 있는지."""
+    rows_by_date = dataset_rows() if rows_by_date is None else rows_by_date
+    v = load_versions()
+    try:
+        ver = get_version(v, base_name) if base_name else None
+    except ValueError:
+        ver = None
+    out = {}
+    for dev in DEVICES:
+        s = read_json(compared_files(base_name, dev)["summary"], None) if ver else None
+        d = {"has": bool(s), "total": sum(rows_by_date.values())}
+        if s:
+            ls = s.get("log_stats") or {}
+            d.update(created_at=s.get("created_at"), rows=s.get("rows"), snapshot=s.get("snapshot"), mode=s.get("mode"),
+                     changed=[x for x, st in ls.items() if log_stat(x, dev) != st],
+                     new_dates=[x for x in rows_by_date if x not in ls and log_path(x, dev)])
+            t = (s.get("tables") or {}).get("날짜별") or {}
+            k = (t.get("cols") or [""]).index("합계") if "합계" in (t.get("cols") or []) else None
+            prev = {r[0]: r[k] for r in t.get("rows", [])} if k is not None else {}
+            d["est_new"] = sum(n if x in d["new_dates"] else max(0, n - prev.get(x, 0)) for x, n in rows_by_date.items()
+                               if x in d["new_dates"] or x in d["changed"])
+        else:
+            d["est_new"] = d["total"]
+        d["bytes"] = sum(st[1] for st in (log_stat(x, dev) for x in rows_by_date) if st)
+        try:                                                              # 지문 한 줄 = 20자 + 줄바꿈
+            d["excluded"] = sum(p.stat().st_size // 21 for p in (VERDIR / n / f"{dev}_considered.txt"
+                                                                 for n in chain(v, base_name)) if p.is_file()) if ver else 0
+        except (OSError, ValueError):
+            d["excluded"] = 0
+        d["base_cached"] = bool(ver) and base_cache_ok(ver, dev)
+        d["models_cached"] = bool(ver) and models_cache_ok(ver, dev)
+        out[dev] = d
+    return out
+
+
+def _first(*xs):
+    return next(x for x in xs if x is not None)
+
+
+def _old(sec, cached, limit):
+    """예전 timing.json 은 캐시를 썼는지 따로 적지 않았다 → limit 초보다 짧으면 캐시를 쓴 시간으로 본다."""
+    return sec if sec is not None and (sec < limit) == cached else None
+
+
+def past_median(timing, tkey):
+    """지난 실행 시간 = 최근 3번의 중앙값 (timing.json 의 hist, 5.0 실행기가 끝까지 성공한 실행마다 남김).
+    한 번 다른 계산과 겹쳐 느렸던 실행에 예상이 끌려가지 않게. 규모에 비례하는 단계는 행·바이트당 초."""
+    h = (timing.get("hist") or {}).get(tkey)
+    return statistics.median(h) if h else None
+
+
+def compare_plan(base_name, devs, mode="new", include_compared=False, timing=None, est=None):
+    """비교 실행 계획 [{key, dev, short, text, expected_s, tkey, per}] - 단계마다 지난 실행 시간(cache/timing.json 의 tkey,
+    최근 3번 중앙값)으로 잰 예상 시간. 화면 6 의 '예상'과 실행기의 전체 진행률(5.0 RunCtx)이 같이 쓴다.
+      기준 데이터·기준 모델  캐시가 있으면 지난 '캐시 읽기' 시간, 없으면 지난 '만들기·학습' 시간 (기록이 없으면 3·20초 / 200·240초)
+      읽기       로그 바이트당 지난 시간 × 지금 로그 크기
+      피처       고정 시간(캐시 읽기·합치기) + 새로 계산할 payload 수 ÷ 초당 처리 수
+      등급·저장  행당 지난 시간 × 비교할 행 수        (per = 그 규모를 실행기가 note 로 남기는 키)
+    est = compare_estimate() 의 장비별 값. 실행 중에 안 값(n_rows 비교할 행 수, n_new 새 payload 수)이 있으면 그 값을 쓰고,
+    같은 08_dataset 을 읽는 다른 장비의 추정에도 쓴다 (IPS 를 읽고 나면 WAF 예상도 고쳐짐)."""
+    timing = read_json(CACHE / "timing.json", {}) if timing is None else timing
+    est = compare_estimate(base_name) if est is None else est
+
+    def fact(dev, k, same):                                # 실행 중에 안 값 (이 장비, 없으면 같은 데이터의 다른 장비)
+        e = est.get(dev) or {}
+        if k in e:
+            return e[k]
+        return next((x[k] for d, x in est.items() if d != dev and k in x and x.get(same) == e.get(same)), None)
+
+    plan = [{"key": "prep", "dev": "", "short": "준비", "text": "준비 (계산 모듈·피처 코드 읽기)",
+             "expected_s": _first(past_median(timing, "compare:prep"), timing.get("compare:prep"), 10.0), "tkey": "compare:prep"}]
+    for dev in devs:
+        e = est.get(dev) or {}
+        h = lambda k, dev=dev: past_median(timing, f"compare:{dev}:{k}")     # 최근 3번 중앙값
+        t = lambda k, dev=dev: timing.get(f"compare:{dev}:{k}")              # 마지막 실행 (hist 가 없을 때)
+        total, nbytes = e.get("total") or 0, e.get("bytes") or 0
+        rows = _first(fact(dev, "n_rows", "total"), max(0, total - (0 if include_compared else e.get("excluded") or 0)))
+        new = _first(fact(dev, "n_new", "total" if mode == "all" else "est_new"), total if mode == "all" else e.get("est_new") or 0)
+        rate = timing.get(f"feat_rows_per_sec_{dev}") or 120.0
+        bc, mc = bool(e.get("base_cached")), bool(e.get("models_cached")) and mode != "all"
+        per = lambda k, now: None if h(k) is None else h(k) * now                         # 행·바이트당 × 지금 규모
+        last = lambda k, now, then: None if t(k) is None else t(k) * now / t(then) if t(then) else t(k)
+        exp = {"base": (_first(h("base:cached"), t("base:cached"), _old(t("base"), True, 60), 3.0) if bc else
+                        _first(h("base:build"), t("base:build"), _old(t("base"), False, 60), 200.0)),
+               "model": (_first(h("model:cached"), t("model:cached"), _old(t("model"), True, 120), 20.0) if mc else
+                         _first(h("model:train"), t("model:train"), _old(t("model"), False, 120), 240.0)),
+               "read": _first(per("read", nbytes), last("read", nbytes, "read_bytes"), 5 + nbytes / 3e6),
+               "feat": _first(h("feat:fixed"), t("feat:fixed"), _old(t("feat"), True, 60), 15.0) + new / rate,
+               "grade": _first(per("grade", rows), last("grade", rows, "rows"), 5 + rows * 3e-4),
+               "save": _first(per("save", rows), last("save", rows, "rows"), 5 + rows * 1.2e-4)}
+        tkey = {"base": "base:cached" if bc else "base:build", "model": "model:cached" if mc else "model:train"}
+        scale_key = {"read": "read_bytes", "grade": "rows", "save": "rows"}
+        for step, short in COMPARE_STEPS:
+            p = {"key": f"{dev}:{step}", "dev": dev, "short": short, "text": compare_step_text(dev, step, base_name, mode),
+                 "expected_s": round(max(0.5, exp[step]), 1), "tkey": f"compare:{dev}:{tkey.get(step, step)}"}
+            if step in scale_key:
+                p["per"] = f"compare:{dev}:{scale_key[step]}"
+            if step == "feat":
+                p["n"] = int(new)
+            plan.append(p)
+    return plan
