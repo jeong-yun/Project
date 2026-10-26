@@ -159,7 +159,7 @@ def test_good_answer_passes_and_parses():
 
 
 def test_bad_answer_reports_each_rule():
-    bad_entry = GOOD_ENTRY.replace("학습 안정성 향상.", "학습 안정성이 완벽하게 향상된다.\n - 성능이 크게 상승한다.").replace(
+    bad_entry = GOOD_ENTRY.replace("학습 안정성 향상.", "학습 안정성이 완벽하게 향상된다.\n - 성능이 크게 상승한다.\n - 메모리도 줄어든다.").replace(
         "https://arxiv.org/abs/2503.14476", "URL 없음").replace("유사: 그룹 이점 / ", "")
     problems = concept.check_answer(answer_with(bad_entry, {**PLAN, "category": "Etc"}))
     text = " ".join(problems)
@@ -192,8 +192,10 @@ def test_normalize_entry_to_catalog_style():
     norm = concept.normalize_entry(raw)
     lines = norm.splitlines()
     assert lines[0] == "[Perf]DAPO(Decoupled Clip) (작성일: 26.10.20)"
-    assert "1. 정의 및 개념" in lines and "2. 작동 원리" in lines and "6. 관계(기존 개념과 비교)" in lines
-    assert " - PPO 기반 RL 알고리즘" in lines and "  ○ 상·하한 분리" in lines and " - 등장 배경" in lines
+    assert "1. 정의 및 개념" in lines and "2. 작동 원리" in lines and "6. 관계 (기존 개념 비교)" in lines
+    # 들여쓴 하위 불릿은 '○' 로 바꾸지 않고 그대로, 참고 문헌은 마지막 절 다음 번호 (카탈로그 형식)
+    assert " - PPO 기반 RL 알고리즘" in lines and "  - 상·하한 분리" in lines and " - 등장 배경" in lines
+    assert "7. 참고 문헌" in lines
     assert lines[-1].startswith(" - [논문·핵심기법]") and "" not in lines
     assert concept.check_entry(norm) == []  # 'Qwen2.5' 의 '2.' 에 속지 않음
 
