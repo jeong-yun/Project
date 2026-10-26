@@ -321,16 +321,33 @@
 - 작업: `core/feedback_sync.py` — 교훈(`lessons.jsonl`)·결정 요약(`decisions.jsonl`)·읽기용 `교훈.md` 를 내보내고, 새 PC 에서는 DB 에 없는 교훈만 가져옴(같은 교훈 중복 없음). 교훈 끝에 붙는 '사람 코멘트' 원문은 공개 파일에서 떼고, 질문·답변·코멘트·사용량·API 키는 내보내지 않음. 저장소 계층(`Storage`)에서 결정·교훈이 바뀔 때마다 자동 동기화 — `AGENT_OFFICE_KNOWLEDGE_DIR` 가 있을 때만(실행용 bat), 내용이 같으면 다시 쓰지 않아 git 변경이 생기지 않음, 실패해도 결정은 저장. 수동 스크립트 `scripts/sync_feedback.py`
 - 성과: 기존 교훈 36개·결정 요약 5건을 내보냄 — 개인 정보·코멘트 원문 0건 확인. 테스트 6건 추가(개인 정보 제외, 안정적 출력·끈 교훈 표시, 자동 동기화 조건, 새 PC 가져오기·중복 없음, 코멘트 떼기, 실패 무시)
 
+## 2026-10-26
+
+**🎛 팀원별 모델 선택 — 상하 관계 규칙(부하는 상사보다 낮은 모델)**
+- 배경: 특정 API 를 너무 많이 쓰지 않도록 에이전트마다 모델을 사람이 고르고 싶음. 단, 부장을 Claude Opus 5.5 로 고르면 그 아래 직급은 더 낮은 모델이 되어야 함
+- 작업
+  - 모델 강도 순서: `config/models.yaml` 에 `model_tiers`(위 = 가장 강함, 12줄 — Opus 5.5(구독·API) > GPT-5.5 > GPT-5.4·Sonnet 5.5 > Gemini 3.8 Flash > GPT-5.4-mini > … > 무료 모델). 무료(freellm) 모델은 하루 한도·속도 때문에 같은 이름의 유료 모델보다 아래. `validate_config` 가 형식·중복·누락(직급·보조·팀 override 에 쓰인 모델이 모두 있는지)을 검사
+  - 규칙(`core/member_models.py`): 팀원은 상사(팀장까지 위쪽 모두)보다 강한 모델 불가, 상사를 **직접 고르면** 그 아래는 **더 낮은** 줄만. '기본' 팀원은 직급 primary 로 보고, 기본 상사와는 같은 강도까지 허용 — 팀장 기본값이 이미 최강(Opus)이라 엄격 규칙이면 '부장 = Opus' 자체가 불가능하고, 지금 직급 설정에도 같은 강도 쌍(대리 대안 = 차장 primary)이 있어서. 상사를 바꿔 규칙에 걸리면 '허용되는 가장 강한 모델'로 자동 낮춤(직접 고른 팀원은 저장값 변경, 기본 팀원은 저장 없이 그때만 → 상사를 되돌리면 복귀) + 누가 바뀌었는지 알림. 하위가 있는 팀원은 맨 아래 줄 선택 불가(하위 몫 남기기)
+  - 실행: 고른 모델이 primary, 대안은 직급 목록에서 상사 규칙을 넘는 것을 뺌(대안으로 규칙을 넘지 않음). 본인·상사 아무도 안 골랐으면 직급 설정 그대로(완전히 같음). 워크플로우를 만들 때 한 번 계산해 에이전트에 넣으므로 진행 중인 업무는 시작할 때의 모델 유지. disabled_providers·무료 모델만·쿨다운·동시 호출 제한은 llm_factory 가 그대로 처리
+  - 화면: 팀 화면 조직도 아래 '🎛 팀원 모델 선택' — 조직도 순서·들여쓰기, 선택지 = 모델 · 제공처 · 비용(구독/유료 API/무료) · 상태 아이콘, '기본'은 직급 설정(규칙에 걸리면 '🔽 기본(자동 제한)'), 최근 7일 팀원별 호출 수·토큰·주로 쓴 모델, ↩️ 모두 기본으로. 조직도 칸·에이전트 패널·결정 전 문의도 선택한 모델로 표시·실행
+  - 저장: 데이터 폴더 `member_models.json`(임시 파일 → 교체로 원자적 쓰기, 깨진 파일은 무시). config/*.yaml 은 건드리지 않음
+  - 팀원별 사용량: 워크플로우 스레드에서 `usage.scope(agent_id=…)` → 사용량 표에 `agent_id` 칸 추가(예전 DB 는 자동으로 칸 추가), `Storage.usage_by_agent`
+- 기술: 트리 위→아래 한 번 순회로 '허용 하한 줄(floor)' 전파(직접 고른 상사는 +1 엄격, 기본 상사는 같은 줄까지), 고정점 반복으로 연쇄 낮춤, Streamlit 위젯 콜백 + 세션 상태를 저장값으로 맞추기(자동 낮춘 값이 선택 상자에 바로 반영), 제목 고정 expander(고를 때 접히지 않게), ContextVar 기반 사용량 태깅, SQLite ALTER TABLE 마이그레이션
+- 성과: 브라우저 미리보기(8517 포트, 임시 데이터 폴더)에서 부장 = Opus → 차장 선택지에서 Opus 사라짐, 차장 = GPT-5.5 → 부장 = GPT-5.4 로 바꾸자 차장이 Gemini 3.8 Flash 로 자동 낮아지고 알림 표시, 새로 고침 후에도 유지 확인
+- 테스트: 20건 추가(`tests/test_member_models.py` — 강도 순서 검증(누락·중복·형식·팀 override), 6개 팀 전체 기본 = 지금과 같음, 부장 Opus → 하위 제한, 기본 상사와 같은 강도까지, 관리자 맨 아래 줄 불가, 자동 낮춤·연쇄·되돌리기, 손으로 고친 저장값도 실행 때 규칙 적용, 대안 상한, 비활성·무료만과 함께, 저장·깨진 파일, 워크플로우 반영·팀원별 사용량 태깅, 예전 DB 마이그레이션, 선택 화면 AppTest)
+- 한계/다음 할 일: 팀원별 사용량은 이 기능 이후 호출부터(예전 기록엔 에이전트 정보 없음), 비평가 호출은 그 검토자에게 합산. 고른 모델이 안 될 때 직급 대안이 고른 모델보다 강할 수 있음(상사 규칙만 지킴) — '대안도 내 선택 이하로'가 필요하면 옵션으로 추가 검토
+
 ---
 
 ## JD / 이력서용 요약 (누적)
 
-- **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
+- **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
 - **프로젝트 한 줄 소개**: 사용자가 supervisor 에게 '최종 상태'를 맡기면 전문가 에이전트 트리가 분배·작성·적대적 검토·통합하고, 비평가·하네스(코드 검증)로 확인한 결과를 사람이 묻고·고치고·채택하면 각 에이전트가 교훈을 학습하는 멀티 에이전트 프레임워크 — 범용·주식·여행·IT 개념·음악·설계 6개 전문 팀 (팀 추가는 YAML + 도구)
 - **대표 구현**
   - 주식: LLM 이 쓴 가중 점수·평균가·손익비·평단을 코드로 재계산해 틀리면 정답 값으로 재작성 (검증 가능한 보상)
   - IT 개념 카탈로그: 추가/수정 자동 판정 → 편집 팀 검증 → 사람 승인 → 파일 반영 → GitHub 커밋·푸시까지 자동화
   - 음악: 가사·프롬프트 형식 하네스 → Gemini Lyria 생성 → Gemini 가 듣고 채점 → 자연어 편집 요청을 화이트리스트 연산 계획으로 바꿔 CPU 로 실행·측정
+  - 모델 거버넌스: 사람이 에이전트마다 모델을 고르되 '부하는 상사보다 낮은 모델' 규칙을 조직도 트리에 강제 — 상사 변경 시 하위 자동 낮춤, 대안 모델도 상한 적용, 팀원별 호출·토큰 집계로 과다 사용 API 를 확인
   - 설계: LLM 은 방 프로그램(구역·이웃·묶음·외곽 유형)만, OR-Tools CP-SAT 배치 엔진이 좌표를, 코드가 검증(겹침·면적·동선·계단·장단변비·복도 몫·채광)·후보안 비교·DXF·3D(GLB·STL·IFC)를 생성
 - **정량 성과**
   - 주식(삼성전자 전망)·여행(오사카 3박 4일) 팀 실측 평가 PRM 100%·ORM 통과 — 숫자·날짜는 코드 계산값 인용 (2026-10-19)

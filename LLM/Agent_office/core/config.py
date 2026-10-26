@@ -161,6 +161,7 @@ def validate_config(ranks: list[Rank], models: ModelsConfig, teams: list[Team]) 
     missing = rank_ids - models.ranks.keys()
     if missing:
         raise ConfigError(f"models.yaml 에 모델이 지정되지 않은 직급: {sorted(missing)}")
+    validate_model_tiers(models, teams)
     for team in teams:
         unknown = (team.personas.keys() | team.model_overrides.keys()) - rank_ids
         if unknown:
@@ -193,6 +194,28 @@ def validate_config(ranks: list[Rank], models: ModelsConfig, teams: list[Team]) 
         task_ids = [t.id for t in team.tasks]
         if len(task_ids) != len(set(task_ids)):
             raise ConfigError(f"teams/{team.id}/team.yaml 에 중복된 업무 id 가 있습니다: {task_ids}")
+
+
+def used_model_keys(models: ModelsConfig, teams: list[Team] = ()) -> set[str]:
+    """설정에 쓰인 모든 모델 ("provider:model") — 직급·보조 작업·팀 override."""
+    chains = [*models.ranks.values(), models.utility, *[rm for t in teams for rm in t.model_overrides.values()]]
+    return {f"{s.provider}:{s.model}" for chain in chains for s in chain.candidates}
+
+
+def validate_model_tiers(models: ModelsConfig, teams: list[Team] = ()) -> None:
+    """models.yaml 의 model_tiers(모델 강도 순서)가 올바른가 — 형식, 중복, 쓰인 모델이 모두 들어 있는지."""
+    listed = [key for tier in models.model_tiers for key in tier]
+    bad = [k for k in listed if k.partition(":")[0] not in models.providers or not k.partition(":")[2]]
+    if bad:
+        raise ConfigError(f"models.yaml model_tiers 형식 오류 (provider:model, provider 는 {sorted(models.providers)}): {bad}")
+    dup = sorted({k for k in listed if listed.count(k) > 1})
+    if dup:
+        raise ConfigError(f"models.yaml model_tiers 에 두 번 나온 모델: {dup}")
+    if any(not tier for tier in models.model_tiers):
+        raise ConfigError("models.yaml model_tiers 에 빈 줄([])이 있습니다.")
+    missing = used_model_keys(models, teams) - set(listed)
+    if missing:
+        raise ConfigError(f"models.yaml model_tiers(모델 강도 순서)에 없는 모델: {sorted(missing)} — 알맞은 줄에 넣어 주세요.")
 
 
 def rank_models(rank_id: str, models: ModelsConfig, team: Team | None = None) -> RankModels:
