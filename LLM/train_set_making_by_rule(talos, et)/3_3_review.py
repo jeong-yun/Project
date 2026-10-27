@@ -54,9 +54,19 @@ C = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(C)
 
 # 검토 모델이 '안전' 을 이유로 샘플을 뺐거나 거절한 문장 (이 룰은 대체 모델로 다시 검토). 2026-10-26 gpt-6-luna 의 삭제 이유
 # 8,679개를 보고 정함 (gpt-5 가 뺀 이유 49개에는 하나도 안 걸림). 잘못 걸려도 대체 모델로 한 번 더 검토할 뿐 샘플을 빼지 않는다.
+# 2026-10-27: 화면 '검토에서 뺀 샘플' 의 '안전상 이유' 문구(0_0_run_ui.py EXCL_SAFETY)도 합쳤다 - 화면은 안전상 이유인데
+# 다시 만들기 대상이 아닌 344개가 있었음 ("도움을 줄 수 없어 제외", "cannot safely validate", "무해하게 만드는 수정은 어렵" 등).
+# 두 곳을 바꿀 때는 함께 맞춘다.
 SAFETY_RE = re.compile(r"안전|지원할 수 없|도울 수 없|도와드릴 수 없|도움을 드릴 수 없|제공할 수 없|보존하거나|보완할 수 없|"
                        r"실행 가능한|구체화|악용|무기화|만들 수 없|재현.{0,12}(수 없|어렵)|"
-                       r"can.?t (help|assist)|cannot (help|assist|provide)|unable to (help|assist)|I.?m sorry", re.I)
+                       r"can.?t (help|assist)|cannot (help|assist|provide)|unable to (help|assist)|I.?m sorry|"
+                       # 화면 '안전상 이유' 문구 (0_0_run_ui.py EXCL_SAFETY)
+                       r"위험|익스플로잇|무해|피해 없|재현 가능|운영 가능|보존(하거나|할 수 없|해 줄 수 없)|"
+                       r"재현(하거나|할 수 없|용)|재구성할 수 없|보정(하지 않|할 수 없)|보강할 수 없|검증·정제할 수 없|"
+                       r"도움(이 될 수|을 줄 수 없|을 드릴 수 없)|승인하거나|공격 (실행|코드|입력을 만들|요청이라|요청으로 (바꿔야|수정할 수 없))|"
+                       r"페이로드를 재작성할 수 없|실행 페이로드|명령 (실행|주입|치환) (요청이라|페이로드|기능|공격)|콜백을 유도|다운로드 후 실행|"
+                       r"서비스 중단|설정 손실|DoS 트리거|(노출|권한 상승)을 유발|열거 기능을 유지|하드코(딩|드)된 (자격|인증)|파괴적 명령|"
+                       r"exploit|weapon|safety|safely|unsafe|harm|can(not|'t) (assist|help|provide|preserve|keep|convert)|refus", re.I)
 AUG_DIR = "_4_augmented"                       # 3_4_augment.py 와 같음
 
 
@@ -265,8 +275,20 @@ def _first_verdicts(raws, ids):
     return got
 
 
+def _fallback_verdicts(rv, name, ids):
+    """예전 대체 검토에서 받은 대체 모델 판정 (raw/<이름>.fb.try<n>.txt·.fb2.try<n>.txt…, 미리 받아 다시 쓴 것은 .fb.reuse.txt)."""
+    got = {}
+    for raw in sorted((rv / "raw").glob(f"{name}.fb*.txt")):
+        for o in C.parse_json_lines(raw.read_text(encoding="utf-8", errors="replace")):
+            if isinstance(o, dict) and o.get("id") in ids:
+                got.setdefault(o["id"], o)
+    return got
+
+
 def redo_candidates(bases, fb_model):
-    """이미 검토한 요청 중 처음 모델이 거절했거나 '안전' 사유로 뺀 룰이 있는 것 → [(날짜 폴더, 이름, 옛 meta, 처음 판정)]."""
+    """이미 검토한 요청 중 처음 모델이 거절했거나 '안전' 사유로 뺀 룰이 있고, 그 룰을 아직 대체 모델에 보내지 않은 것
+    → [(날짜 폴더, 이름, 옛 meta, 처음 판정)]. 대체 모델에 이미 보낸 룰은 다시 보내지 않는다 (대체 모델도 거절·제외한 샘플은
+    제외로 남음). 2026-10-27~: 대체 검토를 한 요청도 그때 보내지 않은 룰(안전 문구를 넓혀 새로 걸린 룰 등)이 있으면 대상."""
     out = []
     for base in bases:
         rv = base / C.REV_DIR
@@ -276,14 +298,15 @@ def redo_candidates(bases, fb_model):
             except ValueError:
                 continue
             name = meta.get("request") or m.name[:-len(".meta.json")]
-            if meta.get("fallback") or meta.get("reviewer") in (None, fb_model):
+            if meta.get("reviewer") in (None, fb_model):
                 continue
             gen_p, req_p = base / C.GEN_DIR / f"{name}.jsonl", base / C.REQ_DIR / f"{name}.jsonl"
             if not (gen_p.exists() and req_p.exists()):
                 continue
             ids = {g["id"] for g in C.read_jsonl(gen_p)}
             prim = _first_verdicts(sorted((rv / "raw").glob(f"{name}.try*.txt")), ids)
-            if any(rid not in prim or safety_dropped(prim[rid]) for rid in ids):
+            sent = set((meta.get("fallback") or {}).get("rules") or {})        # 예전 대체 검토에서 보낸 룰
+            if any((rid not in prim or safety_dropped(prim[rid])) and rid not in sent for rid in ids):
                 out.append((base, name, meta, prim))
     return out
 
@@ -327,10 +350,14 @@ def redo_safety(args, cfg, providers, run, log, workers):
         rules = C.read_jsonl(base / C.REQ_DIR / f"{name}.jsonl")
         gens = C.read_jsonl(base / C.GEN_DIR / f"{name}.jsonl")
         rev_dir = base / C.REV_DIR
-        given, fb_usage = None, None
+        # 예전 대체 검토에서 이미 보낸 룰: 그때 받은 판정은 그대로 다시 쓰고 다시 묻지 않는다 (그때 거절한 룰은 '검토 거절' 로 남음)
+        sent = set((old.get("fallback") or {}).get("rules") or {})
+        given = _fallback_verdicts(rev_dir, name, sent) if sent else None
+        fb_usage = (old.get("usage") or {}).get("reviewer_fallback") if sent else None
         if reuse and (reuse / base.name / "raw" / f"{name}.try1.txt").exists():      # 미리 대체 모델로 검토한 원문 (시험)
             src = reuse / base.name / "raw" / f"{name}.try1.txt"
-            given = {o["id"]: o for o in C.parse_json_lines(src.read_text(encoding="utf-8")) if isinstance(o, dict) and o.get("id")}
+            given = dict(given or {}, **{o["id"]: o for o in C.parse_json_lines(src.read_text(encoding="utf-8"))
+                                         if isinstance(o, dict) and o.get("id")})
             (rev_dir / "raw").mkdir(parents=True, exist_ok=True)
             (rev_dir / "raw" / f"{name}.fb.reuse.txt").write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
             m2 = reuse / base.name / f"{name}.meta.json"
@@ -341,10 +368,12 @@ def redo_safety(args, cfg, providers, run, log, workers):
             by_id = {g["id"]: g for g in gens}
             need = [i for i in review_items(rules, by_id) if i["rule"]["id"] not in prim or safety_dropped(prim[i["rule"]["id"]])]
             usage = {}
-            rest = [i for i in need if i["rule"]["id"] not in (given or {})]
+            rest = [i for i in need if i["rule"]["id"] not in (given or {}) and i["rule"]["id"] not in sent]
             last2 = ""
             if rest:
-                v2, last2 = ask(name, "fb.try", rest, fb, providers, run, prompt, rev_dir, log, usage, "reviewer_fallback")
+                # 원문 파일 이름: 처음 다시 만들기는 fb.try<n>, 그 뒤는 fb2.try<n>… (예전 대체 모델 원문을 덮어쓰지 않게)
+                tag = f"fb{len(list((rev_dir / 'raw').glob(f'{name}.fb*.try1.txt'))) + 1}.try" if sent else "fb.try"
+                v2, last2 = ask(name, tag, rest, fb, providers, run, prompt, rev_dir, log, usage, "reviewer_fallback")
                 if not v2 and not last2:                # 깨진 응답(거절 아님) → 옛 결과 그대로, 다음 '다시 만들기' 때 다시
                     raise C.LLMError(f"{name}: 대체 모델 응답을 해석하지 못함")
                 # 대체 모델도 거절한 룰은 '검토 거절' 로 남기고 다시 만들기 대상에서도 뺀다 (계속 안 만들어지는 샘플은 제외)

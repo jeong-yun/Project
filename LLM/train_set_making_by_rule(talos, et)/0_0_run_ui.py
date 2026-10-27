@@ -2234,11 +2234,13 @@ def _excl_request(date, rev, gen, name, has_rej, fb, safety):
     rej = _jsonl(rev / f"{name}.rejected.jsonl") if has_rej else []
     if not rej:
         return out
-    # 다시 만들기 대상: 아직 대체 검토를 안 한 요청에서 처음 검토 모델이 판정하지 않았거나(응답 거절, '검토 거절' 단계)
-    # 안전 사유로 뺀 샘플이 있는 룰 (3_3 redo_candidates 와 같은 기준. 2026-10-27 전 실행에서 판정 없이 통과된 룰은 여기서 셀 수 없음)
-    if fb and not fbk and model not in ("?", fb):
-        out["cand"] = {r.get("id") for r in rej if r.get("stage") == "검토 거절"
-                       or (r.get("stage") == "검토" and safety.search(str(r.get("reason", ""))))}
+    # 다시 만들기 대상: 처음 검토 모델이 판정하지 않았거나(응답 거절, '검토 거절' 단계) 안전 사유로 뺀 샘플이 있는 룰 중
+    # 아직 대체 모델에 보내지 않은 룰 (3_3 redo_candidates 와 같은 기준 - 대체 검토를 한 요청도 그때 보내지 않은 룰은 대상.
+    # 2026-10-27 전 실행에서 판정 없이 통과된 룰은 여기서 셀 수 없음)
+    sent = set(fbk.get("rules") or {})
+    if fb and model not in ("?", fb):
+        out["cand"] = {r.get("id") for r in rej if r.get("id") not in sent and (r.get("stage") == "검토 거절"
+                       or (r.get("stage") == "검토" and safety.search(str(r.get("reason", "")))))}
     g_by = {g.get("id"): g for g in _jsonl(gen / f"{name}.jsonl") if isinstance(g, dict)}
     for rid, g in g_by.items():
         out["att"][rid] = [sum(1 for s in g.get("samples", []) if isinstance(s, dict) and s.get("label") == "anomalies"), 0]
