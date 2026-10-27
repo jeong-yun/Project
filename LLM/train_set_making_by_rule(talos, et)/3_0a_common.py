@@ -1,7 +1,7 @@
 """[3.0a 3.x 보조] LLM 데이터 생성 단계(3_1 ~ 3_4)가 함께 쓰는 기능. 직접 실행하지 않는다.
 
   - 경로·로그·.env·설정 md(LLM_설정.md) 읽기
-  - LLM 호출 (provider: upstage / openai / anthropic / mock)
+  - LLM 호출 (provider: upstage / openai / anthropic / claude_cli(이 PC 의 Claude 로그인으로 claude -p) / mock)
   - LLM 응답에서 JSON 꺼내기
   - 코드 검사(local_check): 샘플을 룰 조건(content·정규식·부정 조건)과 기계적으로 대조
 
@@ -19,7 +19,10 @@ import logging
 import os
 import random
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -242,6 +245,15 @@ class LLMError(Exception):
     pass
 
 
+# 다른 요청도 같은 이유로 실패하므로 그 실행을 멈출 오류 (설정·키·모델 이름, 크레딧 없음, Claude CLI 로그인·구독 사용 한도)
+FATAL_MARKS = ("가 없습니다", "HTTP 401", "HTTP 403", "HTTP 404", "크레딧 없음", "Claude CLI 를 찾지 못",
+               "Claude CLI 로그인", "Claude 구독 사용 한도")
+
+
+def is_fatal(e):
+    return any(m in str(e) for m in FATAL_MARKS)
+
+
 def _post(url, headers, body, timeout):
     """→ (응답 JSON, 응답 헤더 {소문자 이름: 값})."""
     req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
@@ -319,6 +331,121 @@ def _retry_after(e):
         return None
 
 
+# ── Claude Code CLI (provider 형식 claude_cli) ──
+# 이 PC 에 로그인된 Claude 계정(구독)으로 `claude -p` 를 불러 글만 받는다 (API 키·크레딧을 쓰지 않음).
+# 구독 사용 한도는 사람이 직접 쓰는 Claude 대화·Claude Code 와 함께 쓴다. 호출 1번 = claude 프로세스 1개 (시작 약 10초).
+CLAUDE_CLI_ENV = "CLAUDE_CLI_PATH"       # claude 실행 파일 경로 (.env 에 넣어도 됨, 비우면 아래 순서로 찾음)
+_CLI_LOGIN = ("not logged in", "/login", "invalid api key", "oauth token has expired", "authentication_failed",
+              "oauth_org_not_allowed", "account_on_hold")
+_CLI_LIMIT = ("usage limit", "hit your limit", "limit reached", "rate limit", "rate_limit", "out of extra usage",
+              "billing_error")
+_CLI_BUSY = ("overloaded", "server_error", "api error: 5", "529")
+
+
+def claude_cli_path(p=None):
+    """claude 실행 파일: provider 표 claude_cli 의 'API 주소' 칸 → CLAUDE_CLI_PATH → PATH → ~/.local/bin →
+    데스크톱 앱에 들어 있는 Claude Code (%LOCALAPPDATA%/Claude-Data/*/claude-code/<버전>/*/claude.exe 중 가장 최근)."""
+    for given in ((p or {}).get("url"), os.environ.get(CLAUDE_CLI_ENV)):
+        given = (given or "").strip()
+        if given and given != "-":
+            return given if Path(given).is_file() else shutil.which(given)
+    found = shutil.which("claude")
+    if found:
+        return found
+    for f in (Path.home() / ".local" / "bin" / "claude.exe", Path.home() / ".local" / "bin" / "claude"):
+        if f.is_file():
+            return str(f)
+    local = os.environ.get("LOCALAPPDATA")
+    bundled = sorted(Path(local).glob("Claude-Data/*/claude-code/*/*/claude.exe"), key=lambda f: f.stat().st_mtime) if local else []
+    return str(bundled[-1]) if bundled else None
+
+
+def _claude_cli_env():
+    """자식 CLI 의 환경변수: API 키(ANTHROPIC_*)와 부모 Claude Code 세션의 설정(CLAUDECODE·CLAUDE_CODE_*·CLAUDE_EFFORT 등)을 빼서
+    구독 로그인·CLI 기본값으로 돌게 한다. 로그인에 쓰는 CLAUDE_CONFIG_DIR·CLAUDE_CODE_OAUTH_TOKEN(`claude setup-token`)은 남긴다."""
+    keep = ("CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN")
+    return {k: v for k, v in os.environ.items()
+            if not (k.upper().startswith(("ANTHROPIC_", "CLAUDE")) and k.upper() not in keep)}
+
+
+def _kill_tree(proc):
+    """시간 초과한 claude 와 그 자식까지 끝낸다 (자식이 출력 파이프를 잡고 있으면 끝날 때까지 기다리게 됨)."""
+    if sys.platform == "win32":
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        proc.kill()
+
+
+def _cli_result(stdout):
+    """--output-format json 출력에서 결과 JSON (type = result). 없으면 None."""
+    for line in reversed((stdout or "").strip().splitlines()):
+        if line.strip().startswith("{"):
+            try:
+                data = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(data, dict) and data.get("type") == "result":
+                return data
+    return None
+
+
+def _call_claude_cli(cfg, p, system, user, run, log):
+    """claude -p 한 번 → (응답 텍스트, 사용량). 도구·CLAUDE.md·훅·플러그인·MCP·세션 기록 없이(--safe-mode 등) 시스템 프롬프트를
+    지시문으로 바꾸고, 빈 임시 폴더에서 실행한다. max_tokens·temperature 는 쓰지 않는다 (CLI 기본값).
+    로그인 안 됨·구독 사용 한도는 바로 LLMError (그 실행은 멈추고 다음 실행 때 이어서),
+    과부하·시간 초과·결과를 못 읽음은 '재시도 횟수' 만큼 다시 보낸다 (과부하면 동시 요청을 줄임)."""
+    exe = claude_cli_path(p)
+    if not exe:
+        raise LLMError("Claude CLI 를 찾지 못했습니다 - Claude Code(데스크톱 앱 포함)를 설치하거나 .env 에 CLAUDE_CLI_PATH=<claude.exe 경로>")
+    retries, timeout = run_int(run, "재시도 횟수", 3), run_int(run, "응답 대기 시간", 300)
+    gate = cfg.get("throttle") or contextlib.nullcontext()
+    last = None
+    for attempt in range(1, retries + 1):
+        with tempfile.TemporaryDirectory(prefix="ruledata_claude_", ignore_cleanup_errors=True) as d:
+            sp = Path(d) / "system_prompt.txt"            # 명령줄 길이 한도(Windows 32K) 때문에 파일로
+            sp.write_text(system, encoding="utf-8")
+            cmd = [exe, "-p", "--model", cfg["model"], "--output-format", "json", "--system-prompt-file", str(sp),
+                   "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-mode", "dontAsk",
+                   "--permission-prompts", "none", "--disable-slash-commands", "--no-session-persistence"]
+            try:
+                with gate:
+                    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=d,
+                                            env=_claude_cli_env(), creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    try:
+                        out, err = proc.communicate(user.encode("utf-8"), timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        _kill_tree(proc)
+                        proc.communicate()
+                        out, last = None, f"{timeout}초 안에 끝나지 않음 (LLM_설정.md '응답 대기 시간')"
+            except OSError as e:
+                raise LLMError(f"Claude CLI 를 찾지 못했습니다 ({exe}): {e}") from None
+        if out is not None:
+            out, err = out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+            data = _cli_result(out)
+            if data and not data.get("is_error") and data.get("subtype") in (None, "success"):
+                if cfg.get("throttle"):
+                    cfg["throttle"].ok()
+                u = data.get("usage") or {}
+                return str(data.get("result") or ""), {
+                    "input_tokens": sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens",
+                                                                     "cache_creation_input_tokens")),
+                    "output_tokens": int(u.get("output_tokens") or 0),
+                    "finish_reason": "length" if data.get("stop_reason") == "max_tokens" else "stop"}
+            why = (data or {}).get("result") or (data or {}).get("subtype") or err or out
+            last = " ".join(str(why).split())[:300] or f"종료 코드 {proc.returncode}"
+            low = last.lower()
+            if any(t in low for t in _CLI_LOGIN):
+                raise LLMError(f"Claude CLI 로그인이 필요합니다 - 터미널에서 claude 를 실행해 /login 하세요 ({last})")
+            if any(t in low for t in _CLI_LIMIT):
+                raise LLMError(f"Claude 구독 사용 한도 - 한도가 풀린 뒤 다시 실행하면 이어서 합니다 ({last})")
+            if cfg.get("throttle") and any(t in low for t in _CLI_BUSY):
+                cfg["throttle"].limited()                     # 과부하면 동시 요청을 줄인다
+        if attempt < retries:
+            log.warning("  LLM 호출 실패 (%d/%d, %ds 후 재시도): %s", attempt, retries, 10 * attempt, last)
+            time.sleep(10 * attempt)
+    raise LLMError(f"LLM 호출 실패 ({cfg['provider']}:{cfg['model']}): {last}")
+
+
 def call_llm(cfg, providers, system, user, run, log):
     """한 번 호출해 (응답 텍스트, 사용량 dict) 를 돌려준다. 429·5xx·네트워크 오류는 재시도.
     사용량 dict 의 finish_reason: 'stop' = 정상 종료, 'length' = 출력 한도에서 잘림 (반복 루프 등)."""
@@ -332,6 +459,8 @@ def call_llm(cfg, providers, system, user, run, log):
         if cfg.get("throttle"):
             cfg["throttle"].ok()
         return mock_response(user, run), {"input_tokens": 0, "output_tokens": 0, "finish_reason": "stop"}
+    if p["style"] == "claude_cli":
+        return _call_claude_cli(cfg, p, system, user, run, log)
     key = os.environ.get(p["key"], "").strip()
     if not key:
         raise LLMError(f".env 에 {p['key']} 가 없습니다")
@@ -380,6 +509,8 @@ def call_llm(cfg, providers, system, user, run, log):
             detail = e.read().decode("utf-8", "replace")[:300]
             if e.code not in (408, 409, 429) and e.code < 500:
                 raise LLMError(f"HTTP {e.code} ({cfg['provider']}:{cfg['model']}): {detail}") from None
+            if e.code == 429 and ("insufficient_quota" in detail or "credit_balance" in detail):   # 기다려도 안 풀림
+                raise LLMError(f"HTTP 429 ({cfg['provider']}:{cfg['model']}): 크레딧 없음 - 충전 후 다시 실행: {detail}") from None
             last = f"HTTP {e.code}: {detail}"
             if e.code in (429, 503, 529) and cfg.get("throttle"):
                 cfg["throttle"].limited()               # 동시 요청을 줄인다

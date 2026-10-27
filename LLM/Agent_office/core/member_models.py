@@ -14,6 +14,8 @@
     직접 고른 팀원은 저장값을 바꾸고, 기본 팀원은 저장하지 않고 그때그때 낮춘다 (상사를 되돌리면 기본도 돌아온다).
   - 실행 때: 고른 모델이 primary, 대안(fallback)은 직급 목록 그대로 두되 상사 규칙에 걸리는 모델은 뺀다
     → 대안 모델로 넘어가도 규칙을 넘지 않는다. 사용 불가(키 없음·비활성·무료만)·쿨다운·동시 호출 제한은 llm_factory 가 그대로 맡는다.
+  - 무료(freellm) 모델을 쓰게 된 팀원(직접 고름·자동으로 낮춰짐)은 대안도 무료 모델만 — 무료 서버가 꺼져 있어도
+    유료 API·구독으로 넘어가지 않고 '무료 서버 꺼짐'으로 실패한다 (특정 API 를 많이 쓰지 않으려고 고른 것이므로).
   - 본인과 상사 중 아무도 고르지 않았으면 지금과 완전히 같다 (직급 설정 그대로).
 
 저장: 데이터 폴더(AGENT_OFFICE_DATA_DIR)의 member_models.json — {팀 id: {에이전트 id: "provider:model"}}.
@@ -31,6 +33,7 @@ from core.schemas import ModelsConfig, ModelSpec, OrgNode, RankModels, Team
 
 FILE_NAME = "member_models.json"
 COST_LABELS = {"claude_cli": "구독", "freellm": "무료"}  # 그 밖의 provider = 유료 API
+FREE_PROVIDER = "freellm"
 
 
 def model_key(spec: ModelSpec) -> str:
@@ -125,8 +128,14 @@ def allowed_keys(models: ModelsConfig, node: OrgNode, member: MemberPlan) -> lis
     return [k for k in catalog(models) if tiers[k] >= member.floor and not (node.children and tiers[k] >= last)]
 
 
+def free_locked(member: MemberPlan) -> bool:
+    """무료 모델을 쓰게 된 팀원인가 (직접 골랐거나 상사 규칙으로 낮춰짐) → 대안도 무료 모델만."""
+    return member.chosen_on_chain and split_key(member.effective)[0] == FREE_PROVIDER
+
+
 def member_rank_models(member: MemberPlan, models: ModelsConfig, team: Team | None) -> RankModels:
-    """실행 때 쓸 모델 후보 — 고른(또는 낮춰진) 모델이 primary, 대안은 직급 목록에서 상사 규칙에 걸리는 것을 뺀 것."""
+    """실행 때 쓸 모델 후보 — 고른(또는 낮춰진) 모델이 primary, 대안은 직급 목록에서 상사 규칙에 걸리는 것을 뺀 것.
+    무료 모델을 쓰게 된 팀원은 대안도 무료 모델만 남긴다 (유료 API·구독으로 넘어가지 않음)."""
     base = rank_models(member.rank_id, models, team)
     if not member.chosen_on_chain:
         return base  # 본인·상사 모두 기본 → 지금과 같다
@@ -134,6 +143,7 @@ def member_rank_models(member: MemberPlan, models: ModelsConfig, team: Team | No
     fallback = [
         s for s in base.candidates
         if model_key(s) != member.effective and tiers.get(model_key(s), len(tiers)) >= member.floor
+        and (not free_locked(member) or s.provider == FREE_PROVIDER)
     ]
     return RankModels(primary=spec_for(member.effective, models, team, member.rank_id), fallback=fallback)
 

@@ -13,10 +13,11 @@
 파일 안에서는 최신 항목이 위에 온다 → 새 항목은 파일 맨 위에 넣는다.
 
 개념 편집 팀 화면(concept_ui.py)은 여기 함수로
-  관련 기존 항목 찾기(find_related) → LLM 팀 검토 → 사람 승인 → 반영(apply_plan) → 커밋·푸시(git_commit / git_push)
+  관련 기존 항목 찾기(find_related) → LLM 팀 검토 → 사람 승인 → 반영(apply_plan) → 커밋·푸시(git_commit / git_sync_push — GitHub 가 앞서 있으면 자동 rebase)
 를 한다. 반영은 로컬 파일만 바꾸고, 푸시는 사람이 버튼을 눌러야 한다.
 """
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -488,9 +489,13 @@ def repo_root(path: Path) -> Path | None:
     return Path(out.stdout.strip()) if out.returncode == 0 else None
 
 
-def git(repo: Path, *args: str, timeout: int = 60) -> tuple[bool, str]:
-    out = subprocess.run(["git", "-c", "core.quotepath=false", *args], cwd=repo, capture_output=True, text=True,
-                         encoding="utf-8", errors="replace", timeout=timeout)
+def git(repo: Path, *args: str, timeout: int = 60, env: dict | None = None) -> tuple[bool, str]:
+    try:
+        out = subprocess.run(["git", "-c", "core.quotepath=false", *args], cwd=repo, capture_output=True, text=True,
+                             encoding="utf-8", errors="replace", timeout=timeout,
+                             env={**os.environ, **env} if env else None)
+    except subprocess.TimeoutExpired:
+        return False, f"git {args[0]} 시간 초과 ({timeout}초)"
     return out.returncode == 0, (out.stdout + out.stderr).strip()
 
 
@@ -513,8 +518,94 @@ def git_push(repo: Path) -> tuple[bool, str]:
     return git(repo, "push", timeout=120)
 
 
-def git_pull(repo: Path) -> tuple[bool, str]:
-    return git(repo, "pull", "--ff-only", timeout=120)
+def git_fetch(repo: Path, quiet: bool = False) -> tuple[bool, str]:
+    """GitHub 의 최신 커밋 정보를 받아 온다 (작업 폴더·브랜치는 그대로).
+    quiet: 사이드바처럼 사람이 누르지 않은 호출 — 비밀번호를 묻느라 멈추지 않게 터미널 질문을 끈다."""
+    return git(repo, "fetch", "origin", timeout=30 if quiet else 120,
+               env={"GIT_TERMINAL_PROMPT": "0"} if quiet else None)
+
+
+def ahead_behind(repo: Path) -> tuple[int, int]:
+    """(이 PC 에만 있는 커밋 수, GitHub 에만 있는 커밋 수) — 마지막 fetch 기준. 원격 추적 브랜치가 없으면 (-1, -1)."""
+    ok, out = git(repo, "rev-list", "--left-right", "--count", "HEAD...@{u}")
+    parts = out.split()
+    if not ok or len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return -1, -1
+    return int(parts[0]), int(parts[1])
+
+
+@dataclass
+class SyncResult:
+    """fetch → (뒤처졌으면) rebase 결과. 실패하면 작업 폴더는 합치기 전 그대로 둔다."""
+    ok: bool
+    message: str  # 사람에게 보여 줄 설명
+    integrated: int = 0  # 자동 rebase 로 합친 GitHub 커밋 수
+    conflicts: list[str] = field(default_factory=list)  # 충돌한 파일 (저장소 기준 경로)
+    log: str = ""  # git 출력
+
+
+def _rebase(repo: Path, behind: int) -> SyncResult | None:
+    """내 커밋을 GitHub 커밋 위로 다시 쌓기. 성공하면 None, 충돌하면 rebase --abort 로 되돌리고 실패 결과."""
+    ok, log = git(repo, "rebase", "@{u}", timeout=120)
+    if ok:
+        return None
+    conflicts = git(repo, "diff", "--name-only", "--diff-filter=U")[1].splitlines()
+    aborted, abort_log = git(repo, "rebase", "--abort")
+    where = ", ".join(f"`{c}`" for c in conflicts) or "(파일 확인 불가 — git 출력 참고)"
+    msg = (f"GitHub 에 이 PC 에 없는 커밋 {behind}개가 있어 자동으로 합치려 했지만, 같은 부분을 양쪽에서 고쳐 충돌했습니다: "
+           f"{where}\n\n푸시하지 않았고, 작업 폴더는 합치기 전 그대로 되돌려 두었습니다 (내 커밋도 그대로).\n\n"
+           "해결 방법: CS 폴더의 터미널에서 `git pull --rebase` → 충돌 표시(`<<<<<<<`)가 있는 부분을 직접 고치고 "
+           "`git add <파일>` → `git rebase --continue` → 다시 푸시.\n"
+           "같은 일을 줄이려면 GitHub 웹에서 고친 뒤에는 사이드바의 '⬇️ 최신 받기'를 먼저 누르고 작업하세요.")
+    if not aborted:
+        msg += f"\n\n⚠️ 되돌리기(git rebase --abort)도 실패했습니다 — 터미널에서 `git status` 로 확인해 주세요: {abort_log}"
+    return SyncResult(False, msg, conflicts=conflicts, log=log)
+
+
+def git_sync(repo: Path, root: Path | None = None) -> SyncResult:
+    """GitHub 에 이 PC 에 없는 커밋이 있으면 받아서 내 커밋을 그 위로 다시 쌓는다 (= git pull --rebase).
+
+    GitHub 웹에서 직접 고친 뒤 이 PC 에서 커밋하면 그냥 푸시는 'non-fast-forward' 로 거절된다. 그래서
+      fetch → 앞섬·뒤처짐 확인 → (내 커밋 없음) 앞으로 당기기 / (양쪽 다 있음) rebase @{u}
+      → (root 가 있으면) 카탈로그를 다시 읽어 깨지지 않았는지 확인
+    충돌하면 rebase --abort 로 되돌려 작업 폴더를 깨끗이 두고, 어느 파일이 충돌했는지 알려 준다.
+    사이드바 '⬇️ 최신 받기'와 푸시 전 단계가 함께 쓴다."""
+    ok, log = git_fetch(repo)
+    if not ok:
+        return SyncResult(False, "GitHub 에서 최신 정보를 받지 못했습니다 (인터넷·로그인 확인).", log=log)
+    ahead, behind = ahead_behind(repo)
+    if behind <= 0:  # 이미 최신 (또는 원격 추적 브랜치 없음 — 푸시가 알아서 판단)
+        return SyncResult(True, "GitHub 에 새 커밋 없음", log=log)
+    if ahead == 0:  # 내 커밋이 없으면 앞으로 당기기만 — 커밋 안 된 변경이 있어도 겹치지 않으면 된다 (git pull --ff-only)
+        ok, log = git(repo, "merge", "--ff-only", "@{u}", timeout=120)
+        if not ok:
+            return SyncResult(False, f"GitHub 커밋 {behind}개를 받지 못했습니다 — 커밋 안 된 변경이 같은 파일에 있는지 확인해 "
+                                     "주세요 (커밋하거나 되돌린 뒤 다시).", log=log)
+    else:
+        ok, dirty = git(repo, "status", "--porcelain", "--untracked-files=no")
+        if ok and dirty:  # rebase 는 커밋 안 된 변경이 있으면 시작하지 못한다 — 자동 stash 대신 사람에게 맡긴다
+            return SyncResult(False, f"GitHub 에 이 PC 에 없는 커밋 {behind}개가 있지만, 커밋하지 않은 변경이 있어 자동으로 "
+                                     "합치지 않았습니다 (푸시하지 않음). 먼저 커밋하거나 되돌린 뒤 다시 눌러 주세요.", log=dirty)
+        result = _rebase(repo, behind)
+        if result is not None:
+            return result
+    done = f"GitHub 에만 있던 커밋 {behind}개를 자동으로 합쳤습니다."
+    if root is not None:  # 합친 결과 카탈로그가 여전히 읽히는지 — 깨졌으면 푸시하지 않는다
+        try:
+            n = len(Catalog.load(root).entries)
+        except Exception as e:  # noqa: BLE001
+            return SyncResult(False, f"{done} 그런데 카탈로그를 다시 읽지 못해 푸시하지 않았습니다: {e}", integrated=behind)
+        done += f" 카탈로그 다시 읽기 확인: 항목 {n}개."
+    return SyncResult(True, done, integrated=behind)
+
+
+def git_sync_push(repo: Path, root: Path | None = None) -> tuple[SyncResult, bool, str]:
+    """git_sync 후 푸시 → (합치기 결과, 푸시 성공, 푸시 출력). 합치기가 실패하면 푸시하지 않는다 (False, "")."""
+    sync = git_sync(repo, root)
+    if not sync.ok:
+        return sync, False, ""
+    ok, log = git_push(repo)
+    return sync, ok, log
 
 
 def web_url(remote: str) -> str | None:
@@ -530,6 +621,7 @@ class RepoInfo:
     branch: str
     unpushed: int  # 아직 GitHub 에 올리지 않은 커밋 수 (원격 추적 브랜치가 없으면 -1)
     last_commit: str  # 이 폴더의 마지막 커밋 "abc1234 메시지 (2 hours ago)"
+    behind: int = -1  # GitHub 에만 있고 이 PC 에 없는 커밋 수 (마지막 fetch 기준, 원격 추적 브랜치가 없으면 -1)
 
     def tree(self, subdir: str) -> str | None:
         return f"{self.url}/tree/{self.branch}/{subdir}".rstrip("/") if self.url else None
@@ -541,13 +633,14 @@ class RepoInfo:
 def repo_info(repo: Path, subdir: str) -> RepoInfo:
     remote = git(repo, "remote", "get-url", "origin")
     branch = git(repo, "rev-parse", "--abbrev-ref", "HEAD")[1] or "main"
-    ahead = git(repo, "rev-list", "--count", "@{u}..HEAD")
+    ahead, behind = ahead_behind(repo)
     last = git(repo, "log", "-1", "--format=%h %s (%cr)", "--", subdir)
     return RepoInfo(
         url=web_url(remote[1]) if remote[0] else None,
         branch=branch,
-        unpushed=int(ahead[1]) if ahead[0] and ahead[1].isdigit() else -1,
+        unpushed=ahead,
         last_commit=last[1] if last[0] else "",
+        behind=behind,
     )
 
 

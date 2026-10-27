@@ -402,10 +402,34 @@ def structured_output_kwargs(spec: ModelSpec) -> dict:
     return {}
 
 
+FREE_SERVER_OFF = "무료 서버 꺼짐 — Docker Desktop 실행 후 FreeLLMAPI 켜기"
+
+
+STATUS_REASONS = {  # provider_status 값 → 쓸 수 없는 이유 (화면 '고른 모델 꺼짐'·실패 메시지)
+    "ok": "",
+    "disabled": "비활성 (models.yaml disabled_providers 또는 '무료 모델만 사용')",
+    "no_key": "API 키 없음 (.env)",
+    "offline": FREE_SERVER_OFF,
+    "not_installed": "Claude CLI 없음",
+    "logged_out": "Claude 로그인 필요 (claude auth login)",
+}
+
+
+def unavailable_reason(provider: str, models: ModelsConfig) -> str:
+    """provider 를 지금 쓸 수 없는 이유 (쓸 수 있으면 빈 문자열)."""
+    status = provider_status(models).get(provider, "no_key")
+    return STATUS_REASONS.get(status, status)
+
+
 def require_candidates(rank_models: RankModels, models: ModelsConfig, who: str) -> list[tuple[ModelSpec, bool]]:
     candidates = available_candidates(rank_models, models)
     if not candidates:
         providers = sorted({s.provider for s in rank_models.candidates})
+        if providers == ["freellm"]:
+            # 팀원 모델 선택으로 무료 모델만 쓰게 된 팀원 — 유료 모델로 넘어가지 않고 이유를 알려 준다
+            raise NoAvailableModelError(
+                f"{who}: 고른 무료 모델을 쓸 수 없습니다 — {unavailable_reason('freellm', models)} (유료 모델로 넘어가지 않습니다)"
+            )
         raise NoAvailableModelError(f"{who}: 사용 가능한 API 키가 없습니다. .env 에 {providers} 중 하나를 설정하세요.")
     return candidates
 

@@ -226,10 +226,10 @@ def main(argv=None):
             log.error("  %s 실패: %s", r.stem, e)
             if "해석하지 못함" in str(e):
                 add_fail(gen_dir, r.stem, str(e))
-            if "가 없습니다" in str(e) or "HTTP 401" in str(e) or "HTTP 403" in str(e) or "HTTP 404" in str(e):
+            if C.is_fatal(e):                  # 설정·키·모델 이름·크레딧·Claude 로그인·구독 사용 한도
                 if not fatal.is_set():
                     fatal.set()
-                    log.error("설정·키·모델 이름 문제라 나머지도 중단합니다")
+                    log.error("설정·키·모델 이름·크레딧·사용 한도 문제라 나머지도 중단합니다 (다음 실행 때 이어서)")
         except Exception:                      # 예상 못 한 오류도 다른 요청은 계속
             log.exception("  %s 실패 (예상 못 한 오류)", r.stem)
 

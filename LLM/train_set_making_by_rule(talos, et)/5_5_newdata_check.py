@@ -38,7 +38,7 @@ C = _load("sup_common", "5_0a_common.py")
 F = _load("sup_features", "5_0b_features.py")
 CHUNK = 4000                          # 피처 계산 묶음 (진행률·중지·캐시 단위)
 FLAG_BITS = {"py_ua": 1, "base_conflict": 2, "collision": 4, "holdout": 8, "allzero": 16, "new_pat": 32,
-             "wrong_rf": 64, "wrong_lg": 128}
+             "wrong_rf": 64, "wrong_lg": 128, "dup_int": 256, "dup_base": 512}
 Stopped = C.Stopped
 
 
@@ -484,7 +484,8 @@ def write_report(path, summary, ex):
 
 
 def write_table(path, R, base_name, dev, snapshot):
-    """화면 선별용 표 (표준 라이브러리 json 으로 읽음). 열마다 값 목록."""
+    """화면 선별용 표 (표준 라이브러리 json 으로 읽음). 열마다 값 목록.
+    sk = 샘플 지문 (IPS·WAF 의 같은 샘플은 같음 → 5.7 이 두 장비 표를 짝지어 같은 샘플을 넣는다)."""
     dates = sorted(R["date"].unique().tolist())
     rules = pd.unique(R["rule_id"]).tolist()
     types = sorted(R["attack_type"].unique().tolist())
@@ -501,7 +502,8 @@ def write_table(path, R, base_name, dev, snapshot):
             "y": R["label"].eq("anomalies").astype(int).tolist(), "pat": R["pat_id"].astype(int).tolist(),
             "rule": idx("rule_id", rules), "type": idx("attack_type", types), "src": idx("source", srcs),
             "llm": R["origin"].eq("llm").astype(int).tolist(),
-            "cons": "".join(cons_num.get(c, "0") for c in R["cons"]), "fl": fl.tolist()}
+            "cons": "".join(cons_num.get(c, "0") for c in R["cons"]), "fl": fl.tolist(),
+            "sk": R["sk"].fillna("").astype(str).tolist()}
     C.write_json(path, data, indent=None)
 
 
