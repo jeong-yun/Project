@@ -84,6 +84,18 @@ def no_network_feeds(monkeypatch):
     return started
 
 
+@pytest.fixture(autouse=True)
+def no_network_market(monkeypatch):
+    """📺 보드·🏠 메인의 지수·환율 띠가 테스트 중 Yahoo 에 묻지 않게 한다 (실패 → 그 칸은 '—').
+    시세 테스트는 market.fetch_history 를 가짜 일봉으로 바꿔 쓴다."""
+    from core import market
+
+    def blocked(ticker, timeout=10):
+        raise RuntimeError("테스트 중 네트워크 금지")
+
+    monkeypatch.setattr(market, "fetch_history", blocked)
+
+
 @pytest.fixture
 def ranks():
     return load_ranks()
