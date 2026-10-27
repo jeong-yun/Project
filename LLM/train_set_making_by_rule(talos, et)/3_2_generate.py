@@ -168,6 +168,7 @@ def main(argv=None):
         log.error("LLM 설정 읽기 실패: %s", e)
         return 1
     cfg = C.role_config(roles, "생성", args.generator)
+    C.set_effort(cfg, run.get("생성 추론 강도", ""), log)   # openai: reasoning_effort, claude_cli: --effort (비우면 기본값)
     in_dir = C.latest_input_dir(args.date)
     if cfg is None or in_dir is None:
         log.error("생성 모델 설정 또는 05_llm_input 이 없습니다")
@@ -201,8 +202,8 @@ def main(argv=None):
             todo = todo[:limit]
     done = sum((gen_dir / r.name).exists() for r in reqs)
     workers = C.parallel_settings(run)[0]
-    log.info("[3.2] 생성 %s:%s | 요청 %d개 중 완료 %d개 → 이번 %d개 (동시 최대 %d개씩, 속도 제한에 맞춰 자동 조절)%s", cfg["provider"], cfg["model"],
-             len(reqs), done, len(todo), workers, " (dry-run: 호출 안 함)" if args.dry_run else "")
+    log.info("[3.2] 생성 %s:%s%s | 요청 %d개 중 완료 %d개 → 이번 %d개 (동시 최대 %d개씩, 속도 제한에 맞춰 자동 조절)%s", cfg["provider"],
+             cfg["model"], C.effort_label(cfg), len(reqs), done, len(todo), workers, " (dry-run: 호출 안 함)" if args.dry_run else "")
     if args.dry_run or not todo:
         return 0
     if not C.generation_guard(log, "3_2_generate"):

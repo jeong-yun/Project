@@ -165,6 +165,36 @@ def role_config(roles, role, override):
     return cfg
 
 
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")    # LLM_설정.md '생성/검토 추론 강도' 에 쓸 수 있는 값
+
+
+def set_effort(cfg, value, log=None):
+    """'생성/검토 추론 강도' 를 그 모델에 맞게 cfg 에 넣는다. 비었거나 '-' 면 넣지 않는다 (모델 기본값).
+    - provider openai     → reasoning_effort (minimal·low·medium·high, xhigh·max 는 OpenAI 에 없어 high)
+    - provider claude_cli → claude -p --effort (low·medium·high·xhigh·max, minimal 은 claude 에 없어 low)
+    - 그 밖(upstage·anthropic·mock)은 쓰지 않는다 (보내면 오류가 날 수 있음).
+    2026-10-27: claude_cli 검토를 CLI 기본 강도로 돌리니 요청 하나에 출력(대부분 생각) 토큰이 10만~26만 개까지 늘어 응답 대기
+    시간(20분)에 걸렸다 → claude_cli 에도 LLM_설정.md 의 값을 넘긴다."""
+    v = str(value or "").strip().lower()
+    if cfg is None or v in ("", "-"):
+        return cfg
+    if v not in EFFORTS:
+        if log:
+            log.warning("추론 강도 '%s' 는 쓸 수 없는 값이라 넘기지 않습니다 (%s)", value, "·".join(EFFORTS))
+        return cfg
+    if cfg.get("provider") == "openai":
+        cfg["reasoning_effort"] = "high" if v in ("xhigh", "max") else v
+    elif cfg.get("provider") == "claude_cli":
+        cfg["effort"] = "low" if v == "minimal" else v
+    return cfg
+
+
+def effort_label(cfg):
+    """로그용: 실제로 넘기는 추론 강도 (' (추론 강도 low)', 기본값이면 '')."""
+    e = (cfg or {}).get("effort") or (cfg or {}).get("reasoning_effort")
+    return f" (추론 강도 {e})" if e else ""
+
+
 def input_dirs():
     """완성된 05_llm_input 날짜 폴더 (오래된 순). 1.3 이 쓰는 중인 임시 폴더(.<날짜>.tmp…)와
     summary.json(마지막에 씀)이 없는 폴더는 뺀다 → 수집이 도는 중에도 반쯤 쓴 입력을 읽지 않는다."""
@@ -392,6 +422,7 @@ def _cli_result(stdout):
 def _call_claude_cli(cfg, p, system, user, run, log):
     """claude -p 한 번 → (응답 텍스트, 사용량). 도구·CLAUDE.md·훅·플러그인·MCP·세션 기록 없이(--safe-mode 등) 시스템 프롬프트를
     지시문으로 바꾸고, 빈 임시 폴더에서 실행한다. max_tokens·temperature 는 쓰지 않는다 (CLI 기본값).
+    추론 강도는 cfg["effort"] (set_effort) 가 있으면 --effort 로 넘긴다 (없으면 CLI 기본값).
     로그인 안 됨·구독 사용 한도는 바로 LLMError (그 실행은 멈추고 다음 실행 때 이어서),
     과부하·시간 초과·결과를 못 읽음은 '재시도 횟수' 만큼 다시 보낸다 (과부하면 동시 요청을 줄임)."""
     exe = claude_cli_path(p)
@@ -407,6 +438,8 @@ def _call_claude_cli(cfg, p, system, user, run, log):
             cmd = [exe, "-p", "--model", cfg["model"], "--output-format", "json", "--system-prompt-file", str(sp),
                    "--safe-mode", "--tools", "", "--strict-mcp-config", "--permission-mode", "dontAsk",
                    "--permission-prompts", "none", "--disable-slash-commands", "--no-session-persistence"]
+            if cfg.get("effort"):                       # LLM_설정.md '생성/검토 추론 강도' (set_effort, 비우면 CLI 기본값)
+                cmd += ["--effort", cfg["effort"]]
             try:
                 with gate:
                     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=d,
