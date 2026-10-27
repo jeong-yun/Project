@@ -158,8 +158,8 @@ def _feeds(settings: dict, models, data_dir: Path, teams: list[str]) -> None:
         feeds.start_collect(settings, models, data_dir, teams)
         st.rerun()
     _feed_status(snap, running, data_dir, cfg)
-    # 전체 화면 보드와 같은 '오늘의 한 줄'·갱신 시각·서비스 상태 + 보드 열기 버튼 (board_ui.py)
-    board_ui.headline_strip(snap, models, settings)
+    # 전체 화면 보드와 같은 '오늘의 한 줄'·갱신 시각·서비스 상태·지수 띠 + 보드 열기 버튼 (board_ui.py)
+    board_ui.headline_strip(snap, models, settings, data_dir)
     if not snap or not snap.get("items"):
         if not running:
             st.info("아직 모은 소식이 없습니다. '🔄 지금 수집'을 누르면 1~2분 안에 채워집니다 (보조 모델 1회 비용).")

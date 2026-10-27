@@ -183,6 +183,89 @@ def test_capped_chain_still_respects_disabled_and_free_only(org, team, models, s
     assert {c[0].provider for c in cands} == {"freellm"}
 
 
+# ─── 무료 모델을 고른 팀원 — 유료로 넘어가지 않음 ─────────────────────
+
+
+FREE_PICK = "freellm:gpt-oss-20b"
+
+
+def test_free_choice_keeps_only_free_fallbacks(org, team, models):
+    chains = team_rank_models(org, models, team, {"staff_draft": FREE_PICK})
+    assert keys(chains["staff_draft"])[0] == FREE_PICK
+    assert {member_models.split_key(k)[0] for k in keys(chains["staff_draft"])} == {"freellm"}
+    assert keys(chains["staff_case"]) == keys(rank_models("staff", models, team))  # 기본 팀원은 그대로 (유료 대안 유지)
+
+
+def test_auto_lowered_to_free_also_stays_free(org, team, models):
+    """상사 규칙으로 무료 모델까지 낮아진 기본 팀원도 대안은 무료만."""
+    plans = plan(org, models, team, {"gm_research": "upstage:solar-mini"})
+    assert plans["dgm_research"].limited and plans["dgm_research"].effective.startswith("freellm:")
+    chain = team_rank_models(org, models, team, {"gm_research": "upstage:solar-mini"})["dgm_research"]
+    assert {s.provider for s in chain.candidates} == {"freellm"}
+
+
+def free_team_script():
+    return Script(
+        text="초안",
+        Delegation=lambda m: make_delegation("gm_research", "gm_action") if "gm_research" in m[-1].content else make_delegation("am_fact", "staff_draft"),
+        ReviewResult=make_review(answer="보완안"),
+    )
+
+
+@pytest.fixture
+def fake_models(set_keys, monkeypatch):
+    """모든 provider 키가 있는 환경 + 호출한 모델 기록."""
+    set_keys("openai", "google", "upstage", "freellm")
+    called: list[str] = []
+
+    def _install(script):
+        def fake_model(spec, models):
+            called.append(f"{spec.provider}:{spec.model}")
+            return FakeOfficeModel(script=script)
+
+        monkeypatch.setattr(llm_factory, "create_chat_model", fake_model)
+        return called
+
+    return _install
+
+
+def test_free_choice_with_server_off_fails_clearly_without_paid_call(org, ranks, team, models, fake_models, monkeypatch):
+    monkeypatch.setattr(llm_factory, "freellm_reachable", lambda: False)
+    called = fake_models(free_team_script())
+    chain = team_rank_models(org, models, team, {"staff_draft": FREE_PICK})["staff_draft"]
+    with pytest.raises(llm_factory.NoAvailableModelError, match="무료 서버 꺼짐 — Docker Desktop 실행 후 FreeLLMAPI 켜기"):
+        llm_factory.require_candidates(chain, models, "사원·초안")
+
+    # 실무자: '작성 실패'로 남고 나머지는 계속, 이유가 본문·기록에 보인다
+    graph = build_office_graph(org, ranks, team, models, {}, {"critic": {"enabled": False}}, member_models={"staff_draft": FREE_PICK})
+    steps = [p for k, p in stream_office(graph, org, "질문", "lead") if k == "step"]
+    failed = next(s for s in steps if s.node_id == "staff_draft")
+    assert "작성하지 못했습니다" in failed.content and "무료 서버 꺼짐" in failed.content
+    assert any("무료 서버 꺼짐" in e for e in failed.errors)
+    assert steps[-1].node_id == "lead" and steps[-1].content == "보완안"
+    assert not any(c.startswith("freellm:") for c in called)  # 꺼진 무료 서버는 부르지 않고
+    staff_models = {s.model.provider for s in steps if s.node_id == "staff_draft"}
+    assert staff_models == {"freellm"}  # 실패 기록도 고른 무료 모델 — 유료로 넘어가지 않음
+
+
+def test_free_manager_with_server_off_stops_run_with_reason(org, ranks, team, models, fake_models, monkeypatch):
+    monkeypatch.setattr(llm_factory, "freellm_reachable", lambda: False)
+    fake_models(free_team_script())
+    graph = build_office_graph(org, ranks, team, models, {}, {"critic": {"enabled": False}},
+                               member_models={"dgm_research": "freellm:gpt-oss-120b"})
+    with pytest.raises(llm_factory.NoAvailableModelError, match="차장·분석: 고른 무료 모델을 쓸 수 없습니다 — 무료 서버 꺼짐"):
+        list(stream_office(graph, org, "질문", "lead"))
+
+
+def test_free_choice_with_server_on_works(org, ranks, team, models, fake_models, monkeypatch):
+    monkeypatch.setattr(llm_factory, "freellm_reachable", lambda: True)
+    called = fake_models(free_team_script())
+    graph = build_office_graph(org, ranks, team, models, {}, {"critic": {"enabled": False}}, member_models={"staff_draft": FREE_PICK})
+    steps = [p for k, p in stream_office(graph, org, "질문", "lead") if k == "step"]
+    assert next(s for s in steps if s.node_id == "staff_draft").model.label == "freellm · gpt-oss-20b"
+    assert FREE_PICK in called
+
+
 # ─── 저장 ───────────────────────────────────────────────────────────
 
 
@@ -303,3 +386,22 @@ def test_member_model_selector(app, tmp_path):
     at = at.button(key="member_reset_general").click().run()
     assert not at.exception, at.exception
     assert json.loads((tmp_path / "data" / "member_models.json").read_text(encoding="utf-8")) == {}
+
+
+def test_selector_and_task_input_show_chosen_model_off(app, tmp_path, set_keys, monkeypatch):
+    set_keys("openai", "google", "freellm")
+    monkeypatch.setattr(llm_factory, "freellm_reachable", lambda: False)  # FreeLLMAPI(Docker) 꺼짐
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "data" / "member_models.json").write_text(json.dumps({"general": {"staff_draft": FREE_PICK}}), encoding="utf-8")
+    at = app.run()
+    assert not at.exception, at.exception
+    off = [m.value for m in at.markdown if "고른 모델 꺼짐" in m.value]
+    assert len(off) == 1 and "무료 서버 꺼짐" in off[0] and "Docker Desktop" in off[0]  # 사원·초안 한 명만
+    warning = next(w.value for w in at.warning if "고른 모델이 꺼져 있는 팀원" in w.value)
+    assert "사원·초안" in warning and "실패합니다" in warning and "Docker Desktop" in warning
+
+    monkeypatch.setattr(llm_factory, "freellm_reachable", lambda: True)  # 켜지면 표시가 사라진다
+    llm_factory._reachable.clear()
+    at = at.run()
+    assert not any("고른 모델 꺼짐" in m.value for m in at.markdown)
+    assert not any("고른 모델이 꺼져 있는 팀원" in w.value for w in at.warning)

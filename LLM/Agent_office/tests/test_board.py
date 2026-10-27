@@ -68,6 +68,28 @@ def test_board_data_without_snapshot():
     data = board_ui.board_data(None, load_models(), load_settings())
     assert data["news"] == [] and "지금 수집" in data["headline"] and data["collected_at"] is None
     assert {l["name"] for l in data["lights"]} <= set(board_ui.STATUS_LABELS.values())
+    assert data["market"] == []
+
+
+def test_rotation_setting_reaches_template():
+    assert board_ui.rotation({}) == (board_ui.ROTATE_SEC, board_ui.TIP_ROTATE_SEC)
+    assert board_ui.rotation({"board": {"rotate_sec": 1, "tip_rotate_sec": "x"}}) == (3, board_ui.TIP_ROTATE_SEC)  # 3초 밑·잘못된 값은 막는다
+    assert board_ui.rotation(load_settings()) == (8, 20)
+    data = board_ui.board_data(SNAP, load_models(), {"board": {"rotate_sec": 12}})
+    page = board_ui.board_html(data)
+    payload = json.loads(page.split("var D = ", 1)[1].split(";\n", 1)[0].replace("<\\/", "</"))
+    assert payload["rotate_sec"] == 12 and "NEWS_MS = (D.rotate_sec || 8) * 1000" in page
+    assert 'bar.style.transition = "width " + NEWS_MS' in page  # 진행 막대도 같은 간격
+
+
+def test_market_cells_reach_template():
+    quotes = [{"name": "코스피", "ticker": "^KS11", "price": 2612.45, "change_pct": 0.52, "date": "2026-10-24"},
+              {"name": "원/달러", "ticker": "KRW=X", "price": None, "change_pct": None, "date": ""}]
+    data = board_ui.board_data(SNAP, load_models(), load_settings(), quotes)
+    assert [(c["value"], c["change"], c["dir"], c["date"]) for c in data["market"]] == [
+        ("2,612.45", "+0.52%", "up", "10/24"), ("—", "", "flat", "")]
+    html = board_ui.market_strip_html(data["market"][:1])
+    assert "2,612.45" in html and "▲ +0.52%" in html and "10/24" in html
 
 
 def _app(tmp_path, monkeypatch, view):
@@ -91,6 +113,9 @@ def test_board_page_renders_without_sidebar(tmp_path, monkeypatch):
     at.run()
     assert not at.exception
     assert not at.sidebar.radio  # 보드는 사이드바(화면 선택) 없이
+    # 시세는 못 받아도 (테스트는 네트워크 금지) 보드는 그려지고 그 칸만 '—'
+    page = at.get("iframe")[0].proto.srcdoc
+    assert '"name": "코스피", "value": "—"' in page and '"rotate_sec": 8' in page and '"market_pending": false' in page
 
 
 def test_home_shows_headline_and_board_link(tmp_path, monkeypatch):
