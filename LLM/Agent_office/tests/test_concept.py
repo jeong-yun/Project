@@ -356,3 +356,125 @@ def test_repo_info_links_and_unpushed(tmp_path):
     info.url = "https://github.com/jeong-yun/CS"
     assert info.tree("Term") == "https://github.com/jeong-yun/CS/tree/main/Term"
     assert info.commit(cat.head_sha(work)).startswith("https://github.com/jeong-yun/CS/commit/")
+
+
+# ─── 푸시 전 자동 rebase (GitHub 웹에서 고친 커밋이 있을 때) ──────────────────
+
+
+def _git(*args, cwd):
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+@pytest.fixture
+def clones(tmp_path):
+    """(GitHub 역할 bare 저장소, 이 PC 의 clone, 'GitHub 웹 편집' 역할 clone) — 카탈로그는 Term/Every_day."""
+    origin, work, web = tmp_path / "origin.git", tmp_path / "work", tmp_path / "web"
+    _git("init", "--bare", "-b", "main", str(origin), cwd=tmp_path)
+    for path in (work, web):
+        _git("clone", str(origin), str(path), cwd=tmp_path)
+        _git("config", "user.email", "t@example.com", cwd=path)
+        _git("config", "user.name", "t", cwd=path)
+    root = work / "Term" / "Every_day"
+    root.mkdir(parents=True)
+    (root / cat.CATEGORY_FILES["AI"]).write_text(AI_TEXT + "\n", encoding="utf-8")
+    (root / cat.SUMMARY_FILE).write_text(SUMMARY, encoding="utf-8")
+    _git("add", ".", cwd=work)
+    _git("commit", "-m", "첫 커밋", cwd=work)
+    _git("push", "-u", "origin", "main", cwd=work)
+    _git("pull", "origin", "main", cwd=web)
+    _git("branch", "--set-upstream-to=origin/main", "main", cwd=web)
+    return origin, work, web
+
+
+def _edit(repo, old, new, message):
+    path = repo / "Term" / "Every_day" / cat.CATEGORY_FILES["AI"]
+    path.write_text(path.read_text(encoding="utf-8").replace(old, new, 1), encoding="utf-8")
+    _git("commit", "-am", message, cwd=repo)
+
+
+def _log(repo, ref="HEAD"):
+    import subprocess
+
+    return subprocess.run(["git", "log", "--format=%s", ref], cwd=repo, capture_output=True, text=True,
+                          encoding="utf-8").stdout.split("\n")[:-1]
+
+
+def test_push_auto_rebases_when_github_is_ahead(clones):
+    origin, work, web = clones
+    root = work / "Term" / "Every_day"
+    # GitHub 웹에서 파일 끝 쪽을 고침 → 이 PC 는 파일 맨 위에 새 항목 (오늘 실제 사례와 같은 모양)
+    _edit(web, "1. 개념: 작성일 없이 수정일만 있는 옛 항목.", "1. 개념: 웹에서 다듬은 옛 항목.", "웹 편집 1")
+    _edit(web, " - GRPO 와 무관한 반복 샘플링 예산 배분.", " - 웹에서 다듬은 예산 배분.", "웹 편집 2")
+    _git("push", cwd=web)
+    _edit(work, AI_TEXT.splitlines()[0], GOOD_ENTRY + "\n\n" + AI_TEXT.splitlines()[0], "Term: DAPO 추가")
+    assert not cat.git_push(work)[0]  # 그냥 푸시하면 non-fast-forward 로 거절
+
+    sync, ok, log = cat.git_sync_push(work, root)
+    assert sync.ok and ok and sync.integrated == 2 and "2개" in sync.message and "항목 4개" in sync.message
+    assert _log(origin, "main") == ["Term: DAPO 추가", "웹 편집 2", "웹 편집 1", "첫 커밋"]  # 웹 커밋 위에 내 커밋
+    text = (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    assert "DAPO" in text and "웹에서 다듬은 옛 항목" in text and "웹에서 다듬은 예산 배분" in text
+    assert cat.ahead_behind(work) == (0, 0) and not cat.git_status(work, "Term")
+
+
+def test_push_conflict_aborts_and_does_not_push(clones):
+    origin, work, web = clones
+    root = work / "Term" / "Every_day"
+    line = " - 그룹 평균으로 이점을 추정하는 RL 알고리즘."
+    _edit(web, line, " - 웹: 그룹 평균 기반 RL.", "웹 편집")
+    _git("push", cwd=web)
+    _edit(work, line, " - PC: 그룹 평균 기반 정책 최적화.", "Term: GRPO 수정")
+    before = _log(work)
+
+    sync, ok, log = cat.git_sync_push(work, root)
+    assert not sync.ok and not ok and log == ""
+    assert sync.conflicts == ["Term/Every_day/" + cat.CATEGORY_FILES["AI"]]
+    assert "충돌" in sync.message and "푸시하지 않았" in sync.message and "git pull --rebase" in sync.message
+    assert _log(origin, "main") == ["웹 편집", "첫 커밋"]  # GitHub 에는 아무것도 올라가지 않음
+    assert _log(work) == before  # 내 커밋 그대로, rebase 중 상태 아님
+    assert not (work / ".git" / "rebase-merge").exists() and not (work / ".git" / "rebase-apply").exists()
+    assert not cat.git_status(work, ".")  # 작업 폴더 깨끗 (충돌 표시 없음)
+    assert "PC: 그룹 평균" in (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+
+
+def test_behind_count_and_pull(clones):
+    origin, work, web = clones
+    root = work / "Term" / "Every_day"
+    _edit(web, "1. 개념: 작성일 없이 수정일만 있는 옛 항목.", "1. 개념: 웹 편집.", "웹 편집")
+    _git("push", cwd=web)
+    assert cat.repo_info(work, "Term").behind == 0  # 아직 fetch 전 — 모름
+    assert cat.git_fetch(work, quiet=True)[0]
+    info = cat.repo_info(work, "Term")
+    assert info.behind == 1 and info.unpushed == 0
+    # 커밋 안 된 변경(겹치지 않는 파일)이 있어도 내 커밋이 없으면 앞으로 당기기만 해서 받는다
+    (root / cat.SUMMARY_FILE).write_text(SUMMARY + "\n메모", encoding="utf-8")
+    sync = cat.git_sync(work, root)
+    assert sync.ok and sync.integrated == 1 and "웹 편집" in (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    assert cat.repo_info(work, "Term").behind == 0 and cat.git_sync(work, root).integrated == 0
+
+
+def test_dirty_tree_blocks_rebase_but_keeps_changes(clones):
+    origin, work, web = clones
+    root = work / "Term" / "Every_day"
+    _edit(web, "1. 개념: 작성일 없이 수정일만 있는 옛 항목.", "1. 개념: 웹 편집.", "웹 편집")
+    _git("push", cwd=web)
+    _edit(work, AI_TEXT.splitlines()[0], GOOD_ENTRY + "\n\n" + AI_TEXT.splitlines()[0], "Term: DAPO 추가")
+    (root / cat.SUMMARY_FILE).write_text(SUMMARY + "\n메모", encoding="utf-8")
+    sync, ok, _ = cat.git_sync_push(work, root)
+    assert not sync.ok and not ok and "커밋하지 않은 변경" in sync.message
+    assert _log(origin, "main") == ["웹 편집", "첫 커밋"] and "메모" in (root / cat.SUMMARY_FILE).read_text(encoding="utf-8")
+
+
+def test_sidebar_fetch_is_cached(monkeypatch, tmp_path):
+    import concept_ui
+
+    calls = []
+    monkeypatch.setattr(cat, "git_fetch", lambda repo, quiet=False: calls.append(quiet) or (True, ""))
+    concept_ui._fetch_cache.clear()
+    for _ in range(3):
+        concept_ui.fetch_remote(tmp_path)
+    concept_ui.refresh_git()  # 커밋·푸시 버튼으로는 다시 받지 않음
+    concept_ui.fetch_remote(tmp_path)
+    assert calls == [True]  # TTL 안에서는 한 번만, 터미널 질문 끔

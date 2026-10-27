@@ -5,7 +5,7 @@
   - 사이드바: 카탈로그(GitHub jeong-yun/CS 의 Term/Every_day) 위치·git 상태
   - 업무 입력: ✍️ 작성(기존에 있으면 수정 · 없으면 추가 — 자동 판정) / 🗑 삭제
   - 최종 결과: 최종본·검증 로그·GitHub 요약·적용 계획 탭, 형식 검사
-  - 채택 후: 📚 카탈로그 반영 → 💾 커밋 → 🚀 푸시
+  - 채택 후: 📚 카탈로그 반영 → 💾 커밋 → 🚀 푸시 (GitHub 에 이 PC 에 없는 커밋이 있으면 먼저 자동 rebase, 충돌하면 되돌리고 중단)
 """
 
 import json
@@ -29,10 +29,20 @@ TASK_WRITE, TASK_DELETE = "write", "delete"
 GIT_TTL_SEC = 30
 _cache = SigCache(maxsize=64)
 GIT_FILES = ("HEAD", "index", "FETCH_HEAD", "ORIG_HEAD", "packed-refs", "logs/HEAD")
+# GitHub 에서 받아 오기(fetch)는 네트워크라 더 드물게 — FETCH_TTL_SEC 마다 한 번. 받아 오면 FETCH_HEAD 가 바뀌어
+# 위의 git 상태 캐시도 자동으로 다시 읽는다. 커밋·푸시 버튼(refresh_git)으로는 비우지 않는다 (푸시·최신 받기는 직접 fetch).
+FETCH_TTL_SEC = 120
+_fetch_cache = SigCache(maxsize=8)
 
 
 def refresh_git() -> None:
     _cache.clear()
+
+
+def fetch_remote(repo: Path) -> tuple[bool, str]:
+    """사이드바용 git fetch (FETCH_TTL_SEC 안에서는 다시 하지 않음). 실패해도(오프라인) 화면은 그대로 그린다."""
+    return _fetch_cache.get(("fetch", str(repo)), (int(time.time() // FETCH_TTL_SEC),),
+                            lambda: cat.git_fetch(repo, quiet=True))
 
 
 def _catalog_files(root: Path) -> list[Path]:
@@ -100,6 +110,7 @@ def sidebar(settings: dict) -> CatalogContext | None:
     if repo is None:
         st.warning("git 저장소가 아닙니다 — 반영은 되지만 커밋·푸시는 할 수 없습니다.")
     else:
+        fetched, _ = fetch_remote(repo)
         info, status = repo_state(repo, subdir, root)
         link = info.tree(subdir)
         if link:
@@ -107,18 +118,63 @@ def sidebar(settings: dict) -> CatalogContext | None:
         if info.last_commit:
             st.caption(f"마지막 커밋: {info.last_commit}")
         st.caption("커밋 안 된 변경 없음" if not status else f"커밋 안 된 변경:\n```\n{status}\n```")
+        if info.behind > 0:
+            # GitHub 웹에서 직접 고친 것 등 — 먼저 받아 두면 푸시가 거절되지 않는다 (푸시할 때도 자동으로 합침)
+            st.warning(f"⬇️ GitHub 에 이 PC 에 없는 커밋 {info.behind}개 — '⬇️ 최신 받기'를 먼저 눌러 주세요")
+        elif not fetched:
+            st.caption("GitHub 최신 여부 확인 실패 (오프라인?) — 마지막으로 받아 온 정보 기준")
         if info.unpushed > 0:
             # 커밋만 하고 푸시하지 않은 채 남은 것 — GitHub 에는 아직 없다
             st.warning(f"⬆️ GitHub 에 아직 올리지 않은 커밋 {info.unpushed}개")
             if st.button("🚀 지금 푸시", use_container_width=True, key="concept_push_pending"):
-                ok, log = cat.git_push(repo)
-                refresh_git()
-                (st.success if ok else st.error)(log[-500:] or "완료")
-        if st.button("⬇️ 최신 받기 (git pull)", use_container_width=True, key="concept_pull"):
-            ok, log = cat.git_pull(repo)
+                _rerun_with(push_messages(repo, subdir, root))
+        if st.button("⬇️ 최신 받기 (git pull --rebase)", use_container_width=True, key="concept_pull"):
+            sync = cat.git_sync(repo, root)
             refresh_git()
-            (st.success if ok else st.error)(log[-500:] or "완료")
+            _rerun_with(sync_messages(sync) or [("success", "이미 최신입니다.")])
+        show_messages(st.session_state.pop(SIDEBAR_MSGS, []))
     return CatalogContext(root, repo, subdir, catalog)
+
+
+SIDEBAR_MSGS = "concept_sidebar_msgs"
+
+
+def _rerun_with(msgs: list[tuple[str, str]]) -> None:
+    """사이드바 버튼 결과 — 위에 이미 그린 '커밋 N개'·항목 수가 옛 값이라, 결과를 넘겨 두고 화면을 새로 그린다."""
+    st.session_state[SIDEBAR_MSGS] = msgs
+    st.rerun()
+
+
+def show_messages(msgs: list[tuple[str, str]]) -> None:
+    """[(종류, 내용)] — 종류: success·info·warning·error, log(접힌 git 출력)."""
+    for kind, text in msgs:
+        if kind == "log":
+            with st.expander("git 출력"):
+                st.code(text)
+        else:
+            getattr(st, kind)(text)
+
+
+def sync_messages(sync: cat.SyncResult) -> list[tuple[str, str]]:
+    """git_sync 결과 — 합쳤으면 몇 개 합쳤는지, 실패하면 이유와 할 일 (새로 받은 게 없으면 빈 목록)."""
+    if not sync.ok:
+        return [("error", sync.message)] + ([("log", sync.log[-3000:])] if sync.log else [])
+    return [("info", "🔄 " + sync.message)] if sync.integrated else []
+
+
+def push_messages(repo: Path, subdir: str, root: Path) -> list[tuple[str, str]]:
+    """🚀 푸시 — GitHub 가 앞서 있으면 먼저 자동으로 합친(rebase) 뒤 올린다. 충돌하면 되돌리고 올리지 않는다."""
+    sync, ok, log = cat.git_sync_push(repo, root)
+    refresh_git()
+    msgs = sync_messages(sync)
+    if not sync.ok:
+        return msgs
+    if not ok:
+        return msgs + [("error", "푸시 실패: " + log[-800:])]
+    if "up-to-date" in log.lower() or "up to date" in log.lower():
+        return msgs + [("warning", "올릴 새 커밋이 없습니다 (GitHub 와 이미 같음).")]
+    link = cat.repo_info(repo, subdir).commit(cat.head_sha(repo))
+    return msgs + [("success", "GitHub 에 올렸습니다." + (f" → [올린 커밋 보기]({link})" if link else "") + "\n\n" + log[-500:])]
 
 
 # ─── 업무 입력 ──────────────────────────────────────────────────────────
@@ -285,15 +341,7 @@ def git_panel(ctx: CatalogContext, key: str, message: str) -> None:
             if not ok:
                 st.error("커밋 실패: " + log[-800:])
                 return
-        ok, log = cat.git_push(ctx.repo)
-        refresh_git()
-        if not ok:
-            st.error("푸시 실패: " + log[-800:])
-        elif "up-to-date" in log.lower() or "up to date" in log.lower():
-            st.warning("올릴 새 커밋이 없습니다 (GitHub 와 이미 같음).")
-        else:
-            link = cat.repo_info(ctx.repo, ctx.subdir).commit(cat.head_sha(ctx.repo))
-            st.success("GitHub 에 올렸습니다." + (f" → [올린 커밋 보기]({link})" if link else "") + "\n\n" + log[-500:])
+        show_messages(push_messages(ctx.repo, ctx.subdir, ctx.root))
 
 
 def adopted_section(ctx: CatalogContext | None, run: dict) -> None:
