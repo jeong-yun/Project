@@ -171,7 +171,7 @@ class StockPlanValidator(Validator):
 @register
 class ConceptEntryValidator(Validator):
     name = "concept_entry"
-    description = "개념 카탈로그 결과 형식 검사 (<thought>·<final>·개조식·절대 표현·참고문헌 형식·적용 계획 JSON)"
+    description = "개념 카탈로그 결과 형식 검사 (<review_log>·<final>·개조식·절대 표현·참고문헌 형식·적용 계획 JSON)"
 
     def check(self, answer: str, options: dict):
         from core.concept import check_answer  # concept 가 harness.base 를 쓰므로 늦게 불러온다

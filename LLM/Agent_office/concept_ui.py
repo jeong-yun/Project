@@ -5,6 +5,7 @@
   - 사이드바: 카탈로그(GitHub jeong-yun/CS 의 Term/Every_day) 위치·git 상태
   - 업무 입력: ✍️ 작성(기존에 있으면 수정 · 없으면 추가 — 자동 판정) / 🗑 삭제
   - 최종 결과: 최종본·검증 로그·GitHub 요약·적용 계획 탭, 형식 검사
+  - 📜 적용된 프롬프트: 입력칸 아래·결과 위 — 스킬(IT 개념 프롬프트) 판·전문, 보낸 업무 브리프, 에이전트별 시스템 프롬프트
   - 채택 후: 📚 카탈로그 반영 → 💾 커밋 → 🚀 푸시 (GitHub 에 이 PC 에 없는 커밋이 있으면 먼저 자동 rebase, 충돌하면 되돌리고 중단)
 """
 
@@ -236,15 +237,77 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
     related_names = st.multiselect("함께 비교할 기존 항목 (자동 추천 — 추가·삭제 가능)", names, default=suggested,
                                    format_func=ctx.label, key=f"cw_related_{team_id}_{hash(name)}")
     use_web = st.checkbox("🌐 웹 검색으로 원전 확인", value=web_available, disabled=not web_available, key=f"cw_web_{team_id}")
+    related = [e for e in ctx.catalog.entries if e.name in related_names]
+    # 요청은 LLM 없이 코드로 만든다 → 맡기기 전에도 보낼 브리프를 그대로 보여 줄 수 있다
+    question, brief = (concept.build_concept_request(action, name.strip(), draft, related, target, sub_title=sub_title)
+                       if name.strip() else ("", None))
+    applied_prompt(question, brief, concept.used_prompt_version(question), key=f"in_{team_id}")
     if not st.button("맡기기", type="primary", disabled=busy or not name.strip(), key=f"cw_go_{team_id}"):
         return None
-    related = [e for e in ctx.catalog.entries if e.name in related_names]
-    question, brief = concept.build_concept_request(action, name.strip(), draft, related, target, sub_title=sub_title)
     return {
         "question": question, "brief": brief, "auto_brief": False, "use_web": bool(use_web and web_available),
-        "tool_inputs": {}, "extra_validators": [], "harness_options": {},
-        "concept": {"action": action, "title": name.strip(), "target": target.name if target else ""},
+        "tool_inputs": {}, "extra_validators": [],
+        # 수정이면 제목 줄 날짜(기존 이력 + 오늘 수정일)를 하네스가 확인한다
+        "harness_options": {"concept_header": concept.expected_header(target)} if action == "update" and target else {},
+        "concept": {"action": action, "title": name.strip(), "target": target.name if target else "",
+                    "prompt": concept.prompt_version()["hash"]},
     }
+
+
+# ─── 📜 적용된 프롬프트 ─────────────────────────────────────────────────
+
+
+def agent_prompts(skills: str) -> list[tuple[str, str, str]]:
+    """개념 편집 팀 에이전트마다 (이름, 전문 분야, 시스템 프롬프트) — 실행 때와 같은 OrgAgent.system_prompt 로 만든다."""
+    from core.agent import OrgAgent
+    from core.config import load_models, load_ranks, load_team, team_org
+
+    team, ranks = load_team(concept.TEAM_ID), load_ranks()
+    ranks_by_id = {r.id: r for r in ranks}
+    nodes = list(team_org(team, ranks).walk())
+    names = {n.id: n.name or ranks_by_id[n.rank].name for n in nodes}
+    models = load_models()
+    out = []
+    for n in nodes:
+        agent = OrgAgent(n, ranks_by_id[n.rank], team, models, names=names, skills=skills)
+        out.append((agent.name, n.specialty or ranks_by_id[n.rank].role, agent.system_prompt()))
+    return out
+
+
+def applied_prompt(question: str, brief, used: str = "", key: str = "") -> None:
+    """📜 적용된 프롬프트 (접힘) — 에이전트가 실제로 받는 것: 스킬 전문(판 표시) · 업무 브리프 · 에이전트별 시스템 프롬프트.
+
+    used: 지난 결과를 만든 프롬프트 판(해시) — 지금 스킬 파일과 다르면 알려 준다.
+    """
+    ver = concept.prompt_version()
+    with st.expander(f"📜 적용된 프롬프트 — IT 개념 프롬프트 v{used or ver['hash']}", expanded=False):
+        if used and used != ver["hash"]:
+            st.warning(f"이 결과는 프롬프트 **v{used}** 로 만들었습니다. 지금 스킬 파일은 **v{ver['hash']}** 이라 아래 스킬 전문과 "
+                       "다를 수 있습니다 (그때 내용은 git 기록의 teams/concept/skills/ 에서 확인).")
+        elif question and not used:
+            st.caption("이 요청에는 프롬프트 판 기록이 없습니다 (판 기록 기능 이전에 만든 결과). 아래는 지금 스킬 파일입니다.")
+        st.caption(f"지금 스킬: {ver['label']} — `teams/concept/skills/it_concept_prompt.md`")
+        st.caption("에이전트가 받는 것 = 시스템 프롬프트(페르소나·직급·전문 분야·공통 규칙 + 스킬 전문 + 지난 피드백 교훈) "
+                   "+ 업무 브리프 + 맡은 업무·근거 자료(실행 중에 정해짐)")
+        tabs = st.tabs(["📘 IT 개념 프롬프트 (스킬)", "📋 업무 브리프·제약", "👥 에이전트별 역할"])
+        with tabs[0]:
+            st.code(ver["text"], language="markdown", wrap_lines=True, height=420)
+        with tabs[1]:
+            if brief is None:
+                st.caption("개념명을 넣으면 보낼 업무 브리프(요청·완료 기준·제약·결과 형식)가 여기 나옵니다.")
+            else:
+                st.code(brief.as_prompt(question), language="markdown", wrap_lines=True, height=420)
+        with tabs[2]:
+            try:
+                agents = agent_prompts(ver["text"])
+            except Exception as e:  # noqa: BLE001 — 설정을 못 읽어도 화면은 그린다
+                st.caption(f"에이전트 정보를 읽지 못했습니다: {e}")
+                return
+            st.dataframe([{"에이전트": a, "전문 분야": s} for a, s, _ in agents], hide_index=True, use_container_width=True)
+            pick = st.selectbox("시스템 프롬프트 보기", [a for a, _, _ in agents], key=f"prompt_agent_{key}")
+            system = next(p for a, _, p in agents if a == pick)
+            st.code(system, language="markdown", wrap_lines=True, height=360)
+            st.caption("지난 피드백 교훈(최대 몇 개)은 실행 때 이 끝에 덧붙습니다.")
 
 
 # ─── 최종 결과 · 결정 · 반영 ─────────────────────────────────────────────
@@ -259,7 +322,9 @@ def result_tabs(content: str, run: dict) -> None:
     target = plan.get("target") or info.get("target")
     st.caption(f"편집 팀 판정: **{decided}**" + (f" — 대상 「{target}」" if target and plan.get("action") == "update" else "")
                + (f" · 통합으로 빠질 항목: {', '.join(plan['absorb'])}" if plan.get("absorb") else ""))
-    problems = concept.check_answer(content)
+    applied_prompt(run.get("question", ""), run.get("brief"), concept.used_prompt_version(run.get("question", "")),
+                   key=f"res_{run.get('run_id', '')}")
+    problems = concept.check_answer(content, run.get("harness_options"))
     if problems:
         st.warning("형식 검사에서 남은 문제 (채택 전 아래에서 직접 고칠 수 있습니다):\n" + "\n".join(f"- {p}" for p in problems))
     tabs = st.tabs(["📄 최종본", "🧠 검증 로그", "🐙 GitHub 요약", "🧾 적용 계획"])

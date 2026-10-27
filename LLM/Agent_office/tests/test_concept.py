@@ -60,7 +60,7 @@ GOOD_ENTRY = """[Perf]DAPO(Decoupled Clip and Dynamic sAmpling Policy Optimizati
 
 
 def answer_with(entry: str, plan: dict) -> str:
-    return f"<thought>1단계 표 / 2단계 검증 로그</thought>\n<final>\n{entry}\n</final>\n## GitHub 요약\n- 요약\n```json\n{json.dumps({'concept_plan': plan}, ensure_ascii=False)}\n```"
+    return f"<review_log>1단계 표 / 2단계 검증 로그</review_log>\n<final>\n{entry}\n</final>\n## GitHub 요약\n- 요약\n```json\n{json.dumps({'concept_plan': plan}, ensure_ascii=False)}\n```"
 
 
 PLAN = {"action": "add", "category": "AI", "tag": "Perf", "title": "DAPO", "target": "", "absorb": [],
@@ -159,13 +159,13 @@ def test_good_answer_passes_and_parses():
 
 
 def test_bad_answer_reports_each_rule():
-    bad_entry = GOOD_ENTRY.replace("학습 안정성 향상.", "학습 안정성이 완벽하게 향상된다.\n - 성능이 크게 상승한다.").replace(
+    bad_entry = GOOD_ENTRY.replace("학습 안정성 향상.", "학습 안정성이 완벽하게 향상된다.\n - 성능이 크게 상승한다.\n - 메모리도 줄어든다.").replace(
         "https://arxiv.org/abs/2503.14476", "URL 없음").replace("유사: 그룹 이점 / ", "")
     problems = concept.check_answer(answer_with(bad_entry, {**PLAN, "category": "Etc"}))
     text = " ".join(problems)
     assert "절대 표현" in text and "개조식" in text and "참고문헌 형식" in text and "유사" in text and "category" in text
     no_thought = concept.check_answer(f"<final>{GOOD_ENTRY}</final>")
-    assert any("<thought>" in p for p in no_thought) and any("concept_plan" in p for p in no_thought)
+    assert any("<review_log>" in p for p in no_thought) and any("concept_plan" in p for p in no_thought)
 
 
 def test_normalize_entry_to_catalog_style():
@@ -192,8 +192,10 @@ def test_normalize_entry_to_catalog_style():
     norm = concept.normalize_entry(raw)
     lines = norm.splitlines()
     assert lines[0] == "[Perf]DAPO(Decoupled Clip) (작성일: 26.10.20)"
-    assert "1. 정의 및 개념" in lines and "2. 작동 원리" in lines and "6. 관계(기존 개념과 비교)" in lines
-    assert " - PPO 기반 RL 알고리즘" in lines and "  ○ 상·하한 분리" in lines and " - 등장 배경" in lines
+    assert "1. 정의 및 개념" in lines and "2. 작동 원리" in lines and "6. 관계 (기존 개념 비교)" in lines
+    # 들여쓴 하위 불릿은 '○' 로 바꾸지 않고 그대로, 참고 문헌은 마지막 절 다음 번호 (카탈로그 형식)
+    assert " - PPO 기반 RL 알고리즘" in lines and "  - 상·하한 분리" in lines and " - 등장 배경" in lines
+    assert "7. 참고 문헌" in lines
     assert lines[-1].startswith(" - [논문·핵심기법]") and "" not in lines
     assert concept.check_entry(norm) == []  # 'Qwen2.5' 의 '2.' 에 속지 않음
 
@@ -314,7 +316,7 @@ def test_change_notes_are_kept_out_of_final_entry():
 def test_replace_final_keeps_rest_of_answer():
     answer = answer_with(GOOD_ENTRY, PLAN)
     replaced = concept.replace_final(answer, "[Perf]새 제목 (작성일: 26.10.20)\n1. 정의 및 개념")
-    assert "<final>\n[Perf]새 제목" in replaced and "<thought>" in replaced and "concept_plan" in replaced
+    assert "<final>\n[Perf]새 제목" in replaced and "<review_log>" in replaced and "concept_plan" in replaced
 
 
 # ─── GitHub 정보 (사이드바 링크·올리지 않은 커밋) ──────────────────────────
