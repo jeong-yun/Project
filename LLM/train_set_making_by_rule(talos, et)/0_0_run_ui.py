@@ -15,6 +15,8 @@
                             검증 결과 = 생성 때 검증(코드 검사·검토 모델·LLM/증강) + 지금 현재 룰로 다시 확인한 결과
                                         (normal 은 다른 공격 룰·공격 흔적이 없는지도 확인)
                           - 로그 형식 파일은 여기서 받지 않는다 → 6. 에서 버전을 확정할 때 기존 + 신규를 합쳐 만든다
+                          - 장비 FW·웹: IPS 줄을 방화벽·웹(nginx) 로그 형식으로 바꿔 보기·CSV·파일로 저장
+                            (1_4a, 08_dataset/<날짜>/fw·web_<yymmdd>.log + _label.jsonl)
   5. 피처                 4.1 피처 설명과 켜진 줄 수
   6. 기존 학습데이터와 비교  신규 학습데이터를 기준 버전(기존 학습데이터)과 비교해 등급(제거·A·B·C)을 매기고(5_5),
                           선별해 버전(26 하반기 등)에 담고 확정하면 학습 파일·로그를 내보낸다 (5_7, 실행은 5_0_run_supervised.py)
@@ -1679,7 +1681,7 @@ def data_query(q):
         dates = [date]
     label, rule, text, cons = _q(q, "label"), _q(q, "rule").strip(), _q(q, "q").strip(), _q(q, "cons")
     hold = _q(q, "hold")
-    if (dev not in ("ips", "waf") or label not in ("", "anomalies", "normal") or cons not in ("", *CONS)
+    if (dev not in ("ips", "waf", *CONV) or label not in ("", "anomalies", "normal") or cons not in ("", *CONS)
             or hold not in ("", *HOLD)):
         raise ValueError("dev/label/cons/hold")
     return dates, dev, label, rule, text, cons, hold
@@ -1701,13 +1703,18 @@ def frame_csv(q):
     → (줄 수, 파일 이름, 바이트 조각 생성기). '전체 검증'의 저장된 줄별 결과가 있으면 그것을 쓰고(빠름),
     없으면 줄마다 다시 확인한다(1천 줄에 약 15초). 200줄씩 만들어 바로 보낸다."""
     dates, dev, label, rule, text, cons, hold = data_query(q)
+    src = "ips" if dev in CONV else dev                 # FW·웹: 원본 IPS 줄을 골라 바꿔서 (conv_csv)
+    if dev in CONV:
+        conv_verified(dates, cons, hold)
     parts = []
     for d in dates:                                     # 조건 오류(예: 전체 검증 전 정합성 필터)는 보내기 전에
-        m = matching(d, dev, label, rule, text, cons, hold)
-        parts.append((d, m, len(line_index(_log_path(d, dev))) if m is None else len(m)))
+        m = matching(d, src, label, rule, text, cons, hold)
+        parts.append((d, m, len(line_index(_log_path(d, src))) if m is None else len(m)))
     total = sum(n for _, _, n in parts)
     name = "_".join([dev, dates[0] if len(dates) == 1 else "all", "frame"] +
                     [x for x in (label, cons, hold and f"hold-{hold}") if x]) + ".csv"
+    if dev in CONV:
+        return total, name, conv_csv(dev, parts)
 
     def chunks():
         buf = io.StringIO()
@@ -1749,6 +1756,8 @@ def data_rows(q):
     """신규 학습 데이터 표 한 페이지 (데이터 프레임 열 + 수정·삭제 상태)."""
     dates, dev, label, rule, text, cons, hold = data_query(q)
     offset, limit = page_args(q, 100)
+    if dev in CONV:
+        return conv_page(dates, dev, label, rule, text, cons, hold, offset, limit)
     total, picked = select_rows(dates, dev, label, rule, text, offset, limit, cons, hold)
     rows = []
     by_date = {}
@@ -1772,6 +1781,137 @@ def data_rows(q):
                              edit={"action": e["action"], "label": e.get("label", ""), "payload": bool(e.get("http"))} if e else None))
     rows.sort(key=lambda r: r["index"])
     return {"total": total, "offset": offset, "rows": rows}
+
+
+# 장비 FW·웹 보기: IPS 신규 학습 데이터 줄을 1_4a 로 바꿔 보여 주고, '파일로 저장'은 날짜 전체를 1_4a.save 로 쓴다. 조건(label·룰·검색·정합성·보류)은
+# 원본 IPS 줄에 적용하고 검증·수정·삭제도 원본(IPS) 기준. 형식·환경 값은 docs/코드참조/FW_웹로그_형식.md
+CONV = {"fw": "FW", "web": "웹"}
+_conv = {}
+
+
+def conv_mod():
+    with _lock:
+        if "M" not in _conv:
+            if not (BASE / "1_4a_fw_web_log.py").exists():
+                raise ValueError("FW·웹 로그 변환 파일(1_4a_fw_web_log.py)이 없습니다")
+            _conv["M"] = _load("fw_web_ui", "1_4a_fw_web_log.py")
+    return _conv["M"]
+
+
+def conv_lines(date, idx):
+    """원본 IPS 로그의 줄과 label 메타."""
+    path = _log_path(date, "ips")
+    li = label_info(path)
+    return read_lines(path, idx), (read_label_lines(li[4], idx) if li else [{}] * len(idx))
+
+
+def conv_verified(dates, cons, hold):
+    """정합성 조건은 원본 '전체 검증' 결과가 있어야 함 (matching 과 같은 확인, 화면 문구에 원본 장비 이름 없이)."""
+    if cons or hold == "rule":
+        for d in dates:
+            if verify_state(d, "ips").get("status") != "done":
+                raise ValueError(f"{d} 데이터는 '전체 검증'을 먼저 실행하세요")
+
+
+def conv_page(dates, dev, label, rule, text, cons, hold, offset, limit):
+    """FW·웹 보기 한 페이지: 줄마다 변환 로그·파싱 결과·공격 근거 (웹은 룰 조건으로 근거가 남는지 확인)."""
+    M = conv_mod()
+    C, rules, _ = checker()
+    conv_verified(dates, cons, hold)
+    total, picked = select_rows(dates, "ips", label, rule, text, offset, limit, cons, hold)
+    rows = []
+    for d in dict.fromkeys(p[0] for p in picked):
+        items = [(i, g) for dd, i, g in picked if dd == d]
+        for (i, g), line, meta in zip(items, *conv_lines(d, [i for i, _ in items])):
+            rows.append(dict(M.convert(dev, line, meta, (C, rules)), index=g, line=i, date=d))
+    return {"total": total, "offset": offset, "rows": rows, "source": M.settings()["source"]}
+
+
+def conv_csv(dev, parts):
+    """FW·웹 보기 CSV: 변환 로그 + 파싱 필드(이름순) + 공격 근거 + 원본 payload. 200줄씩 만들어 바로 보낸다
+    (변환만 해서 1천 줄에 약 1초, 웹은 룰 조건 대조 포함)."""
+    M = conv_mod()                                      # 변환 파일이 없으면 보내기 전에 오류
+    C, rules, _ = checker()
+    head, names = M.csv_columns(dev)
+
+    def chunks():
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(head)
+        yield ("﻿" + buf.getvalue()).encode("utf-8")
+        g0 = 0
+        for d, m, n in parts:
+            for s in range(0, n, 200):
+                idx = list(range(s, min(n, s + 200))) if m is None else m[s:s + 200]
+                buf.seek(0)
+                buf.truncate()
+                for k, (line, meta) in enumerate(zip(*conv_lines(d, idx))):
+                    row = M.convert(dev, line, meta, (C, rules))     # '-' 하나(빈 값 표기)는 수식이 아니라 그대로
+                    w.writerow([v if v == "-" else _cell(v) for v in M.csv_values(dev, row, g0 + s + k, d, names)])
+                yield buf.getvalue().encode("utf-8")
+            g0 += n
+    return chunks()
+
+
+_conv_save = {}      # 화면의 '파일로 저장' (한 번에 하나): status·dev·dates·date·done·total·saved·error
+
+
+def conv_saved(date, dev):
+    """저장 파일 이름 + 저장했으면 크기·시각과 stale (저장한 뒤 원본 학습 로그나 형식 md 가 바뀜)."""
+    M = conv_mod()
+    log, lab = M.out_files(date, dev)
+    out = {"name": f"08_dataset/{date}/{log.name}", "label": lab.name}
+    try:
+        st = log.stat()
+    except OSError:
+        return out
+    ips = M.ips_files(date)
+    src = [p for p in ((ips[0] if ips else None), M.SETTINGS_FILE) if p and p.exists()]
+    out.update(mb=round(st.st_size / 1e6, 1), saved_at=time.strftime("%Y-%m-%d %H:%M", time.localtime(st.st_mtime)),
+               stale=any(p.stat().st_mtime > st.st_mtime for p in src))
+    return out
+
+
+def conv_save_state(date, dev):
+    """'파일로 저장' 작업 상태 + 고른 날짜(전체면 모든 날짜)의 저장 파일."""
+    dates = [d["date"] for d in dataset_dates()]
+    if dev not in CONV or (date != "all" and date not in dates):
+        raise ValueError("date/dev")
+    return {"job": dict(_conv_save), "files": {d: conv_saved(d, dev) for d in (dates if date == "all" else [date])}}
+
+
+def conv_save_start(b):
+    """'파일로 저장': 고른 날짜(전체면 모든 날짜)의 데이터 전체를 1_4a.save 로 (화면 안 스레드, 하루 약 11만 줄에 FW 30초·웹 1분)."""
+    dev, date = b.get("dev", ""), b.get("date", "")
+    dates = [d["date"] for d in dataset_dates()]
+    todo = dates if date == "all" else [date]
+    if dev not in CONV or not todo or not set(todo) <= set(dates):
+        raise ValueError("date/dev")
+    if dataset_job()["running"]:
+        raise ValueError("학습 로그를 다시 만드는 중입니다 - 끝난 뒤에 저장하세요")
+    M = conv_mod()
+    with _lock:
+        if _conv_save.get("status") == "running":
+            raise ValueError("이미 파일을 저장하는 중입니다")
+        _conv_save.clear()
+        _conv_save.update(status="running", dev=dev, dates=todo, date=todo[0], done=0, total=0, saved=[],
+                          started_at=RT.now_iso())
+    threading.Thread(target=_conv_save_work, args=(M, dev, todo), daemon=True).start()
+    return {"started": todo}
+
+
+def _conv_save_work(M, dev, todo):
+    s = _conv_save
+    try:
+        C, rules, _ = checker()
+        for d in todo:
+            s.update(date=d, done=0, total=0)
+            _, n, total = M.save(d, dev, (C, rules), lambda k, t: s.update(done=k, total=t))
+            s["saved"].append({"date": d, "lines": n, "skipped": total - n})
+        s.update(status="done", finished_at=RT.now_iso())
+    except Exception as e:                              # 사유를 화면에
+        s.update(status="error", error=str(e) if isinstance(e, ValueError) else f"{type(e).__name__}: {e}",
+                 finished_at=RT.now_iso())
 
 
 _label_offsets = {}
@@ -2023,7 +2163,7 @@ EXCL_SAFETY = re.compile(
 EXCL_RULE = re.compile(r"모순|응답|response|JSON|CRLF|multipart|바이너리|REPEAT|조건 불일치|만족(할|시킬|하도록|시키려면)? ?수 없|"
                        r"within|일치하지 않|불만족|정규식|부정 조건|HTTP 형식|유효한 HTTP", re.I)
 EXCL_DUP = re.compile(r"중복|다양성|동일한 내용")
-EXCL_CATS = ["안전상 이유", "룰 조건상 불가", "중복·다양성", "기타 검토", "코드 검사", "형식"]
+EXCL_CATS = ["안전상 이유", "응답 거절", "룰 조건상 불가", "중복·다양성", "기타 검토", "코드 검사", "형식"]
 _excl = {}                                              # 날짜 → (요청별 파일 지문, 그 날짜 결과)
 _excl_req = {}                                          # (날짜, 요청) → (파일 지문, 요청 결과) - 바뀐 요청만 다시 읽음
 _rv = {}                                                # 3_3_review 의 SAFETY_RE (다시 검토 대상 문구)
@@ -2047,7 +2187,10 @@ def _redo_re():
 
 
 def _excl_cat(stage, reason):
-    """빠진 이유 분류: 검토 모델이 뺀 것은 이유 문구로, 나머지는 단계 그대로."""
+    """빠진 이유 분류: 검토 모델이 뺀 것은 이유 문구로, 나머지는 단계 그대로.
+    '검토 거절' (2026-10-27~) = 검토 모델이 같은 모델로 '재시도 횟수' 만큼 물어도 그 룰을 판정하지 않음 (거절·응답 중단)."""
+    if stage == "검토 거절":
+        return "응답 거절"
     if stage != "검토":
         return "코드 검사" if stage == "코드 검사" else "형식"
     if EXCL_SAFETY.search(reason):
@@ -2091,10 +2234,11 @@ def _excl_request(date, rev, gen, name, has_rej, fb, safety):
     rej = _jsonl(rev / f"{name}.rejected.jsonl") if has_rej else []
     if not rej:
         return out
-    # 다시 만들기 대상: 아직 대체 검토를 안 한 요청에서 처음 검토 모델이 안전 사유로 뺀 샘플이 있는 룰 (3_3 redo_candidates 와 같은 기준,
-    # 응답을 거절해 판정이 없는 룰은 뺀 샘플이 없어 여기서는 셀 수 없음 - 실제 수는 실행 로그)
+    # 다시 만들기 대상: 아직 대체 검토를 안 한 요청에서 처음 검토 모델이 판정하지 않았거나(응답 거절, '검토 거절' 단계)
+    # 안전 사유로 뺀 샘플이 있는 룰 (3_3 redo_candidates 와 같은 기준. 2026-10-27 전 실행에서 판정 없이 통과된 룰은 여기서 셀 수 없음)
     if fb and not fbk and model not in ("?", fb):
-        out["cand"] = {r.get("id") for r in rej if r.get("stage") == "검토" and safety.search(str(r.get("reason", "")))}
+        out["cand"] = {r.get("id") for r in rej if r.get("stage") == "검토 거절"
+                       or (r.get("stage") == "검토" and safety.search(str(r.get("reason", ""))))}
     g_by = {g.get("id"): g for g in _jsonl(gen / f"{name}.jsonl") if isinstance(g, dict)}
     for rid, g in g_by.items():
         out["att"][rid] = [sum(1 for s in g.get("samples", []) if isinstance(s, dict) and s.get("label") == "anomalies"), 0]
@@ -2302,12 +2446,16 @@ KNOWN_MODELS = {       # 고르기 목록 (직접 입력도 됨) - 이 프로젝
     "claude_cli": ["sonnet", "opus", "haiku", "claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-5-5"],
 }
 MODEL_FIELDS = ("provider", "model", "temperature", "max_tokens")      # '모델' 표의 2~5번째 칸
-RUN_FIELDS = {"fb": "검토 대체 모델", "conc_gen": "생성 동시 요청 수", "conc_rev": "검토 동시 요청 수"}
+RUN_FIELDS = {"fb": "검토 대체 모델", "conc_gen": "생성 동시 요청 수", "conc_rev": "검토 동시 요청 수",
+              "eff_gen": "생성 추론 강도", "eff_rev": "검토 추론 강도"}
+# 추론 강도에 쓸 수 있는 값 (3_0a_common.set_effort 와 같음): openai 는 reasoning_effort (xhigh·max → high),
+# claude_cli 는 --effort (minimal → low), 그 밖의 provider 는 쓰지 않음. 비우면 넘기지 않음 (모델 기본값)
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 CONC_TOP = {"conc_gen": 16, "conc_rev": 32}                     # 3_0a_common.parallel_settings 의 상한
 # 연결 확인: 아주 짧은 요청 1개를 별도 프로세스에서 (API 키를 화면 프로세스에 올리지 않고, 파이프라인 로그에도 남기지 않음)
 CHECK_CODE = r"""
 import importlib.util, json, logging, sys, time
-base, role, model, temp, mt = sys.argv[1:6]
+base, role, model, temp, mt, eff = sys.argv[1:7]
 spec = importlib.util.spec_from_file_location("llm_common_check", base + "/3_0a_common.py")
 C = importlib.util.module_from_spec(spec); spec.loader.exec_module(C)
 C.load_env()
@@ -2316,6 +2464,8 @@ cfg = C.role_config(roles, role, model)
 cfg.update(temperature=float(temp) if temp else None, max_tokens=int(mt))
 run = dict(run, **{"재시도 횟수": "1", "응답 대기 시간": "120"})
 log = logging.getLogger("model_check"); log.propagate = False; log.addHandler(logging.NullHandler())
+if eff and hasattr(C, "set_effort"):                     # 실제 실행처럼 추론 강도를 넘김
+    C.set_effort(cfg, eff, log)
 t = time.time()
 try:
     text, u = C.call_llm(cfg, providers, "Reply with the single word OK.", "ping", run, log)
@@ -2549,6 +2699,13 @@ def save_models(b):
     want[("실행", RUN_FIELDS["fb"])] = {2: fb}
     for k in ("conc_gen", "conc_rev"):
         want[("실행", RUN_FIELDS[k])] = {2: str(_int_in(r.get(k, ""), 1, CONC_TOP[k], RUN_FIELDS[k]))}
+    for k in ("eff_gen", "eff_rev"):                           # 추론 강도 (보내지 않은 칸은 그대로)
+        if k in r:
+            e = str(r.get(k) or "").strip().lower()
+            if e not in ("",) + EFFORTS:
+                raise ValueError(f"{RUN_FIELDS[k]} (비우거나 {'·'.join(EFFORTS)})")
+            want[("실행", RUN_FIELDS[k])] = {2: e}
+    empty_ok = {RUN_FIELDS["fb"], RUN_FIELDS["eff_gen"], RUN_FIELDS["eff_rev"]}    # 빈칸·'-' 는 같은 뜻
     lines, section, changes, found = raw.decode("utf-8").splitlines(keepends=True), None, [], set()
     for i, line in enumerate(lines):
         body = line.rstrip("\r\n")
@@ -2564,13 +2721,14 @@ def save_models(b):
         found.add(key)
         for j, val in cells.items():
             old = parts[j].strip()
-            if old == val or (key[1] == RUN_FIELDS["fb"] and {old, val} <= {"", "-", "none"}):
+            if old == val or (key[1] in empty_ok and {old, val} <= {"", "-", "none"}):
                 continue
             changes.append([f"{key[1]} {MODEL_FIELDS[j - 2]}" if section == "모델" else key[1], old, val])
-            parts[j] = f" {val} " if val else " "
+            parts[j] = f" {val} "                               # 빈 값도 같은 모양 ('|  |', 실행 표 그대로)
         lines[i] = "|".join(parts) + line[len(body):]           # 줄바꿈(CRLF) 그대로
-    if set(want) - found:
-        raise ValueError("LLM_설정.md 에 없는 줄: " + ", ".join(k[1] for k in set(want) - found))
+    missing = [k[1] for k in set(want) - found if any(want[k].values())]     # 없는 줄에 빈 값이면 그냥 둠
+    if missing:
+        raise ValueError("LLM_설정.md 에 없는 줄: " + ", ".join(missing))
     if not changes:
         return 200, {"changed": []}
     tmp = SETTINGS_FILE.with_name(f"{SETTINGS_FILE.name}.{os.getpid()}.tmp")
@@ -2597,8 +2755,11 @@ def check_model(b):
         raise ValueError("model ('provider:model')")
     temp = _temperature(b.get("temperature"), role)
     mt = min(_int_in(b.get("max_tokens") or 2048, 1, 200000, "max_tokens"), 2048)
+    eff = str(b.get("effort") or "").strip().lower()
+    if eff not in ("",) + EFFORTS:
+        raise ValueError(f"추론 강도 (비우거나 {'·'.join(EFFORTS)})")
     try:
-        r = subprocess.run([sys.executable, "-c", CHECK_CODE, str(BASE), role, model, temp, str(mt)], capture_output=True,
+        r = subprocess.run([sys.executable, "-c", CHECK_CODE, str(BASE), role, model, temp, str(mt), eff], capture_output=True,
                            timeout=240, cwd=str(BASE), env=dict(os.environ, PYTHONIOENCODING="utf-8"),
                            stdin=subprocess.DEVNULL, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except subprocess.TimeoutExpired:
@@ -2692,6 +2853,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, verify_summary(_q(q, "date"), _q(q, "dev", "ips")))
             if u.path == "/api/data/edits":
                 return self._send(200, edits_summary(_q(q, "date")))
+            if u.path == "/api/data/conv/save":
+                return self._send(200, conv_save_state(_q(q, "date"), _q(q, "dev")))
             if u.path == "/api/excluded":
                 return self._send(200, excluded_summary(q))
             if u.path == "/api/models":
@@ -2763,6 +2926,8 @@ class Handler(BaseHTTPRequestHandler):
             return 200, delete_bad(b.get("date", ""), b.get("dev", "ips"))
         if path == "/api/data/rebuild":
             return 200, start_rebuild(b.get("date", ""))
+        if path == "/api/data/conv/save":
+            return 200, conv_save_start(b)
         if path == "/api/sup/compare":
             return 200, sup_start("compare", b)
         if path == "/api/sup/finalize":
@@ -2963,7 +3128,7 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
  <div class="msg" id="agMsg"></div><pre id="agLog"></pre></div>
 </div>
 <div class="card" id="mCard"><h2>모델 설정 <span class="muted" style="font-weight:400;font-size:13px" id="mHdr"></span><a id="mReload" style="float:right;font-size:13px;font-weight:400;cursor:pointer">다시 불러오기</a></h2>
- <div class="muted" style="font-size:12.5px">학습데이터 생성(3.2)·검토(3.3)에 쓰는 모델입니다. 저장하면 LLM_설정.md 의 해당 칸만 바뀌고 <b>다음 실행부터</b> 적용됩니다. 생성·다시 만들기가 도는 동안은 저장할 수 없습니다 (실행 중인 단계가 이 파일을 읽음). 키 값은 보이지 않고 .env 에 있는지만 봅니다. '연결 확인'은 아주 짧은 요청 1개를 보냅니다 (API 비용 또는 Claude 구독 사용량이 조금 듦). 한 번만 다른 모델로 돌리려면 위 '이번 실행만 다른 모델'을 쓰세요 (저장 안 됨).</div>
+ <div class="muted" style="font-size:12.5px">학습데이터 생성(3.2)·검토(3.3)에 쓰는 모델입니다. 저장하면 LLM_설정.md 의 해당 칸만 바뀌고 <b>다음 실행부터</b> 적용됩니다. 생성·다시 만들기가 도는 동안은 저장할 수 없습니다 (실행 중인 단계가 이 파일을 읽음). 키 값은 보이지 않고 .env 에 있는지만 봅니다. '연결 확인'은 아주 짧은 요청 1개를 보냅니다 (API 비용 또는 Claude 구독 사용량이 조금 듦). <b>추론 강도</b>는 openai(reasoning_effort)·claude_cli(--effort)에만 쓰고 비우면 모델 기본값이며, 검토 대체 모델도 검토 추론 강도를 씁니다 (낮출수록 빠르고 토큰이 적지만 판단이 얕아질 수 있음). 한 번만 다른 모델로 돌리려면 위 '이번 실행만 다른 모델'을 쓰세요 (저장 안 됨).</div>
  <div id="mBody" style="margin-top:8px;overflow-x:auto" class="muted">불러오는 중…</div>
  <div class="row" style="margin-top:8px;align-items:center">
   <label>생성 동시 요청 수<input id="mConcGen" type="number" min="1" max="16" style="width:70px"></label>
@@ -2972,11 +3137,11 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
  <div id="mHint" style="font-size:12.5px;margin-top:4px"></div>
  <details style="margin-top:6px"><summary>바꾼 기록 (최근 10)</summary><div id="mLog" style="font-size:12.5px"></div></details></div>
 <div class="card"><h2>검토에서 뺀 샘플 <span class="muted" style="font-weight:400" id="exHdr"></span><a id="exCsv" style="float:right;font-size:13px;font-weight:400">CSV 받기</a></h2>
- <div class="muted" style="font-size:12.5px">생성한 샘플 중 검토(3.3)에서 빠진 것입니다. <b>검토 모델이 뺀 것</b>은 이유 문구로 나눕니다: <b>안전상 이유</b> = 공격 요청을 '안전하게 보존·수정할 수 없다'며 뺀 것 (gpt-6-luna 에 많음) · 룰 조건상 불가 = 룰 조건끼리 모순이거나 응답 방향 조건 등 요청으로 만들 수 없음 · 중복·다양성 · 기타. <b>코드 검사</b> = 검토 뒤 룰 조건 대조에서 라벨과 어긋나 뺀 것. 공격 유형을 누르면 그 유형의 이유를 봅니다.<br><b>다시 만들기</b> = 처음 검토 모델이 안전상 이유로 뺀 샘플이 있는 룰을 '검토 대체 모델'(LLM_설정.md)로 다시 검토하고 증강·학습 로그·진행 현황까지 다시 만듭니다 (API 비용 또는 Claude 구독 사용량). 다시 만든 샘플은 이 목록에서 빠지고, 다시 검토 뒤에도 빠진 샘플만 남습니다. 룰 조건상 불가·코드 검사 등으로만 빠진 샘플은 다시 만들지 않습니다.</div>
+ <div class="muted" style="font-size:12.5px">생성한 샘플 중 검토(3.3)에서 빠진 것입니다. <b>검토 모델이 뺀 것</b>은 이유 문구로 나눕니다: <b>안전상 이유</b> = 공격 요청을 '안전하게 보존·수정할 수 없다'며 뺀 것 (gpt-6-luna 에 많음) · 룰 조건상 불가 = 룰 조건끼리 모순이거나 응답 방향 조건 등 요청으로 만들 수 없음 · 중복·다양성 · 기타. <b>응답 거절</b> = 검토 모델이 같은 모델로 '재시도 횟수'(3번) 물어도 그 룰을 판정하지 않음 (거절·응답 중단). <b>코드 검사</b> = 검토 뒤 룰 조건 대조에서 라벨과 어긋나 뺀 것. 공격 유형을 누르면 그 유형의 이유를 봅니다.<br><b>다시 만들기</b> = 응답 거절이거나 안전상 이유로 뺀 샘플이 있는 룰을 '검토 대체 모델'(LLM_설정.md)로 다시 검토하고 증강·학습 로그·진행 현황까지 다시 만듭니다 (API 비용 또는 Claude 구독 사용량). <b>검토 대체 모델은 이 버튼을 누를 때만 씁니다</b> (보통 생성 실행에서는 쓰지 않음). 다시 만든 샘플은 신규 학습데이터에 들어가 이 목록에서 빠지고, 다시 검토 뒤에도 빠진 샘플만 남습니다. 룰 조건상 불가·코드 검사 등으로만 빠진 샘플은 다시 만들지 않습니다.</div>
  <div class="row" style="margin-top:8px;align-items:center">
   <label>입력 날짜<select id="exDate"></select></label>
   <label>검토 모델<select id="exModel"><option value="">전체</option></select></label>
-  <label>분류<select id="exCat"><option value="">전체</option><option>안전상 이유</option><option>룰 조건상 불가</option><option>중복·다양성</option><option>기타 검토</option><option>코드 검사</option><option>형식</option></select></label>
+  <label>분류<select id="exCat"><option value="">전체</option><option>안전상 이유</option><option>응답 거절</option><option>룰 조건상 불가</option><option>중복·다양성</option><option>기타 검토</option><option>코드 검사</option><option>형식</option></select></label>
   <button id="exRedo" disabled>다시 만들기</button><span class="msg" id="exRedoMsg"></span>
  </div>
  <div id="exRedoInfo" style="font-size:12.5px;margin-top:6px"></div>
@@ -2997,15 +3162,15 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
 <section class="page" id="p-data"><div class="card"><h2>신규 학습 데이터 <span class="muted" style="font-weight:400" id="dSum"></span></h2>
  <div class="row">
   <label>날짜<select id="dDate"></select></label>
-  <label>장비<select id="dDev"><option value="ips">IPS</option><option value="waf">WAF</option></select></label>
+  <label>장비<select id="dDev"><option value="ips">IPS</option><option value="waf">WAF</option><option value="fw">방화벽(FW)</option><option value="web">웹 로그</option></select></label>
   <label>label<select id="dLabel"><option value="">전체</option><option>anomalies</option><option>normal</option></select></label>
   <label>룰 id<input id="dRule" placeholder="예: et:1:2001044" style="width:150px"></label>
   <label>payload 검색<input id="dQ" style="width:200px"></label>
   <label>label 정합성<select id="dCons"><option value="">전체</option><option value="OK">정합</option><option value="RULE">정합 (룰 기준)</option><option value="CHECK">확인 필요</option><option value="BAD">불일치</option></select></label>
   <label>보류 대상<select id="dHold"><option value="">전체</option><option value="rule">'정합 (룰 기준)' 공격</option><option value="pyua">python-requests UA 정상</option></select></label>
-  <button id="dGo">조회</button><button id="dVerifyNew">검증 안 한 데이터만 검증</button><button id="dVerify">전체 검증</button><button class="danger" id="dVerifyStop" style="display:none">검증 중지</button><a id="dDown" style="font-size:13px;align-self:center">CSV 내려받기</a>
+  <button id="dGo">조회</button><button id="dVerifyNew">검증 안 한 데이터만 검증</button><button id="dVerify">전체 검증</button><button class="danger" id="dVerifyStop" style="display:none">검증 중지</button><button id="dSave" style="display:none" title="고른 날짜(전체면 모든 날짜)의 데이터 전체를 08_dataset/&lt;날짜&gt;/ 에 로그 + label 파일로 저장">파일로 저장</button><a id="dDown" style="font-size:13px;align-self:center">CSV 내려받기</a>
  </div>
- <div class="vsum" id="dVsum"></div>
+ <div class="vsum" id="dVsum"></div><div class="vsum" id="dSaveSum" style="display:none"></div>
  <div class="vsum" id="dEdits"></div><div id="dEditList" style="display:none"></div>
  <div class="muted" style="margin-top:8px;font-size:12.5px" id="dHelp"></div>
  <div id="dBody" style="margin-top:10px;overflow-x:auto"></div>
@@ -3201,13 +3366,15 @@ async function loadModels(refresh){let r;try{r=await get("/api/models"+(refresh?
  M=r;renderModels();estimate()}
 function mOpts(sel,k){const names=Object.keys(M.providers).filter(p=>p!=="mock"||p===sel);if(sel&&!names.includes(sel)&&sel!=="none"&&sel!=="-")names.push(sel);
  return names.map(p=>`<option${p===sel?" selected":""}>${esc(p)}</option>`).join("")+(k==="rev"?`<option value="none"${sel==="none"?" selected":""}>none (검토 생략)</option>`:"")+(k==="fb"?`<option value="-"${sel==="-"?" selected":""}>사용 안 함</option>`:"")}
+const MEFF=["minimal","low","medium","high","xhigh","max"];   // 추론 강도 (openai: xhigh·max → high, claude_cli: minimal → low)
+function mEffOpts(sel){sel=sel==="-"?"":sel||"";return ["",...MEFF,...(sel&&!MEFF.includes(sel)?[sel]:[])].map(x=>`<option value="${esc(x)}"${x===sel?" selected":""}>${x?esc(x):"기본값 (비움)"}</option>`).join("")}
 function renderModels(){const R=M.roles,Z={provider:"",model:"",temperature:"",max_tokens:""},fb=String(M.run.fb||"").trim(),on=fb.includes(":");
- const row=(k,name,v)=>`<tr><td class="nw"><b>${name}</b></td><td><select id="mP_${k}" data-mk="${k}">${mOpts(v.provider,k)}</select></td><td><input id="mM_${k}" list="mL_${k}" value="${esc(v.model)}" style="width:160px"><datalist id="mL_${k}"></datalist></td>`+
-  (k==="fb"?'<td colspan="2" class="muted">검토와 같음</td>':`<td><input id="mT_${k}" value="${esc(v.temperature)}" placeholder="비움" style="width:56px"></td><td><input id="mX_${k}" value="${esc(v.max_tokens)}" style="width:74px"></td>`)+
+ const row=(k,name,v,eff)=>`<tr><td class="nw"><b>${name}</b></td><td><select id="mP_${k}" data-mk="${k}">${mOpts(v.provider,k)}</select></td><td><input id="mM_${k}" list="mL_${k}" value="${esc(v.model)}" style="width:160px"><datalist id="mL_${k}"></datalist></td>`+
+  (k==="fb"?'<td colspan="3" class="muted">검토와 같음</td>':`<td><input id="mT_${k}" value="${esc(v.temperature)}" placeholder="비움" style="width:56px"></td><td><input id="mX_${k}" value="${esc(v.max_tokens)}" style="width:74px"></td><td><select id="mE_${k}">${mEffOpts(eff)}</select></td>`)+
   `<td id="mS_${k}"></td><td id="mH_${k}"></td><td class="nw"><button data-mc="${k}">연결 확인</button><div id="mC_${k}" style="font-size:12px;max-width:340px;white-space:normal"></div></td></tr>`;
  $("mBody").className="";
- $("mBody").innerHTML=`<table class="mini"><thead><tr><th>역할</th><th>provider</th><th>model</th><th>temperature</th><th>max_tokens</th><th>사용 가능</th><th>지난 기록 (요청당)</th><th></th></tr></thead><tbody>`+
-  row("gen","생성",R["생성"]||Z)+row("rev","검토",R["검토"]||Z)+row("fb","검토 대체",on?{provider:fb.slice(0,fb.indexOf(":")),model:fb.slice(fb.indexOf(":")+1)}:{provider:"-",model:""})+"</tbody></table>";
+ $("mBody").innerHTML=`<table class="mini"><thead><tr><th>역할</th><th>provider</th><th>model</th><th>temperature</th><th>max_tokens</th><th>추론 강도</th><th>사용 가능</th><th>지난 기록 (요청당)</th><th></th></tr></thead><tbody>`+
+  row("gen","생성",R["생성"]||Z,M.run.eff_gen)+row("rev","검토",R["검토"]||Z,M.run.eff_rev)+row("fb","검토 대체",on?{provider:fb.slice(0,fb.indexOf(":")),model:fb.slice(fb.indexOf(":")+1)}:{provider:"-",model:""})+"</tbody></table>";
  $("mConcGen").value=M.run.conc_gen;$("mConcRev").value=M.run.conc_rev;$("mHdr").textContent="· "+M.file;
  for(const [k] of MROWS)mRow(k);
  $("mLog").innerHTML=M.changes.length?`<table class="mini"><tbody>${M.changes.map(c=>`<tr><td class="nw muted">${esc(String(c.at).replace("T"," "))}</td><td>${(c.changes||[]).map(x=>`${esc(x[0])}: ${esc(x[1]||"(빈칸)")} → <b>${esc(x[2]||"(빈칸)")}</b>`).join("<br>")}</td></tr>`).join("")}</tbody></table>`:'<div class="muted">아직 없음</div>';
@@ -3219,6 +3386,8 @@ function mAvail(p){const v=M.providers[p];if(!v)return '<span class="bad">provid
 function mRow(k){const v=mVal(k),off=v.provider==="none"||v.provider==="-",cli=(M.providers[v.provider]||{}).style==="claude_cli";
  $("mL_"+k).innerHTML=((M.known||{})[v.provider]||[]).map(x=>`<option value="${esc(x)}">`).join("");$("mM_"+k).disabled=off;
  if(k!=="fb")for(const f of["mT_","mX_"]){$(f+k).disabled=off||cli;$(f+k).title=cli?"claude_cli 는 쓰지 않음 (CLI 기본값)":""}
+ if(k!=="fb"){const e=$("mE_"+k);e.disabled=off;e.title=v.provider==="openai"?"OpenAI reasoning_effort (minimal·low·medium·high, xhigh·max 는 high 로 보냄)":
+  v.provider==="claude_cli"?"claude --effort (low·medium·high·xhigh·max, minimal 은 low 로 보냄)":"이 provider 는 추론 강도를 쓰지 않음 (openai·claude_cli 만)"}
  const h=(((M.stats||{})[k==="gen"?"생성":k==="rev"?"검토":"대체"])||{})[`${v.provider}:${v.model}`];
  $("mS_"+k).innerHTML=off?'<span class="muted">-</span>':mAvail(v.provider);
  $("mH_"+k).innerHTML=off?"":h?`${fmt(h.n)}건${h.sec_n?` · ${Math.round(h.sec/h.sec_n)}초`:""} · 토큰 ${fmt(Math.round(h.tin/h.n))} / ${fmt(Math.round(h.tout/h.n))}`+(k==="fb"?' <span class="muted">(일부 룰만)</span>':""):'<span class="warn">기록 없음</span>'}
@@ -3228,17 +3397,24 @@ function mHints(){if(!M||!$("mP_gen"))return;const h=[],g=mVal("gen"),r=mVal("re
   if(pv.key&&pv.state!=="있음")h.push(`${name} ${esc(v.provider)}: .env 에 ${esc(pv.key)} 가 ${pv.state==="형식 오류"?"올바르지 않아":"없어"} 실행이 실패합니다`);
   if(pv.style==="claude_cli"&&!(pv.state||{}).logged_in)h.push(`${name} claude_cli: ${(pv.state||{}).exe?"로그인이 필요합니다 (터미널에서 claude → /login)":"claude 실행 파일을 찾지 못했습니다"}`)}
  for(const [k,name] of [["gen","생성"],["rev","검토"]]){const v=mVal(k);if(v.provider==="openai"&&$("mT_"+k).value.trim())h.push(`${name} openai: 추론 모델(gpt-5 등)은 temperature 를 받지 않을 수 있습니다 - 비워 두기를 권장`)}
+ for(const [k,name] of [["gen","생성"],["rev","검토"]]){const v=mVal(k),e=$("mE_"+k).value;if(!e||v.provider==="none")continue;
+  if(v.provider!=="openai"&&v.provider!=="claude_cli")h.push(`${name} ${esc(v.provider)}: 추론 강도는 openai·claude_cli 에만 씁니다 (이 provider 에는 넘기지 않음)`);
+  else if(v.provider==="openai"&&(e==="xhigh"||e==="max"))h.push(`${name} openai: '${e}' 는 OpenAI 에 없어 high 로 보냅니다`);
+  else if(v.provider==="claude_cli"&&e==="minimal")h.push(`${name} claude_cli: 'minimal' 은 claude 에 없어 low 로 보냅니다`)}
+ if($("mE_rev").value&&f.provider!=="-"&&f.provider!==r.provider&&(f.provider==="openai"||f.provider==="claude_cli"))h.push(`검토 대체 ${esc(f.provider)}: 검토 추론 강도(${esc($("mE_rev").value)})를 대체 검토에도 씁니다`);
  if(r.provider==="claude_cli"&&+$("mConcRev").value>8)h.push("검토 claude_cli: 호출마다 claude 프로세스가 뜨고 구독 사용 한도를 사람의 Claude 사용과 함께 써서 검토 동시 요청 수는 4~8 을 권장");
  if(r.provider==="none")h.push("검토 none: 검토 모델 없이 코드 검사만 합니다");
- if(f.provider!=="-"&&r.provider!=="none")h.push(`${f.provider}:${f.model}`===`${r.provider}:${r.model}`?"검토 대체 모델이 검토 모델과 같으면 보통 실행에서는 대체 검토를 하지 않고 '다시 만들기'에서만 씁니다":"검토 대체 모델이 검토 모델과 다르면 보통 실행에서도 거절·안전 사유로 뺀 룰을 그 모델로 다시 검토합니다 (그 모델의 비용·사용량이 듦)");
+ if(f.provider!=="-"&&r.provider!=="none"&&`${f.provider}:${f.model}`===`${r.provider}:${r.model}`)h.push("검토 대체 모델이 검토 모델과 같습니다 - '다시 만들기' 는 처음 검토와 같은 모델로 다시 묻게 됩니다");
  $("mHint").innerHTML=h.map(x=>`<div class="warn">${x}</div>`).join("");$("mSave").disabled=!!lock}
 function mBody(){const b={sig:M.sig,roles:{},run:{}};
  for(const [k,name] of [["gen","생성"],["rev","검토"]]){const v=mVal(k);b.roles[name]={provider:v.provider,model:v.model,temperature:$("mT_"+k).value.trim(),max_tokens:$("mX_"+k).value.trim()}}
- const f=mVal("fb");b.run={fb:f.provider==="-"?"-":`${f.provider}:${f.model}`,conc_gen:$("mConcGen").value.trim(),conc_rev:$("mConcRev").value.trim()};return b}
+ const f=mVal("fb");b.run={fb:f.provider==="-"?"-":`${f.provider}:${f.model}`,conc_gen:$("mConcGen").value.trim(),conc_rev:$("mConcRev").value.trim(),
+  eff_gen:$("mE_gen").value,eff_rev:$("mE_rev").value};return b}
 $("mSave").onclick=async()=>{if(!M||!$("mP_gen"))return;const b=mBody(),R=M.roles,diff=[],blank=x=>x||"(빈칸)";
  for(const name of["생성","검토"])for(const f of["provider","model","temperature","max_tokens"]){const o=String((R[name]||{})[f]||""),n=b.roles[name][f];if(o!==n)diff.push(`${name} ${f}: ${blank(o)} → ${blank(n)}`)}
  const fo=String(M.run.fb||"").trim();if(fo!==b.run.fb&&!(["","-","none"].includes(fo)&&b.run.fb==="-"))diff.push(`검토 대체 모델: ${blank(fo)} → ${b.run.fb==="-"?"사용 안 함 (-)":b.run.fb}`);
  for(const [k,name] of [["conc_gen","생성 동시 요청 수"],["conc_rev","검토 동시 요청 수"]])if(String(M.run[k])!==b.run[k])diff.push(`${name}: ${M.run[k]} → ${b.run[k]}`);
+ for(const [k,name] of [["eff_gen","생성 추론 강도"],["eff_rev","검토 추론 강도"]]){const o=String(M.run[k]||"").replace(/^-$/,""),n=b.run[k];if(o!==n)diff.push(`${name}: ${o||"기본값 (비움)"} → ${n||"기본값 (비움)"}`)}
  if(!diff.length){$("mMsg").textContent="바뀐 것이 없습니다";return}
  if(!confirm(`LLM_설정.md 를 바꿉니다 (다음 생성·검토 실행부터 적용):\n\n${diff.join("\n")}\n\n저장할까요?`))return;
  try{const r=await post("/api/models/save",b);$("mMsg").textContent=r.changed.length?`저장함 (${r.changed.length}개 칸) - 다음 실행부터 적용`:"바뀐 것이 없습니다";await loadModels();loadState()}catch(e){$("mMsg").textContent="저장 못 함: "+e.message}};
@@ -3251,7 +3427,7 @@ $("mCard").addEventListener("click",async e=>{const btn=e.target.closest("[data-
  const t=k==="gen"?"gen":"rev",cost=pv.style==="claude_cli"?"Claude 구독 사용량을 조금 씁니다 (claude 프로세스 1개, 10~30초)":pv.style==="mock"?"가짜 응답이라 비용이 없습니다":"API 요청 1개라 비용이 아주 조금 듭니다";
  if(!confirm(`${v.provider}:${v.model} 에 아주 짧은 요청 1개('OK' 라고 답하기)를 보내 연결을 확인합니다.\n${cost}. 진행할까요?`))return;
  out.textContent="확인 중… (최대 2분)";btn.disabled=true;
- try{const r=await post("/api/models/check",{role:k==="gen"?"생성":"검토",model:`${v.provider}:${v.model}`,temperature:$("mT_"+t).value.trim(),max_tokens:$("mX_"+t).value.trim()});
+ try{const r=await post("/api/models/check",{role:k==="gen"?"생성":"검토",model:`${v.provider}:${v.model}`,temperature:$("mT_"+t).value.trim(),max_tokens:$("mX_"+t).value.trim(),effort:$("mE_"+t).value});
   out.innerHTML=r.ok?`<span class="ok">연결됨</span> ${r.sec}초 · ${r.reply?`응답 '${esc(r.reply)}'`:"빈 응답"}${r.cut?" (출력 한도에서 잘림)":""} · 토큰 ${fmt(r.in||0)} / ${fmt(r.out||0)}`:`<span class="bad">실패</span> ${r.sec!=null?r.sec+"초 · ":""}${esc(r.error||"")}`}
  catch(err){out.textContent="실패: "+err.message}finally{btn.disabled=false}});
 /* ── 1. 진행 현황 ── */
@@ -3290,19 +3466,45 @@ $("rPrev").onclick=()=>{rOff=Math.max(0,rOff-50);loadRules()};$("rNext").onclick
 /* ── 4. 신규 학습 데이터 (표만, 로그 형식 파일은 6. 에서 버전을 확정할 때 만듦) ── */
 let dOff=0,dInit=false,D=[],dTot=0,dReady=false,dV=null,dVT=0,dRows=[],dE=null,dET=0,dERun=false,edX=null,dPending=null;
 function dLimit(){return 50}
+/* 장비 FW·웹: IPS 줄을 1_4a 로 바꿔 보여 줌 (조건·검증·수정·삭제는 원본 IPS 기준, 표는 보기만) */
+function dSrc(){const v=$("dDev").value;return v==="fw"||v==="web"?"ips":v}
+function dConv(){return dSrc()!==$("dDev").value}
+const EVC={none:["c-CHECK","없음"],kept:["c-OK","남음"],lost:["c-BAD","사라짐"],check:["c-CHECK","확인 못 함"]};
+function convTable(r,all){const nm=$("dDev").value==="fw"?"FW":"웹";
+ return `<table><thead><tr><th class="n">index</th><th>${nm} 로그 (변환)</th><th>label <span class="muted" style="font-weight:400">(원본 샘플)</span></th><th>공격 근거 (${nm} 로그)</th><th>원본 payload</th></tr></thead><tbody>${r.rows.map(x=>{const e=EVC[x.evidence.state];
+  return `<tr><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.raw)}</div><details><summary>파싱 결과 ${x.fields.length}개</summary><div class="reason" style="word-break:break-all">${x.fields.map(([k,v])=>`<code>${esc(k)}</code>=${esc(v)}`).join(", ")}</div></details></td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span><div class="muted">${esc(x.rule_id)}</div></td><td class="reason">${e?`<span class="chip ${e[0]}">${e[1]}</span> `:""}${esc(x.evidence.text)}${x.lost_headers.length?`<div class="muted">사라지는 헤더: ${esc(x.lost_headers.join(", "))}</div>`:""}</td><td><details><summary>${esc(x.request.slice(0,80))}</summary><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></details></td></tr>`}).join("")}</tbody></table>`}
+function convHelp(){const dv=$("dDev").value,fw=dv==="fw";
+ return (fw?`<b>방화벽(FW) 로그 보기</b>: 신규 학습 데이터를 FW 세션 로그 형식(syslog + CSV 34열)으로 바꿔 보여 줍니다. <b>FW 로그에는 payload 가 없어</b>(출발·목적 IP·포트, protocol, 바이트·패킷, 룰, 동작만) <b>공격 근거가 로그에 없습니다</b> - label 은 원본 샘플의 것이고 FW 줄 내용으로는 판단할 수 없습니다. 보낸 바이트는 요청 길이로, 세션 시간·응답 크기는 샘플 지문으로 만든 값입니다 (label 과 무관).`
+  :`<b>웹 로그 보기</b>: nginx 접근 로그 형식(syslog + combined + X-Forwarded-For·본문)으로 바꿔 보여 줍니다. 남는 것: 요청 줄·User-Agent·Referer·X-Forwarded-For·본문 (+ Basic 인증 사용자 이름). Host·Cookie·Content-Type·Authorization·사용자 정의 헤더는 사라집니다 → anomalies 인데 룰 조건이 그런 헤더에만 있으면 <b>공격 근거 '사라짐'</b> (남는 부분만으로 룰 조건을 다시 대조). 응답 코드·크기는 원본에 없어 샘플 지문으로 만든 값입니다 (label 과 무관). 값은 nginx 처럼 " \\ 와 줄바꿈·한글 등을 \\xHH 로 적습니다.`)
+  +` label 정합성·보류 대상 필터와 검증 버튼은 <b>원본 payload 기준</b>이고, 수정·삭제는 이 보기에서 하지 않습니다. <b>CSV 내려받기</b>: 지금 조건에 맞는 줄의 변환 로그 + 파싱 필드 + 공격 근거 + 원본 payload (하루 약 11만 줄에 1~2분). <b>파일로 저장</b>: 고른 날짜(전체면 모든 날짜)의 데이터 전체를 조건과 상관없이 08_dataset/&lt;날짜&gt;/ 에 ${dv}_&lt;yymmdd&gt;.log (변환 로그 한 줄씩) + ${dv}_&lt;yymmdd&gt;_label.jsonl (같은 줄 순서의 label·룰 id·공격 근거) 로 저장합니다 (하루 약 11만 줄에 FW 30초·웹 1분). 학습 로그를 다시 만들면 다시 저장하세요. 형식·장비 값: docs/코드참조/FW_웹로그_형식.md (확인 필요 값 표시)`}
+/* FW·웹 '파일로 저장': 고른 날짜(전체면 모든 날짜)의 데이터 전체 → 08_dataset/<날짜>/<fw|web>_<yymmdd>.log + _label.jsonl (1_4a.save) */
+let dST=0;
+async function loadSave(){clearTimeout(dST);const on=dConv();$("dSave").style.display=$("dSaveSum").style.display=on?"":"none";if(!on)return;
+ let s;try{s=await get(`/api/data/conv/save?date=${$("dDate").value}&dev=${$("dDev").value}`)}catch(e){$("dSaveSum").textContent="";return}
+ const j=s.job,run=j.status==="running",mine=j.dev===$("dDev").value,fs=Object.values(s.files),f=fs[0]||{},nm=d=>d==="fw"?"FW":"웹";$("dSave").disabled=run;
+ let h=run?`<span>${nm(j.dev)} 로그 파일 저장 중… ${j.date}${j.dates.length>1?` (${j.dates.indexOf(j.date)+1} / ${j.dates.length}일)`:""} · ${fmt(j.done)} / ${fmt(j.total)}줄</span>`
+  :fs.length>1?`<span>파일로 저장한 날짜 ${fs.filter(x=>x.saved_at).length} / ${fs.length}${fs.some(x=>x.stale)?` · 저장한 뒤 학습 로그나 형식 md 가 바뀐 날짜 ${fs.filter(x=>x.stale).length}`:""}</span>`
+  :f.saved_at?`<span>저장한 파일: <code>${esc(f.name)}</code> + <code>${esc(f.label)}</code> · ${f.mb}MB · ${f.saved_at}${f.stale?" · <b>저장한 뒤 학습 로그나 형식 md 가 바뀜 → 다시 저장</b>":""}</span>`
+  :`<span class="muted">저장한 파일 없음 - '파일로 저장' 은 <code>${esc(f.name||"")}</code> + <code>${esc(f.label||"")}</code> 로 저장합니다</span>`;
+ if(!run&&mine&&j.status==="error")h+=`<span class="muted">저장 실패: ${esc(j.error)}</span>`;
+ if(!run&&mine&&j.status==="done")h+=`<span class="muted">${j.finished_at.slice(11,16)} 저장 끝: ${j.saved.map(x=>`${x.date} ${fmt(x.lines)}줄`).join(", ")}</span>`;
+ $("dSaveSum").innerHTML=h;if(run)dST=setTimeout(loadSave,1500)}
+$("dSave").onclick=async()=>{const v=$("dDate").value,dev=$("dDev").value,ds=v==="all"?D:D.filter(d=>d.date===v),n=ds.reduce((s,d)=>s+(d.label.anomalies||0)+(d.label.normal||0),0);
+ if(!confirm(`${v==="all"?"모든 날짜":v} 의 데이터 전체 ${fmt(n)}줄을 ${dev==="fw"?"FW":"웹"} 로그 파일로 저장합니다 (지금 조건과 상관없이, ${dur(n*(dev==="fw"?0.00025:0.0005))}).\n08_dataset/<날짜>/${dev}_<yymmdd>.log 와 _label.jsonl 이 이미 있으면 바꿉니다. 진행할까요?`))return;
+ try{await post("/api/data/conv/save",{date:v,dev});loadSave()}catch(e){$("dSaveSum").style.display="";$("dSaveSum").textContent="실패: "+e.message}};
 async function initData(){if(!dInit){const r=await get("/api/data/dates");D=r.dates;
   $("dDate").innerHTML=(D.length>1?'<option value="all">전체 (모든 날짜)</option>':"")+D.slice().reverse().map(d=>`<option value="${d.date}">${d.date} (${fmt(d.events)}건)</option>`).join("");
   if(D.length)$("dDate").value=D.at(-1).date;dInit=true}
  if(dPending){$("dRule").value=dPending.rule||"";$("dDev").value=dPending.dev;if(D.length>1)$("dDate").value="all";   // 6. 의 '4.에서 보기'
   $("dLabel").value=$("dCons").value=$("dQ").value="";$("dHold").value=dPending.hold||"";dHoldUi();dOff=0;dPending=null}
- loadData();loadVerify();loadEdits();ensureFeat()}
+ loadData();loadVerify();loadEdits();loadSave();ensureFeat()}
 function dHoldUi(){const h=$("dHold").value;for(const id of["dLabel","dCons"]){$(id).disabled=!!h;if(h)$(id).value=""}}   // 보류 대상이 label·정합성을 정함
 function dSummary(){const v=$("dDate").value,ds=v==="all"?D:D.filter(d=>d.date===v);const a=ds.reduce((s,d)=>s+(d.label.anomalies||0),0),n=ds.reduce((s,d)=>s+(d.label.normal||0),0);
  $("dSum").textContent=`· ${v==="all"?"전체":v} · ${fmt(a+n)}건 (anomalies ${fmt(a)} / normal ${fmt(n)}) · 룰 ${fmt(ds.reduce((s,d)=>s+d.rules,0))}개`;
  // 지금 조건에 맞는 모든 줄을 표의 열 그대로 CSV
  $("dDown").href="/download/frame?"+new URLSearchParams({date:v,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value});
- $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다.";}
-async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=await get(`/api/data/verify?date=${v}&dev=${$("dDev").value}`)}catch(e){$("dVsum").textContent="";return}
+ $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다.";if(dConv())$("dHelp").innerHTML=convHelp();}
+async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=await get(`/api/data/verify?date=${v}&dev=${dSrc()}`)}catch(e){$("dVsum").textContent="";return}
  dV=s;dReady=s.status==="done"&&!!s.frame_ready;
  const run=s.status==="running";$("dVerifyStop").style.display=run?"":"none";$("dVerifyNew").disabled=$("dVerify").disabled=run;
  if(run){const what=s.mode==="new"?"검증 안 한 데이터만 검증":"전체 검증",left=s.eta_s!=null?` · 남은 시간 <b>약 ${hms(s.eta_s)}</b> · <b>${clock(s.eta_s)}</b> 쯤 끝날 예상`:"";
@@ -3314,22 +3516,23 @@ async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=aw
  const stop=s.stopped?`<span class="muted">${s.stopped.at.slice(11,16)} 에 중지 (${esc(s.stopped.why)}) - 확인한 ${fmt(s.stopped.saved)}줄은 저장됨 → '검증 안 한 데이터만 검증' 으로 이어서</span>`:"";
  if(s.status!=="done"){$("dVsum").innerHTML=(s.status==="error"?`<span class="muted">검증 오류: ${esc(s.error)}</span>`:`<span class="muted">검증 전 — 모든 줄의 label 정합성을 확인하면 정합성으로 걸러 볼 수 있습니다.</span>`)+stop+est;return}
  const tot=Object.values(s.summary).reduce((a,b)=>a+b,0);
- $("dVsum").innerHTML=`<b>label 정합성 (${fmt(tot)}줄)</b>`+["OK","RULE","CHECK","BAD"].map(k=>`<span class="chip c-${k}" data-c="${k}">${esc(s.names[k])} ${fmt(s.summary[k]||0)} (${tot?(100*(s.summary[k]||0)/tot).toFixed(1):0}%)</span>`).join("")+`<span class="muted">${s.finished_at.replace("T"," ")} 검증${s.reused?` · 이미 확인한 결과 ${fmt(s.reused)}줄 그대로 씀`:""}${s.old_rules?` · ${fmt(s.old_rules)}줄은 이전 룰 입력(${esc(Object.keys(s.rule_inputs).filter(k=>k!==s.latest_input).sort().join(", "))}) 기준 - 최신 룰(${esc(s.latest_input)})로 다시 보려면 '전체 검증'`:""}</span>`+stop+(s.est_new?est:"");
+ $("dVsum").innerHTML=`<b>label 정합성${dConv()?" (원본 payload 기준)":""} (${fmt(tot)}줄)</b>`+["OK","RULE","CHECK","BAD"].map(k=>`<span class="chip c-${k}" data-c="${k}">${esc(s.names[k])} ${fmt(s.summary[k]||0)} (${tot?(100*(s.summary[k]||0)/tot).toFixed(1):0}%)</span>`).join("")+`<span class="muted">${s.finished_at.replace("T"," ")} 검증${s.reused?` · 이미 확인한 결과 ${fmt(s.reused)}줄 그대로 씀`:""}${s.old_rules?` · ${fmt(s.old_rules)}줄은 이전 룰 입력(${esc(Object.keys(s.rule_inputs).filter(k=>k!==s.latest_input).sort().join(", "))}) 기준 - 최신 룰(${esc(s.latest_input)})로 다시 보려면 '전체 검증'`:""}</span>`+stop+(s.est_new?est:"");
  $("dVsum").querySelectorAll("[data-c]").forEach(c=>c.onclick=()=>{$("dHold").value="";dHoldUi();$("dCons").value=c.dataset.c;dOff=0;loadData()});renderEdits();}
-async function startVerify(mode){try{const r=await post("/api/data/verify",{date:$("dDate").value,dev:$("dDev").value,mode});
+async function startVerify(mode){try{const r=await post("/api/data/verify",{date:$("dDate").value,dev:dSrc(),mode});
   if(!r.started.length&&r.done.length){$("dVsum").innerHTML='<span class="muted">새로 확인할 줄이 없습니다 - 이미 모두 검증했습니다.</span>';setTimeout(loadVerify,2500)}else loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}}
 $("dVerifyNew").onclick=()=>startVerify("new");
 $("dVerify").onclick=()=>{if(!dV||confirm(`모든 줄(${fmt(dV.total)}줄)을 지금 룰로 새로 확인합니다 (약 ${hms(dV.est_all_s)}). 진행할까요?`))startVerify("all")};
-$("dVerifyStop").onclick=async()=>{try{await post("/api/data/verify/stop",{date:$("dDate").value,dev:$("dDev").value});loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}};
+$("dVerifyStop").onclick=async()=>{try{await post("/api/data/verify/stop",{date:$("dDate").value,dev:dSrc()});loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}};
 async function loadData(){dSummary();if(!D.length){$("dBody").innerHTML='<div class="muted">08_dataset 에 학습데이터가 없습니다.</div>';return}
  const qs=new URLSearchParams({date:$("dDate").value,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value,offset:dOff,limit:dLimit()});
  $("dBody").style.opacity=.5;let r;try{r=await get("/api/data/rows?"+qs)}catch(e){$("dBody").innerHTML=`<div class="muted">불러오지 못했습니다: ${esc(e.message)}</div>`;return}finally{$("dBody").style.opacity=1}
  const all=$("dDate").value==="all";
- $("dBody").innerHTML=`<table><thead><tr><th class="n">index</th><th>payload</th><th>method</th><th>label</th><th>label 사유</th><th>검증 결과</th><th>label 정합성</th><th>탐지 피처 <a href="#/features" style="font-weight:400">(설명)</a></th><th>수정·삭제</th></tr></thead><tbody>${r.rows.map((x,k)=>`<tr class="lv-${x.level}"><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td class="method">${esc(x.method)}</td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></td><td class="reason">${esc(x.reason)}</td><td class="chk">${x.checks.map(([s,t])=>`<div class="${s}">${s==="ok"?"✔":s==="warn"?"△":"✘"} ${esc(t)}</div>`).join("")}</td><td class="cons"><span class="chip c-${x.cons}">${esc(x.cons_text)}</span><div>${esc(x.cons_reason)}</div></td><td class="feat">${x.features.length?x.features.map(f=>`<div><code class="fn" data-f="${esc(f.name)}" data-d="${f.name.startsWith("k_")?"":esc(f.desc)}">${esc(f.name)}</code> = ${f.value} <span class="muted">${esc(f.desc)}</span></div>`).join("")+`<div class="muted">${x.label==="normal"?"✘ 정상인데 켜진 피처가 있음":`켜진 피처 ${x.features.length}개 → 모델이 공격으로 볼 근거`}</div>`:`<div class="muted">${x.label==="normal"?"켜진 피처 없음 → 정상으로 볼 근거":"켜진 피처 없음 → 이 피처로는 탐지 못 함"}</div>`}</td><td class="act">${editCell(x,k)}</td></tr>`).join("")}</tbody></table>`;
+ $("dBody").innerHTML=dConv()?convTable(r,all):`<table><thead><tr><th class="n">index</th><th>payload</th><th>method</th><th>label</th><th>label 사유</th><th>검증 결과</th><th>label 정합성</th><th>탐지 피처 <a href="#/features" style="font-weight:400">(설명)</a></th><th>수정·삭제</th></tr></thead><tbody>${r.rows.map((x,k)=>`<tr class="lv-${x.level}"><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td class="method">${esc(x.method)}</td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></td><td class="reason">${esc(x.reason)}</td><td class="chk">${x.checks.map(([s,t])=>`<div class="${s}">${s==="ok"?"✔":s==="warn"?"△":"✘"} ${esc(t)}</div>`).join("")}</td><td class="cons"><span class="chip c-${x.cons}">${esc(x.cons_text)}</span><div>${esc(x.cons_reason)}</div></td><td class="feat">${x.features.length?x.features.map(f=>`<div><code class="fn" data-f="${esc(f.name)}" data-d="${f.name.startsWith("k_")?"":esc(f.desc)}">${esc(f.name)}</code> = ${f.value} <span class="muted">${esc(f.desc)}</span></div>`).join("")+`<div class="muted">${x.label==="normal"?"✘ 정상인데 켜진 피처가 있음":`켜진 피처 ${x.features.length}개 → 모델이 공격으로 볼 근거`}</div>`:`<div class="muted">${x.label==="normal"?"켜진 피처 없음 → 정상으로 볼 근거":"켜진 피처 없음 → 이 피처로는 탐지 못 함"}</div>`}</td><td class="act">${editCell(x,k)}</td></tr>`).join("")}</tbody></table>`;
  dRows=r.rows;dTot=r.total;$("dCount").textContent=`${fmt(r.total)}건 중 ${r.total?dOff+1:0}–${Math.min(dOff+dLimit(),r.total)}`;$("dPrev").disabled=dOff===0;$("dNext").disabled=dOff+dLimit()>=r.total;}
 $("dDown").onclick=e=>{   // 저장된 '전체 검증' 결과가 없으면 줄마다 다시 확인하므로 오래 걸릴 수 있음
+ if(dConv()){if(dTot>30000&&!confirm(`${fmt(dTot)}줄을 ${$("dDev").value==="fw"?"FW":"웹"} 로그로 바꿔 CSV 를 만듭니다 (${dur(dTot*0.001)}). 지금 받을까요?`))e.preventDefault();return}   // FW·웹: 변환만 (1천 줄에 약 1초)
  if(!dReady&&dTot>1000&&!confirm(`'전체 검증' 결과가 없어 ${fmt(dTot)}줄을 하나씩 다시 확인하며 CSV 를 만듭니다 (${dur(dTot*0.015)}).\n'전체 검증'을 먼저 하면 바로 받을 수 있습니다. 지금 받을까요?`))e.preventDefault()};
-for(const id of["dDate","dDev"])$(id).onchange=()=>{dOff=0;$("dCons").value="";loadData();loadVerify();loadEdits()};
+for(const id of["dDate","dDev"])$(id).onchange=()=>{dOff=0;$("dCons").value="";loadData();loadVerify();loadEdits();loadSave()};
 /* 수정·삭제: 저장하면 '학습 로그에 반영'(1.4 다시 만들기) 때 학습 로그에 들어간다 */
 function editCell(x,k){if(!x.sk)return"";
  if(x.edit)return x.edit.action==="delete"?`<span class="chip c-BAD">삭제 예정</span><div><button class="sm" data-a="undo" data-r="${k}">되돌리기</button></div>`
@@ -3365,7 +3568,7 @@ function editList(){const s=dE,box=$("dEditList");if(!s||box.style.display!=="no
  box.innerHTML=`<table><thead><tr><th>날짜</th><th>처리</th><th>룰 id</th><th>label</th><th>사유</th><th>저장 시각</th><th></th></tr></thead><tbody>${s.items.map((e,k)=>`<tr><td>${e.date}</td><td>${e.action==="delete"?"삭제":"수정"+(e.payload?" (payload)":"")}</td><td>${esc(e.id)}</td><td>${esc(e.orig_label)}${e.label?" → "+esc(e.label):""}</td><td class="reason">${esc(e.why)}</td><td>${esc(e.at.replace("T"," "))}</td><td><button class="sm" data-u="${k}">되돌리기</button></td></tr>`).join("")}</tbody></table>${s.saved>s.items.length?`<div class="muted">최근 ${s.items.length}건만 표시</div>`:""}`;box.style.display="block"}
 $("dEdits").addEventListener("click",async e=>{const b=e.target.closest("button[data-e]");if(!b)return;const a=b.dataset.e,v=$("dDate").value;
  try{if(a==="list")return editList();
-  if(a==="bad"){const n=dV.summary.BAD;if(!confirm(`검증에서 '불일치' 인 ${fmt(n)}줄을 모두 삭제로 저장합니다. '학습 로그에 반영' 때 적용되고 목록에서 되돌릴 수 있습니다. 진행할까요?`))return;await post("/api/data/edit/bad",{date:v,dev:$("dDev").value});loadData()}
+  if(a==="bad"){const n=dV.summary.BAD;if(!confirm(`검증에서 '불일치' 인 ${fmt(n)}줄을 모두 삭제로 저장합니다. '학습 로그에 반영' 때 적용되고 목록에서 되돌릴 수 있습니다. 진행할까요?`))return;await post("/api/data/edit/bad",{date:v,dev:dSrc()});loadData()}
   if(a==="apply"){if(!confirm("저장한 수정·삭제를 반영해 학습 로그를 다시 만듭니다 (1.4, API 비용 없음, 큰 날짜는 4~5분). 끝나면 '검증 안 한 데이터만 검증' 으로 바뀐 줄만 확인하세요. 진행할까요?"))return;await post("/api/data/rebuild",{date:v})}
   loadEdits()}catch(err){alert("실패: "+err.message)}});
 $("dEditList").addEventListener("click",async e=>{const b=e.target.closest("button[data-u]");if(!b)return;const it=dE.items[+b.dataset.u];
