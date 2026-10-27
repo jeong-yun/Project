@@ -121,15 +121,61 @@ def _model_key(spec: ModelSpec) -> str:
     return f"{spec.provider}:{spec.model}"
 
 
+_cooldown_why: dict[str, str] = {}  # 위 키 → 쉬는 이유 (화면 표시용)
+
+
+def _team_key(spec: ModelSpec, team: str) -> str:
+    return f"{_model_key(spec)}@{team}"
+
+
 def note_failure(spec: ModelSpec, error: Exception) -> None:
-    """호출 실패 기록 — 할당량 소진이면 잠시 후보에서 뺀다."""
+    """호출 실패 기록 — 할당량 소진이면 잠시 후보에서 뺀다.
+
+    안전 필터 거부(claude_cli)는 그 팀의 프롬프트 탓이므로 '그 팀'에서만 뺀다 (팀은 usage.scope 의 team_id).
+    같은 실행의 다음 단계(예: 부장 통합 → 편집장 검토)가 또 거부를 기다리지 않고 바로 대안 모델로 간다.
+    """
+    if getattr(error, "refused", False):
+        key = _team_key(spec, usage.current("team_id"))
+        _cooldown[key] = time.monotonic() + (getattr(error, "cooldown_sec", None) or QUOTA_COOLDOWN_SEC)
+        _cooldown_why[key] = "안전 필터가 요청을 거부"
+        return
     if is_quota_exhausted(error):
         seconds = getattr(error, "cooldown_sec", None) or QUOTA_COOLDOWN_SEC  # 구독 한도는 더 오래 쉰다
         _cooldown[_model_key(spec)] = time.monotonic() + seconds
+        _cooldown_why[_model_key(spec)] = "구독 사용 한도" if spec.provider == "claude_cli" else "사용 한도 소진"
 
 
-def cooling_down(spec: ModelSpec) -> bool:
-    return _cooldown.get(_model_key(spec), 0.0) > time.monotonic()
+def skip_reason(spec: ModelSpec, team: str | None = None) -> str:
+    """이 모델을 지금 뒤로 미루는 이유 (쉬는 중이 아니면 빈 문자열). team 을 안 주면 지금 usage.scope 의 팀."""
+    team = usage.current("team_id") if team is None else team
+    now = time.monotonic()
+    for key in (_model_key(spec), _team_key(spec, team)):
+        if _cooldown.get(key, 0.0) > now:
+            return _cooldown_why.get(key, "사용 한도 소진")
+    return ""
+
+
+def cooling_down(spec: ModelSpec, team: str | None = None) -> bool:
+    return bool(skip_reason(spec, team))
+
+
+def failure_reason(error: str) -> str:
+    """'건너뛴 모델' 기록 한 줄 → 사람이 읽는 짧은 이유 (화면의 '⚠️ 대안 모델' 옆에 쓴다)."""
+    text = error.lower()
+    for markers, reason in (
+        (("claudeclirefused", "safeguards flagged", "legal/aup", "안전 필터"), "안전 필터가 요청을 거부"),
+        (("claudecliusagelimit", "구독 사용 한도"), "구독 사용 한도"),
+        (("사용 한도 소진",), "사용 한도"),
+        (("claudecliunavailable", "not logged in"), "Claude 로그인 필요·CLI 없음"),
+        (("claudeclitimeout", "timeout", "timed out"), "시간 초과"),
+        (("503", "overloaded", "high demand", "unavailable"), "서버 과부하"),
+        (("429", "quota", "rate limit", "resourceexhausted"), "사용 한도"),
+        (("emptyresponse",), "빈 응답"),
+        (("파싱 실패", "parsing"), "형식에 맞지 않는 답"),
+    ):
+        if any(m in text for m in markers):
+            return reason
+    return "호출 오류"
 
 
 def sleep(seconds: float) -> None:
@@ -330,13 +376,17 @@ def free_only(models: ModelsConfig) -> ModelsConfig:
     return models.model_copy(update={"disabled_providers": sorted(set(models.disabled_providers) | set(paid))})
 
 
-def available_candidates(rank_models: RankModels, models: ModelsConfig) -> list[tuple[ModelSpec, bool]]:
+def available_candidates(
+    rank_models: RankModels, models: ModelsConfig, team: str | None = None
+) -> list[tuple[ModelSpec, bool]]:
     """사용 가능한 후보 모델을 우선순위대로 반환. (spec, is_fallback) 목록.
 
-    할당량 소진으로 쉬는 중인 모델은 뒤로 미룬다 (모두 쉬는 중이면 그래도 시도한다).
+    할당량 소진·안전 필터 거부로 쉬는 중인 모델은 뒤로 미룬다 (모두 쉬는 중이면 그래도 시도한다).
+    team: 팀별로 쉬는 기록(거부)을 볼 팀 — 안 주면 지금 usage.scope 의 팀 (화면은 직접 넘긴다).
     """
     usable = [(spec, i > 0) for i, spec in enumerate(rank_models.candidates) if is_available(spec.provider, models)]
-    return [c for c in usable if not cooling_down(c[0])] + [c for c in usable if cooling_down(c[0])]
+    resting = {id(c) for c in usable if cooling_down(c[0], team)}
+    return [c for c in usable if id(c) not in resting] + [c for c in usable if id(c) in resting]
 
 
 def create_chat_model(spec: ModelSpec, models: ModelsConfig) -> BaseChatModel:
@@ -421,6 +471,19 @@ def unavailable_reason(provider: str, models: ModelsConfig) -> str:
     return STATUS_REASONS.get(status, status)
 
 
+def skip_notes(rank_models: RankModels, candidates: list[tuple[ModelSpec, bool]]) -> list[str]:
+    """첫 후보보다 앞 순위인데 쉬는 중이라 뒤로 미룬 모델 — 단계 기록('건너뛴 모델')과 '⚠️ 대안 모델' 옆에 이유를 남긴다."""
+    first = candidates[0][0] if candidates else None
+    notes = []
+    for spec in rank_models.candidates:
+        if spec == first:
+            break
+        why = skip_reason(spec)
+        if why:
+            notes.append(f"{spec.label}: 건너뜀 — {why} (잠시 쉬는 중)")
+    return notes
+
+
 def require_candidates(rank_models: RankModels, models: ModelsConfig, who: str) -> list[tuple[ModelSpec, bool]]:
     candidates = available_candidates(rank_models, models)
     if not candidates:
@@ -453,8 +516,9 @@ def invoke_structured(
     who: str,
 ) -> StructuredCall:
     """구조화 출력 호출. 일시적 오류는 같은 모델로 재시도하고, 그래도 실패하면 다음 후보로 넘어간다."""
-    errors: list[str] = []
-    for spec, is_fallback in require_candidates(rank_models, models, who):
+    candidates = require_candidates(rank_models, models, who)
+    errors: list[str] = skip_notes(rank_models, candidates)
+    for spec, is_fallback in candidates:
         out = None
         for attempt in range(len(RETRY_DELAYS) + 1):
             started = time.perf_counter()

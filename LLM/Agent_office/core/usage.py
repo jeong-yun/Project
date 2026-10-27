@@ -147,6 +147,11 @@ def scope(**tags: str) -> Iterator[None]:
         _scope.reset(token)
 
 
+def current(tag: str) -> str:
+    """지금 scope 에 붙은 값 (예: current("team_id")) — 없으면 빈 문자열."""
+    return _scope.get().get(tag, "")
+
+
 # ─── 기록 ───────────────────────────────────────────────────────────────
 
 

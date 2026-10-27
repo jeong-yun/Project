@@ -186,7 +186,7 @@ def build_office_graph(
             previous = answer
             answer = redo(feedback, previous)
             answer.attempts = previous.attempts + 1
-            answer.verification_log = previous.verification_log
+            answer.verification_log = [*previous.verification_log, *answer.verification_log]
         answer.harness = results
         answer.verification_log = [*answer.verification_log, *log]
         if not harness.all_passed(results):
@@ -320,6 +320,11 @@ def build_office_graph(
         messages = agent.review_messages(question, task, children, web, lessons, rewrite_answer)
         answer = agent.review(messages, children, rewrite_answer)
 
+        def again(feedback: str, previous: AgentAnswer) -> AgentAnswer:
+            # 고칠 곳(edits) 방식이면 모델이 마지막으로 본 글(직전 결과)에 적용한다
+            base = previous.content if agent.edit_mode else None
+            return agent.review(with_feedback(messages, previous.review.model_dump_json(), feedback), children, rewrite_answer, base)
+
         # 비평가(Critic): 검토 과정의 논리 비약을 채점 → 불합격이면 자가 교정
         use_critic = critic_cfg["enabled"] and (critic_cfg["scope"] == "all" or node_id == state["root_id"])
         if use_critic:
@@ -342,22 +347,16 @@ def build_office_graph(
                     break
                 emit({"type": "retry", "node": node_id, "reason": "critic"})
                 previous = answer
-                answer = agent.review(
-                    with_feedback(messages, previous.review.model_dump_json(), verification.correction_message(critic)),
-                    children,
-                    rewrite_answer,
-                )
+                answer = again(verification.correction_message(critic), previous)
                 answer.attempts = previous.attempts + 1
                 answer.verification_log = [
                     *previous.verification_log,
                     f"비평가 불합격({critic.score}/5) → 자가 교정 {round_ + 1}회",
+                    *answer.verification_log,
                 ]
             answer = keep_best_attempt(tried, passed)
 
-        def redo_review(feedback: str, previous: AgentAnswer) -> AgentAnswer:
-            return agent.review(with_feedback(messages, previous.review.model_dump_json(), feedback), children, rewrite_answer)
-
-        return run_harness(answer, redo_review, state)
+        return run_harness(answer, again, state)
 
     # ── 스케줄러 ────────────────────────────────────────────────
 

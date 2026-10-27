@@ -347,6 +347,7 @@ def test_unavailable_cli_falls_back_in_draft_stream(models, set_keys, fake_cli, 
     agent.models, agent.name = models, "팀장"
     agent.node = type("N", (), {"id": "lead"})()
     agent.rank = type("R", (), {"id": "team_lead"})()
+    agent.rank_models = CHAIN
     agent.candidates = lambda: llm_factory.require_candidates(CHAIN, models, "팀장")
     stream = AnswerStream(agent, [HumanMessage("q")])
     assert "".join(stream) == "대안 초안"

@@ -9,6 +9,7 @@
 모델 선택과 실패 시 대안 모델 전환은 core/llm_factory.py 가 맡는다.
 """
 
+import re
 import time
 from collections.abc import Iterator
 
@@ -17,7 +18,9 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, Huma
 from core import llm_factory
 from core.config import date_label, rank_models, today
 from core.llm_factory import NoAvailableModelError
-from core.schemas import AgentAnswer, Delegation, ModelsConfig, ModelSpec, OrgNode, Rank, RankModels, ReviewResult, Team
+from core.schemas import (
+    AgentAnswer, Delegation, ModelsConfig, ModelSpec, OrgNode, Rank, RankModels, ReviewEdits, ReviewResult, Team,
+)
 from core.verification import rubric_text
 
 __all__ = ["EmptyResponseError", "NoAvailableModelError", "OrgAgent", "AnswerStream", "chunk_text", "with_feedback"]
@@ -36,6 +39,44 @@ def chunk_text(content) -> str:
         for block in content
         if not isinstance(block, dict) or block.get("type", "text") == "text"
     )
+
+
+SECTION_HEAD = re.compile(r"^\[[^\]\n]+\]")  # 스킬의 절 제목 줄 — 줄 첫머리의 '[2단계·검증 로그 먼저 …]'
+
+
+def skill_sections(skills: str, heads: list[str]) -> str:
+    """스킬에서 heads 로 시작하는 절만 남긴다 (heads 가 비면 전문). 코드 블록(```) 안의 '[태그]…' 줄은 절 제목이 아니다.
+
+    절 = 제목 줄부터 다음 절 제목 줄 앞까지. 첫 절 제목 앞의 머리말('## 스킬: 이름')은 남긴다.
+    """
+    if not heads:
+        return skills
+    kept, keep, fenced = [], True, False
+    for line in skills.split("\n"):
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        elif not fenced and SECTION_HEAD.match(line):
+            keep = line.startswith(tuple(heads))
+        elif not fenced and line.startswith("## 스킬:"):
+            keep = True  # 다음 스킬 파일의 머리말
+        if keep:
+            kept.append(line)
+    return "\n".join(kept).strip()
+
+
+def apply_text_edits(text: str, edits) -> tuple[str, list[str]]:
+    """고칠 곳(find → replace)을 차례로 적용한다. (고친 글, 적용하지 못한 것 기록)
+
+    find 가 글에 정확히 한 번 있을 때만 바꾼다 — 없거나 여러 번이면 엉뚱한 곳을 바꾸지 않게 건너뛴다.
+    """
+    skipped = []
+    for e in edits:
+        count = text.count(e.find) if e.find else 0
+        if count == 1:
+            text = text.replace(e.find, e.replace)
+        else:
+            skipped.append(f"{'찾지 못함' if count == 0 else f'{count}곳에 있음'}: {e.find[:40]!r}")
+    return text, skipped
 
 
 def with_feedback(messages: list[BaseMessage], previous_output: str, feedback: str) -> list[BaseMessage]:
@@ -64,7 +105,8 @@ class OrgAgent:
         self.models = models
         self.rubric = rubric  # 채점 루브릭(퓨샷 예시 포함) — 검토할 때 프롬프트에 들어간다
         self.names = names or {}  # 에이전트 id → 표시 이름 (하위 에이전트 소개용)
-        self.skills = skills  # 팀 스킬(teams/<팀>/skills/*.md) — 모든 업무에 적용되는 고정 지침
+        # 팀 스킬(teams/<팀>/skills/*.md) — 모든 업무에 적용되는 고정 지침. 조직도에 skill_sections 가 있으면 그 절만
+        self.skills = skill_sections(skills, node.skill_sections)
         # 이 에이전트가 쓸 모델 후보 — 화면에서 팀원 모델을 골랐으면 그것(core/member_models.py), 아니면 직급 설정
         self.rank_models = chain or rank_models(rank.id, models, team)
 
@@ -149,6 +191,13 @@ class OrgAgent:
         parts = [f"[업무 브리프]\n{question}"]
         if task and task != question:
             parts.append(f"[상사가 맡긴 업무 — 이 범위에 집중]\n{task}")
+        if self.node.output_scope:
+            # 브리프의 완료 기준·결과 형식은 팀 전체(최종 답변) 기준이다 — 실무자는 맡은 산출물만 쓰고 통합은 상사가 한다
+            parts.append(
+                "[내 산출물 범위 — 이것만 쓴다]\n"
+                "업무 브리프의 [완료 기준]·[결과 형식]은 팀 전체 최종 답변의 기준이며 상사가 통합할 때 맞춘다. "
+                f"나는 아래 범위만 쓴다.\n{self.node.output_scope}"
+            )
         if web_context:
             parts += self._web_block(web_context, "답변 근거로 활용")
             parts.append(
@@ -198,11 +247,17 @@ class OrgAgent:
                 "- 출처 [번호] 표기는 유지한다.",
             ]
         else:
-            rule = (
-                "revise 이면 revised_answer 에 지적을 모두 반영한 **완성 답변 전문**을 쓴다. approve 이면 빈 문자열."
-                if rewrite_answer
-                else "답변을 직접 고쳐 쓰지 말고 revised_answer 는 빈 문자열로 둔다. 지적은 issues 에 남긴다."
-            )
+            if not rewrite_answer:
+                rule = "답변을 직접 고쳐 쓰지 말고 revised_answer 는 빈 문자열로 둔다. 지적은 issues 에 남긴다."
+            elif self.edit_mode:
+                rule = (
+                    "revise 이면 답변 전문을 다시 쓰지 말고 edits 에 고칠 곳마다 {find: 검토 대상 답변의 바꿀 부분 글자 그대로"
+                    " (답변 안에서 한 번만 나오게 앞뒤를 조금 포함), replace: 바꿀 글} 을 쓰고 revised_answer 는 빈 문자열로 둔다."
+                    " 고칠 곳이 너무 많아 전면 재작성이 꼭 필요할 때만 revised_answer 에 완성 답변 전문을 쓴다."
+                    " approve 이면 edits 는 빈 목록, revised_answer 는 빈 문자열."
+                )
+            else:
+                rule = "revise 이면 revised_answer 에 지적을 모두 반영한 **완성 답변 전문**을 쓴다. approve 이면 빈 문자열."
             job = [
                 *stance,
                 "지금은 관리자로서 하위 에이전트의 결과를 검토하는 단계다.",
@@ -236,25 +291,45 @@ class OrgAgent:
         )
         return [SystemMessage(system), HumanMessage(human)]
 
-    def review(self, messages: list[BaseMessage], child_results: list[AgentAnswer], rewrite_answer: bool = True) -> AgentAnswer:
-        """검토·통합 LLM 호출 1회. 승인이면 하위 답변을 그대로 올린다."""
-        call = llm_factory.invoke_structured(self.rank_models, self.models, ReviewResult, messages, self.name)
+    @property
+    def edit_mode(self) -> bool:
+        """하위 1명 검토에서 전문 대신 고칠 곳만 쓰는가 (team.yaml review_mode: edit)."""
+        return self.team.review_mode == "edit"
+
+    def review(
+        self, messages: list[BaseMessage], child_results: list[AgentAnswer], rewrite_answer: bool = True,
+        base: str | None = None,
+    ) -> AgentAnswer:
+        """검토·통합 LLM 호출 1회. 승인이면 하위 답변을 그대로 올린다.
+
+        base: 고칠 곳(edits)을 적용할 글 — 처음 검토는 하위 답변, 자가 교정·하네스 재시도는 직전 결과(모델이 마지막으로 본 글).
+        """
+        integrate = len(child_results) > 1
+        edit = self.edit_mode and not integrate and rewrite_answer
+        call = llm_factory.invoke_structured(self.rank_models, self.models, ReviewEdits if edit else ReviewResult, messages, self.name)
         review: ReviewResult = call.parsed
         review.score = min(max(review.score, 1), 10)
-        integrate = len(child_results) > 1
+        base = child_results[0].content if base is None else base
+        log: list[str] = []
 
         if review.revised_answer.strip() and (integrate or (review.verdict == "revise" and rewrite_answer)):
             content = review.revised_answer
+            if edit:
+                log.append("고칠 곳 대신 전문을 다시 씀")
         elif integrate:
             # 통합인데 답을 안 썼으면 하위 결과를 이어 붙여서라도 올린다
             content = "\n\n".join(f"### {self.names.get(r.node_id, r.node_id)}\n{r.content}" for r in child_results)
+        elif edit and review.verdict == "revise" and review.edits:
+            content, skipped = apply_text_edits(base, review.edits)
+            log.append(f"고칠 곳 {len(review.edits) - len(skipped)}/{len(review.edits)}개 적용 (전문을 다시 쓰지 않음)")
+            log += [f"적용 못 함 — {s}" for s in skipped]
         else:
             # 승인 또는 고쳐 쓰기 끔 → 하위 답변 유지 (모델이 옮겨 쓰며 생기는 변형 방지)
-            content = child_results[0].content
+            content = base
         review.revised_answer = content
         return AgentAnswer(
             node_id=self.node.id, rank_id=self.rank.id, kind="integrate" if integrate else "review",
-            content=content, review=review,
+            content=content, review=review, verification_log=log,
             model=call.spec, is_fallback=call.is_fallback, elapsed_sec=call.elapsed_sec,
             input_tokens=call.input_tokens, output_tokens=call.output_tokens, errors=call.errors,
         )
@@ -284,7 +359,7 @@ class AnswerStream:
     def __iter__(self) -> Iterator[str]:
         candidates = self.agent.candidates()
 
-        errors: list[str] = []
+        errors: list[str] = llm_factory.skip_notes(self.agent.rank_models, candidates)
         for spec, is_fallback in candidates:
             for attempt in range(len(llm_factory.RETRY_DELAYS) + 1):
                 started = time.perf_counter()

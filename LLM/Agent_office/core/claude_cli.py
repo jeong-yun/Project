@@ -20,6 +20,7 @@
   - 구독 사용 한도 → ClaudeCLIUsageLimit (같은 모델 재시도 없이 대안 모델로, LIMIT_COOLDOWN_SEC 동안 쉼)
   - 과부하·서버 오류 → 일시적 오류 (잠깐 기다렸다 재시도)
   - 시간 초과 → ClaudeCLITimeout (Opus 를 처음부터 다시 기다리지 않고 바로 대안 모델로)
+  - 안전 필터 거부 → ClaudeCLIRefused (재시도 없이 대안 모델로, 그 팀에서만 30분 건너뜀 — 프롬프트 내용 문제)
 
 사용량
   결과의 usage(입력·캐시·출력 토큰)를 usage_metadata 로 돌려준다 → usage.UsageCallback 이 provider claude_cli 로 기록,
@@ -58,6 +59,9 @@ LIMIT_ERRORS = {"rate_limit", "billing_error"}
 TRANSIENT_ERRORS = {"overloaded", "server_error"}
 UNAVAILABLE_TEXT = ("not logged in", "/login", "invalid api key", "oauth token has expired")
 LIMIT_TEXT = ("usage limit", "hit your limit", "limit reached", "rate limit", "rate_limit", "out of extra usage")
+# 모델 안전 필터가 요청 내용을 거부 (2026-10-27 실측: "Opus 5.5's safeguards flagged this message (…/legal/aup)")
+REFUSAL_TEXT = ("safeguards flagged", "legal/aup", "usage policy")
+REFUSAL_COOLDOWN_SEC = 1800  # 같은 팀 프롬프트는 다시 보내도 또 거부되므로 30분 동안 그 팀에서만 건너뛴다
 
 
 class ClaudeCLIError(RuntimeError):
@@ -84,6 +88,17 @@ class ClaudeCLIUsageLimit(ClaudeCLIError):
 
 class ClaudeCLITimeout(ClaudeCLIError):
     transient = False
+
+
+class ClaudeCLIRefused(ClaudeCLIError):
+    """모델 안전 필터가 이 요청(프롬프트 내용)을 거부 — 같은 프롬프트로는 다시 해도 같다.
+
+    프롬프트(팀 스킬)에 달린 문제라 구독 전체가 아니라 '그 팀'에서만 잠시 건너뛴다 (llm_factory.note_failure).
+    """
+
+    transient = False
+    refused = True
+    cooldown_sec = REFUSAL_COOLDOWN_SEC
 
 
 # ─── 실행 파일·로그인 상태 ────────────────────────────────────────────
@@ -248,6 +263,8 @@ def error_for(text: str, kind: str | None = None) -> ClaudeCLIError:
     if kind in UNAVAILABLE_ERRORS or any(t in lowered for t in UNAVAILABLE_TEXT):
         mark_unavailable()
         return ClaudeCLIUnavailable(message)
+    if any(t in lowered for t in REFUSAL_TEXT):
+        return ClaudeCLIRefused(message)  # 거부 안내문에 'rate limit' 같은 낱말이 섞여도 한도로 오해하지 않게 먼저 본다
     if kind in LIMIT_ERRORS or any(t in lowered for t in LIMIT_TEXT):
         return ClaudeCLIUsageLimit(message)
     error = ClaudeCLIError(message)
