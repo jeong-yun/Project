@@ -358,6 +358,9 @@ def check_adoptable(entry: str, plan_text: str) -> tuple[dict | None, str]:
         plan = json.loads(plan_text)
     except json.JSONDecodeError as e:
         return None, f"적용 계획 JSON 오류: {e}"
+    if not isinstance(plan, dict):
+        return None, "적용 계획 JSON 은 { … } 객체여야 합니다."
+    plan, _ = concept.normalize_plan(plan)  # 사람이 고친 계획도 absorb·edits 모양을 맞춘다 (모양 문제는 결과 화면에서 이미 알림)
     if not entry.strip() and plan.get("action") != "delete":
         return None, "최종본이 비어 있습니다 — 최종 통합안(<final> 이 있는 안)을 고르세요."
     return plan, ""

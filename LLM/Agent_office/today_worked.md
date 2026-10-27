@@ -384,6 +384,12 @@
 - 실측(2026-10-27, Claude 구독 CLI — 편집장·부장 Opus 5.5, 실무자 Sonnet 5.5, 임시 데이터·카탈로그 복사본): FlashAttention-3 수정 1회 17분, 하네스 통과. 최종본 구조가 기준 항목과 일치 — 절 제목 8개·부제·①②③·ⓐ 15줄·7절 '1)' 5개·'     - ' 25줄·관계 6줄·참고문헌 5건, '○' 0줄, 제목 줄 날짜 이력 '(수정일: 26.10.16, 10.27)'
 - 발견: 원문 프롬프트의 `<thought>` 태그·'CoT 강제'·'내부 사고 과정' 문구가 Claude(Opus·Sonnet 5.5) 안전 필터에 걸려 첫 호출부터 거부됨 → 태그를 `<review_log>` 로, 문구를 '검증 순서'로 바꿈 (예전 결과의 thought 태그도 계속 읽음). 스킬 증가로 시스템 프롬프트 토큰 증가(9.1 → 16.8KB)
 
+**🩹 개념 편집 팀 결과 화면 멈춤 수정 — 적용 계획의 absorb 모양**
+- 배경: 사용 버전에서 결과 화면을 열자 `concept_ui.result_tabs` 의 `', '.join(plan['absorb'])` 에서 멈춤. 모델이 `absorb` 를 이름 목록이 아니라 객체 목록·문자열 하나·null 섞인 목록으로 쓰면 그대로 받아서 생긴 일(카탈로그 반영 `apply_plan` 도 같은 가정)
+- 작업: `core/concept.py` 에 `normalize_plan` — `parse_result` 가 적용 계획을 읽을 때 한 번 모양을 맞춤(absorb → 이름 문자열 목록·빈 값 제거·중복 제거, edits → {entry, find, replace, reason} 문자열 칸, summary 값·basic_terms·action/category/tag/title/target 을 문자열로). 틀린 모양은 한국어 문제로 남겨 하네스 `concept_entry` 가 다시 쓰게 하고, 화면에는 '형식 검사에서 남은 문제' 경고로만 보임. `concept_ui.check_adoptable` 도 사람이 고친 계획을 같은 함수로 맞춤(객체가 아닌 JSON 은 반영 전에 막음)
+- 저장된 결과: 화면을 다시 열 때도 같은 `parse_result` 를 거쳐 이미 저장된(모양이 틀린) 결과가 그대로 열림
+- 테스트: `tests/test_concept.py` 8건 추가(absorb 문자열·객체·null/숫자 섞임·객체 하나, edits·tag·target·summary·basic_terms 틀린 모양, 틀린 absorb 로 채택 → 카탈로그 통합 반영, AppTest 로 결과 화면이 경고만 띄우고 열림)
+
 ---
 
 ## JD / 이력서용 요약 (누적)

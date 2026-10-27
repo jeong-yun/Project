@@ -174,8 +174,86 @@ def parse_result(answer: str) -> ConceptResult:
             res.problems.append(f"적용 계획 JSON 파싱 오류: {e.msg}")
             continue
         if isinstance(data, dict) and "concept_plan" in data:
-            res.plan = data["concept_plan"]
+            res.plan, fixes = normalize_plan(data["concept_plan"])
+            res.problems += fixes
     return res
+
+
+NAME_KEYS = ("name", "title", "term", "entry", "target", "항목", "이름")  # 모델이 이름을 객체로 감쌀 때 쓰는 키
+
+
+def _as_name(value) -> str:
+    """항목 이름 하나 — 문자열·숫자는 그대로, {"name": …} 같은 객체는 이름 칸을 꺼낸다. 알 수 없으면 ""."""
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, (str, int, float)):
+        return str(value).strip()
+    if isinstance(value, dict):
+        return next((n for n in (_as_name(value.get(k)) for k in NAME_KEYS) if n), "")
+    return ""
+
+
+def _as_list(value) -> list:
+    return [] if value in (None, "") else value if isinstance(value, list) else [value]
+
+
+def normalize_plan(plan) -> tuple[dict, list[str]]:
+    """모델이 쓴 concept_plan 의 칸 모양을 코드가 쓰는 모양으로 맞춘다. (맞춘 계획, 고쳐 달라고 알릴 문제 목록)
+
+    absorb 를 이름 목록이 아니라 문자열 하나·객체 목록·null 섞인 목록으로 쓰면 화면·반영이 멈췄다 (2026-10-27).
+    알아볼 수 있는 값은 고쳐서 쓰고, 모양이 틀렸다는 것은 문제로 남겨 하네스가 다시 쓰게 한다.
+    """
+    if not isinstance(plan, dict):
+        return {}, [f"concept_plan 은 {{...}} 객체여야 한다 (현재 {type(plan).__name__})"]
+    plan, problems = dict(plan), []
+    for key in ("action", "category", "tag", "title", "target"):
+        if key in plan and not isinstance(plan[key], str) and plan[key] is not None:
+            name = _as_name(plan[key]) or (_as_name(plan[key][0]) if isinstance(plan[key], list) and len(plan[key]) == 1 else "")
+            problems.append(f"concept_plan.{key} 는 문자열 하나로 쓴다 (현재 {plan[key]!r})")
+            plan[key] = name
+    if "absorb" in plan:
+        names, bad = [], False
+        for item in _as_list(plan["absorb"]):
+            name = _as_name(item)
+            bad |= not isinstance(item, str) or not name
+            if name and name not in names:
+                names.append(name)
+        if bad or not isinstance(plan["absorb"], list) and plan["absorb"] not in (None, ""):
+            problems.append(f'concept_plan.absorb 는 흡수될 기존 항목 이름(문자열) 목록으로 쓴다 — 예: ["항목 이름"] (현재 {plan["absorb"]!r})')
+        plan["absorb"] = names
+    if "edits" in plan:
+        edits = []
+        for item in _as_list(plan["edits"]):
+            if not isinstance(item, dict):
+                problems.append(f"concept_plan.edits 의 각 칸은 {{entry, find, replace, reason}} 객체여야 한다 (현재 {item!r})")
+                continue
+            edit = {**item, "entry": _as_name(item.get("entry")) or _as_name(item)}
+            edit.update({k: "" if item.get(k) is None else str(item[k]) for k in ("find", "replace", "reason")})
+            if not edit["entry"] or not edit["find"]:
+                problems.append(f"concept_plan.edits 에는 수정할 항목 이름(entry)과 바꿀 문장(find)이 있어야 한다 (현재 {item!r})")
+            edits.append(edit)
+        if not isinstance(plan["edits"], list) and plan["edits"] not in (None, ""):
+            problems.append("concept_plan.edits 는 [{entry, find, replace, reason}, …] 목록으로 쓴다")
+        plan["edits"] = edits
+    if "summary" in plan and not isinstance(plan["summary"], dict):
+        if plan["summary"] not in (None, ""):
+            problems.append(f"concept_plan.summary 는 {{emoji, name, keywords, one_line}} 객체여야 한다 (현재 {plan['summary']!r})")
+        plan["summary"] = {}
+    elif isinstance(plan.get("summary"), dict):
+        plan["summary"] = {k: ", ".join(map(str, v)) if isinstance(v, list) else "" if v is None else str(v)
+                           for k, v in plan["summary"].items()}
+    if "basic_terms" in plan:
+        terms = []
+        for item in _as_list(plan["basic_terms"]):
+            if isinstance(item, dict):
+                terms.append(item)
+            elif isinstance(item, str) and ":" in item:
+                term, _, definition = item.partition(":")
+                terms.append({"term": term.strip(), "definition": definition.strip()})
+            else:
+                problems.append(f"concept_plan.basic_terms 의 각 칸은 {{term, definition}} 객체여야 한다 (현재 {item!r})")
+        plan["basic_terms"] = terms
+    return plan, problems
 
 
 def check_answer(answer: str, options: dict | None = None) -> list[str]:
