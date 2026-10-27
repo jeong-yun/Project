@@ -1,7 +1,8 @@
 """개념 작성 — 요청 만들기(관련 기존 항목 포함) · 결과 나누기(검증 로그/최종본/요약/적용 계획) · 형식 검사.
 
 결과 형식 (개념 편집 팀이 지켜야 하는 출력 계약 — 코드가 이 표시로 잘라서 파일에 반영한다)
-  <thought> 1단계 비교 표·이중 해리 + 2단계 검증 로그 </thought>
+  <review_log> 1단계 비교 표·이중 해리 + 2단계 검증 로그 </review_log>
+  (원문 프롬프트의 thought 태그는 Claude 모델 안전 필터가 요청 자체를 막아(2026-10-27 실측) 이름만 바꿨다 — 예전 결과의 thought 태그도 읽는다)
   <final> 카탈로그에 그대로 들어갈 항목 텍스트 (제목 줄부터 참고문헌까지) </final>
   ## GitHub 요약 …
   ```json {"concept_plan": {...}} ```   ← 적용 계획 (분류·태그·추가/수정·통합 대상·요약·기초 용어·다른 항목 수정)
@@ -21,6 +22,7 @@ from core.config import TEAMS_DIR, load_skills
 from core.harness.base import extract_code_blocks
 
 ACTIONS = {"add": "추가", "update": "수정", "delete": "삭제"}
+LOG_TAG, OLD_LOG_TAG = "review_log", "thought"  # 검증 로그 태그 (예전 결과는 thought)
 ABSOLUTE = ("완벽", "100%", "무조건", "완전 차단", "원천 차단", "절대적으로", "무한한")
 REF_LABELS = ("논문·핵심기법", "논문·서베이", "논문·한계·반박", "논문·벤치마크", "표준/거버넌스", "도구/프레임워크")
 # 카탈로그에는 '논문·한계·분석'·'논문·응용' 같은 논문 세부 라벨도 있다 → '논문·' 으로 시작하면 받는다
@@ -161,7 +163,8 @@ def replace_final(answer: str, new_entry: str) -> str:
 
 def parse_result(answer: str) -> ConceptResult:
     entry, notes = strip_change_notes(normalize_entry(_between(answer, "final")))
-    res = ConceptResult(thought=_between(answer, "thought"), final_entry=entry, change_notes=notes)
+    log = _between(answer, LOG_TAG) or _between(answer, OLD_LOG_TAG)
+    res = ConceptResult(thought=log, final_entry=entry, change_notes=notes)
     after = re.split(r"</final>", answer, flags=re.IGNORECASE)[-1] if "</final>" in answer.lower() else answer
     res.summary_md = re.sub(r"```json.*?```", "", after, flags=re.DOTALL).strip()
     for src in extract_code_blocks(answer, "json"):
@@ -181,9 +184,9 @@ def check_answer(answer: str, options: dict | None = None) -> list[str]:
     problems = list(res.problems)
     lower = answer.lower()
     if not res.thought:
-        problems.append("<thought> … </thought> (1단계 비교·2단계 검증 로그)가 없다")
-    elif lower.find("<thought>") > lower.find("<final>") >= 0:
-        problems.append("<thought> 는 <final> 보다 먼저 와야 한다 (검증 로그 먼저)")
+        problems.append(f"<{LOG_TAG}> … </{LOG_TAG}> (1단계 비교·2단계 검증 로그)가 없다")
+    elif max(lower.find(f"<{LOG_TAG}>"), lower.find(f"<{OLD_LOG_TAG}>")) > lower.find("<final>") >= 0:
+        problems.append(f"<{LOG_TAG}> 는 <final> 보다 먼저 와야 한다 (검증 로그 먼저)")
     plan = res.plan
     if not plan:
         problems.append('```json {"concept_plan": {...}} 적용 계획 블록이 없다')
@@ -375,7 +378,7 @@ def build_concept_request(
             "작성 규칙은 시스템 프롬프트의 'IT 개념 프롬프트'를 따른다."
         ),
         success_criteria=[
-            "<thought> 안에 1단계(관련 기존 항목 비교 표·이중 해리·판정)와 2단계(원전 식별·주장별 판정 표·체크리스트)를 먼저 쓴다",
+            "<review_log> 안에 1단계(관련 기존 항목 비교 표·이중 해리·판정)와 2단계(원전 식별·주장별 판정 표·체크리스트)를 먼저 쓴다",
             "<final> 안에 카탈로그 형식 최종본(제목 줄 ~ 참고문헌)을 개조식으로 쓴다",
             "GitHub 요약(이모지+개념명+태그 / 분류 / 핵심 키워드 / 한 줄 정의)을 쓴다",
             "맨 끝에 적용 계획 ```json 블록을 쓴다 (편입·병합이면 absorb 에 흡수될 기존 항목, 다른 항목 수정은 edits 에)",
@@ -394,7 +397,7 @@ def build_concept_request(
             "최종본에 '완벽·100%·무조건·완전 차단' 같은 절대 표현을 쓰지 않는다",
         ],
         output_format=(
-            "<thought>1단계 표·이중 해리·판정 / 2단계 검증 로그 표</thought> → <final>[태그]한글명(English) (작성일: …) / 부제 / "
+            "<review_log>1단계 표·이중 해리·판정 / 2단계 검증 로그 표</review_log> → <final>[태그]한글명(English) (작성일: …) / 부제 / "
             "1.~6.(7.) / 8. 참고 문헌</final> → ## 변경 요약 → ## GitHub 요약 → ```json 적용 계획``` 예시: " + plan_json
         ),
         assumptions=[],

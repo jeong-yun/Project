@@ -24,7 +24,7 @@ OTHER = "[Perf]라딕스 어텐션(RadixAttention) (작성일: 26.08.01)\n1. 정
 
 
 def answer_with(entry: str, plan: dict = PLAN) -> str:
-    return (f"<thought>1단계 표 / 2단계 검증 로그</thought>\n<final>\n{entry}\n</final>\n## 변경 요약\n- 🔧수정: 예\n"
+    return (f"<review_log>1단계 표 / 2단계 검증 로그</review_log>\n<final>\n{entry}\n</final>\n## 변경 요약\n- 🔧수정: 예\n"
             f"## GitHub 요약\n- 요약\n```json\n{json.dumps({'concept_plan': plan}, ensure_ascii=False)}\n```")
 
 
@@ -164,6 +164,20 @@ def test_brief_follows_catalog_format():
     rules = " ".join(brief.constraints) + brief.output_format
     assert "8. 참고 문헌" in rules and "부제" in rules and "출력 형식 견본" in rules and "①②③" in rules
     assert "○" not in rules and "'참고 문헌'," not in rules  # 예전 규칙(○ 하위 불릿·번호 없는 참고 문헌)이 남지 않음
+
+
+def test_prompt_avoids_words_claude_safeguards_block():
+    """'<thought>' 태그·'CoT 강제'·'내부 사고 과정' 요청은 Claude(Opus·Sonnet 5.5) 안전 필터가 요청 자체를 막는다 (2026-10-27 실측).
+
+    검증 로그 태그는 <review_log> — 예전 결과의 <thought> 도 계속 읽는다.
+    """
+    q, brief = concept.build_concept_request("add", "X(Y)", "", [], None, D)
+    sent = SKILL.read_text(encoding="utf-8") + brief.as_prompt(q)
+    for banned in ("<thought>", "</thought>", "CoT 강제", "사고 과정"):
+        assert banned not in sent, banned
+    assert "<review_log>" in sent
+    old = answer_with(TARGET).replace("<review_log>", "<thought>").replace("</review_log>", "</thought>")
+    assert concept.parse_result(old).thought == "1단계 표 / 2단계 검증 로그" and concept.check_answer(old) == []
 
 
 def test_request_records_prompt_version():

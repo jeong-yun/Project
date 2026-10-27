@@ -60,7 +60,7 @@ GOOD_ENTRY = """[Perf]DAPO(Decoupled Clip and Dynamic sAmpling Policy Optimizati
 
 
 def answer_with(entry: str, plan: dict) -> str:
-    return f"<thought>1단계 표 / 2단계 검증 로그</thought>\n<final>\n{entry}\n</final>\n## GitHub 요약\n- 요약\n```json\n{json.dumps({'concept_plan': plan}, ensure_ascii=False)}\n```"
+    return f"<review_log>1단계 표 / 2단계 검증 로그</review_log>\n<final>\n{entry}\n</final>\n## GitHub 요약\n- 요약\n```json\n{json.dumps({'concept_plan': plan}, ensure_ascii=False)}\n```"
 
 
 PLAN = {"action": "add", "category": "AI", "tag": "Perf", "title": "DAPO", "target": "", "absorb": [],
@@ -165,7 +165,7 @@ def test_bad_answer_reports_each_rule():
     text = " ".join(problems)
     assert "절대 표현" in text and "개조식" in text and "참고문헌 형식" in text and "유사" in text and "category" in text
     no_thought = concept.check_answer(f"<final>{GOOD_ENTRY}</final>")
-    assert any("<thought>" in p for p in no_thought) and any("concept_plan" in p for p in no_thought)
+    assert any("<review_log>" in p for p in no_thought) and any("concept_plan" in p for p in no_thought)
 
 
 def test_normalize_entry_to_catalog_style():
@@ -316,7 +316,7 @@ def test_change_notes_are_kept_out_of_final_entry():
 def test_replace_final_keeps_rest_of_answer():
     answer = answer_with(GOOD_ENTRY, PLAN)
     replaced = concept.replace_final(answer, "[Perf]새 제목 (작성일: 26.10.20)\n1. 정의 및 개념")
-    assert "<final>\n[Perf]새 제목" in replaced and "<thought>" in replaced and "concept_plan" in replaced
+    assert "<final>\n[Perf]새 제목" in replaced and "<review_log>" in replaced and "concept_plan" in replaced
 
 
 # ─── GitHub 정보 (사이드바 링크·올리지 않은 커밋) ──────────────────────────
