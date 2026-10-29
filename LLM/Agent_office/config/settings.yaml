@@ -106,6 +106,22 @@ feeds:
     queries: [Claude Code, AI agent]
     per_query: 5
 
+autonomy:
+  # 🤖 자율 실행 (core/autonomy.py, scripts/run_autonomous.py) — 사람이 묻지 않아도 정해 둔 업무를 주기마다 돌린다
+  # 설계: docs/AI_전용_업무_설계.md. 작업 스케줄러가 스크립트를 1시간마다 부르면, 때가 된 작업만 실행한다
+  enabled: false             # true 로 바꾸기 전에는 스크립트가 아무것도 하지 않는다
+  daily_budget_usd: 1.0      # 오늘 모든 LLM 호출 추정 비용 합계가 이 값 이상이면 새 실행을 시작하지 않는다
+  max_runs_per_day: 6        # 하루에 시작하는 자율 실행 수 상한 (비용이 0 으로 잡히는 무료·구독 모델도 막는다)
+  audit_file: autonomy/audit.jsonl   # data/ 기준 — 실행·건너뜀·승인 요청을 해시 체인으로 남긴다
+  jobs: []
+  # 예시 (level: observe = 보고서만 / propose = 바꿀 내용을 제안으로 저장, 적용은 사람이):
+  #  - id: weekly_access_review
+  #    team: _security_governance
+  #    task: control_check
+  #    inputs: {framework: ISMS-P, scope: 접근통제, evidence: "(점검할 설정·정책 발췌)"}
+  #    every_hours: 168
+  #    level: observe
+
 board:
   # 📺 전체 화면 보드 (주소 ?view=board, board_ui.py) · 🏠 메인 위쪽 '오늘의 한 줄' 띠
   rotate_sec: 8              # 뉴스 카드가 넘어가는 간격 (초) — 제목 2줄·요약 3줄을 한 번 읽을 만큼
