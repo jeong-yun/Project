@@ -1,0 +1,17 @@
+# CI 에서 부하에 민감한 Agent Office 테스트 (pytest node id, 한 줄에 하나).
+# agent-office-tests.yml 이 전체 실행에서 빼고, 끝에 하나씩 새 프로세스로 최대 3번 돌린다. 3번 다 실패하면 CI 실패.
+# 테스트 자체는 고치지 않는다 — 검사 내용은 그대로이고, 실행 방식만 다르다.
+# 목록에 넣는 기준: 로컬에서 다른 작업과 동시에 돌 때 실패한 기록이 있고, 혼자 다시 돌리면 통과하는 테스트.
+
+# OR-Tools CP-SAT 평면도 배치 — 시간·작업량 제한 안에서 찾은 답의 품질(복도 비율·모양·후보 다양성)을 본다.
+# CPU 가 바쁘면 같은 제한 안에서 덜 좋은 답이 나올 수 있다. 큰 프로그램 후보는 module fixture 로 한 번만 만든다.
+tests/test_floorplan_solver.py::test_big_program_puts_pool_in_end_block_and_short_corridor
+tests/test_floorplan_solver.py::test_three_candidates_are_diverse
+tests/test_floorplan_space.py::test_big_sample_has_no_unrequested_void
+tests/test_floorplan_space.py::test_big_sample_corridors_stay_one_spine
+
+# 실제 시간을 재는 동시 실행 테스트 — 스레드가 늦게 시작하면 '겹침'·'걸린 시간' 판단이 흔들린다.
+tests/test_concurrency.py::test_sibling_drafts_overlap_and_parent_waits_for_all
+tests/test_concurrency.py::test_independent_subtrees_do_not_wait_for_each_other
+tests/test_concurrency.py::test_data_tools_and_web_search_run_together
+tests/test_feeds.py::test_slow_source_keeps_what_it_got_and_a_hung_source_times_out
