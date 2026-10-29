@@ -25,7 +25,6 @@ from core.schemas import ModelsConfig, OrgNode, Rank, RankModels, Team
 BASE_DIR = Path(__file__).resolve().parent.parent
 CONFIG_DIR = BASE_DIR / "config"
 TEAMS_DIR = BASE_DIR / "teams"
-ASSETS_DIR = BASE_DIR / "assets"
 AVATAR_EXTS = ("png", "jpg", "jpeg", "webp")
 
 
@@ -149,10 +148,6 @@ def subtree(root: OrgNode, node_id: str) -> OrgNode:
 def parent_map(root: OrgNode) -> dict[str, str]:
     """{자식 id: 부모 id} — 피드백에서 '누가 내 결과를 검토했는지' 찾을 때 쓴다."""
     return {child.id: node.id for node in root.walk() for child in node.children}
-
-
-def node_name(node: OrgNode, ranks_by_id: dict[str, Rank]) -> str:
-    return node.name or ranks_by_id[node.rank].name
 
 
 def validate_config(ranks: list[Rank], models: ModelsConfig, teams: list[Team]) -> None:

@@ -48,15 +48,6 @@ def current_keys(models) -> dict[str, tuple[str, str]]:
     return out
 
 
-def key_label(key: dict | None, key_id: str, provider: str = "") -> str:
-    if not key_id:
-        return f"{PROVIDER_NAMES.get(provider, provider)} " + ("(로그인)" if provider == SUBSCRIPTION else "(키 없음)")
-    if key and key.get("label"):
-        return key["label"]
-    masked = key["masked"] if key else key_id[:6]
-    return f"{PROVIDER_NAMES.get(key['provider'] if key else provider, provider)} 키 {masked}"
-
-
 def billing(provider: str) -> str:
     """모델별 표의 '요금' 칸 — 구독·무료·API 종량제를 구분한다."""
     if provider == SUBSCRIPTION:

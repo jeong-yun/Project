@@ -26,7 +26,6 @@ from core.floorplan import (
     floor_geometry,
     parse_layout,
     partition,
-    validate,
 )
 from core.harness import REGISTRY
 from core.live import new_run
