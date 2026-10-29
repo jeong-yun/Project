@@ -28,11 +28,12 @@
 | 기본 팀 | 자유 질문 (예시 4종) | 웹 검색 |
 | 📈 주식 팀 | ① 분야별 종목 추천(1~5점 매력도) ② 종목 판단(7개 항목 → 매수·보유·매도) ③ 주가 전망 ④ 매매 전략(분할 매수·목표가·손절가·손익비) ⑤ 보유 종목 추가 매매(물타기·불타기·익절·손절) ⑥ 포트폴리오 구성 | **시세 데이터**(Yahoo Finance: 현재가·이동평균·재무 지표·컨센서스·평가손익·평단 시뮬레이션을 코드로 계산) + 최근 1개월 공시·리포트·뉴스 (블로그·커뮤니티 제외) + **코드 검산**(가중 점수·평균가·손익비) |
 | ✈️ 여행 팀 | 여행 계획서 (국내/해외, 출발·도착일, 인원, 예산, 스타일) + **🗺 움직이는 경로 지도** | **여행 달력**(N박 M일·날짜별 요일을 코드로 계산) + 목적지 날씨·행사·교통 검색 |
+| 📚 개념 편집 팀 | ① ✍️ 작성(IT 개념 추가·수정 자동 판정 → 카탈로그 형식 최종본) ② 삭제 — 채택하면 카탈로그 파일 반영 → 커밋 → 푸시 | **IT 개념 카탈로그**(CS 저장소의 관련 항목) + 웹 검색 + **하네스**(카탈로그 형식 검사) + 📜 적용된 프롬프트 보기 — 7-2 참고 |
 | 🎵 음악 팀 | ① 🎤 노래 만들기(보컬·한국어 가사 가능) ② 🎼 반주 만들기 + **Gemini Lyria 로 MP3 생성 · ✂️ 편집(자르기·템포·키·페이드·리버브·음량, 버전 되돌리기)** | **하네스**(가사 섹션 태그·분량, 반주 문구, 아티스트 이름, 시간표 길이를 코드로 검사) + Gemini 가 곡을 듣고 채점 (7-4 참고, 유료) |
 | 📐 설계 팀 | ① 평면도 만들기(한국어 설명 → 2D 평면도, 선택 시 3D) ② 도면 수정·층 추가(JSON·DXF·그림·PDF 첨부) ③ 3D 만들기(GLB·OBJ·STL·IFC, 프린팅 축척) | **첨부 도면 → 레이아웃 JSON**(코드 변환·검증) + 방 최소 치수 기준표 + **코드 검증**(겹침·외곽·면적·동선·계단) — 7-5 참고 |
 | 🛡️ 보안 거버넌스 팀 | ① 통제 항목 점검(ISMS-P · ISO/IEC 27001:2022 · NIST CSF 2.0 항목별 충족·미흡·확인 불가 + 인용 증적·개선안) ② 설정 drift 점검(지난번·이번 설정 비교 → 통제 영향). 가상 회사 샘플 증적으로 바로 시험 가능 | **증적 묶음·코드 diff·공개 통제 목록**(웹 검색 없음 — 내부 증적이 검색어로 나가지 않게) + **하네스**(지어낸 통제 번호·증적에 없는 인용을 코드로 검사) — 7-6 참고 |
 
-> 진행 상황은 [today_worked.md](today_worked.md), 초기 계획은 [PLAN.md](PLAN.md) 참고.
+> 진행 상황은 [today_worked.md](today_worked.md), 프로젝트 요약은 [PROJECTS.md](../../PROJECTS.md), 자율 실행 설계는 [docs/AI_전용_업무_설계.md](docs/AI_전용_업무_설계.md), 초기 계획은 [PLAN.md](PLAN.md) 참고.
 
 ---
 
@@ -726,15 +727,19 @@ Agent_office/
 ├── home_ui.py              🏠 메인 화면 (AI 브리핑·주목 저장소·아이디어 카드, 모델별 토큰·추정 비용, 지금/이전 API 키 이름 붙이기, 가격표)
 ├── concept_ui.py           개념 편집 팀 화면 조각 (카탈로그 사이드바·작성/삭제 입력·결과 탭·채택 후 반영 → 커밋 → 푸시)
 ├── design_ui.py            설계 팀 화면 조각 (도면 미리보기·3D 뷰어·내려받기·채택 시 저장 파일)
+├── board_ui.py             📺 전체 화면 보드 (?view=board — 지수·환율 띠·뉴스 넘김·CLI 팁)
+├── autonomy_ui.py          🤖 자율 실행 상태 패널 (🏠 메인, 읽기 전용)
 ├── core/
 │   ├── schemas.py          ① 모든 데이터 형식 (설정·LLM 출력·실행 결과) — 여기부터 읽기
 │   ├── config.py           ② 설정 읽기·검증, 조직도·아바타·스킬
 │   ├── llm_factory.py      ③ provider/model → ChatModel, 대안 모델 전환, provider 별 동시 호출 제한
+│   ├── claude_cli.py       Claude 구독 provider (`claude -p` 를 ChatModel 로 감쌈, 안전 필터 거부 구분)
 │   ├── member_models.py    팀원별 모델 선택 — 강도 순서·상하 관계 규칙·자동 낮춤·대안 상한, member_models.json 저장
 │   ├── agent.py            ④ 에이전트 한 명: 분배(plan)·초안(draft)·검토(review) 프롬프트
 │   ├── workflow.py         ⑤ LangGraph: brief → research → work(형제 서브트리 동시 진행) → human_decision → feedback
 │   ├── brief.py            요청 정리(최종 상태 정의) + 질문 예시
 │   ├── live.py             백그라운드 실행 + 실시간 진행 상태 (화면이 1초마다 읽어 그림)
+│   ├── followup.py         결정 전 후속 대화 (결과에 대해 묻기·고쳐 달라고 하기)
 │   ├── avatars.py          에이전트 이미지 저장·자동 '작업 중' 이미지·되돌리기
 │   ├── exporter.py         채택 결과 → results/<팀>/ 파일 (.md, 지도 .html, 음원 .mp3, 도면·3D 파일)
 │   ├── floorplan.py        설계 팀 레이아웃 JSON 스키마·방 프로그램 모델·문/창 배치·벽 형상·검증(설계 품질)·후보안
@@ -749,7 +754,9 @@ Agent_office/
 │   ├── stock_calc.py       주식 숫자 검산 (가중 점수·결정 밴드·평균가·손익비·평단)
 │   ├── catalog.py          IT 개념 카탈로그(CS 저장소) 읽기·관련 항목 찾기·반영·git
 │   ├── concept.py          개념 작성 요청·결과 나누기·형식 검사
-│   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력), floorplan_input(첨부 도면)
+│   ├── governance.py       보안 거버넌스 팀 코드 계산 (통제 목록·통제 번호·인용 문구 검사·증적 묶음·설정 drift)
+│   ├── autonomy.py         자율 실행 (주기 판단·예산/횟수 상한·기본 거부 게이트·해시 체인 감사 로그, 기본 꺼짐)
+│   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력), floorplan_input(첨부 도면), governance_evidence(증적)
 │   ├── search.py           웹 검색(검색어 생성 → 검색어들을 동시에 DuckDuckGo 웹+뉴스)
 │   ├── feeds.py            🏠 AI 뉴스·GitHub·HN(+키 있으면 Reddit·네이버·Threads) 수집 → 보조 모델 1회로 브리핑·아이디어 카드, 과장 표시, 캐시
 │   ├── market.py           📺 보드·🏠 메인의 지수·환율 띠 (yfinance, 10분 파일 캐시, 백그라운드 새로 받기, 실패 칸 '—')
@@ -760,16 +767,21 @@ Agent_office/
 │   ├── memo.py             파일 지문(수정 시각·크기) 캐시 — 화면을 다시 그릴 때 같은 파일을 다시 읽지 않게
 │   ├── usage.py            모델 호출마다 토큰·추정 비용 기록 (LangChain 콜백·키 지문·팀/실행 태그·가격 계산)
 │   └── harness/            결정론적 검증기(validators) + 단계별 평가(evaluation)
-├── config/                 ranks / models / settings / verification (.yaml)
+├── config/                 ranks / models / settings / verification / pricing / cli_tips (.yaml)
+│   └── controls/           공개 통제 목록 (ISMS-P · ISO/IEC 27001:2022 · NIST CSF 2.0)
 ├── teams/                  팀별 team.yaml (조직도·업무 양식) + skills/ + avatars/
-│                           (general = 기본, stock = 주식, travel = 여행, concept = 개념 편집, design = 설계, _template = 템플릿)
+│                           (general = 기본, stock = 주식, travel = 여행, concept = 개념 편집, music = 음악, design = 설계,
+│                            security_governance = 보안 거버넌스(+ samples/ 가상 회사 증적), _template = 템플릿)
 ├── evals/                  단계별 평가 실행기 + 케이스
 ├── results/                채택한 결과 파일 (git 제외 — 개인 정보 보호. 올리려면 .gitignore 에서 results/ 삭제)
 ├── assets/avatars/         공용 에이전트 이미지 (+ _working 이미지)
-├── scripts/                기본 아바타 생성, 화면 속도 측정(bench_ui.py)
+├── scripts/                기본 아바타 생성, 화면 속도 측정(bench_ui.py), 자율 실행(run_autonomous.py), 교훈 동기화(sync_feedback.py)
+├── knowledge/              GitHub 에 올리는 교훈·결정 요약 (개인 정보 원문 제외 — 8-1 참고)
+├── docs/                   설계 문서 (AI_전용_업무_설계.md — 자율 실행)
 ├── GIT_GUIDE.md            Git/GitHub 에 올리기 단계별 가이드
 ├── tests/                  모의 LLM 테스트 (API 키·비용 없이 실행)
-└── data/                   runs.db · checkpoints.db · evals/ · uploads/(첨부 파일) · feeds/(AI 브리핑·카드 상태) (git 제외, 자동 생성)
+└── data/                   runs.db · checkpoints.db · evals/ · uploads/(첨부 파일) · feeds/(AI 브리핑·카드 상태) · market/(시세 캐시)
+                            · autonomy/(감사 로그·보고서) · member_models.json (git 제외, 자동 생성)
 ```
 
 ## 10. 테스트
@@ -779,7 +791,8 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-테스트는 가짜 모델·가짜 검색을 쓰므로 API 키·비용·인터넷 없이 실행됩니다.
+테스트는 가짜 모델·가짜 검색을 쓰므로 API 키·비용·인터넷 없이 실행됩니다 (2026-10-29 기준 480건).
+OR-Tools 배치 엔진 테스트 몇 건과 동시 실행·피드 시간 테스트는 PC 가 바쁘면 시간 제한에 걸릴 수 있습니다 — 실패하면 그 테스트만 다시 돌려 보세요.
 
 ### 성능 (화면 전환 속도)
 
