@@ -8,7 +8,10 @@
        - 기존 학습 데이터가 충분한 룰: 3.1a 결과에서 기존 샘플이 '기존 데이터 충분 기준'(기본 1000) 이상
   3. 기존 샘플이 1 ~ '기존 데이터 참고 기준'(기본 50) 건인 룰에는 기존 payload 예시(existing_examples)를 붙인다.
      → 생성 모델이 비슷한 유형으로, 하지만 똑같지 않게 만들도록 (지시문 LLM_프롬프트.md)
-  4. '호출당 룰 수' 씩 나눠 07_llm_output/<날짜>/_1_requests/<set>_bNNNN_<지문>_cK.jsonl 로 저장한다.
+     예시는 외부 LLM 에 전달되므로 붙이기 전에 민감값(Host·쿠키·인증값·IP·이메일·토큰 등)을 자리표시 값으로 바꾼다
+     ('참고 예시 마스킹', 기본 예, 3_0b_mask.py). 마스킹 오류나 룰 조건이 깨진 예시는 보내지 않는다 (원래 값을 보내는 길 없음).
+     요청 파일의 룰마다 _mask(바꾼 개수·뺀 예시 수)를 남기고, 이 칸은 LLM 에 보내지 않는다 (3.2·3.3 이 뺌).
+  4.'호출당 룰 수' 씩 나눠 07_llm_output/<날짜>/_1_requests/<set>_bNNNN_<지문>_cK.jsonl 로 저장한다.
      - 이미 생성(3.2)까지 끝난 룰은 다시 넣지 않는다.
      - 입력 날짜가 바뀌어도(1_0 이 새 05_llm_input/<날짜> 를 만들어도) 다른 날짜 폴더에서 생성한 룰은
        룰 내용(원본 룰 텍스트)이 같으면 다시 넣지 않는다. 내용이 바뀐 룰(rev 변경 등)만 다시 만든다.
@@ -18,6 +21,7 @@
 [사용법]
     python 3_1_prepare_requests.py                 # 변경분(delta)
     python 3_1_prepare_requests.py --set all       # 전체
+    python 3_1_prepare_requests.py --dry-run       # 파일을 쓰지 않고 건수·마스킹 수만 로그에
 """
 
 import argparse
@@ -30,6 +34,8 @@ from pathlib import Path
 
 _spec = importlib.util.spec_from_file_location("llm_common", Path(__file__).resolve().parent / "3_0a_common.py")
 C = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(C)
+_mspec = importlib.util.spec_from_file_location("mask_examples", Path(__file__).resolve().parent / "3_0b_mask.py")
+M = importlib.util.module_from_spec(_mspec); _mspec.loader.exec_module(M)
 
 EXISTING_SUB = "_0_existing"
 
@@ -39,6 +45,7 @@ def main(argv=None):
     ap.add_argument("--set", choices=["delta", "all"], default="delta", help="배치 종류 (기본 delta = 변경분)")
     ap.add_argument("--date", help="05_llm_input 날짜 폴더 (기본: 가장 최근)")
     ap.add_argument("--force", action="store_true", help="아직 생성 안 된 요청 파일을 모두 다시 만든다")
+    ap.add_argument("--dry-run", action="store_true", help="파일을 쓰거나 지우지 않고 건수·마스킹 수만 로그에")
     args = ap.parse_args(argv)
     log = C.setup_logging("3_1_prepare_requests")
     if not C.generation_guard(log, "3_1_prepare_requests"):     # 3_0 또는 다른 생성이 돌고 있으면 (같은 파일을 쓰므로) 멈춤
@@ -63,6 +70,7 @@ def main(argv=None):
     hi = C.run_int(run, "기존 데이터 충분 기준", 1000)
     lo = C.run_int(run, "기존 데이터 참고 기준", 50)
     n_ex = C.run_int(run, "참고 예시 수", 3)
+    mask = C.run_yes(run, "참고 예시 마스킹")       # 기본 예 (설정에 줄이 없어도 켬)
 
     # 기존 학습 데이터 결과 (3.1a). 없으면 모든 룰을 '기존 0건' 으로 본다
     cov_file = base / EXISTING_SUB / "coverage.json"
@@ -72,23 +80,29 @@ def main(argv=None):
                     cov_file.relative_to(C.BASE_DIR))
 
     # 조건 지문: 바뀌면 아직 생성 안 된 요청 파일을 다시 만든다
+    # 마스킹 설정·규칙 버전도 넣는다: 켜거나 규칙을 바꾸면 예전 예시가 든 생성 전 요청을 다시 만든다
     cond = json.dumps([sorted(skip), sorted(sides), n, hi, lo, n_ex,
-                       hashlib.sha1(cov_file.read_bytes()).hexdigest() if cov_file.exists() else ""])
+                       hashlib.sha1(cov_file.read_bytes()).hexdigest() if cov_file.exists() else ""]
+                      + ([f"mask{M.VERSION}"] if mask else []))
     fp = hashlib.sha1(cond.encode()).hexdigest()[:6]
     manifest_file = req_dir / f"_manifest_{args.set}.json"
     manifest = json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.exists() else {}
     pending = [p for p in req_dir.glob(f"{args.set}_*.jsonl") if not (gen_dir / p.name).exists()]
+    gone = set()           # 다시 만들 생성 전 요청 (dry-run 은 지우지 않고 없는 것으로만 본다)
     if args.force or manifest.get("fingerprint") != fp:
-        for p in pending:          # 생성 전 요청만 지움 (생성된 결과는 그대로 둔다)
+        gone = set(pending)
+        for p in pending if not args.dry_run else []:          # 생성 전 요청만 지움 (생성된 결과는 그대로 둔다)
             p.unlink()
         if pending:
-            log.info("[3.1] 조건 변경 - 생성 전 요청 %d개를 다시 만든다", len(pending))
+            log.info("[3.1] 조건 변경 - 생성 전 요청 %d개를 다시 만든다%s", len(pending), " (dry-run: 지우지 않음)" if args.dry_run else "")
         pending = []
 
     # 다시 넣지 않을 룰: 이 묶음의 요청 파일(대기 중 포함) + 다른 묶음(all/delta)에서 이미 생성까지 끝난 룰
     # 단, 생성 응답에서 빠진 룰(.meta.json 의 rules_missing)은 다시 새 요청에 넣는다
     assigned, retry = set(), set()
     for p in req_dir.glob("*.jsonl"):
+        if p in gone:
+            continue
         if p.name.startswith(args.set + "_") or (gen_dir / p.name).exists():
             ids = {r["id"] for r in C.read_jsonl(p)}
             meta = gen_dir / f"{p.stem}.meta.json"
@@ -106,6 +120,7 @@ def main(argv=None):
                  ", ".join(sorted({d for _, d in prior.values()})))
 
     stat = collections.Counter()
+    mstat, mkinds = collections.Counter(), collections.Counter()     # 마스킹: 예시 수·뺀 수, 종류별 바꾼 값 수 (원래 값은 없음)
     made = 0
     chars = 0
     for bf in sorted((in_dir / "batches" / args.set).glob("batch_*.jsonl")):
@@ -130,7 +145,18 @@ def main(argv=None):
             if p:
                 stat["룰 변경 → 다시 생성"] += 1
             if 1 <= cnt <= lo:
-                r = dict(r, existing_count=cnt, existing_examples=ex.get("examples", [])[:n_ex])
+                if mask:          # 보내기 전에 민감값을 바꾼다. 오류·룰 조건이 깨진 예시는 빼고 다음 후보로 채움
+                    exs, st = M.safe_examples(C, ex.get("examples", []), r, n_ex)
+                    mstat.update({k: st[k] for k in ("in", "sent", "drop_error", "drop_rule")})
+                    mkinds.update(st["masked"])
+                    info = {"on": True, "values": sum(st["masked"].values()), "dropped": st["drop_error"] + st["drop_rule"]}
+                else:
+                    exs = ex.get("examples", [])[:n_ex]
+                    mstat["sent"] += len(exs)
+                    info = {"on": False}
+                r = dict(r, existing_count=cnt, _mask=info)
+                if exs:           # 예시가 모두 빠지면 예시 없이 일반 생성 (기존 0건 룰과 같은 흐름)
+                    r["existing_examples"] = exs
                 stat[f"생성: 기존 1~{lo}건 (예시 참고)"] += 1
             elif cnt > lo:
                 stat[f"생성: 기존 {lo + 1}~{hi - 1}건"] += 1
@@ -143,15 +169,30 @@ def main(argv=None):
         start = max(used, default=0) + 1
         for k in range(0, len(chosen), n):
             chunk = chosen[k:k + n]
-            C.write_jsonl(req_dir / f"{prefix}{start + k // n}.jsonl", chunk)
+            if not args.dry_run:
+                C.write_jsonl(req_dir / f"{prefix}{start + k // n}.jsonl", chunk)
             chars += sum(len(json.dumps(r, ensure_ascii=False)) for r in chunk)
             made += 1
 
-    manifest = {"fingerprint": fp, "set": args.set, "input": in_dir.name, "stats": dict(stat),
-                "requests_total": len(list(req_dir.glob(f"{args.set}_*.jsonl")))}
-    manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    masking = {"enabled": mask, "rule_version": M.VERSION if mask else None,
+               "examples_seen": mstat["in"], "existing_examples_sent": mstat["sent"],
+               "dropped_mask_error": mstat["drop_error"], "dropped_rule_broken": mstat["drop_rule"],
+               "masked_values": sum(mkinds.values()), "masked_by_kind": {k: mkinds[k] for k in M.KINDS if mkinds[k]}}
     prompt_chars = len(C.GEN_PROMPT_FILE.read_text(encoding="utf-8"))
     log.info("[3.1] %s/batches/%s: %s", in_dir.name, args.set, dict(stat))
+    if mask:
+        log.info("[3.1] 참고 예시 마스킹: 보낼 예시 %d개, 바꾼 값 %d개 %s, 뺀 예시 %d개 (오류 %d · 룰 조건 깨짐 %d)",
+                 mstat["sent"], masking["masked_values"], masking["masked_by_kind"],
+                 mstat["drop_error"] + mstat["drop_rule"], mstat["drop_error"], mstat["drop_rule"])
+    else:
+        log.warning("[3.1] 참고 예시 마스킹 꺼짐 - 기존 예시 %d개를 그대로 보냄 (LLM_설정.md '참고 예시 마스킹')", mstat["sent"])
+    if args.dry_run:
+        log.info("[3.1] dry-run: 요청 파일·manifest 를 쓰지 않음 (만들 요청 %d개, 생성 입력 약 %d 토큰)", made,
+                 (chars + prompt_chars * made) // 3)
+        return 0
+    manifest = {"fingerprint": fp, "set": args.set, "input": in_dir.name, "stats": dict(stat), "masking": masking,
+                "requests_total": len(list(req_dir.glob(f"{args.set}_*.jsonl")))}
+    manifest_file.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     log.info("[3.1] 새 요청 %d개 (전체 요청 %d개, 생성 입력 약 %d 토큰). 요청 파일: %s", made,
              manifest["requests_total"], (chars + prompt_chars * made) // 3, req_dir)
     return 0

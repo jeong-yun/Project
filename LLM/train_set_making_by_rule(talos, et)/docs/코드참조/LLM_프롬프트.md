@@ -4,7 +4,7 @@
 > LLM을 호출할 때 이 지시문 + 배치 파일(`batches/.../batch_NNNN.jsonl`) 1개를 함께 넣는다.
 > 지시문을 바꾸려면 이 파일을 고친 뒤 `python 1_3_build_llm_input.py --force`를 실행한다.
 > 샘플 수는 `LLM_설정.md`에서 바꾼다.
-> `3_2_generate.py`가 이 지시문을 생성 모델(기본 UpStage Solar)에 보낸다. 결과는 `3_3_review.py`(검토, 기본 ChatGPT gpt-5) → `3_4_augment.py`(증강) → `1_4_build_dataset.py`(IPS·WAF 수집 로그)로 이어진다.
+> `3_2_generate.py`가 이 지시문을 생성 모델(`LLM_설정.md` 의 '생성' 행)에 보낸다. 결과는 `3_3_review.py`(검토, `LLM_설정.md` 의 '검토' 행) → `3_4_augment.py`(증강) → `1_4_build_dataset.py`(IPS·WAF 수집 로그)로 이어진다.
 > `{ANOMALIES}`, `{NORMAL}`은 실행할 때 `LLM_설정.md`의 `생성 anomalies 수`, `생성 normal 수`로 바뀐다.
 
 ## 역할

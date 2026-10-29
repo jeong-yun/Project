@@ -356,7 +356,8 @@ def read_llm_outputs(folder):
     """*.jsonl 을 읽어 룰 결과 목록을 돌려준다. ``` 줄, 빈 줄은 무시."""
     results, bad = [], []
     for f in sorted(folder.glob("*.jsonl")):
-        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        # 줄은 '\n' 으로만 (splitlines 는 payload 안의 U+0085·U+2028 등에서도 나눠 JSON 줄을 깨뜨림, 2026-10-29)
+        for i, line in enumerate(f.read_text(encoding="utf-8").split("\n"), 1):
             s = line.strip()
             if not s or s.startswith("```"):
                 continue

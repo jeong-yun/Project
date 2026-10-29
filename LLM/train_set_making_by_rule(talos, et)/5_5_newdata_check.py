@@ -495,6 +495,7 @@ def write_table(path, R, base_name, dev, snapshot):
     for k, bit in FLAG_BITS.items():
         fl |= np.where(R[k].to_numpy(dtype=bool), bit, 0)
     cons_num = {v: k for k, v in C.CONS_CODE.items()}
+    ok = C.llm_ok_keys()                                 # 4. 'LLM 재확인'이 label 맞다고 한 샘플 → lk (6. 선별의 '불일치' 중 남기기 옵션)
     data = {"base": base_name, "dev": dev, "snapshot": snapshot, "created_at": C.now_iso(), "n": int(len(R)),
             "dates": dates, "rules": rules, "types": types, "sources": srcs,
             "date": idx("date", dates), "line": R["line"].astype(int).tolist(),
@@ -503,7 +504,8 @@ def write_table(path, R, base_name, dev, snapshot):
             "rule": idx("rule_id", rules), "type": idx("attack_type", types), "src": idx("source", srcs),
             "llm": R["origin"].eq("llm").astype(int).tolist(),
             "cons": "".join(cons_num.get(c, "0") for c in R["cons"]), "fl": fl.tolist(),
-            "sk": R["sk"].fillna("").astype(str).tolist()}
+            "sk": R["sk"].fillna("").astype(str).tolist(),
+            "lk": "".join("1" if c in ok else "0" for c in R["ck"]) if ok else ""}
     C.write_json(path, data, indent=None)
 
 

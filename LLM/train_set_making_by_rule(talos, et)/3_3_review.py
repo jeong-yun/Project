@@ -1,4 +1,5 @@
-"""[3.3 데이터 검토] 생성된 샘플을 검토 모델(LLM_설정.md, 2026-10-26 부터 Claude CLI sonnet)로 검토해 pass / fix / drop 을 반영한다.  (3_0 이 실행)
+"""[3.3 데이터 검토] 생성된 샘플을 검토 모델(LLM_설정.md '## 모델' 의 '검토' 행)로 검토해 pass / fix / drop 을 반영한다.  (3_0 이 실행)
+  모델 이름은 이 주석에 적지 않는다 - 지금 값은 LLM_설정.md, 실제로 쓴 값은 meta.json 의 provenance 를 본다.
 
 [전체 흐름]  _2_generated/<이름>.jsonl 하나마다 (이미 _3_reviewed 에 결과가 있으면 건너뜀)
   1. 검토 지시문(LLM_검토_프롬프트.md) + 룰 + 생성 샘플(번호 i) + 코드 검사 결과 → 검토 모델 호출
@@ -7,6 +8,8 @@
      anomalies = 룰 조건을 모두 만족(탐지), normal = 조건을 하나 이상 어김(미탐지).
      어긋나면 '로컬 검사 실패 처리', 룰로 판단할 수 없으면 '판정 불가 처리' (둘 다 기본 drop = 뺀다)
   4. _3_reviewed/<이름>.jsonl (+ .rejected.jsonl: 빠진 샘플과 이유, .meta.json, raw/<이름>.txt)
+     meta.json 에는 생성 이력(provenance: 생성·검토·대체 모델, temperature·max_tokens·추론 강도, 지시문 sha256)과
+     공격 유형별 검토 결과(review_by_type: 생성 공격 샘플·검토 drop·그중 안전 사유·판정 거절 → 3.5 거부 편향 경보)를 남긴다.
 
   검토 모델을 'none' 으로 하면 호출 없이 코드 검사만 해서 넘긴다.
 
@@ -22,7 +25,8 @@
     usage 의 reviewer = 두 모델 합계 (reviewer_primary / reviewer_fallback 따로). 원문은 raw/<이름>.try<n>.txt (처음 모델),
     raw/<이름>.fb.try<n>.txt (대체 모델).
   근거 (2026-10-26): gpt-6-luna 는 명령 주입·RCE·인증 우회·오버플로·역직렬화 등의 공격 샘플을 '악용 가능한 요청을 보존·보완할 수
-  없다' 며 13% 쯤 뺐다 (gpt-5 는 같은 요청 30개에서 0개). 같은 날 OpenAI 크레딧이 떨어져 검토·대체 검토를 claude_cli 로 바꿨다.
+  없다' 며 많이 뺐다 (gpt-5 는 같은 요청 30개에서 0개). 비율은 분모에 따라 다르다 → docs/ai_governance/04_측정_지표.md 4.1
+  '안전 거부' 표 (2026-10-29 다시 셈).
 
 [속도] 요청 여러 개를 동시에 검토한다 (LLM_설정.md '검토 동시 요청 수', 기본 4).
        --follow <생성 PID>: 생성(3.2)과 함께 돌면서 생성된 요청부터 바로 검토한다 (3_0 이 '생성·검토 동시 진행' 때 사용).
@@ -38,6 +42,7 @@
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import os
@@ -134,7 +139,8 @@ def review_items(rules, by_id):
                    for i, s in enumerate(g["samples"]) if isinstance(s, dict)]
         checks = [dict(s.get("local_check", {"result": "fail", "reasons": ["형식 오류"]}), i=i)
                   for i, s in enumerate(g["samples"]) if isinstance(s, dict)]
-        items.append({"rule": r, "generated": {"attack_type": g["attack_type"], "samples": samples},
+        rule = {k: v for k, v in r.items() if k != "_mask"}       # _mask: 3.1 의 마스킹 기록 (로컬 전용, 보내지 않음)
+        items.append({"rule": rule, "generated": {"attack_type": g["attack_type"], "samples": samples},
                       "local_check": checks})
     return items
 
@@ -166,6 +172,46 @@ def ask(name, tag, items, cfg, providers, run, prompt, rev_dir, log, usage, key)
                     "검토 응답에서 JSON 을 찾지 못함" if not new else f"검토 응답에 룰 {len(todo)}개의 판정이 없음", attempt,
                     f" - 거절: {' '.join(text.split())[:90]}" if is_refusal(text) else "", nxt)
     return got, refusal
+
+
+def type_counts(generated, rejected):
+    """공격 유형별 [생성 공격 샘플, 검토 모델이 뺀 공격 샘플, 그중 안전 사유(SAFETY_RE), 판정 거절로 빠진 공격 샘플].
+    유형은 생성 결과의 attack_type (화면 '검토에서 뺀 샘플' 과 같음). 3.5 가 모아 유형별 거부 비율이 기준을 넘으면 경고 (R01)."""
+    by_id = {g.get("id"): g for g in generated if isinstance(g, dict)}
+    out = {}
+    for g in by_id.values():
+        c = out.setdefault(g.get("attack_type") or "other", [0, 0, 0, 0])
+        c[0] += sum(1 for s in g.get("samples", []) if isinstance(s, dict) and s.get("label") == "anomalies")
+    for x in rejected:
+        g = by_id.get(x.get("id")) or {}
+        smp, i = g.get("samples") or [], x.get("i")
+        s = smp[i] if isinstance(i, int) and 0 <= i < len(smp) else None
+        if not isinstance(s, dict) or s.get("label") != "anomalies":
+            continue
+        c = out.setdefault(g.get("attack_type") or "other", [0, 0, 0, 0])
+        if x.get("stage") == "검토":
+            c[1] += 1
+            c[2] += bool(SAFETY_RE.search(str(x.get("reason", ""))))
+        elif x.get("stage") == "검토 거절":
+            c[3] += 1
+    return out
+
+
+def provenance(cfg, prompt, rev_dir, name):
+    """meta.json 의 생성 이력: 생성 모델(3.2 meta), 검토 모델·설정, 대체 모델(다시 만들기 때), 검토 지시문 지문.
+    3_2_generate.provenance 와 같은 모양에 generator·substitute 를 더함."""
+    try:
+        gen = json.loads((rev_dir.parent / C.GEN_DIR / f"{name}.meta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        gen = {}
+    fb = (cfg or {}).get("fallback")
+    return {"generator": gen.get("generator"), "generator_prompt_sha256": (gen.get("provenance") or {}).get("prompt_sha256"),
+            "model": f"{cfg['provider']}:{cfg['model']}" if cfg else None,
+            "substitute": f"{fb['provider']}:{fb['model']}" if fb else None,
+            "temperature": (cfg or {}).get("temperature"), "max_tokens": (cfg or {}).get("max_tokens"),
+            "effort": (cfg or {}).get("effort") or (cfg or {}).get("reasoning_effort"),
+            "prompt_file": C.REV_PROMPT_FILE.name if cfg else None,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest() if cfg and prompt else None}
 
 
 def _total(usage):
@@ -244,7 +290,8 @@ def review(name, rules, generated, cfg, providers, run, prompt, rev_dir, log, pr
             "rules": len(by_id), "rules_kept": len(final),
             "samples": len(flat), "anomalies": sum(s["label"] == "anomalies" for s in flat),
             "normal": sum(s["label"] == "normal" for s in flat),
-            "fixed": sum(s["review"] == "fix" for s in flat), "rejected": len(rejected), "usage": usage}
+            "fixed": sum(s["review"] == "fix" for s in flat), "rejected": len(rejected), "usage": usage,
+            "provenance": provenance(cfg, prompt, rev_dir, name), "review_by_type": type_counts(generated, rejected)}
     if fallback:
         meta["fallback"] = fallback
     if refused:

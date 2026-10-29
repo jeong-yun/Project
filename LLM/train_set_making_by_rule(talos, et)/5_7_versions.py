@@ -18,6 +18,11 @@ IPS·WAF 공통 선별 (2026-10-26~): 두 장비에 **같은 신규 샘플**을 
   - 상한은 등급·label·패턴마다 적용하고, 넘치면 룰을 돌아가며 고른다 (같은 패턴 안에서도 여러 룰, 룰 안에서는 LLM 샘플 먼저).
   - '불일치'(4. 화면 검증) 빼기: 기본 켬.  보류 옵션(담당관 회신 전, 기본 끔): '정합 (룰 기준)' 공격 빼기, python-requests UA 정상 빼기.
   - 룰·공격 유형 조정: 빼기(그 샘플 모두 뺌) / 넣기(상한 없이 제거 외 모두 넣음, 룰만).
+  - '불일치' 중 LLM 재확인이 label 맞다고 한 것은 남기기 (2026-10-29~, 기본 끔): 4. 화면 'LLM 재확인'(3.6) 결과를 5.5 가 비교 표의
+    lk 로 남기고(샘플 내용 지문 ck), 이 옵션을 켜면 '불일치' 빼기에서 그 샘플은 빼지 않는다. 담은 뒤 lk 가 바뀌면 확정하지 않음.
+  - 목표 합계 (2026-10-29~, 비우면 안 씀): B 의 패턴당 상한 대신, 다른 선택(A·C·룰 '넣기')을 먼저 넣고 모자란 수를 B 에서
+    정확히 채운다. B 패턴당 상한을 1, 2, 3 … 으로 올리며 목표를 넘지 않는 가장 큰 k 까지 넣고, 남은 수는 k+1 번째 샘플을
+    패턴을 돌아가며 1개씩 (_fill). C 로는 채우지 않는다.
 버전
   초안   이름, 기준 버전, 조건(날짜·출처), 선별 옵션, 룰·유형 조정 + 저장할 때의 비교 스냅숏(장비별), mode = combined
          (예전 장비별 초안은 '새 방식으로 다시 담기' 를 해야 확정된다 - 옵션·조정은 그대로)
@@ -36,8 +41,10 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import threading
 import time
 from collections import Counter
+from itertools import zip_longest
 from pathlib import Path
 
 BASE = Path(__file__).resolve().parent
@@ -52,9 +59,12 @@ def _load(name, file):
 
 C = _load("sup_common_v", "5_0a_common.py")
 DEFAULT_OPTIONS = {"A": "all", "B": 20, "C": 20,          # "all" = 전부, 0 = 빼기, n = 패턴당 n개까지
-                   "exclude_bad": True, "exclude_rule_based": False, "exclude_python_ua_normal": False}
+                   "exclude_bad": True, "exclude_rule_based": False, "exclude_python_ua_normal": False,
+                   "keep_llm_ok": False,                  # '불일치' 빼기에서 LLM 재확인(4. 화면, 3.6)이 label 맞다고 한 것은 남김
+                   "target": None}                        # 목표 합계 (None = 안 씀, 있으면 B 는 이 합계까지 채움)
 OPTION_TEXT = {"exclude_bad": "'불일치' 빼기", "exclude_rule_based": "'정합 (룰 기준)' 공격 빼기 (보류)",
-               "exclude_python_ua_normal": "python-requests UA 정상 빼기 (보류)"}
+               "exclude_python_ua_normal": "python-requests UA 정상 빼기 (보류)",
+               "keep_llm_ok": "'불일치' 중 LLM 재확인이 label 맞다고 한 것은 남기기"}
 HOLD = {"rule": "'정합 (룰 기준)' 공격", "pyua": "python-requests UA 정상"}   # 보류 옵션의 대상 (화면에서 따로 봄)
 PY_UA = 1                                                  # 5.5 FLAG_BITS
 
@@ -71,8 +81,14 @@ def norm_options(o):
             except (TypeError, ValueError):
                 raise ValueError(f"선별 옵션 {k}: 'all' 또는 0 이상의 수")
         out[k] = val
-    for k in ("exclude_bad", "exclude_rule_based", "exclude_python_ua_normal"):
+    for k in ("exclude_bad", "exclude_rule_based", "exclude_python_ua_normal", "keep_llm_ok"):
         out[k] = bool((o or {}).get(k, out[k]))
+    tg = (o or {}).get("target")
+    if tg not in (None, "", 0, "0"):
+        try:
+            out["target"] = max(1, min(10_000_000, int(tg)))
+        except (TypeError, ValueError):
+            raise ValueError("선별 옵션 목표 합계: 비우거나 1 이상의 수")
     return out
 
 
@@ -107,6 +123,8 @@ def combine(ti, tw):
     out = {k: [] for k in keys + ("g", "gi", "gw", "pat", "pat_w", "fl", "iidx", "widx", "wline", "sk")}
     cons, n_ips_only, n_mismatch, used = [], 0, 0, 0
     GI, GW, FI, FW, KI, KW = ti["g"], tw["g"], ti["fl"], tw["fl"], ti["cons"], tw["cons"]
+    LI, LW = ti.get("lk") or "", tw.get("lk") or ""      # LLM 재확인 'label 맞음' (5.5, 예전 표에는 없음)
+    lk = [] if LI or LW else None
     for i, s in enumerate(ti["sk"]):
         j = pos.get(s or f"{ti['dates'][ti['date'][i]]}:{ti['line'][i]}")
         if j is None:
@@ -136,7 +154,10 @@ def combine(ti, tw):
         out["sk"].append(s)
         ci, cw = KI[i], KW[j]
         cons.append("4" if "4" in (ci, cw) else "2" if "2" in (ci, cw) else ci if ci != "0" else cw)
+        if lk is not None:
+            lk.append("1" if "1" in (LI[i:i + 1], LW[j:j + 1]) else "0")
     out.update({"base": ti["base"], "dev": "ips+waf", "combined": True, "n": used, "cons": "".join(cons),
+                "lk": "".join(lk) if lk is not None else "",
                 "dates": ti["dates"], "rules": ti["rules"], "types": ti["types"], "sources": ti["sources"],
                 "snapshot": f"{ti.get('snapshot')}+{tw.get('snapshot')}", "snapshots": {"ips": ti.get("snapshot"),
                                                                                          "waf": tw.get("snapshot")},
@@ -166,19 +187,103 @@ def _round_robin(idx, cap, R, L):
     return picked
 
 
-def select(t, conditions=None, options=None, overrides=None):
+def _rr_order(idx, R, L):
+    """_round_robin(idx, len(idx)) 과 같은 순서를 정렬로 ((룰 안의 순서, 룰 순서) 순) → 앞의 cap 개 = _round_robin(idx, cap).
+    룰 하나에 샘플이 몰린 묶음에서도 빠르다 (_round_robin 은 cap 이 작을 때를 위한 것)."""
+    r0 = R[idx[0]]
+    if len(idx) == 1 or all(R[i] == r0 for i in idx):   # 룰이 하나뿐인 묶음: LLM 먼저, 날짜·줄 순
+        return [i for i in idx if L[i]] + [i for i in idx if not L[i]]
+    by_rule = {}
+    for i in idx:
+        lst = by_rule.get(R[i])
+        if lst is None:
+            by_rule[R[i]] = [i]
+        else:
+            lst.append(i)
+    keyed = []
+    for r, x in enumerate(by_rule.values()):
+        keyed.extend((p, r, i) for p, i in enumerate([i for i in x if L[i]] + [i for i in x if not L[i]]))
+    keyed.sort()
+    return [i for _, _, i in keyed]
+
+
+_FILL_CACHE = {}    # (비교 스냅숏, B 후보) → 순위: 목표 합계만 바꿔 다시 셀 때 (화면) 다시 늘어놓지 않음
+_FILL_LOCK = threading.Lock()                           # 화면의 미리 보기가 동시에 와도 한 번만 셈
+
+
+def _fill_rank(t, idx, R, L):
+    """B 후보 idx 의 순위 → (줄 번호 → 두 장비 중 앞선 순위, 장비별 묶음 순서 목록, 순위별 수)."""
+    ck = (t.get("snapshot"), t["n"], len(idx), hash(tuple(idx)))
+    with _FILL_LOCK:
+        hit = _FILL_CACHE.get(ck)
+        if hit is None:
+            hit = _fill_rank_calc(t, idx, R, L)
+            _FILL_CACHE.clear()                         # 하나만 둔다 (메모리)
+            _FILL_CACHE[ck] = hit
+    return hit
+
+
+def _fill_rank_calc(t, idx, R, L):
+    G, Y = t["g"], t["y"]
+    rank, per_dev = [t["n"]] * t["n"], []
+    for P in (t.get("pats") or [t["pat"]]):
+        groups = {}
+        for i in idx:
+            key = (P[i] << 3) | (G[i] << 1) | Y[i]
+            lst = groups.get(key)
+            if lst is None:
+                groups[key] = [i]
+            else:
+                lst.append(i)
+        orders = [_rr_order(x, R, L) for x in groups.values()]
+        for order in orders:
+            for p, i in enumerate(order):
+                if p < rank[i]:
+                    rank[i] = p
+        per_dev.append(orders)
+    return rank, per_dev, Counter(rank[i] for i in idx)
+
+
+def _fill(t, idx, need, R, L):
+    """목표 합계: B 후보 idx 에서 정확히 need 개 (0 < need < len(idx)) → (고른 줄, k, 하나 더 넣은 수).
+    장비마다 그 장비 패턴의 (등급·label·패턴) 묶음을 룰을 돌아가며 늘어놓고(_rr_order), 샘플의 순위 = 두 장비 중 앞선 순위.
+    순위 k 미만 전부 = 패턴당 상한 k 와 같은 선택이라 need 를 넘지 않는 가장 큰 k 까지 넣고,
+    남은 수는 순위 k 인 샘플(묶음마다 하나)을 패턴을 돌아가며 (장비를 번갈아, 앞에 나온 패턴부터) 1개씩 더한다."""
+    rank, per_dev, cnt = _fill_rank(t, idx, R, L)
+    k, total = 0, 0
+    while total + cnt[k] <= need:                      # need < len(idx) 이라 어느 k 에서 넘는다
+        total += cnt[k]
+        k += 1
+    picked = [i for i in idx if rank[i] < k]
+    more = set()
+    for orders in zip_longest(*per_dev):               # IPS 첫 패턴, WAF 첫 패턴, IPS 둘째 패턴 …
+        for order in orders:
+            if len(more) == need - total:
+                break
+            if order is not None and k < len(order) and rank[order[k]] == k:
+                more.add(order[k])
+        if len(more) == need - total:
+            break
+    picked += sorted(more)
+    return picked, k, len(more)
+
+
+def select(t, conditions=None, options=None, overrides=None, fill=None):
     """선별용 표(5.5 <장비>_table.json 또는 combine 한 공통 표) → (고른 줄 번호 목록, 조건 안의 줄 번호 목록, 뺀 이유별 수).
-    상한(B·C): 표에 장비별 패턴(pats)이 있으면 장비마다 그 장비 패턴으로 묶어 상한만큼 고른 뒤 합친다."""
+    상한(B·C): 표에 장비별 패턴(pats)이 있으면 장비마다 그 장비 패턴으로 묶어 상한만큼 고른 뒤 합친다.
+    목표 합계(options target): B 는 상한 대신 다른 선택을 다 넣은 뒤 모자란 수만큼 채운다 (_fill).
+    fill: dict 를 주면 목표 합계 결과 {target, base(B 없이 고른 수), max(B 전부), added, k, extra, state} 를 적는다."""
     cond, opts, ov = norm_conditions(conditions), norm_options(options), norm_overrides(overrides)
     every = not cond["dates"] and not cond["sources"]
     date_ok = [not cond["dates"] or d in cond["dates"] for d in t["dates"]]
     src_ok = [not cond["sources"] or s in cond["sources"] for s in t["sources"]]
     rule_ov = [{"exclude": 1, "include": 2}.get(ov["rules"].get(r), 0) for r in t["rules"]]
     type_ex = [ov["types"].get(x) == "exclude" for x in t["types"]]
-    caps = [None, opts["A"], opts["B"], opts["C"]]
+    caps = [None, opts["A"], "fill" if opts["target"] else opts["B"], opts["C"]]
     ex_bad, ex_rule, ex_py = opts["exclude_bad"], opts["exclude_rule_based"], opts["exclude_python_ua_normal"]
+    LK = (t.get("lk") or "") if opts["keep_llm_ok"] else ""      # '불일치' 중 LLM 재확인이 label 맞다고 한 줄은 남김
     n_dup = n_ex = n_bad = n_rule = n_py = n_grade = 0
-    sel, cand, capped = [], [], []
+    sel, cand, capped, fillb = [], [], [], []
     R, L, G, Y = t["rule"], t["llm"], t["g"], t["y"]
     # 표의 줄은 날짜·줄 순서 (5.5) → 줄 번호 순서가 곧 날짜·줄 순서
     for i, d, s, g, y, r, ty, k, fl in zip(range(t["n"]), t["date"], t["src"], G, Y, R, t["type"], t["cons"], t["fl"]):
@@ -191,7 +296,7 @@ def select(t, conditions=None, options=None, overrides=None):
         rc = rule_ov[r]
         if rc == 1 or type_ex[ty]:
             n_ex += 1
-        elif ex_bad and k == "4":
+        elif ex_bad and k == "4" and not (LK and LK[i] == "1"):
             n_bad += 1
         elif ex_rule and k == "2" and y:
             n_rule += 1
@@ -201,6 +306,8 @@ def select(t, conditions=None, options=None, overrides=None):
             sel.append(i)
         elif caps[g] == 0:
             n_grade += 1
+        elif caps[g] == "fill":
+            fillb.append(i)
         else:
             capped.append(i)
     chosen = set()
@@ -218,9 +325,18 @@ def select(t, conditions=None, options=None, overrides=None):
             chosen.update(idx if len(idx) <= cap else _round_robin(idx, cap, R, L))
     sel.extend(chosen)
     n_cap = len(capped) - len(chosen)
+    if opts["target"]:                                  # 목표 합계: 지금까지 고른 것(A·C·룰 '넣기') 다음 B 로 모자란 수만큼
+        need, base = opts["target"] - len(sel), len(sel)
+        add, k, extra = ([], 0, 0) if need <= 0 else (fillb, None, 0) if need >= len(fillb) else _fill(t, fillb, need, R, L)
+        sel.extend(add)
+        if fill is not None:
+            fill.update(target=opts["target"], base=base, max=base + len(fillb), added=len(add), k=k, extra=extra,
+                        state="over" if need < 0 else "under" if need > len(fillb) else "exact")
     sel.sort()
     why = {"제거 (중복)": n_dup, "'불일치'": n_bad, "'정합 (룰 기준)' 공격 (보류)": n_rule,
            "python-requests UA 정상 (보류)": n_py, "룰·유형 빼기": n_ex, "등급 빼기": n_grade, "패턴당 상한 초과": n_cap}
+    if opts["target"]:
+        why["목표 합계 밖 (B)"] = len(fillb) - len(add)
     return sel, cand, why
 
 
@@ -235,12 +351,16 @@ def hold_rows(t, cand, kind):
 def preview(t, conditions=None, options=None, overrides=None, view=""):
     """화면 미리 보기: 등급·label 별 후보/선택 수, 공격 유형·출처·날짜별, 뺀 이유, 룰별 표, 보류 대상 수.
     view = rule | pyua 면 표들을 그 보류 대상만으로 센다 (선별 자체는 그대로 - 지금 선별에 몇 개가 들어갔는지 보임)."""
-    sel, cand, why = select(t, conditions, options, overrides)
+    fill = {}
+    sel, cand, why = select(t, conditions, options, overrides, fill)
     ov = norm_overrides(overrides)
     on = bytearray(t["n"])
     for i in sel:
         on[i] = 1
+    sg = Counter(t["g"][i] for i in sel)                # 등급별 선택 수 (보기와 상관없이 지금 선별 전체)
     hold, rows_of, G, Y, K = {}, {}, t["g"], t["y"], t["cons"]
+    LK = t.get("lk") or ""                              # '불일치' 후보 중 LLM 재확인이 label 맞다고 한 수 (옵션 옆에)
+    llm_ok = sum(1 for i in cand if K[i] == "4" and LK[i] == "1") if LK else 0
     for kind in HOLD:                                   # [후보, 지금 선택(옵션을 켜면 빠질 수), 제거, A, B, C]
         idx = rows_of[kind] = hold_rows(t, cand, kind)
         h = hold[kind] = [len(idx), sum(on[i] for i in idx), 0, 0, 0, 0]
@@ -296,8 +416,14 @@ def preview(t, conditions=None, options=None, overrides=None, view=""):
             "by_date": by(dc, t["dates"]), "rules": rule_rows, "snapshot": t.get("snapshot"),
             "all_dates": t["dates"], "all_sources": t["sources"], "hold": hold, "unverified_att": unverified,
             "view": view if view in HOLD else "", "combined": bool(t.get("combined")), "overlap": overlap,
-            "one_side": t.get("one_side"),
+            "one_side": t.get("one_side"), "sel_grade": {C.GRADES[g]: sg[g] for g in (1, 2, 3)}, "fill": fill or None,
+            "llm_ok_bad": llm_ok, "has_lk": bool(LK),
             "options": norm_options(options), "conditions": norm_conditions(conditions), "overrides": ov}
+
+
+def lk_sig(t):
+    """비교 표의 LLM 재확인 'label 맞음' 표시 지문 - 'LLM 맞음은 남기기' 초안을 담은 뒤 바뀌었는지 (확정 때 확인)."""
+    return hashlib.sha1((t.get("lk") or "").encode()).hexdigest()[:16]
 
 
 def read_table(base_name, dev):
@@ -329,14 +455,17 @@ def save_draft(name, base_name, conditions, options, overrides, tables):
     for t in tables.values():
         if t["base"] != base_name:
             raise ValueError("비교 결과의 기준 버전이 다릅니다")
-    pv = preview(combine(tables["ips"], tables["waf"]), conditions, options, overrides)
+    tc = combine(tables["ips"], tables["waf"])
+    pv = preview(tc, conditions, options, overrides)
     snap = {dev: tables[dev]["snapshot"] for dev in C.DEVICES}
     one = {"cand": pv["cand"], "sel": pv["sel"], "sel_label": pv["sel_label"], "by_grade": pv["by_grade"],
-           "overlap": pv["overlap"], "one_side": pv["one_side"]}
+           "overlap": pv["overlap"], "one_side": pv["one_side"], "fill": pv["fill"]}
     counts = {dev: dict(one) for dev in C.DEVICES}
     item = {"name": name, "base": base_name, "status": "draft", "mode": "combined", "conditions": norm_conditions(conditions),
             "options": norm_options(options), "overrides": norm_overrides(overrides), "snapshot": snap,
             "draft_counts": counts, "created_at": (cur or {}).get("created_at") or C.now_iso(), "updated_at": C.now_iso()}
+    if item["options"]["keep_llm_ok"]:                  # 비교 표의 LLM 재확인 표시가 담은 뒤 바뀌면 확정하지 않는다
+        item["lk_sig"] = lk_sig(tc)
     if cur:
         cur.clear()
         cur.update(item)
@@ -560,6 +689,8 @@ def finalize(name, ctx):
             if tc is None:                                  # IPS·WAF 공통 선별 (한 번만, 두 장비가 같은 샘플)
                 ctx.sub(0, 3, "선별용 표 읽기 (IPS·WAF 짝짓기)")
                 tc = combined_table(base["name"])
+                if (ver.get("options") or {}).get("keep_llm_ok") and ver.get("lk_sig") != lk_sig(tc):
+                    raise ValueError("담은 뒤 비교 결과의 LLM 재확인 표시가 바뀌었습니다 - 지금 결과로 확인하고 '버전 후보에 담기'를 다시 하세요")
                 ctx.sub(1, 3, f"공통 선별 ({tc['n']:,}개)")
                 sel, cand, why = select(tc, ver["conditions"], ver["options"], ver["overrides"])
             ctx.sub(2, 3, "샘플별 등급 읽기 (rows.parquet)")

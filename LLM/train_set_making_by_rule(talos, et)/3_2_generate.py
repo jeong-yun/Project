@@ -1,12 +1,15 @@
 """[3.2 데이터 생성] 요청 파일마다 생성 모델(기본 UpStage Solar)을 호출해 룰별 anomalies/normal 샘플을 만든다.  (3_0 이 실행)
 
 [전체 흐름]  _1_requests/<이름>.jsonl 하나마다 (이미 _2_generated 에 결과가 있으면 건너뜀)
+  순서: 이름순 = 배치 순서 (ET → Talos → 사용자 룰). --custom-first 면 사용자 룰(custom)이 든 요청부터
   1. 지시문(LLM_프롬프트.md, 샘플 수는 LLM_설정.md 값으로 채움) + 룰들 → 생성 모델 호출
      룰마다 정규식 조건에 실제로 맞는 짧은 예시(regex_examples, 코드가 만들고 확인)를 붙인다 (LLM_설정.md '정규식 예시')
   2. 응답에서 룰별 JSON 을 꺼낸다. JSON 이 없거나, 응답이 출력 한도에서 잘려(반복 루프) 빠진 룰이 있으면
      **그 룰만** '재시도 횟수' 안에서 다시 요청한다 (반복을 {{REPEAT:문자열:횟수}} 로 쓰라는 주의를 붙여서)
   3. 긴 반복 표기를 펼치고, 샘플마다 코드 검사(local_check) 결과를 붙인다 → 다음 단계 검토 모델이 참고
   4. _2_generated/<이름>.jsonl (+ .meta.json: 토큰 사용량·빠진 룰, raw/<이름>.txt: 응답 원문)
+     meta.json 에는 생성 이력(provenance: 모델·temperature·max_tokens·추론 강도·지시문 sha256)과 참고 예시를 보낸 수
+     (existing_examples_sent)·마스킹으로 바꾼 값 수(masked_values)도 남긴다. 원래 값은 남기지 않는다.
 
 [속도] 요청 여러 개를 동시에 보낸다 (LLM_설정.md '생성 동시 요청 수', 기본 3).
 [비용 안전장치] 기본은 요청 1개만 처리 (--max-requests 0 = 남은 것 전부). --dry-run 은 호출하지 않는다.
@@ -15,12 +18,14 @@
     python 3_2_generate.py --dry-run
     python 3_2_generate.py                          # 요청 1개
     python 3_2_generate.py --max-requests 20
+    python 3_2_generate.py --max-requests 70 --custom-first   # 사용자 룰이 든 요청부터
     python 3_2_generate.py --generator upstage:solar-pro2
     python 3_2_generate.py --generator mock         # 키 없이 흐름 시험
 """
 
 import argparse
 import datetime as dt
+import hashlib
 import importlib.util
 import json
 import sys
@@ -41,6 +46,7 @@ def with_examples(rule):
 
 def user_message(rules, n_a, n_n, hint="", examples=True):
     # 샘플 수를 요청 메시지에 다시 못박는다 (지시문의 출력 예시 개수를 그대로 따라 하는 모델이 있음)
+    rules = [{k: v for k, v in r.items() if k != "_mask"} for r in rules]     # _mask: 3.1 의 마스킹 기록 (로컬 전용)
     if examples:
         rules = [with_examples(r) for r in rules]
     return ((hint + "\n\n" if hint else "") +
@@ -57,6 +63,14 @@ def user_message(rules, n_a, n_n, hint="", examples=True):
                f"그대로 복사하지 말고 실제 공격 안에 넣는다.\n" if examples else "") +
             f"- 출력은 룰마다 JSON 객체 하나씩. 설명 문장 없이.\n\n"
             + "\n".join(json.dumps(r, ensure_ascii=False) for r in rules))
+
+
+def provenance(cfg, prompt, prompt_file):
+    """meta.json 의 생성 이력: 실제로 부른 모델·설정과 지시문 지문 (지시문이 바뀌면 지문이 바뀜, 재현·감사용).
+    3_3_review.py 의 provenance 와 같은 모양."""
+    return {"model": f"{cfg['provider']}:{cfg['model']}", "temperature": cfg.get("temperature"),
+            "max_tokens": cfg.get("max_tokens"), "effort": cfg.get("effort") or cfg.get("reasoning_effort"),
+            "prompt_file": prompt_file.name, "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()}
 
 
 def generate(name, rules, cfg, providers, run, prompt, gen_dir, log):
@@ -120,7 +134,14 @@ def generate(name, rules, cfg, providers, run, prompt, gen_dir, log):
             "rules": len(rules), "rules_done": len(out), "rules_missing": missing, "cut_responses": cuts, "regex_examples": examples,
             "samples": len(flat), "local_check": {k: sum(1 for s in flat if s.get("local_check", {}).get("result") == k)
                                                   for k in ("ok", "fail", "unknown")},
-            "usage": usage}
+            "usage": usage, "provenance": provenance(cfg, prompt, C.GEN_PROMPT_FILE)}
+    # 참고 예시: 보낸 수와 마스킹으로 바꾼 값 수만 (원래 값은 남기지 않음). masked_values 가 None 이면 마스킹 기록이 없는
+    # 요청(마스킹 꺼짐, 또는 마스킹 전에 만든 요청 파일)
+    sent = sum(len(r.get("existing_examples") or []) for r in rules)
+    infos = [r["_mask"] for r in rules if isinstance(r.get("_mask"), dict)]
+    meta["existing_examples_sent"] = sent
+    meta["masked_values"] = (sum(i.get("values", 0) for i in infos)
+                             if infos and all(i.get("on") for i in infos) else (0 if not sent else None))
     (gen_dir / f"{name}.meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     log.info("  %s: 룰 %d/%d, 샘플 %d개 (코드 검사 ok %d / fail %d), 토큰 %s", name, len(out), len(rules),
              len(flat), meta["local_check"]["ok"], meta["local_check"]["fail"], usage.get("generator"))
@@ -145,6 +166,16 @@ def add_fail(gen_dir, name, error):
         ensure_ascii=False), encoding="utf-8")
 
 
+def custom_first(todo, log):
+    """사용자 룰(id 가 custom: 으로 시작)이 든 요청을 앞으로 옮긴다 (--custom-first). 기본 순서(이름순)는
+    배치 순서(ET → Talos → 사용자 룰)라 사용자 룰이 맨 뒤에 온다. 앞·뒤 무리 안의 순서는 그대로."""
+    n = {r: sum(str(x.get("id", "")).startswith("custom:") for x in C.read_jsonl(r)) for r in todo}
+    first = [r for r in todo if n[r]]
+    log.info("[3.2] 순서: 사용자 룰 먼저 - 남은 요청 %d개 중 사용자 룰이 든 요청 %d개 (룰 %d개)를 앞으로%s", len(todo),
+             len(first), sum(n.values()), "" if first else " (없어서 기본 순서 그대로)")
+    return first + [r for r in todo if not n[r]]
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="생성 모델로 샘플 생성")
     ap.add_argument("--date", help="날짜 폴더 (기본: 05_llm_input 의 가장 최근)")
@@ -156,6 +187,8 @@ def main(argv=None):
                     help="검토 대기 중인 생성 결과도 --max-requests 에 포함 (3_0 이 사용)")
     ap.add_argument("--pending-all", action="store_true",
                     help="검토 대기분을 모든 날짜 폴더에서 센다 (3.3 이 모든 날짜를 처리할 때, 3_0 이 사용)")
+    ap.add_argument("--custom-first", action="store_true",
+                    help="사용자 룰(custom)이 든 요청부터 (기본: 이름순 = 배치 순서 ET → Talos → 사용자 룰)")
     ap.add_argument("--force", action="store_true", help="이미 생성한 요청·실패가 반복된 요청도 다시")
     ap.add_argument("--dry-run", action="store_true", help="호출하지 않고 무엇을 할지만 출력")
     args = ap.parse_args(argv)
@@ -189,6 +222,8 @@ def main(argv=None):
             log.info("[3.2] 응답 해석 실패가 %d번 반복된 요청 %d개는 건너뜀 (%s 등, 다시 하려면 --force)",
                      FAIL_LIMIT, len(failed), failed[0].stem)
             todo = [r for r in todo if r not in failed]
+        if args.custom_first:
+            todo = custom_first(todo, log)
         if args.max_requests > 0:
             limit = args.max_requests
             if args.count_pending:   # 3_0 이 부를 때: 검토 못 한 생성 결과가 있으면 그만큼 새로 만들지 않는다
@@ -204,6 +239,9 @@ def main(argv=None):
     workers = C.parallel_settings(run)[0]
     log.info("[3.2] 생성 %s:%s%s | 요청 %d개 중 완료 %d개 → 이번 %d개 (동시 최대 %d개씩, 속도 제한에 맞춰 자동 조절)%s", cfg["provider"],
              cfg["model"], C.effort_label(cfg), len(reqs), done, len(todo), workers, " (dry-run: 호출 안 함)" if args.dry_run else "")
+    if todo and (args.dry_run or args.custom_first):        # 어떤 요청부터 하는지 (건수 확인·사용자 룰 먼저)
+        log.info("[3.2] 처리 순서: %s%s", ", ".join(r.stem for r in todo[:3]),
+                 f" … {todo[-1].stem} (모두 {len(todo)}개)" if len(todo) > 3 else "")
     if args.dry_run or not todo:
         return 0
     if not C.generation_guard(log, "3_2_generate"):
@@ -235,7 +273,7 @@ def main(argv=None):
             log.exception("  %s 실패 (예상 못 한 오류)", r.stem)
 
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="gen") as ex:
-        list(ex.map(one, todo))                # 순서대로 시작 (배치 순서 유지), 동시에 workers 개
+        list(ex.map(one, todo))                # 순서대로 시작 (배치 순서, --custom-first 면 사용자 룰 먼저), 동시에 workers 개
     if stopped.is_set():
         log.info("[3.2] 중지 요청 - 여기서 멈춤 (남은 요청은 다음 실행 때)")
     return 1 if fatal.is_set() else 0

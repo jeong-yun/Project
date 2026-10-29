@@ -68,6 +68,8 @@ JOBS = {   # 이름: (스크립트, 잠금 이름)
     "dataset": ("1_4_build_dataset.py", "dataset"),    # 신규 학습 데이터 화면의 '학습 로그에 반영' (수정·삭제 적용)
     "supervised": ("5_0_run_supervised.py", "supervised"),  # 6. 기존 학습데이터와 비교 (비교·버전 확정)
     "redo": ("3_3_review.py", "generation"),   # 2. 검토에서 뺀 샘플 '다시 만들기' (3_3 --redo-safety, 생성과 같은 잠금)
+    "recheck": ("3_6_recheck_labels.py", "recheck"),   # 4. '불일치' 줄 LLM 재확인 (3_6, 별도 프로세스)
+    "features": ("4_1_build_features.py", "features_view"),   # 5. 피처 '켜진 줄 수 다시 계산' (4_1 --view, 표준·신규 피처 표시 캐시)
 }
 START_WAIT = {"redo": 600}      # 다시 만들기는 다시 검토할 요청을 찾은 뒤(1분쯤) 잠금을 잡는다 → 그동안도 '시작하는 중'
 PROGRESS_FILE = BASE / "07_llm_output" / "_progress" / "progress.json"
@@ -384,6 +386,7 @@ def run_progress():
     steps, dry, stop, last_ts, until = {}, bool((lock or {}).get("dry_run")), False, since, None
     overlap = (lock or {}).get("step") == "3.2+3.3"
     asked = int((lock or {}).get("max_requests") or 0)  # 요청한 수 (0 = 남은 전부)
+    cfirst = bool((lock or {}).get("custom_first"))     # 생성 순서: 사용자 룰 먼저
     if by == "3_0":
         for ts, lv, msg in _log_since("3_0_run_generation.log", since):
             if msg.startswith("입력 날짜"):
@@ -391,6 +394,7 @@ def run_progress():
                     until = last_ts
                     break
                 dry = dry or "(dry-run)" in msg
+                cfirst = cfirst or "사용자 룰 먼저" in msg
                 if lock is None and (m := re.search(r"요청 (\d+)개", msg)):
                     asked = int(m.group(1))
             m = re.match(r"[▶■] \[(\S+)\] \S+ (시작|종료)(?: \(코드 (-?\d+))?", msg)
@@ -524,7 +528,7 @@ def run_progress():
     detail = {"3.2": f"{gen_done}/{n_gen}" if g["header"] and not dry else "",
               "3.3": f"{rev_done}/{n_rev}" if (r["header"] or st("3.2") != "wait") and not dry else ""}
     return {"state": state, "running": not finished, "by": by, "dry_run": dry, "started_at": since, "asked": asked,
-            "elapsed_s": elapsed, "pct": pct, "remaining_s": remaining if not finished else None,
+            "custom_first": cfirst, "elapsed_s": elapsed, "pct": pct, "remaining_s": remaining if not finished else None,
             "parallel": {"generate": cg, "review": cr, "overlap": overlap, "generate_now": ng, "review_now": nr},
             "steps": [{"key": k, "name": n, "status": status(k), "detail": detail.get(k, "")} for k, n in STEPS
                       if by == "3_0" or k in steps],
@@ -567,7 +571,213 @@ def read_progress():
         data = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = None
-    return {"data": data, "computing": _progress["running"], "error": _progress["error"]}
+    return {"data": data, "computing": _progress["running"], "error": _progress["error"],
+            "change": input_change((data or {}).get("input_date"))}
+
+
+_change = {}            # (앞 입력 날짜, 입력 날짜, 두 룰 파일 수정 시각) → 결과 (None = 세는 중)
+_change_lock = threading.Lock()
+
+
+def input_change(cur):
+    """화면 1: 입력 날짜 cur 의 룰이 바로 앞 입력 날짜보다 어떻게 바뀌었는지 (새 룰·빠진 룰과 그중 중복 제거·내용 바뀐 룰).
+    룰 파일 2개(각 30MB 안팎)를 읽어 4~5초 걸리므로 처음 보는 파일이면 배경에서 세고, 다음 불러오기부터 보인다."""
+    dates = input_dates()
+    if cur not in dates or dates.index(cur) == 0:
+        return None
+    prev = dates[dates.index(cur) - 1]
+    try:
+        key = (prev, cur) + tuple((BASE / "05_llm_input" / d / "rules_all.jsonl").stat().st_mtime_ns for d in (prev, cur))
+    except OSError:
+        return None
+    with _change_lock:
+        if key not in _change:
+            _change[key] = None
+            threading.Thread(target=_change_work, args=(key, prev, cur), daemon=True).start()
+        return _change[key]
+
+
+def _change_work(key, prev, cur):
+    try:
+        val = _count_change(prev, cur)
+    except Exception as e:      # 덤 정보라 실패해도 진행 현황은 그대로 (같은 파일이면 다시 세지 않음)
+        val = {"error": f"{type(e).__name__}: {e}"}
+    with _change_lock:
+        _change[key] = val
+
+
+def _count_change(prev, cur):
+    with _lock:
+        if _check["C"] is None:
+            _check["C"] = _load("llm_common_ui", "3_0a_common.py")
+        C = _check["C"]
+    old, new = ({r["id"]: C.rule_hash(r) for r in C.read_jsonl(BASE / "05_llm_input" / d / "rules_all.jsonl")}
+                for d in (prev, cur))
+    added, removed = new.keys() - old.keys(), old.keys() - new.keys()
+
+    def dup_keys(date):         # 1.2 통합에서 다른 룰과 같아 뺀 룰 (04_integrated/<날짜>/duplicates.json)
+        try:
+            s = json.loads((BASE / "05_llm_input" / date / "summary.json").read_text(encoding="utf-8"))
+            src = s.get("source_dir") or f"04_integrated/{date}"
+            dup = json.loads((BASE / src.replace("\\", "/") / "duplicates.json").read_text(encoding="utf-8"))
+            return {r["key"] for r in dup.get("removed", [])}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return set()
+
+    def by_source(ids):
+        return dict(Counter(i.split(":")[0] for i in sorted(ids)))
+
+    return {"prev": prev, "cur": cur, "net": len(new) - len(old),
+            "added": {"total": len(added), "by_source": by_source(added)},
+            "removed": {"total": len(removed), "by_source": by_source(removed),
+                        "duplicate": len(removed & (dup_keys(cur) - dup_keys(prev)))},
+            "changed": sum(1 for i in new.keys() & old.keys() if new[i] != old[i])}
+
+
+C_REQ, C_GEN, C_REV, C_FAIL_LIMIT = "_1_requests", "_2_generated", "_3_reviewed", 2   # 3_0a_common.*_DIR, 3_2_generate.FAIL_LIMIT
+_creq = {"key": None, "val": None, "busy": False, "files": {}}    # 결과, 요청 파일 → (수정 시각, 사용자 룰 수)
+_creq_lock = threading.Lock()
+
+
+def custom_requests():
+    """화면 2 '생성 순서': 가장 최근 입력 날짜의 생성 대기 요청 중 사용자 룰(id 가 custom:)이 든 요청, 세트별
+    {pending: 대기 요청, custom: 사용자 룰이 든 요청, rules: 그 안의 사용자 룰, ahead: 기본 순서(이름순)에서 그 앞의 대기 요청}
+    + review_wait: 생성됐지만 검토 안 된 결과 (모든 날짜 폴더 - 3_0 은 요청 수에서 이만큼 덜 생성한다).
+    요청·생성·검토 폴더가 바뀌었을 때만 배경에서 다시 센다 (요청 파일은 수정 시각이 같으면 다시 읽지 않음, 처음은 2초쯤).
+    세는 동안은 지난 결과, 처음이면 None."""
+    dates = input_dates()
+    if not dates:
+        return {}
+    root = BASE / "07_llm_output"
+    outs = sorted(p for p in root.glob("*") if DATE_RE.match(p.name)) if root.is_dir() else []
+
+    def mtime(p):               # 파일이 생기거나 지워지면 폴더 수정 시각이 바뀐다
+        try:
+            return p.stat().st_mtime_ns
+        except OSError:
+            return 0
+    key = (dates[-1], mtime(root / dates[-1] / C_REQ), mtime(RULES_FILE)) + \
+        tuple(mtime(d / s) for d in outs for s in (C_GEN, C_REV))
+    with _creq_lock:
+        if _creq["key"] != key and not _creq["busy"]:
+            _creq.update(key=key, busy=True)
+            threading.Thread(target=_creq_work, args=(root / dates[-1], outs), daemon=True).start()
+        return _creq["val"]
+
+
+def _creq_work(base, outs):
+    try:
+        wait = 0
+        for d in outs:          # 3_2 --count-pending --pending-all 과 같은 셈
+            if (d / C_GEN).is_dir():
+                rev = {e.name for e in os.scandir(d / C_REV)} if (d / C_REV).is_dir() else set()
+                wait += sum(e.name.endswith(".jsonl") and e.name not in rev for e in os.scandir(d / C_GEN))
+        by_set, retry = _count_custom(base)
+        flags, noauto = {}, {}                          # 화면 1·3 과 같은 기준 (3.5 rule_status): 사용자 룰 상태별 수
+        for r in _rule_rows():
+            if r.get("source") == "custom":
+                flags[r["flag"]] = flags.get(r["flag"], 0) + 1
+                if r["flag"] in ("EMPTY", "FAILED"):    # 3.1·3.2 가 자동으로 다시 만들지 않음
+                    noauto.setdefault(r["flag"], []).append(r["id"])
+        val = {"date": base.name, "by_set": by_set, "review_wait": wait, "retry": retry, "flags": flags, "noauto": noauto}
+    except Exception as e:      # 덤 정보라 실패해도 생성 카드는 그대로 (폴더가 바뀌면 다시 셈)
+        val = {"error": f"{type(e).__name__}: {e}"}
+    with _creq_lock:
+        _creq.update(val=val, busy=False)
+
+
+def _count_custom(base):
+    """→ (세트별 생성 대기 요청 {pending, custom, rules, ahead}, 다음 실행 때 다시 요청할 사용자 룰 _custom_retry).
+    요청 파일마다 룰 id 를 읽어 둔다 (수정 시각이 같으면 다시 읽지 않음)."""
+    req_dir, gen_dir = base / C_REQ, base / C_GEN
+    if not req_dir.is_dir():
+        return {}, None         # 새 입력 날짜: 요청 파일은 다음 생성의 준비 단계(3.1)가 만든다
+    gen = {e.name for e in os.scandir(gen_dir)} if gen_dir.is_dir() else set()
+    old, files, out, ids_of = _creq["files"], {}, {}, {}
+    for e in sorted(os.scandir(req_dir), key=lambda e: e.name):     # 3_2 와 같은 이름순 (= 배치 순서)
+        m = re.match(r"(all|delta)_b\d+_.*\.jsonl$", e.name)
+        if not m:
+            continue
+        mt = e.stat().st_mtime_ns
+        hit = old.get(e.path)
+        if not hit or hit[0] != mt:
+            try:
+                with open(e.path, encoding="utf-8") as f:
+                    hit = (mt, tuple(_rule_id(x) for x in f if x.strip()))
+            except (OSError, ValueError):       # 3.1 이 쓰는 중 등 → 다음에 다시 읽음
+                continue
+        files[e.path] = hit
+        name = e.name[:-len(".jsonl")]
+        ids_of[name] = hit[1]
+        s = out.setdefault(m.group(1), {"pending": 0, "custom": 0, "rules": 0, "ahead": 0})  # 요청 파일이 있는 세트 (대기 0 이어도)
+        if e.name in gen:                       # 이미 생성한 요청
+            continue
+        if f"{name}.fail.json" in gen:          # 응답 해석 실패가 반복된 요청은 3_2 가 건너뜀
+            try:
+                if json.loads((gen_dir / f"{name}.fail.json").read_text(encoding="utf-8")).get("fails", 0) >= C_FAIL_LIMIT:
+                    continue
+            except (OSError, ValueError):
+                pass
+        n = sum(i.startswith("custom:") for i in hit[1])
+        if n:
+            if not s["custom"]:
+                s["ahead"] = s["pending"]
+            s["custom"] += 1
+            s["rules"] += n
+        s["pending"] += 1
+    _creq["files"] = files
+    return out, _custom_retry(base, gen, ids_of)
+
+
+_ID_HEAD = re.compile(r'\{"id": "([^"\\]*)"')            # 요청 파일 한 줄 = 룰 JSON, id 가 맨 앞 (3.1 write_jsonl)
+
+
+def _rule_id(line):
+    m = _ID_HEAD.match(line)                            # 줄 전체(룰 원문·조건)를 해석하지 않고 id 만
+    return m.group(1) if m else str(json.loads(line).get("id", ""))
+
+
+def _custom_retry(base, gen, ids_of):
+    """다음 생성의 준비 단계(3.1)가 새 요청으로 다시 넣을 사용자 룰 = 생성 응답에서 빠진 룰(meta.json rules_missing) 중
+    다른 요청에 아직 배정되지 않은 것 (3_1 의 assigned·retry 와 같은 셈, 세트 all). 사용자 룰이 든 배치의 룰만 본다 (묶음 수를 세려고 배치 전체).
+    → {rules: [룰 id], requests: 새 요청 중 사용자 룰이 든 수 (3.1 처럼 배치마다 배치 파일 순서로 '호출당 룰 수'씩 묶어 셈)}."""
+    gen_dir = base / C_GEN
+    cb = {n.split("_")[1] for n, ids in ids_of.items() if n.startswith("all_") and any(i.startswith("custom:") for i in ids)}
+    rel = {i for n, ids in ids_of.items() if n.startswith("all_") and n.split("_")[1] in cb for i in ids}
+    old, metas, assigned, retry = _creq.get("metas", {}), {}, set(), set()
+    for name, ids in ids_of.items():
+        if not (name.startswith("all_") or f"{name}.jsonl" in gen) or rel.isdisjoint(ids):
+            continue
+        miss = ()
+        if f"{name}.meta.json" in gen:
+            p = gen_dir / f"{name}.meta.json"
+            try:
+                mt = p.stat().st_mtime_ns
+                hit = old.get(p)
+                if not hit or hit[0] != mt:
+                    hit = (mt, tuple(json.loads(p.read_text(encoding="utf-8")).get("rules_missing", [])))
+                metas[p] = hit
+                miss = hit[1]
+            except (OSError, ValueError):
+                pass
+        assigned |= set(ids) - set(miss)
+        retry |= set(miss)
+    _creq["metas"] = metas
+    redo = retry - assigned
+    try:
+        per = max(1, int(run_settings().get("호출당 룰 수", 3)))
+    except ValueError:
+        per = 3
+    n_req = 0
+    for b in sorted(cb):                                # 배치 파일 순서대로 다시 넣을 룰을 per 개씩 (3_1 과 같은 묶음)
+        try:
+            with open(BASE / "05_llm_input" / base.name / "batches" / "all" / f"batch_{b[1:]}.jsonl", encoding="utf-8") as f:
+                order = [str(json.loads(x).get("id", "")) for x in f if x.strip()]
+        except (OSError, ValueError):                   # 배치 파일을 못 읽으면 요청 파일에 나온 순서
+            order = list(dict.fromkeys(r for n, ids in ids_of.items() if n.split("_")[1] == b for r in ids))
+        chosen = [r for r in order if r in redo]
+        n_req += sum(any(r.startswith("custom:") for r in chosen[k:k + per]) for k in range(0, len(chosen), per))
+    return {"rules": sorted(r for r in redo if r.startswith("custom:")), "requests": n_req}
 
 
 def _q(q, key, default=""):
@@ -580,16 +790,23 @@ def page_args(q, max_limit=200):
     return offset, limit
 
 
-def rules_page(q):
+def _rule_rows():
+    """3.5 룰별 상태 (rule_status.jsonl, 바뀔 때만 다시 읽음). 없으면 []."""
     try:
         mtime = RULES_FILE.stat().st_mtime
     except OSError:
-        return {"total": 0, "rows": []}
+        return []
     if _rules_cache["mtime"] != mtime:
         with open(RULES_FILE, encoding="utf-8") as f:
-            _rules_cache["rows"] = [json.loads(line) for line in f if line.strip()]
-        _rules_cache["mtime"] = mtime
-    rows = _rules_cache["rows"]
+            rows = [json.loads(line) for line in f if line.strip()]
+        _rules_cache.update(rows=rows, mtime=mtime)
+    return _rules_cache["rows"]
+
+
+def rules_page(q):
+    rows = _rule_rows()
+    if not rows:
+        return {"total": 0, "rows": []}
     flag, source, text = _q(q, "flag"), _q(q, "source"), _q(q, "q").strip().lower()
     if flag:
         rows = [r for r in rows if r["flag"] == flag]
@@ -687,27 +904,36 @@ def label_info(log_path):
     return _labels[lab]
 
 
-def matching(date, dev, label, rule, text, cons="", hold=""):
+def matching(date, dev, label, rule, text, cons="", hold="", llm=""):
     """조건에 맞는 줄 번호 목록 (0부터). 조건이 없으면 None (= 모든 줄). cons = label 정합성 (전체 검증 결과 필요).
-    hold = 보류 대상 (6. 선별의 보류 옵션과 같은 기준): rule = '정합 (룰 기준)' 공격, pyua = python-requests UA 정상."""
+    hold = 보류 대상 (6. 선별의 보류 옵션과 같은 기준): rule = '정합 (룰 기준)' 공격, pyua = python-requests UA 정상.
+    llm = LLM 재확인 (3_6): '불일치' 줄 중 그 판정, todo = 아직 안 함, any = 재확인한 것 전부."""
     path = _log_path(date, dev)
     if hold == "rule":
         label, cons = "anomalies", "RULE"
     elif hold == "pyua":
         label = "normal"
-    if not (label or rule or text or cons):
+    if not (label or rule or text or cons or llm):
         return None
-    key = (str(path), path.stat().st_mtime, label, rule, text, cons, hold)
+    key = (str(path), path.stat().st_mtime, label, rule, text, cons, hold, llm, recheck_stamp() if llm else None)
     if key in _filters:
         return _filters[key]
     n = len(line_index(path))
     keep = list(range(n))
-    if cons:
+    if cons or llm:
         v = verify_state(date, dev)
         if v.get("status") != "done":
             raise ValueError(f"{date} {dev.upper()} 는 '전체 검증'을 먼저 실행하세요")
+    if cons:
         want = CODE_NUM[cons]
         keep = [i for i in keep if i < len(v["codes"]) and v["codes"][i] == want]
+    if llm:                                             # 줄별 결과의 내용 지문(k)으로 그 줄의 가장 최근 재확인을 찾는다
+        bad = [i for i in keep if i < len(v["codes"]) and v["codes"][i] == CODE_NUM["BAD"]]
+        cache, latest = frame_cache(date, dev), recheck_latest()
+        heads = [ROW_KEY.match(x) for x in read_lines(cache, bad)] if cache and bad else [None] * len(bad)
+        got = {i: latest.get(m.group(1)) if m else None for i, m in zip(bad, heads)}
+        keep = [i for i in bad if (got[i] is None if llm == "todo" else
+                                   got[i] is not None and llm in ("any", got[i].get("verdict")))]
     li = label_info(path)
     if (label or rule) and li:
         _, labels, rule_no, ids, _ = li
@@ -736,11 +962,11 @@ def matching(date, dev, label, rule, text, cons="", hold=""):
     return keep
 
 
-def select_rows(dates, dev, label, rule, text, offset, limit, cons="", hold=""):
+def select_rows(dates, dev, label, rule, text, offset, limit, cons="", hold="", llm=""):
     """여러 날짜를 이어 붙인 것처럼 페이지를 고른다 → (전체 수, [(날짜, 그 날짜의 줄 번호, 전체 index)])."""
     parts = []
     for d in dates:
-        m = matching(d, dev, label, rule, text, cons, hold)
+        m = matching(d, dev, label, rule, text, cons, hold, llm)
         parts.append((d, m, len(line_index(_log_path(d, dev))) if m is None else len(m)))
     total = sum(p[2] for p in parts)
     picked, start = [], 0
@@ -1020,16 +1246,86 @@ ATTACK_NAMES = {"sql_injection": "SQL 인젝션", "xss": "XSS", "xxe": "XXE", "s
                 "rce": "원격 코드 실행", "buffer_overflow": "버퍼 오버플로", "info_disclosure": "정보 노출",
                 "scanner": "스캐너", "dos": "서비스 거부", "csrf": "CSRF", "open_redirect": "오픈 리다이렉트",
                 "other": "기타 공격"}
-GROUP_DOC = [
-    ("공격 흔적", "k_", "payload 를 URL 디코딩(2번)하고 소문자로 바꾼 뒤 공격 유형별 키워드가 몇 번 나오는지. "
-                       "정상 요청에도 나오는 형태는 뺐다 (예: 명령 패턴은 & 가 아니라 && 만)."),
-    ("회피·이상 신호", "k_", "탐지를 피하려는 인코딩, 제어문자·NULL 바이트, 공격 도구 User-Agent. 원문 payload 에서 센다."),
-    ("공격 룰", "ra_", "신뢰할 수 있는 공격 룰(정보성 룰, 기존 normal 에도 걸리는 모호한 룰 제외)과 대조해 "
-                      "공격 유형별로 모든 조건이 일치한 룰 수. 조건 일부만 맞거나 확인 못 한 조건이 있으면 세지 않는다."),
-    ("개별 룰", "r_", "특정 룰 하나의 탐지 여부와 그 룰의 정규식 조건별 일치 (4_0 --rules 로 지정). "
-                     "신규 학습 데이터 화면에서는 그 줄을 만든 룰로 계산한다."),
+GROUP_DOC = [   # 화면 5 묶음 순서 = 표준모델 피처 → 신규 피처(표준이 못 잡는 것만) → 라벨 검증용 (2026-10-29)
+    ("표준모델 피처", "<장비>_payload_", "표준모델(기준 26 상반기)이 쓰는 피처 34개. 이름·정규식은 실행할 때 표준모델 피처 파일에서 "
+                                      "읽는다 (6. 비교와 같은 계산). 소문자로 바꾼 payload 에서 _comb = 정규식 중 하나라도 맞으면 1, "
+                                      "_count = 맞은 횟수, _ratio = 정규식에 맞은 글자 비율(0~1). 한글이 10% 이상인 payload 는 모두 0. "
+                                      "정상에서도 자주 켜지는 범용 피처(기준 정상의 10% 이상)는 4. 줄별 '탐지 피처'에서 뺀다."),
+    ("신규 피처: 공격 흔적 보충 (기존 피처 결합 가능)", "add_",
+     "표준 피처가 못 잡는 공격 흔적 중 같은 계열 표준 comb 피처가 있어 그 피처에 합칠 수 있는 것 (줄마다 '합쳐질 표준 피처'와 근거). "
+     "합친 정의(결합판, 이름은 표준과 같음)는 로컬 파일 5_0d_combined_features.py 이고 5.4 피처 실험 E13 에서 시험한다 "
+     "(6. 비교·'26 하반기' 선별에는 쓰지 않음). 지금 값(add_)은 표준에 없는 갈래는 URL 디코딩(2번)·소문자 payload 에서 모두 세고, "
+     "인코딩되면 표준 피처가 못 보는 갈래는 디코딩해야만 보일 때만 센다 (디코딩 뒤 수 − 원문 수)."),
+    ("신규 피처: 공격 흔적 보충 (신규 피처로 생성 필요)", "add_",
+     "대응하는 표준 피처가 없거나 값의 뜻(개수)이 달라 신규 피처로 만들어야 하는 것: XXE, 회피 신호(이중 인코딩·%u 인코딩·제어문자 개수)."),
+    ("신규 피처: 공격 흔적 보충", "add_", "표준 피처가 못 잡는 공격 흔적·회피 신호 (결합판 파일 5_0d_combined_features.py 가 없거나 "
+                                         "4.1 과 맞지 않아 결합 가능 여부를 나누지 않음)."),
+    ("라벨 검증용: 공격 흔적", "k_", "4. label 정합성 판정과 3.4 증강 normal 교차 검사가 쓰는 흔적 (모든 갈래, 표준 피처와 같은 갈래 포함). "
+                                   "판정 사유의 '공격 흔적 …' 이 이것이다. ML 피처가 아니며, 판정 기준을 바꾸지 않으려고 그대로 둔다 "
+                                   "(ML 피처는 위의 표준모델 피처 + 신규 피처)."),
+    ("라벨 검증용: 공격 룰", "ra_", "신뢰할 수 있는 공격 룰(정보성 룰, 기존 normal 에도 걸리는 모호한 룰 제외)과 대조해 "
+                                  "공격 유형별로 모든 조건이 일치한 룰 수. 조건 일부만 맞거나 확인 못 한 조건이 있으면 세지 않는다. "
+                                  "4. label 정합성 판정에 쓰고 ML 피처로는 쓰지 않는다 (LLM 데이터의 라벨을 정한 룰과 같은 정보 = "
+                                  "라벨 누수, 5.4 피처 실험에서도 뺌)."),
+    ("라벨 검증용: 개별 룰", "r_", "특정 룰 하나의 탐지 여부와 그 룰의 정규식 조건별 일치 (4_0 --rules 로 지정). "
+                                 "신규 학습 데이터 화면에서는 그 줄을 만든 룰로 계산한다. 분석·라벨 검증용 (ML 피처 아님)."),
 ]
+STD_KIND = {"comb": ("정규식 중 하나라도 맞으면 1", "해당하면 1"), "count": ("정규식에 맞은 횟수", "맞은 횟수"),
+            "ratio": ("정규식에 맞은 글자 수 ÷ payload 글자 수", "비율 0~1")}
+ADD_DOC = {   # add_ 신규 피처: (표준 피처가 못 잡아 보충하는 것, 예). 갈래는 4.1 FEATURE_PARTS 그대로
+    "sql": ("표준 피처에 없는 것: xp_cmdshell·sp_executesql, group_concat(·updatexml(·load_file(, INTO OUTFILE, 따옴표 뒤 # · /* 주석. "
+            "인코딩돼 표준 피처가 못 보는 것: 따옴표 뒤 OR/AND 비교, OR 1=1, benchmark(, char(숫자), ; 뒤 DROP·INSERT 등",
+            "group_concat( · xp_cmdshell · ' /* · %27%20or%201%3D1 (인코딩)"),
+    "xss": ("표준 피처에 없는 것: <script>·</script>, vbscript:, onclick=, document.cookie·document.domain, String.fromCharCode. "
+            "인코딩돼 못 보는 것: javascript:, on이벤트=, <img …on…=, <iframe, alert(·prompt(·confirm(",
+            "<script>… · document.cookie · %3Ciframe%20src%3D… (인코딩)"),
+    "cmd": ("표준 피처에 없는 것: ; | && 뒤의 id·ls·bash·sh·ncat·ifconfig, $(id)·$(ls)·$(sleep, cmd /c, busybox. "
+            "인코딩돼 못 보는 것: /bin/sh, chmod +x, ; | && 뒤의 whoami·cat·wget·curl 등, $(whoami)·백틱 실행",
+            ";id · |ls · $(sleep 5) · cmd /c dir · %3Bwhoami (인코딩)"),
+    "traversal": ("인코딩돼 표준 피처가 못 보는 것만: 여러 번 인코딩한 ../, win.ini·boot.ini·system.ini, /proc/self/",
+                  "%25252e%25252e%25252f (세 번 인코딩한 ../) · %2fproc%2fself%2f · %5cwin.ini"),
+    "inclusion": ("표준 피처에 없는 것: zip:// · glob:// · php://(input·filter 외), data:…;base64, 파라미터 값의 원격 스크립트 URL. "
+                  "인코딩돼 못 보는 것: file:/// · php://input · php://filter",
+                  "zip://a.jpg%23x · data:text/plain;base64,… · ?page=http://x/s.txt? · php%3A%2F%2Ffilter (인코딩)"),
+    "template": ("템플릿·EL 주입 전체 (표준 피처는 일부 모양만 봄): ${jndi:, ${env:…}, {{ }} 안의 코드, #{…( · %{…( · <%=",
+                 "{{config}} · ${env:HOME} · %{(#…)}"),
+    "xxe": ("XML 외부 엔티티 전체 (표준 피처에 없음): <!ENTITY 선언, DOCTYPE 안의 엔티티, SYSTEM \"file:…\"",
+            "<!DOCTYPE x [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>"),
+    "deserial": ("표준 피처에 없는 것: 자바 직렬화 시작 바이트(rO0AB · aced0005), __proto__·constructor[prototype], ysoserial, "
+                 "\"$type\":, !!python/object. 인코딩돼 못 보는 것: PHP 객체 표기 O:숫자:\"클래스\":숫자:{",
+                 "rO0ABXNy… · __proto__ · O%3A8%3A%22stdClass%22%3A1%3A%7B (인코딩)"),
+    "shellshock": ("Bash Shellshock 공격 문자열 전체 (표준 피처는 일부만 봄): () { :; };", "User-Agent: () { :; }; /bin/bash -c …"),
+    "sensitive": ("표준 피처에 없는 것: web.config. 인코딩돼 못 보는 것: /.ssh/", "GET /web.config · %2F.ssh%2Fid_rsa (인코딩)"),
+}
 R_ALL, R_RE = "r_<룰>_all", "r_<룰>_re<n>"
+
+
+_cb = {}
+
+
+def combined_ui():
+    """5.0d 결합판 (로컬 전용 파일: add_ 의 결합 가능 갈래 → 표준 comb 피처). 없거나 4.1 과 맞지 않으면 (None, 사유)."""
+    with _lock:
+        if "M" not in _cb:
+            try:
+                if not (BASE / "5_0d_combined_features.py").exists():
+                    raise FileNotFoundError("5_0d_combined_features.py 없음")
+                M = _load("combined_ui", "5_0d_combined_features.py")
+                M.check_parts()
+                _cb.update(M=M, err="")
+            except Exception as e:                      # 화면은 결합 여부를 나누지 않고 보여 줌
+                _cb.update(M=None, err=f"{type(e).__name__}: {e}")
+    return _cb["M"], _cb["err"]
+
+
+def add_title(k):
+    """add_ 신규 피처의 이름 (화면 4·5). 결합판이 있으면 (가) 표준 결합 가능 / (나) 신규 피처를 붙인다."""
+    M = combined_ui()[0]
+    base = "스캐너·공격 도구 UA (표준에 없는 도구" if k == "scanner_ua" else TRACE_NAMES.get(k, k) + " ("
+    if M is None:
+        return "스캐너·공격 도구 UA (표준에 없는 도구)" if k == "scanner_ua" else \
+            TRACE_NAMES.get(k, k) + ("" if k in ("double_enc", "unicode_enc", "ctrl_bytes") else " (표준 보충)")
+    return base + (", " if k == "scanner_ua" else "") + ("표준 결합 가능)" if f"add_{k}" in M.COMBINABLE else "신규 피처)")
 
 
 def feature_key(name):
@@ -1039,54 +1335,138 @@ def feature_key(name):
     return name
 
 
-def feature_catalog():
-    """4.1 피처 전체와 설명. 패턴은 4.1 코드에서 그대로 가져온다 (설명과 실제 계산이 어긋나지 않게)."""
+def feature_catalog(dev="ips"):
+    """화면 5 피처 목록: 표준모델 피처 → 신규 피처 add_*(표준이 못 잡는 것만) → 라벨 검증용(k_·ra_·r_).
+    표준 피처 이름·정규식은 표준모델 피처 파일에서, 신규·흔적 패턴은 4.1 코드에서 그대로 가져온다 (설명과 실제 계산이 어긋나지 않게).
+    표준 피처 설명·기준 비율·대응(어느 표준 피처와 같은 내용인지)은 로컬 대응표 (overlap_notes, 표준 피처 이름은 코드에 적지 않음)."""
     fe = feature_engine()
     F = fe["F"]
     _, rules, _ = checker()
     items = []
-    for k, rx in F.KEYWORDS.items():
-        what, ex = TRACE_DOC.get(k, ("", ""))
-        items.append({"name": f"k_{k}", "group": "공격 흔적", "title": TRACE_NAMES.get(k, k), "what": what,
-                      "example": ex, "value": "나온 횟수", "pattern": rx})
+    notes = F.overlap_notes()
+    fam, generic, rates = notes["families"], set(notes["generic"].get(dev, [])), notes["base_rates"].get(dev, {})
+    std = F.std_features(dev)
+    full = {F.std_short(n, dev): n for n, _, _ in std}
+
+    def names(v):           # 대응표의 짧은 이름 (a·b) → 이 장비의 표준 피처 이름
+        return " · ".join(full.get(s, s) for s in v.split("·")) if v else "표준 피처"
+    CB, cb_err = combined_ui()          # 결합판: add_ 갈래 → 합칠 표준 comb 피처 (로컬 전용 파일, 표준 피처 이름은 코드에 적지 않음)
+    merged = {}                         # 표준 피처(짧은 이름) → 더하는 add_ 갈래 수
+    for t, a, *_ in (CB.MERGE if CB else []):
+        merged.setdefault(t, {}).setdefault(a, 0)
+        merged[t][a] += 1
+    for n, kind, rxs in std:
+        s = F.std_short(n, dev)
+        sup = [a for a in F.FEATURE_NAMES if s in fam.get(a, [])]
+        r = rates.get(s)
+        ml = [f"기준(26 상반기) 공격의 {r[0]}% · 정상의 {r[1]}% 에서 켜짐" if r else "",
+              "범용 (정상에서도 자주 켜짐) → 4. 줄별 '탐지 피처'에서 뺌" if s in generic else ""]
+        if s in merged:
+            ml.append("결합판(5.0d)에 더하는 갈래: " + ", ".join(f"{a} {c}개" for a, c in merged[s].items()))
+        elif sup and CB:
+            ca, na = [a for a in sup if a in CB.COMBINABLE], [a for a in sup if a not in CB.COMBINABLE]
+            if ca:
+                ml.append(f"같은 계열 신규 피처 {', '.join(ca)} 는 " + ("비율·개수 피처라 여기에 합치지 않음 (같은 계열 comb 피처에 합침)"
+                                                                   if kind != "comb" else "다른 comb 피처에 합침"))
+            if na:
+                ml.append(f"같은 계열 {', '.join(na)} 는 신규 피처로 둠")
+        elif sup:
+            ml.append(f"못 잡는 부분 보충: {', '.join(sup)}")
+        items.append({"name": n, "std": s, "group": "표준모델 피처", "title": notes["titles"].get(s, s),
+                      "what": f"표준모델 피처 파일의 정규식 {len(rxs)}개 - {STD_KIND[kind][0]}", "ml": " · ".join(x for x in ml if x),
+                      "example": "", "value": STD_KIND[kind][1], "pattern": "\n".join(rxs), "src": "view"})
+    adds = []
+
+    def add_group(name):                # (가) 결합 가능 / (나) 신규 생성 필요 / 결합판이 없으면 나누지 않음
+        if CB is None:
+            return "신규 피처: 공격 흔적 보충"
+        return "신규 피처: 공격 흔적 보충 (" + ("기존 피처 결합 가능" if name in CB.COMBINABLE else "신규 피처로 생성 필요") + ")"
+
+    def merge_info(name):               # (가): 갈래 → 합쳐질 표준 피처와 근거 / (나): 신규로 두는 이유
+        if CB is None:
+            return [], ""
+        m = [{"pattern": p, "how": h, "std": full.get(t, t), "why": why} for t, a, p, h, why in CB.MERGE if a == name]
+        if m:
+            tg = list(dict.fromkeys(x["std"] for x in m))
+            return m, "합쳐질 표준 피처: " + ", ".join(f"{x} (갈래 {sum(y['std'] == x for y in m)})" for x in tg)
+        return [], "신규로 두는 이유: " + CB.NEW_ONLY.get(name, "")
+    for k, parts in F.FEATURE_PARTS.items():
+        what, ex = ADD_DOC.get(k, ("", ""))
+        dropped = F.FEATURE_DROPPED.get(k, [])
+        same = [full[s] for s in fam.get(f"add_{k}", []) if s in full]
+        mg, how = merge_info(f"add_{k}")
+        to = {x["pattern"]: x["std"] for x in mg}
+        ml = ((how + " · " if how else "")
+              + f"표준에 없는 갈래 {sum(h == 'new' for _, h in parts)}개 · 인코딩됐을 때만 세는 갈래 {sum(h == 'enc' for _, h in parts)}개"
+              + (f" · 표준과 같아 뺀 갈래 {len(dropped)}개" if dropped else "")
+              + ("" if mg else f" · 같은 계열 표준 피처: {', '.join(same)}" if same else " · 같은 계열 표준 피처 없음"))
+        adds.append({"name": f"add_{k}", "group": add_group(f"add_{k}"), "title": add_title(k), "what": what, "ml": ml,
+                     "example": ex, "value": "나온 횟수", "src": "view", "merge": mg,
+                     "pattern": "\n".join(("[인코딩됐을 때만] " if h == "enc" else "") + p + (f"  → {to[p]}" if p in to else "")
+                                          for p, h in parts),
+                     "dropped": [{"pattern": p, "std": names(notes["parts"].get(p))} for p in dropped]})
     evasion_pat = {"double_enc": r"%25(?:2e|2f|5c|3c|3e|27|22|00|3b|7c)", "unicode_enc": r"%u[0-9a-f]{4}",
-                   "ctrl_bytes": r"글자 코드 < 32 (\n \r \t 제외) + 글자로 적힌 \x00~\x1f + %00",
-                   "scanner_ua": F.UA_SCANNER.pattern}
+                   "ctrl_bytes": r"글자 코드 < 32 (\n \r \t 제외) + 글자로 적힌 \x00~\x1f + %00"}
     for k in F.EVASION:
         what, ex = TRACE_DOC.get(k, (F.EVASION[k], ""))
-        items.append({"name": f"k_{k}", "group": "회피·이상 신호", "title": TRACE_NAMES.get(k, k), "what": what,
-                      "example": ex, "value": "해당하면 1" if k == "scanner_ua" else "나온 횟수",
-                      "pattern": evasion_pat.get(k, "")})
+        ua = k == "scanner_ua"
+        same = [full[s] for s in fam.get(f"add_{k}", []) if s in full]
+        mg, how = merge_info(f"add_{k}")
+        if ua:
+            what = f"User-Agent 가 표준 피처에 없는 스캐너·공격 도구: {', '.join(F.UA_SCANNER_FEATURE.pattern.split('|')[:8])} 등"
+            ex = "User-Agent: Acunetix … · OpenVAS …"
+        adds.append({"name": f"add_{k}", "group": add_group(f"add_{k}"), "title": add_title(k), "what": what,
+                     "ml": (how + " · " if how else "") + (f"표준 피처에 있는 도구 {len(F.UA_DROPPED)}개 뺌" if ua else "")
+                           + ("" if mg or ua else f"같은 계열 표준 피처: {', '.join(same)}" if same else "같은 계열 표준 피처 없음"),
+                     "example": ex, "value": "해당하면 1" if ua else "나온 횟수", "src": "view", "merge": mg,
+                     "pattern": F.UA_SCANNER_FEATURE.pattern + (f"  → {mg[0]['std']}" if mg else "") if ua else evasion_pat.get(k, ""),
+                     "dropped": [{"pattern": t, "std": names(notes["ua"].get(t))} for t in F.UA_DROPPED] if ua else []})
+    order = [g[0] for g in GROUP_DOC]
+    items += sorted(adds, key=lambda i: order.index(i["group"]))     # 묶음 순서대로 (같은 묶음 안은 원래 순서)
+    for k, rx in F.KEYWORDS.items():
+        what, ex = TRACE_DOC.get(k, ("", ""))
+        items.append({"name": f"k_{k}", "group": "라벨 검증용: 공격 흔적", "title": TRACE_NAMES.get(k, k), "what": what,
+                      "example": ex, "value": "나온 횟수", "pattern": rx, "src": "verify"})
+    for k in F.EVASION:
+        what, ex = TRACE_DOC.get(k, (F.EVASION[k], ""))
+        items.append({"name": f"k_{k}", "group": "라벨 검증용: 공격 흔적", "title": TRACE_NAMES.get(k, k), "what": what,
+                      "example": ex, "value": "해당하면 1" if k == "scanner_ua" else "나온 횟수", "src": "verify",
+                      "pattern": F.UA_SCANNER.pattern if k == "scanner_ua" else evasion_pat.get(k, "")})
     by_type = {}
     for rid, t in fe["types"].items():
         by_type.setdefault(t, []).append(rid)
     for t in F.ATTACK_TYPES:
         ids = sorted(by_type.get(t, []))
-        items.append({"name": f"ra_{t}", "group": "공격 룰", "title": f"{ATTACK_NAMES.get(t, t)} 공격 룰 일치 수",
+        items.append({"name": f"ra_{t}", "group": "라벨 검증용: 공격 룰", "title": f"{ATTACK_NAMES.get(t, t)} 공격 룰 일치 수",
                       "what": f"신뢰할 수 있는 {ATTACK_NAMES.get(t, t)} 공격 룰 {len(ids):,}개 중 이 payload 에서 "
                               "모든 조건이 일치한 룰 수", "rules": len(ids),
                       "example": " · ".join(f"{i} {rules[i]['rule_name']}" for i in ids[:3] if i in rules),
-                      "value": "일치한 룰 수", "pattern": ""})
-    items.append({"name": "ra_total", "group": "공격 룰", "title": "공격 룰 일치 수 합계",
+                      "value": "일치한 룰 수", "pattern": "", "src": "verify"})
+    items.append({"name": "ra_total", "group": "라벨 검증용: 공격 룰", "title": "공격 룰 일치 수 합계",
                   "what": f"위 공격 유형 {len(F.ATTACK_TYPES)}개의 합 (신뢰할 수 있는 공격 룰 {len(fe['types']):,}개 전체)",
-                  "rules": len(fe["types"]), "example": "", "value": "일치한 룰 수", "pattern": ""})
-    items.append({"name": R_ALL, "group": "개별 룰", "title": "이 룰 탐지",
+                  "rules": len(fe["types"]), "example": "", "value": "일치한 룰 수", "pattern": "", "src": "verify"})
+    items.append({"name": R_ALL, "group": "라벨 검증용: 개별 룰", "title": "이 룰 탐지",
                   "what": "그 룰의 모든 조건(content·정규식·위치·순서)을 만족하면 1. 학습데이터 라벨과 같은 기준이라 "
                           "평가할 때는 룰 단위로 나눠야 한다 (라벨 누수)",
-                  "example": "r_et_1_2053468_all", "value": "해당하면 1", "pattern": ""})
-    items.append({"name": R_RE, "group": "개별 룰", "title": "이 룰의 정규식 조건 일치",
+                  "example": "r_et_1_2053468_all", "value": "해당하면 1", "pattern": "", "src": "verify"})
+    items.append({"name": R_RE, "group": "라벨 검증용: 개별 룰", "title": "이 룰의 정규식 조건 일치",
                   "what": "그 룰의 정규식(pcre) 조건 하나가 일치하면 1 (n = 룰 안의 조건 번호). 룰 전체가 아니라 "
                           "핵심 패턴만 맞아도 켜진다",
                   "example": "r_et_1_2053468_re2 (et:1:2053468 의 정규식 UNION.+SELECT)", "value": "해당하면 1",
-                  "pattern": ""})
-    return {"items": items, "groups": [{"name": n, "prefix": p, "desc": d} for n, p, d in GROUP_DOC],
-            "attack_rules": len(fe["types"]), "note": fe["note"]}
+                  "pattern": "", "src": "verify"})
+    return {"items": items, "groups": [{"name": n, "prefix": p, "desc": d} for n, p, d in GROUP_DOC if any(i["group"] == n for i in items)],
+            "attack_rules": len(fe["types"]), "note": fe["note"], "dev": dev, "notes_found": bool(notes["titles"]),
+            "combined": {"bundle": f"{CB.BUNDLE} {CB.VERSION}", "targets": len(CB.TARGETS), "branches": len(CB.MERGE),
+                         "combinable": len(CB.COMBINABLE), "new_only": len(CB.NEW_ONLY)} if CB else {"error": cb_err}}
 
 
 def feature_counts(dev):
-    """전체 검증 결과에서 피처별로 켜진 줄 수 (anomalies / normal). 검증하지 않은 날짜는 따로 알려 준다."""
+    """피처별로 켜진 줄 수 (anomalies / normal).
+    표준·신규 피처(src view): 표시 캐시의 켜진 줄 수 (4_1 --view = 5. '켜진 줄 수 다시 계산', 전체 검증을 다시 돌리지 않음).
+    라벨 검증용(src verify): 전체 검증 결과. 검증하지 않은 날짜는 따로 알려 준다."""
     out = {"labels": {"anomalies": 0, "normal": 0}, "counts": {}, "dates": [], "missing": [], "running": False}
-    for d in [x["date"] for x in dataset_dates()]:
+    dates = [x["date"] for x in dataset_dates()]
+    for d in dates:
         v = verify_state(d, dev)
         if v.get("status") == "running":
             out["running"] = True
@@ -1100,7 +1480,55 @@ def feature_counts(dev):
             c = out["counts"].setdefault(name, [0, 0])
             c[0] += a
             c[1] += n
+    st = job_state("features")
+    view = {"running": st["running"], "progress": {k: st["lock"].get(k) for k in ("dev", "step", "done", "total")},
+            "dates": [], "labels": {}}
+    p = feature_engine()["F"].VIEW_DIR / f"{dev}_counts.json"
+    try:
+        vc, t = json.loads(p.read_text(encoding="utf-8")), p.stat().st_mtime
+    except (OSError, ValueError):
+        vc = None
+    if vc:
+        now = {}                        # 지금 로그 (계산한 뒤 날짜가 늘었거나 로그가 다시 만들어졌으면 stale)
+        for d in dates:
+            g = sorted((DATASET_DIR / d).glob(f"{dev}_*_snort.log"))
+            if g:
+                now[d] = g[0]
+        out["counts"].update(vc.get("counts", {}))
+        view.update(dates=vc.get("dates", []), labels=vc.get("labels", {}), lines=vc.get("lines", 0),
+                    computed_at=vc.get("computed_at", ""),
+                    stale=set(now) != set(vc.get("dates", [])) or any(g.stat().st_mtime > t for g in now.values()))
+    out["view"] = view
     return out
+
+
+_viewc = {}      # 장비 → (파일 시각, 표준·신규 피처 표시 캐시)
+
+
+def view_cache_ui(dev):
+    """표시 캐시(4_1 --view: payload 지문 → 표준 34·add_* 값)를 파일이 바뀔 때만 다시 읽는다. 없으면 None."""
+    F = feature_engine()["F"]
+    p = F.VIEW_DIR / f"{dev}.parquet"
+    try:
+        mt = p.stat().st_mtime
+    except OSError:
+        return None
+    hit = _viewc.get(dev)
+    if not hit or hit[0] != mt:
+        hit = _viewc[dev] = (mt, F.view_cache(dev))
+    return hit[1]
+
+
+def ml_features(payloads, dev, cache=None):
+    """4. 줄별 '탐지 피처' (ML 피처): 켜진 표준모델 피처(범용 제외) + 켜진 신규 피처 add_* → [[{name, value, desc}]].
+    표시만 바꾼다 (label 정합성 판정은 그대로 흔적 k_·공격 룰로). 표시 캐시에 없는 payload 는 바로 계산한다 (100줄 약 0.3초)."""
+    F = feature_engine()["F"]
+    notes = F.overlap_notes()
+    hide = {f"{dev}_payload_{s}" for s in notes["generic"].get(dev, [])}
+    vals = F.view_features(payloads, dev, view_cache_ui(dev) if cache is None else cache, hide)
+    return [[{"name": c, "value": int(v) if v == int(v) else round(v, 3),
+              "desc": add_title(c[4:]) if c.startswith("add_") else notes["titles"].get(F.std_short(c, dev), "")}
+             for c, v in r] for r in vals]
 
 
 # ── 전체 검증 (파일의 모든 줄의 label 정합성) ────────────────────────────
@@ -1618,6 +2046,146 @@ def delete_bad(date, dev):
     return {"deleted": n}
 
 
+# ── 4. LLM 재확인 ('불일치' 줄만, 3_6 별도 프로세스 - 화면을 다시 켜도 계속) ─────────────────────────
+# 판정은 07_llm_output/_recheck/results.jsonl (줄 내용 지문 k 마다, 코드 판정 cons 와 따로). 반영은 기존 수정·삭제(edits)로.
+RECHECK_V = {"ok": "label 맞음", "flip": "label 반대", "unfit": "학습에 부적합", "unknown": "판단 불가"}   # 3_6 VERDICTS 와 같음
+RECHECK_WHY = "LLM 재확인"                               # 반영한 수정·삭제의 사유 앞부분 (되돌리기가 이것만 찾음)
+ROW_KEY = re.compile(r'^\{"k": "([0-9a-f]+)"')          # 줄별 결과(frame) 한 줄의 내용 지문
+_rc = {"M": None, "res": (None, {})}                    # 3_6 모듈, results.jsonl (수정 시각, 내용 지문 → 가장 최근 판정)
+
+
+def recheck_mod():
+    with _lock:
+        if _rc["M"] is None:
+            _rc["M"] = _load("recheck_ui", "3_6_recheck_labels.py")
+    return _rc["M"]
+
+
+def recheck_stamp():
+    try:
+        return (recheck_mod().OUT_DIR / "results.jsonl").stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def recheck_latest():
+    """줄 내용 지문 → 가장 최근 LLM 재확인 (results.jsonl 이 바뀔 때만 다시 읽음, 없으면 {})."""
+    mt = recheck_stamp()
+    if not mt:
+        return {}
+    if _rc["res"][0] != mt:
+        M = recheck_mod()
+        _rc["res"] = (mt, M.latest_by_key(M.read_results()))
+    return _rc["res"][1]
+
+
+def _rc_scope(date):
+    dates = [d["date"] for d in dataset_dates()]
+    if date not in ("", "all", *dates):
+        raise ValueError("date")
+    return dates if date in ("", "all") else [date]
+
+
+def recheck_state(q):
+    """화면 4 'LLM 재확인': 실행 상태(.run/recheck.json), 지금 날짜·장비의 '불일치' 줄과 판정 수, 반영한 수, 모델 목록·기본값."""
+    M, dev = recheck_mod(), _q(q, "dev", "ips")
+    if dev not in ("ips", "waf"):
+        raise ValueError("dev")
+    latest, cnt, bad, applied = recheck_latest(), {k: 0 for k in RECHECK_V}, 0, 0
+    for d in _rc_scope(_q(q, "date")):
+        for r in M.bad_rows(d, dev):
+            bad += 1
+            x = latest.get(r["k"])
+            if x:
+                cnt[x["verdict"]] = cnt.get(x["verdict"], 0) + 1
+        applied += sum(1 for e in read_edits(d).values() if str(e.get("why", "")).startswith(RECHECK_WHY))
+    _, t = _read_settings()
+    rev = next((r for r in t.get("모델", []) if len(r) >= 3 and r[0] == "검토"), None)
+    run = {r[0]: r[1] for r in t.get("실행", []) if len(r) >= 2}
+    known = [f"{p}:{m}" for p, ms in KNOWN_MODELS.items() for m in ms]
+    for role in (_magg["val"] or {}).values():          # 화면 2 가 이미 센 지난 기록의 모델도 (처음부터 세면 10초 넘게 걸려 세지 않음)
+        known += [pm for pm in role if pm not in known]
+    return {"job": job_state("recheck"), "status": RT.read_status("recheck"), "bad": bad, "counts": cnt,
+            "todo": bad - sum(cnt.values()), "applied": applied, "verdicts": RECHECK_V, "efforts": EFFORTS, "known": known,
+            "model": f"{rev[1]}:{rev[2]}" if rev and rev[1] not in ("", "-", "none") else "",
+            "effort": run.get("검토 추론 강도", "")}
+
+
+def _rc_args(b):
+    """화면의 모델·추론 강도·날짜 → (model, effort, dates). model '' = LLM_설정.md 검토 모델,
+    effort '' = '검토 추론 강도' 값, '-' = 넘기지 않음 (모델 기본값). 이번 실행에만 쓰고 LLM_설정.md 는 바꾸지 않는다."""
+    model = str(b.get("model") or "").strip()
+    if model and (not MODEL_RE.match(model) or model == "none"):
+        raise ValueError("모델 ('provider:model')")
+    eff = str(b.get("effort") or "").strip().lower()
+    if eff not in ("", "-", *EFFORTS):
+        raise ValueError(f"추론 강도 (비우거나 - 또는 {'·'.join(EFFORTS)})")
+    dates = _rc_scope(b.get("date") or "all")
+    return model, (eff or None), (None if (b.get("date") or "all") == "all" else dates)
+
+
+def recheck_plan(b):
+    """시작 전 확인: 대상 줄·이미 한 줄·요청 수·예상 토큰·시간·비용 (호출 없음)."""
+    model, eff, dates = _rc_args(b)
+    return recheck_mod().estimate(model, eff, dates)
+
+
+def recheck_start(b):
+    if job_state("recheck")["running"]:
+        raise ValueError("LLM 재확인이 이미 도는 중입니다")
+    model, eff, dates = _rc_args(b)
+    args = (["--model", model] if model else []) + (["--effort", eff] if eff else []) + \
+           (["--dates", ",".join(dates)] if dates else [])
+    RT.clear_stop("recheck")
+    return {"pid": spawn("recheck", args), "args": args}
+
+
+def recheck_stop(b):
+    """중지 = 지금 보낸 요청까지 (판정은 저장됨), 강제 중지 = 바로 (보내던 요청의 판정은 버림)."""
+    st = job_state("recheck")
+    if not st["running"]:
+        raise ValueError("도는 LLM 재확인이 없습니다")
+    if b.get("force"):
+        return {"killed": force_kill(st["lock"].get("pid") or st["ui"].get("pid"))}
+    RT.request_stop("recheck")
+    return {"stop": True}
+
+
+def recheck_apply(b):
+    """LLM 재확인 판정을 수정·삭제로 저장 (지금 날짜·장비의 '불일치' 줄, '학습 로그에 반영' 때 적용·되돌릴 수 있음).
+    delete = label 반대·학습에 부적합 → 삭제, flip = label 반대 → label 바꾸기, undo = LLM 재확인으로 저장한 수정·삭제를 되돌림.
+    사람이 이미 수정·삭제를 저장한 샘플은 건드리지 않는다 (건너뛴 수로 알림)."""
+    act, dev = b.get("action"), b.get("dev", "ips")
+    if act not in ("delete", "flip", "undo") or dev not in ("ips", "waf"):
+        raise ValueError("action/dev")
+    M, latest, out = recheck_mod(), recheck_latest(), {"saved": 0, "skipped": 0, "undone": 0}
+    for d in _rc_scope(b.get("date") or "all"):
+        rows = [] if act == "undo" else M.bad_rows(d, dev)
+        with _edit_lock:
+            edits, n0 = read_edits(d), (out["saved"], out["undone"])
+            if act == "undo":
+                for sk in [s for s, e in edits.items() if str(e.get("why", "")).startswith(RECHECK_WHY)]:
+                    edits.pop(sk)
+                    out["undone"] += 1
+            for r in rows:
+                x = latest.get(r["k"])
+                if not x or not r["sk"] or not (x["verdict"] == "flip" or (act == "delete" and x["verdict"] == "unfit")):
+                    continue
+                if r["sk"] in edits:
+                    out["skipped"] += 1
+                    continue
+                e = {"action": "delete" if act == "delete" else "edit", "id": r["rule_id"], "orig_label": r["label"],
+                     "why": f"{RECHECK_WHY} ({x.get('model', '')}): {RECHECK_V[x['verdict']]} - {x.get('reason', '')}"[:300],
+                     "at": RT.now_iso()}
+                if act == "flip":
+                    e["label"] = "normal" if r["label"] == "anomalies" else "anomalies"
+                edits[r["sk"]] = e
+                out["saved"] += 1
+            if (out["saved"], out["undone"]) != n0:
+                _write_edits(d, edits)
+    return out
+
+
 def dataset_job():
     """화면에서 시작한 '학습 로그에 반영'(1.4) 상태."""
     rec = _ui_record("dataset")
@@ -1672,7 +2240,7 @@ def start_rebuild(date):
 
 
 def data_query(q):
-    """신규 학습 데이터 화면의 조건 → (날짜 목록, 장비, label, 룰 id, payload 검색어, label 정합성, 보류 대상)."""
+    """신규 학습 데이터 화면의 조건 → (날짜 목록, 장비, label, 룰 id, payload 검색어, label 정합성, 보류 대상, LLM 재확인)."""
     dev, date = _q(q, "dev", "ips"), _q(q, "date")
     dates = [d["date"] for d in dataset_dates()]
     if date and date != "all":
@@ -1680,16 +2248,28 @@ def data_query(q):
             raise ValueError("date")
         dates = [date]
     label, rule, text, cons = _q(q, "label"), _q(q, "rule").strip(), _q(q, "q").strip(), _q(q, "cons")
-    hold = _q(q, "hold")
+    hold, llm = _q(q, "hold"), _q(q, "llm")
     if (dev not in ("ips", "waf", *CONV) or label not in ("", "anomalies", "normal") or cons not in ("", *CONS)
-            or hold not in ("", *HOLD)):
-        raise ValueError("dev/label/cons/hold")
-    return dates, dev, label, rule, text, cons, hold
+            or hold not in ("", *HOLD) or llm not in ("", "todo", "any", *RECHECK_V)):
+        raise ValueError("dev/label/cons/hold/llm")
+    return dates, dev, label, rule, text, cons, hold, llm
 
 
 FRAME_COLS = ["index", "payload", "method", "label", "label 사유", "검증 결과", "label 정합성", "label 정합성 사유",
-              "탐지 피처", "rule_id", "date"]
+              "탐지 피처", "라벨 검증용 피처", "rule_id", "date", "LLM 재확인", "LLM 재확인 근거", "LLM 재확인 모델"]
 CHECK_MARK = {"ok": "✔", "warn": "△", "bad": "✘"}
+
+
+def ml_rows(payloads, dev, cache=None):
+    """줄별 ML 피처 (ml_features). 표준모델 피처 파일을 못 읽는 등으로 실패해도 표·CSV 는 그대로 보이게 → (목록, 오류 문구)."""
+    try:
+        return ml_features(payloads, dev, cache), ""
+    except Exception as e:
+        return [[] for _ in payloads], f"탐지 피처를 계산하지 못했습니다: {type(e).__name__}: {e}"
+
+
+def feat_text(feats):
+    return "; ".join(f"{x['name']}={x['value']}" + (f" ({x['desc']})" if x.get("desc") else "") for x in feats)
 
 
 def _cell(v):
@@ -1702,19 +2282,21 @@ def frame_csv(q):
     """데이터 프레임 내려받기: 조건에 맞는 모든 줄을 화면의 열 그대로 CSV(UTF-8 BOM, 엑셀용)로.
     → (줄 수, 파일 이름, 바이트 조각 생성기). '전체 검증'의 저장된 줄별 결과가 있으면 그것을 쓰고(빠름),
     없으면 줄마다 다시 확인한다(1천 줄에 약 15초). 200줄씩 만들어 바로 보낸다."""
-    dates, dev, label, rule, text, cons, hold = data_query(q)
+    dates, dev, label, rule, text, cons, hold, llm = data_query(q)
     src = "ips" if dev in CONV else dev                 # FW·웹: 원본 IPS 줄을 골라 바꿔서 (conv_csv)
     if dev in CONV:
-        conv_verified(dates, cons, hold)
+        conv_verified(dates, cons, hold, llm)
     parts = []
     for d in dates:                                     # 조건 오류(예: 전체 검증 전 정합성 필터)는 보내기 전에
-        m = matching(d, src, label, rule, text, cons, hold)
+        m = matching(d, src, label, rule, text, cons, hold, llm)
         parts.append((d, m, len(line_index(_log_path(d, src))) if m is None else len(m)))
     total = sum(n for _, _, n in parts)
     name = "_".join([dev, dates[0] if len(dates) == 1 else "all", "frame"] +
-                    [x for x in (label, cons, hold and f"hold-{hold}") if x]) + ".csv"
+                    [x for x in (label, cons, hold and f"hold-{hold}", llm and f"llm-{llm}") if x]) + ".csv"
     if dev in CONV:
         return total, name, conv_csv(dev, parts)
+    latest = recheck_latest()
+    vc = view_cache_ui(dev)                             # 탐지 피처 = 표준·신규 피처 표시 캐시 (없는 줄만 계산)
 
     def chunks():
         buf = io.StringIO()
@@ -1730,23 +2312,27 @@ def frame_csv(q):
                 idx = list(range(s, min(n, s + 200))) if m is None else m[s:s + 200]
                 metas = read_label_lines(li[4], idx) if li else [{}] * len(idx)
                 saved = cached_rows(cache, idx) if cache else None
+                lines = read_lines(path, idx)
+                fields = [split_log(line) for line in lines]
+                ml, err = ml_rows([f[6] if len(f) == 8 else line for f, line in zip(fields, lines)], dev, vc)
                 buf.seek(0)
                 buf.truncate()
-                for k, (line, meta) in enumerate(zip(read_lines(path, idx), metas)):
-                    f = split_log(line)
+                for k, (line, f, meta) in enumerate(zip(lines, fields, metas)):
                     payload, method, lab = (f[6], f[5], f[7]) if len(f) == 8 else (line, "", "")
                     try:
                         a = saved[k] if saved else analyze(payload, lab, meta)
                     except Exception as e:              # 한 줄이 실패해도 파일은 끝까지
                         a = {"reason": "", "checks": [("bad", f"확인 실패: {type(e).__name__}: {e}")], "cons_text": "",
                              "cons_reason": "", "features": []}
+                    rc = latest.get(_row_key(payload, lab, meta)) if latest else None    # LLM 재확인 (줄 내용 지문)
                     w.writerow([g0 + s + k] + [_cell(v) for v in (
                         payload, method, lab, a["reason"],
                         " / ".join(f"{CHECK_MARK.get(st, '')} {t}" for st, t in a["checks"]),
                         a["cons_text"], a["cons_reason"],
-                        "; ".join(f"{x['name']}={x['value']}" + (f" ({x['desc']})" if x.get("desc") else "")
-                                  for x in a["features"]),
-                        meta.get("id", ""), d)])
+                        err or feat_text(ml[k]), feat_text(x for x in a["features"] if not x["name"].startswith("k_")),
+                        meta.get("id", ""), d,
+                        RECHECK_V.get(rc["verdict"], rc["verdict"]) if rc else "", rc["reason"] if rc else "",
+                        rc["model"] if rc else "")])
                 yield buf.getvalue().encode("utf-8")
             g0 += n
     return total, name, chunks()
@@ -1754,12 +2340,12 @@ def frame_csv(q):
 
 def data_rows(q):
     """신규 학습 데이터 표 한 페이지 (데이터 프레임 열 + 수정·삭제 상태)."""
-    dates, dev, label, rule, text, cons, hold = data_query(q)
+    dates, dev, label, rule, text, cons, hold, llm = data_query(q)
     offset, limit = page_args(q, 100)
     if dev in CONV:
-        return conv_page(dates, dev, label, rule, text, cons, hold, offset, limit)
-    total, picked = select_rows(dates, dev, label, rule, text, offset, limit, cons, hold)
-    rows = []
+        return conv_page(dates, dev, label, rule, text, cons, hold, offset, limit, llm)
+    total, picked = select_rows(dates, dev, label, rule, text, offset, limit, cons, hold, llm)
+    rows, latest = [], recheck_latest()
     by_date = {}
     for d, i, g in picked:
         by_date.setdefault(d, []).append((i, g))
@@ -1776,11 +2362,19 @@ def data_rows(q):
             payload, method, lab = (f[6], f[5], f[7]) if len(f) == 8 else (line, "", "")
             a = saved[k] if saved else analyze(payload, lab, meta)
             e = edits.get(meta.get("sk")) or {}
+            rc = latest.get(_row_key(payload, lab, meta)) if latest else None       # LLM 재확인 (3_6, 줄 내용 지문)
             rows.append(dict(a, index=g, line=i, date=d, payload=payload, method=method, label=lab, rule_id=meta.get("id", ""),
                              sk=meta.get("sk", ""), edited=meta.get("edited", ""),
-                             edit={"action": e["action"], "label": e.get("label", ""), "payload": bool(e.get("http"))} if e else None))
+                             edit={"action": e["action"], "label": e.get("label", ""), "payload": bool(e.get("http"))} if e else None,
+                             llm={"v": rc["verdict"], "r": rc.get("reason", ""), "m": rc.get("model", ""), "at": rc.get("at", "")}
+                             if rc else None))
     rows.sort(key=lambda r: r["index"])
-    return {"total": total, "offset": offset, "rows": rows}
+    # 탐지 피처 = ML 피처(표준·신규) 표시. 검증 결과의 흔적 k_ 는 판정에만 쓰고 보이지 않고, ra_·r_ 는 '라벨 검증용'으로 따로
+    ml, err = ml_rows([r["payload"] for r in rows], dev)
+    for r, x in zip(rows, ml):
+        r["vfeatures"] = [v for v in r["features"] if not v["name"].startswith("k_")]
+        r["features"] = x
+    return {"total": total, "offset": offset, "rows": rows, "ml_error": err}
 
 
 # 장비 FW·웹 보기: IPS 신규 학습 데이터 줄을 1_4a 로 바꿔 보여 주고, '파일로 저장'은 날짜 전체를 1_4a.save 로 쓴다. 조건(label·룰·검색·정합성·보류)은
@@ -1805,20 +2399,20 @@ def conv_lines(date, idx):
     return read_lines(path, idx), (read_label_lines(li[4], idx) if li else [{}] * len(idx))
 
 
-def conv_verified(dates, cons, hold):
+def conv_verified(dates, cons, hold, llm=""):
     """정합성 조건은 원본 '전체 검증' 결과가 있어야 함 (matching 과 같은 확인, 화면 문구에 원본 장비 이름 없이)."""
-    if cons or hold == "rule":
+    if cons or hold == "rule" or llm:
         for d in dates:
             if verify_state(d, "ips").get("status") != "done":
                 raise ValueError(f"{d} 데이터는 '전체 검증'을 먼저 실행하세요")
 
 
-def conv_page(dates, dev, label, rule, text, cons, hold, offset, limit):
+def conv_page(dates, dev, label, rule, text, cons, hold, offset, limit, llm=""):
     """FW·웹 보기 한 페이지: 줄마다 변환 로그·파싱 결과·공격 근거 (웹은 룰 조건으로 근거가 남는지 확인)."""
     M = conv_mod()
     C, rules, _ = checker()
-    conv_verified(dates, cons, hold)
-    total, picked = select_rows(dates, "ips", label, rule, text, offset, limit, cons, hold)
+    conv_verified(dates, cons, hold, llm)
+    total, picked = select_rows(dates, "ips", label, rule, text, offset, limit, cons, hold, llm)
     rows = []
     for d in dict.fromkeys(p[0] for p in picked):
         items = [(i, g) for dd, i, g in picked if dd == d]
@@ -2610,7 +3204,7 @@ def model_stats(fresh=False):
 def _changes_tail(n=10):
     """바꾼 기록 최근 n개 (최근 것부터)."""
     try:
-        rows = MODEL_LOG.read_text(encoding="utf-8").splitlines()[-n:]
+        rows = [x for x in MODEL_LOG.read_text(encoding="utf-8").split("\n") if x.strip()][-n:]   # '\n' 으로만
     except OSError:
         return []
     out = []
@@ -2787,7 +3381,8 @@ def state():
             "agent": dict(job_state("agent"), status=RT.read_status("agent")),
             "last_collect": RT.read_status("collect"), "input_dates": input_dates(),
             "models": settings_summary(), "settings": dict(zip(("generate", "review", "overlap"), parallel())),
-            "step_seconds": step_summary(), "supervised": sup, "redo": job_state("redo")}
+            "step_seconds": step_summary(), "supervised": sup, "redo": job_state("redo"),
+            "custom_requests": custom_requests()}
 
 
 # ── 요청 처리 ────────────────────────────────────────────────────────────
@@ -2855,6 +3450,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, verify_summary(_q(q, "date"), _q(q, "dev", "ips")))
             if u.path == "/api/data/edits":
                 return self._send(200, edits_summary(_q(q, "date")))
+            if u.path == "/api/data/recheck":
+                return self._send(200, recheck_state(q))
             if u.path == "/api/data/conv/save":
                 return self._send(200, conv_save_state(_q(q, "date"), _q(q, "dev")))
             if u.path == "/api/excluded":
@@ -2889,7 +3486,7 @@ class Handler(BaseHTTPRequestHandler):
                 dev = _q(q, "dev", "ips")
                 if dev not in ("ips", "waf"):
                     raise ValueError("dev")
-                return self._send(200, dict(feature_catalog(), **feature_counts(dev)))
+                return self._send(200, dict(feature_catalog(dev), **feature_counts(dev)))
             if u.path == "/download/rule_status.csv" and CSV_FILE.exists():
                 return self._send(200, CSV_FILE.read_bytes(), "text/csv; charset=utf-8",
                                   {"Content-Disposition": "attachment; filename=rule_status.csv"})
@@ -2926,10 +3523,25 @@ class Handler(BaseHTTPRequestHandler):
             return 200, check_edit(b)
         if path == "/api/data/edit/bad":
             return 200, delete_bad(b.get("date", ""), b.get("dev", "ips"))
+        if path == "/api/data/recheck/plan":
+            return 200, recheck_plan(b)
+        if path == "/api/data/recheck/start":
+            return 200, recheck_start(b)
+        if path == "/api/data/recheck/stop":
+            return 200, recheck_stop(b)
+        if path == "/api/data/recheck/apply":
+            return 200, recheck_apply(b)
         if path == "/api/data/rebuild":
             return 200, start_rebuild(b.get("date", ""))
         if path == "/api/data/conv/save":
             return 200, conv_save_start(b)
+        if path == "/api/features/count":        # 5. '켜진 줄 수 다시 계산' = 4_1 --view (표준·신규 피처, 별도 프로세스, 재검증 없음)
+            dev = b.get("dev", "ips")
+            if dev not in ("ips", "waf"):
+                raise ValueError("dev")
+            if job_state("features")["running"]:
+                return 409, {"error": "켜진 줄 수를 계산하는 중입니다 - 끝난 뒤 다시 누르세요"}
+            return 200, {"pid": spawn("features", ["--view", dev])}
         if path == "/api/sup/compare":
             return 200, sup_start("compare", b)
         if path == "/api/sup/finalize":
@@ -2995,6 +3607,10 @@ class Handler(BaseHTTPRequestHandler):
                     if not MODEL_RE.match(b[key]):
                         raise ValueError(key)
                     args += [f"--{key}", b[key]]
+            if b.get("order") not in (None, "", "custom"):         # 생성 순서: 기본(배치 순서) / 사용자 룰 먼저
+                raise ValueError("order")
+            if b.get("order") == "custom":
+                args.append("--custom-first")
             if b.get("dry_run"):
                 args.append("--dry-run")
             RT.clear_stop("generation")
@@ -3071,7 +3687,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-top:8px}
 .chk{font-size:12px;line-height:1.5;min-width:220px}td.method{min-width:130px}.chk .ok{color:var(--ok)}.chk .warn{color:var(--warn)}.chk .bad{color:var(--bad);font-weight:600}
 tr.lv-bad td{background:rgba(214,69,69,.06)}.reason{font-size:12.5px;min-width:240px}
 .pager{display:flex;gap:8px;align-items:center;margin-top:10px}
-.est{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:13px;line-height:1.6}.est b{font-weight:600}
+.est{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:13px;line-height:1.6}.est b{font-weight:600}#gOrderInfo .warn{color:var(--warn);font-weight:600}
 .c-OK{background:#d7f3e3;color:#13633a}.c-RULE{background:#dde8fb;color:#1f4fa3}.c-CHECK{background:#fff0d1;color:#8a5a00}.c-BAD{background:#fde0e0;color:#a32424}
 .vsum{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:13px}button.sm{padding:2px 8px;font-size:12px;margin:0 2px 2px 0}td.act{min-width:130px}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:50;display:none;align-items:center;justify-content:center;padding:16px}.mbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;width:min(940px,100%);max-height:92vh;overflow:auto}.mbox h3{margin:0 0 10px;font-size:15px}.mbox textarea{width:100%;min-height:260px;font:12px/1.45 Consolas,monospace;padding:8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);margin-top:8px}#edRes{margin:8px 0;font-size:13px}#dEditList{margin-top:8px;max-height:360px;overflow:auto}.vsum .chip{cursor:pointer;font-size:12.5px;padding:2px 10px}
@@ -3090,6 +3706,8 @@ tr.hl td{background:rgba(47,111,222,.12)}.fgroup td{background:var(--bg);font-we
 .pat{font:11.5px Consolas,monospace;word-break:break-all;white-space:pre-wrap;max-height:9em;overflow:auto;background:var(--bg);border-radius:6px;padding:4px 6px;min-width:220px}
 label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var(--fg)}.g0{background:var(--chip);color:var(--muted)}.g1{background:#fde0e0;color:#a32424}.g2{background:#dde8fb;color:#1f4fa3}.g3{background:#d7f3e3;color:#13633a}
 .hold{display:flex;gap:6px 18px;flex-wrap:wrap;margin-top:8px;font-size:12.5px}.hold a,a[data-hv]{cursor:pointer;color:var(--accent);text-decoration:underline}
+.sstate{margin-top:8px;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg);font-size:13px;line-height:1.6}.sstate.dirty{border:2px solid var(--warn)}.sstate.clean{border:2px solid var(--ok)}.sstate .steps{margin:0 0 8px}
+.sstate .head{display:flex;gap:6px 12px;flex-wrap:wrap;align-items:center;font-size:14px}.sstate .head .chip{font-size:14px;padding:2px 12px;font-weight:600}.sstate ul{margin:4px 0 2px 18px;padding:0}tr.adj td{background:rgba(183,121,31,.12)}.optc{display:flex;gap:4px;align-items:center}.optf{padding:5px 8px;border:1px dashed var(--warn);border-radius:7px;color:var(--fg);font-size:13px}.optsum{margin-top:6px;font-size:13px;line-height:1.6}.optsum .warn{color:var(--warn);font-weight:600}.rcbox{margin-top:6px;padding:8px 10px;border:1px dashed var(--line);border-radius:8px}td.cons .llm{margin-top:4px}
 .tw{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}.tw>div{min-width:260px;flex:1}.tw h4{margin:10px 0 4px;font-size:13px}table.mini td,table.mini th{padding:3px 6px}.ck{display:inline-flex;gap:3px;align-items:center;margin-right:8px}
 @media (max-width:480px){main{padding:10px}.grid{grid-template-columns:1fr}}
 </style></head><body>
@@ -3110,7 +3728,9 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
   <label>세트<select id="gSet"><option value="all">전체 (all)</option><option value="delta">변경분 (delta)</option></select></label>
   <label>요청 수 (0 = 남은 전부)<input id="gN" type="number" min="0" value="200" style="width:110px"></label>
   <label>입력 날짜<select id="gDate"><option value="">가장 최근</option></select></label>
+  <label>생성 순서<select id="gOrder"><option value="">기본 (ET → Talos → 사용자 룰)</option><option value="custom">사용자 룰 먼저</option></select></label>
  </div>
+ <div class="muted" id="gOrderInfo" style="font-size:12.5px;margin-top:6px"></div>
  <div class="est" id="genEst"></div>
  <details id="gOvrBox"><summary>이번 실행만 다른 모델 <span class="muted" id="gOvr">(저장 안 됨 · 비우면 아래 '모델 설정'의 저장된 값)</span></summary><div class="row" style="margin-top:6px">
   <label>생성 모델<input id="gGen" placeholder="예: upstage:solar-pro2"></label>
@@ -3170,10 +3790,18 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
   <label>payload 검색<input id="dQ" style="width:200px"></label>
   <label>label 정합성<select id="dCons"><option value="">전체</option><option value="OK">정합</option><option value="RULE">정합 (룰 기준)</option><option value="CHECK">확인 필요</option><option value="BAD">불일치</option></select></label>
   <label>보류 대상<select id="dHold"><option value="">전체</option><option value="rule">'정합 (룰 기준)' 공격</option><option value="pyua">python-requests UA 정상</option></select></label>
+  <label>LLM 재확인<select id="dLlm"><option value="">전체</option><option value="todo">불일치 중 아직 안 함</option><option value="ok">label 맞음</option><option value="flip">label 반대</option><option value="unfit">학습에 부적합</option><option value="unknown">판단 불가</option><option value="any">재확인한 것 전부</option></select></label>
   <button id="dGo">조회</button><button id="dVerifyNew">검증 안 한 데이터만 검증</button><button id="dVerify">전체 검증</button><button class="danger" id="dVerifyStop" style="display:none">검증 중지</button><button id="dSave" style="display:none" title="고른 날짜(전체면 모든 날짜)의 데이터 전체를 08_dataset/&lt;날짜&gt;/ 에 로그 + label 파일로 저장">파일로 저장</button><a id="dDown" style="font-size:13px;align-self:center">CSV 내려받기</a>
  </div>
  <div class="vsum" id="dVsum"></div><div class="vsum" id="dSaveSum" style="display:none"></div>
  <div class="vsum" id="dEdits"></div><div id="dEditList" style="display:none"></div>
+ <div class="vsum" id="dRc"></div>
+ <div class="rcbox" id="dRcBox" style="display:none"><div class="row">
+  <label>모델 <span class="muted">(이번 실행만 · 비우면 검토 모델)</span><input id="rcModel" list="rcModels" style="width:230px"><datalist id="rcModels"></datalist></label>
+  <label>추론 강도<select id="rcEff"></select></label>
+  <button id="rcPlan">대상·예상 보기 (호출 없음)</button><button class="primary" id="rcGo">재확인 시작</button>
+  <button id="rcStop" style="display:none">중지 (지금 요청까지)</button><button class="danger" id="rcKill" style="display:none">강제 중지</button></div>
+  <div class="est" id="rcEst"><span class="muted">'불일치' 줄만 고른 LLM 에 보내 label 이 맞는지 다시 묻습니다 (API 비용 또는 Claude 구독 사용량). '대상·예상 보기'는 호출하지 않고 대상 줄·요청 수·예상 토큰·시간·비용만 셉니다. 시작하면 별도 프로세스로 돌아 화면을 다시 켜도 계속되고, 판정은 표에 코드 판정과 따로 보입니다 (학습 로그·검증 결과는 바꾸지 않음).</span></div></div>
  <div class="muted" style="margin-top:8px;font-size:12.5px" id="dHelp"></div>
  <div id="dBody" style="margin-top:10px;overflow-x:auto"></div>
  <div class="pager"><button id="dPrev">이전</button><span class="muted" id="dCount"></span><button id="dNext">다음</button></div></div></section>
@@ -3191,9 +3819,9 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
   <label>묶음<select id="fGroup"><option value="">전체</option></select></label>
   <label>검색 (이름·설명·패턴)<input id="fQ" style="width:240px"></label>
   <label>켜진 줄 수 기준<select id="fDev"><option value="ips">IPS 신규 학습 데이터</option><option value="waf">WAF 신규 학습 데이터</option></select></label>
-  <button id="fCount">켜진 줄 수 다시 계산</button><span class="muted" style="align-self:center;font-size:12.5px" id="fCountMsg"></span>
+  <button id="fCount">켜진 줄 수 다시 계산 (표준·신규 피처)</button><span class="muted" style="align-self:center;font-size:12.5px" id="fCountMsg"></span>
  </div>
- <div style="margin-top:10px;overflow-x:auto"><table><thead><tr><th>피처</th><th>이름</th><th>무엇을 보는지</th><th>예</th><th>값</th><th class="n">켜진 줄<br>anomalies</th><th class="n">켜진 줄<br>normal</th><th class="n">켜졌을 때<br>anomalies 비율</th><th>패턴 (4.1 코드 그대로)</th></tr></thead><tbody id="fBody"></tbody></table></div>
+ <div style="margin-top:10px;overflow-x:auto"><table><thead><tr><th>피처</th><th>이름</th><th>무엇을 보는지</th><th>예</th><th>값</th><th class="n">켜진 줄<br>anomalies</th><th class="n">켜진 줄<br>normal</th><th class="n">켜졌을 때<br>anomalies 비율</th><th>패턴 (계산에 쓰는 그대로)</th></tr></thead><tbody id="fBody"></tbody></table></div>
 </div></section>
 
 <!-- 6. 기존 학습데이터와 비교 -->
@@ -3213,15 +3841,20 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
 <div class="card"><h2>비교 결과 <span class="seg" id="sDevSeg" style="vertical-align:middle;margin-left:6px"><button data-d="ips" class="on">IPS</button><button data-d="waf">WAF</button></span> <span class="muted" style="font-weight:400" id="sResHdr"></span><a id="sXlsx" style="float:right;font-size:13px;font-weight:400">엑셀 받기</a></h2>
  <div id="sRes" class="muted">비교 결과가 없습니다.</div></div>
 <div class="card"><h2>선별 → 버전 후보 <span class="muted" style="font-weight:400" id="sSelHdr"></span></h2>
- <div class="muted" style="font-size:12.5px"><b>IPS·WAF 에 같은 샘플</b>을 넣습니다: 두 장비 비교 결과를 샘플로 짝지어 <b>합친 등급</b>으로 고릅니다 (A = 어느 장비든 A · B = A 가 아니고 어느 장비든 B · C = 그 밖 · 제거 = 두 장비 모두 중복, 한 장비만 기준과 중복이면 다른 장비 등급). 패턴당 상한은 장비마다 그 장비의 피처 패턴으로 세어 고른 뒤 합칩니다. 기본값: <b>A 전부 + B·C 패턴당 20개</b> (패턴이 넘치면 룰을 돌아가며 고름). 바꾸면 바로 다시 셉니다. 룰별 표에서 룰 단위로 빼거나 넣고, '후보 CSV 받기'로 payload 를 확인한 뒤 담으세요. 확정은 아래 버전 표에서 합니다.</div>
+ <div id="sState" class="sstate">불러오는 중…</div>
+ <details><summary>선별 방법 설명</summary><div class="muted" style="font-size:12.5px"><b>IPS·WAF 에 같은 샘플</b>을 넣습니다: 두 장비 비교 결과를 샘플로 짝지어 <b>합친 등급</b>으로 고릅니다 (A = 어느 장비든 A · B = A 가 아니고 어느 장비든 B · C = 그 밖 · 제거 = 두 장비 모두 중복, 한 장비만 기준과 중복이면 다른 장비 등급). 패턴당 상한은 장비마다 그 장비의 피처 패턴으로 세어 고른 뒤 합칩니다. 기본값: <b>A 전부 + B·C 패턴당 20개</b> (패턴이 넘치면 룰을 돌아가며 고름). 바꾸면 바로 다시 셉니다. 룰별 표에서 룰 단위로 빼거나 넣고, '후보 CSV 받기'로 payload 를 확인한 뒤 담으세요. 확정은 아래 버전 표에서 합니다.<br>
+ 위 상자는 지금 화면의 선별을 <b>불러온·방금 담은 초안</b>(없으면 기본값)과 비교합니다. 담기 전에 바꾼 것은 이 브라우저에 보관돼 새로 고치거나 화면을 다시 켜도 이어서 보입니다.</div></details>
  <div class="row" style="margin-top:8px">
-  <label>A 부족한 데이터<select id="oA"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option></select></label>
-  <label>B 새 패턴<select id="oB"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option></select></label>
-  <label>C 이미 학습됨<select id="oC"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option></select></label>
+  <label>A 부족한 데이터<span class="optc"><select id="oA"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option><option value="custom">패턴당 직접 입력</option></select><input id="oAn" type="number" min="0" max="100000" step="1" style="width:72px" hidden></span></label>
+  <label>B 새 패턴<span class="optc"><select id="oB"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option><option value="custom">패턴당 직접 입력</option></select><input id="oBn" type="number" min="0" max="100000" step="1" style="width:72px" hidden><span class="optf" id="oBf" hidden>목표 합계로 채움</span></span></label>
+  <label>C 이미 학습됨<span class="optc"><select id="oC"><option value="all">전부</option><option value="50">패턴당 50</option><option value="20">패턴당 20</option><option value="0">빼기</option><option value="custom">패턴당 직접 입력</option></select><input id="oCn" type="number" min="0" max="100000" step="1" style="width:72px" hidden></span></label>
+  <label>목표 합계 <span class="muted">(비우면 안 씀 · B 로 채움)</span><input id="oT" type="number" min="1" step="1" placeholder="예: 200000" style="width:130px"></label>
   <label class="inl"><input type="checkbox" id="oBad"> '불일치' 빼기</label>
+  <label class="inl" title="4. 신규 학습 데이터의 'LLM 재확인'이 label 맞다고 한 '불일치' 샘플은 빼지 않음 (비교를 다시 해야 최근 재확인 결과가 들어감)"><input type="checkbox" id="oLlm"> └ LLM 이 label 맞다고 한 것은 남기기 <span class="muted" id="oLlmN"></span></label>
   <label class="inl"><input type="checkbox" id="oRule"> '정합 (룰 기준)' 공격 빼기 <span class="muted">(보류)</span></label>
   <label class="inl"><input type="checkbox" id="oPy"> python-requests UA 정상 빼기 <span class="muted">(보류)</span></label>
  </div>
+ <div class="optsum" id="oSum"></div>
  <div class="hold" id="sHold"></div>
  <div class="row" style="margin-top:6px">
   <label>보기<select id="sView"><option value="">선별 전체</option><option value="rule">보류 데이터만: '정합 (룰 기준)' 공격</option><option value="pyua">보류 데이터만: python-requests UA 정상</option></select></label>
@@ -3262,7 +3895,7 @@ async function loadState(){S=await get("/api/state");const g=S.generation,c=S.co
  $("genRun").innerHTML=runHtml(g);
  const sel=$("gDate");if(sel.options.length-1!==S.input_dates.length){sel.innerHTML='<option value="">가장 최근</option>'+S.input_dates.slice().reverse().map(d=>`<option>${d}</option>`).join("")}
  $("genDot").className="dot"+(g.running||rdo.starting?" on":"");
- $("genStatus").textContent=rdo.starting&&!g.running?"다시 만들기 시작하는 중… (다시 검토할 요청을 찾는 중, 1분쯤)":g.running&&redo?`다시 만들기 실행 중 (검토에서 뺀 샘플 다시 검토) · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작 · 멈추려면 '강제 중지'`:g.running?(g.starting?"시작하는 중…":`실행 중 · 단계 ${g.lock.step||"-"} · 입력 ${g.lock.input_date||"-"} · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작`+(g.stop_requested?" · 중지 요청됨":"")):(c.running||(a.running&&(a.status||{}).state==="수집 중")?"대기 · 지금 수집 중이지만 생성을 함께 시작할 수 있습니다 (시작할 때의 입력 날짜를 끝까지 씀)":"대기");
+ $("genStatus").textContent=rdo.starting&&!g.running?"다시 만들기 시작하는 중… (다시 검토할 요청을 찾는 중, 1분쯤)":g.running&&redo?`다시 만들기 실행 중 (검토에서 뺀 샘플 다시 검토) · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작 · 멈추려면 '강제 중지'`:g.running?(g.starting?"시작하는 중…":`실행 중 · 단계 ${g.lock.step||"-"} · 입력 ${g.lock.input_date||"-"}${g.lock.custom_first?" · 사용자 룰 먼저":""} · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작`+(g.stop_requested?" · 중지 요청됨":"")):(c.running||(a.running&&(a.status||{}).state==="수집 중")?"대기 · 지금 수집 중이지만 생성을 함께 시작할 수 있습니다 (시작할 때의 입력 날짜를 끝까지 씀)":"대기");
  for(const id of["bDry","bPilot","bGen"])$(id).disabled=g.running||rdo.starting;$("bStop").disabled=!g.running||redo;$("bKill").disabled=!g.running;
  if(EX)exRedoUi();if(M)mHints();
  if(document.activeElement!==$("gN"))estimate();
@@ -3287,7 +3920,7 @@ function runHtml(g){const r=g.run;
  const head=live?`남은 시간 <b>약 ${hms(r.remaining_s)}</b> · <b>${clock(r.remaining_s)}</b> 쯤 끝날 예상 · 경과 ${hms(r.elapsed_s)}`:`<b>${r.state==="done"?"끝남":"중단됨 (끝까지 못 감)"}</b> · 걸린 시간 ${hms(r.elapsed_s)}`;
  return `<div class="row" style="align-items:center;gap:16px;flex-wrap:nowrap"><div class="pct">${r.pct}%</div><div style="flex:1;min-width:0">
   <div class="bar${live?" live":""}" style="margin:4px 0 6px"><i style="width:${r.pct}%"></i></div>
-  <div style="font-size:13px">${head}</div><div class="muted" style="font-size:12.5px">${esc(r.started_at)} 시작${r.dry_run?" · 건수 확인 (dry-run, 호출 없음)":""}${r.by!=="3_0"?(r.by.includes("redo")?" · 다시 만들기 (검토에서 뺀 샘플 다시 검토)":` · ${esc(r.by)} 단독 실행`):""}${r.stop_requested?" · <b>중지 요청됨</b> (지금 요청까지 하고 멈춤)":""}</div></div></div>
+  <div style="font-size:13px">${head}</div><div class="muted" style="font-size:12.5px">${esc(r.started_at)} 시작${r.dry_run?" · 건수 확인 (dry-run, 호출 없음)":""}${r.custom_first?" · <b>사용자 룰 먼저</b>":""}${r.by!=="3_0"?(r.by.includes("redo")?" · 다시 만들기 (검토에서 뺀 샘플 다시 검토)":` · ${esc(r.by)} 단독 실행`):""}${r.stop_requested?" · <b>중지 요청됨</b> (지금 요청까지 하고 멈춤)":""}</div></div></div>
   <div class="steps">${r.steps.map(s=>`<span class="step ${s.status}" title="${word[s.status]}">${icon[s.status]} ${s.key} ${esc(s.name)}${s.detail?` <b>${s.detail}</b>`:""}</span>`).join("")}</div>
   ${live&&r.current?`<div class="runnow">지금: <b>${esc(r.current)}</b></div>`:""}
   ${r.dry_run?"":`<div class="kv" style="margin-top:6px"><b>생성</b><span>${fmt(G.ok)}개 성공 · ${fmt(G.fail)}개 실패 / 이번 ${fmt(G.target)}개${G.ok+G.fail?` · 약 ${hms(G.sec_per_req)}마다 1개 완료 · 토큰 ${fmt(G.tokens_in+G.tokens_out)} (입력 ${fmt(G.tokens_in)} / 출력 ${fmt(G.tokens_out)})`:""}</span>
@@ -3295,13 +3928,38 @@ function runHtml(g){const r=g.run;
   ${G.check_ok+G.check_fail?`<b>생성 품질</b><span>코드 검사 통과 <b>${(100*G.check_ok/(G.check_ok+G.check_fail)).toFixed(1)}%</b> (샘플 ${fmt(G.check_ok)} / ${fmt(G.check_ok+G.check_fail)})${R.ok?` · 검토가 고친 샘플 요청당 <b>${(R.fixed/R.ok).toFixed(1)}개</b>, 뺀 샘플 ${(R.dropped/R.ok).toFixed(1)}개`:""} <span class="muted">(정규식 예시·요청 줄 자동 수정 전 100개 실행: 통과 69.5% · 고친 샘플 요청당 11.6개)</span></span>`:""}
   ${r.parallel?`<b>동시 처리</b><span>생성 ${live?`지금 ${r.parallel.generate_now}개 (최대 ${r.parallel.generate})`:`최대 ${r.parallel.generate}개`} · 검토 ${live?`지금 ${r.parallel.review_now}개 (최대 ${r.parallel.review})`:`최대 ${r.parallel.review}개`}${r.parallel.overlap?" · 생성된 요청부터 바로 검토":""}${live?" · 속도 제한에 맞춰 자동 조절":""}</span>`:""}</div>
   <div class="muted" style="font-size:12px;margin-top:4px">%·남은 시간은 이번 실행에서 실제로 요청이 끝나는 간격(동시 처리 반영)과 지난 실행의 준비·마무리 단계 시간으로 계산합니다 (응답 해석 실패·재시도가 많으면 늘어남). 토큰은 성공한 요청 기준.</div>`}`}
-function genBody(extra){return Object.assign({set:$("gSet").value,max_requests:+$("gN").value,date:$("gDate").value,generator:$("gGen").value.trim(),reviewer:$("gRev").value.trim()},extra)}
+function genBody(extra){return Object.assign({set:$("gSet").value,max_requests:+$("gN").value,date:$("gDate").value,order:$("gOrder").value,generator:$("gGen").value.trim(),reviewer:$("gRev").value.trim()},extra)}
+/* 생성 순서: 사용자 룰(custom)이 든 대기 요청 (서버가 가장 최근 입력의 요청 파일에서 셈). llm(k) = 요청 k개 생성·검토 시간(초), 기록이 없으면 null */
+function orderHint(llm){const el=$("gOrderInfo"),cr=S&&S.custom_requests,first=$("gOrder").value==="custom";
+ if(cr&&cr.error){el.textContent="사용자 룰 요청을 세지 못했습니다: "+cr.error;return}
+ if(!cr||!cr.date){el.textContent=S&&cr===null?"사용자 룰 요청 세는 중…":"";return}     // 입력 날짜가 없으면 {}
+ const set=$("gSet").value,c=cr.by_set[set],day=$("gDate").value,other=day&&day!==cr.date?` <span class="warn">(가장 최근 입력 ${esc(cr.date)} 기준이라 고른 입력 날짜와 다를 수 있음)</span>`:"";
+ // 사용자 룰 = 완료 + (a) 대기 요청에 든 룰 + (b) 생성 응답에서 빠져 다음 실행의 3.1 이 새 요청으로 다시 넣을 룰
+ //          + (c) 자동으로 다시 만들지 않는 룰 (샘플 없음·생성 실패) (+ 검토·증강 대기) - 화면 1·3 과 같은 기준 (3.5 rule_status)
+ const fl=cr.flags||{},FN=(P&&P.flag_names)||{},tot=Object.values(fl).reduce((a,b)=>a+b,0),rt=(set==="all"&&cr.retry)||{rules:[],requests:0},na=cr.noauto||{};
+ const nb=rt.rules.length,nc=Object.values(na).reduce((a,x)=>a+x.length,0);
+ const head=tot?`사용자 룰(custom) <b>${fmt(tot)}개</b> <span class="muted">(화면 1·3 기준: ${Object.entries(fl).sort((a,b)=>b[1]-a[1]).map(([k,n])=>`${esc(FN[k]||k)} ${fmt(n)}`).join(" · ")})</span><br>`:"";
+ if(!c){el.innerHTML=head+`입력 ${esc(cr.date)} 의 이 세트 요청 파일이 아직 없습니다 - 다음 생성의 준비 단계(3.1)가 만든 뒤 고른 순서대로 처리${other}`;return}
+ const abc=`(a) 대기 요청에 든 룰 <b>${fmt(c.rules)}개</b>${c.custom?` (요청 ${fmt(c.custom)}개)`:""} · (b) 다음 실행 때 새 요청으로 다시 넣을 룰 <b>${fmt(nb)}개</b>`+
+  (nb?` <span class="muted">(생성 응답에서 빠짐 - 준비 단계 3.1 이 요청 약 ${fmt(rt.requests)}개로 다시 만듦)</span>`:"")+` · (c) 자동으로 다시 만들지 않는 룰 <b>${fmt(nc)}개</b>`+
+  (nc?` <span class="muted">(${Object.entries(na).map(([k,x])=>`${esc(FN[k]||k)} ${x.length}`).join(" · ")})</span> <a href="#/rules" data-r3="${esc(Object.keys(na)[0])}">화면 3 에서 보기</a>`:"");
+ const nreq=c.custom+rt.requests;                 // (a)+(b) 를 만드는 요청 수
+ if(!nreq){el.innerHTML=head+abc+` · 다음 생성에서 새로 만들 사용자 룰은 없음`+other;return}
+ // 요청 수에는 이전 실행의 검토 대기분이 들어가 그만큼 덜 생성한다 (3_0 --max-requests) → (a)+(b) 전부 = 그 요청 + 검토 대기
+ const asked=+$("gN").value||0,rw=cr.review_wait||0,need=nreq+rw,t=llm&&c.custom&&c.ahead?llm(c.ahead):0,why=rw?` (요청 수에 이전 검토 대기 ${fmt(rw)}개 포함)`:"";
+ el.innerHTML=head+abc+"<br>"+(!first?
+  (c.custom&&!c.ahead?"기본 순서로도 (a) 가 맨 앞":`기본 순서로는 ${c.custom?`(a) 가 앞의 요청 ${fmt(c.ahead)}개 다음${t?` (그 요청들 생성·검토 ${dur(t)})`:""}`:"배치 순서상 뒤쪽"}`)+` · '사용자 룰 먼저'로 요청 수 ${fmt(need)} 이상이면 (a)+(b) 를 한 번에${why}`
+  :asked&&asked<need?`<span class="warn">요청 수 ${fmt(asked)}개면 이번에는 사용자 룰 요청 중 ${fmt(Math.max(0,asked-rw))}개만</span> · (a)+(b) 를 모두 하려면 ${fmt(need)} 이상${why}`
+  :`<b>사용자 룰 요청부터</b> 만들고 (${nb?"(b) 는 준비 단계가 새로 만든 요청을 맨 앞으로 · ":""}${asked===need?"그다음 끝냄":asked?"남는 수만큼 기본 순서로 이어감":"이어서 남은 요청 전부"})`)+other}
+function goRules(flag){$("rSrc").value="custom";const f=$("rFlag");if(![...f.options].some(o=>o.value===flag))f.add(new Option(flag,flag));   // 화면 3 을 사용자 룰·그 상태로 걸러 열기
+ f.value=flag;$("rQ").value="";rOff=0;location.hash="#/rules"}
+$("gOrderInfo").addEventListener("click",e=>{const a=e.target.closest("a[data-r3]");if(!a)return;e.preventDefault();goRules(a.dataset.r3)});
 function dur(sec){if(sec<3600)return `약 ${Math.max(1,Math.round(sec/60))}분`;const h=sec/3600;return h<48?`약 ${h.toFixed(1)}시간`:`약 ${(h/24).toFixed(1)}일 (${fmt(Math.round(h))}시간)`}
-function estimate(){const el=$("genEst");if(!P){el.textContent="예상: 진행 현황을 불러오는 중…";return}
+function estimate(){const el=$("genEst");if(!P){el.textContent="예상: 진행 현황을 불러오는 중…";orderHint(null);return}
  const av=P.average_per_request||{},rq=P.requests||{},set=$("gSet").value;let left=((rq.pending_by_set||{})[set])??rq.pending??0;
  if(!left&&set==="all")left=(P.estimate_remaining||{}).requests||0;   // 새 입력 날짜라 요청 파일이 아직 없으면 (다음 실행의 3.1 이 만듦) 남은 룰 수로 추정
  const asked=+$("gN").value||0,all=asked===0,n=all?left:Math.min(asked,left);
- if(!av.generate_seconds){el.innerHTML="<b>예상</b> 생성 기록이 아직 없어 계산할 수 없습니다 — '파일럿 5개'를 먼저 돌리면 실제 평균으로 계산합니다.";return}
+ if(!av.generate_seconds){el.innerHTML="<b>예상</b> 생성 기록이 아직 없어 계산할 수 없습니다 — '파일럿 5개'를 먼저 돌리면 실제 평균으로 계산합니다.";orderHint(null);return}
  // 동시 처리: 생성은 pg 개씩, 검토는 pr 개씩. 함께 진행하면 생성된 요청부터 바로 검토 → 늦게 끝나는 쪽 기준
  // 모델: '이번 실행만' 입력 > 저장된 설정. 그 모델의 지난 기록(5건 이상)이 있으면 그 평균, 없으면 전체 평균(다른 모델 포함)
  const ov={g:$("gGen").value.trim(),r:$("gRev").value.trim()},gm=ov.g||(S&&S.models["생성"])||"생성 모델",rm=ov.r||(S&&S.models["검토"])||"검토 모델",noRev=rm==="none";
@@ -3312,17 +3970,17 @@ function estimate(){const el=$("genEst");if(!P){el.textContent="예상: 진행 �
   else if(h.sec_n<5)warn.push(`${role} ${esc(m)}: 걸린 시간 기록이 없어 시간은 전체 평균으로 계산`)}
  $("gOvr").textContent=ov.g||ov.r?`(지금 입력: ${[ov.g&&"생성 "+ov.g,ov.r&&"검토 "+ov.r].filter(Boolean).join(" · ")} - 이번 실행만, 저장 안 됨)`:`(저장 안 됨 · 비우면 저장된 값: 생성 ${(S&&S.models["생성"])||"?"} / 검토 ${(S&&S.models["검토"])||"?"})`;
  if(ov.g||ov.r)$("gOvrBox").open=true;
- const tg=Math.ceil(n/par.generate)*g1,tr=Math.ceil(n/par.review)*r1,sec=!n?0:par.overlap?Math.max(tg+r1,g1+tr):tg+tr;
+ const llm=k=>{const tg=Math.ceil(k/par.generate)*g1,tr=Math.ceil(k/par.review)*r1;return !k?0:par.overlap?Math.max(tg+r1,g1+tr):tg+tr},sec=llm(n);orderHint(llm);
  // 준비·마무리: 지난 실행 기록 (증강은 요청 수에 비례). 아직 생성을 돌리지 않은 입력 날짜면 기존 로그 대조·요청 파일 만들기로 준비가 길다
  const ss=(S&&S.step_seconds)||{},day=$("gDate").value||((S&&S.input_dates)||[]).slice(-1)[0],first=(ss.first_dates||[]).includes(day);
  const prep=!n?0:first?(ss.prep_first??1240):(ss.prep??60),fin=!n?0:(ss.augment_per_request??0.6)*n+(ss.post??40);
  const gi=Math.round(n*(hg?hg.tin/hg.n:av.generator_input_tokens||0)),go=Math.round(n*(hg?hg.tout/hg.n:av.generator_output_tokens||0)),ri=noRev?0:Math.round(n*(hr?hr.tin/hr.n:av.reviewer_input_tokens||0)),ro=noRev?0:Math.round(n*(hr?hr.tout/hr.n:av.reviewer_output_tokens||0));
  el.innerHTML=`<b>예상</b>${ov.g||ov.r?' <span class="warn">(이번 실행만 바꾼 모델)</span>':""} 요청 ${fmt(n)}개${all?" (남은 전부)":""} → 시간 <b>${dur(sec+prep+fin)}</b> <span class="muted">(생성·검토 ${dur(sec)} + 준비 ${dur(prep)}${first?" (이 입력 날짜의 첫 실행 - 기존 데이터 대조·요청 파일 만들기)":""} + 마무리 ${dur(fin)} · 동시 최대 생성 ${par.generate}개·검토 ${par.review}개${par.overlap?" · 생성·검토 함께":""}, 하나씩이면 ${dur(n*(g1+r1))} · API 속도 제한에 걸리면 더 걸림)</span><br>토큰 합계 <b>${fmt(gi+go+ri+ro)}</b> = 생성 ${esc(gm)} <b>${fmt(gi+go)}</b> (입력 ${fmt(gi)} / 출력 ${fmt(go)}) + 검토 ${esc(rm)} <b>${fmt(ri+ro)}</b> (입력 ${fmt(ri)} / 출력 ${fmt(ro)})<div class="muted">기준: 생성 ${hg?`${esc(gm)} ${fmt(hg.n)}건`:`전체 ${av.generated_requests}건`} · 검토 ${noRev?"생략":hr?`${esc(rm)} ${fmt(hr.n)}건`:`전체 ${av.reviewed_requests}건`}의 실제 평균 (재시도 포함, 요청 1개 생성 ${Math.round(g1)}초·검토 ${Math.round(r1)}초) · 이 세트의 남은 요청 ${fmt(left)}개${!all&&asked>left?" (입력한 수가 남은 요청보다 많아 남은 수로 계산)":""}</div>${warn.length?`<div class="warn">${warn.join("<br>")}</div>`:""}`}
-$("gN").oninput=estimate;$("gSet").onchange=estimate;$("gGen").oninput=$("gRev").oninput=estimate;
+$("gN").oninput=estimate;$("gSet").onchange=$("gOrder").onchange=$("gDate").onchange=estimate;$("gGen").oninput=$("gRev").oninput=estimate;
 async function act(msgId,fn){try{const r=await fn();$(msgId).textContent="요청함 "+(r.pid?`(PID ${r.pid})`:"");setTimeout(loadState,800)}catch(e){$(msgId).textContent="실패: "+e.message}}
 $("bDry").onclick=()=>act("genMsg",()=>post("/api/generation/start",genBody({dry_run:true})));
 $("bPilot").onclick=()=>act("genMsg",()=>post("/api/generation/start",genBody({max_requests:5})));
-$("bGen").onclick=()=>{const n=+$("gN").value;if(!confirm(n===0?"남은 요청 전부를 생성합니다 (API 비용·수일 소요). 진행할까요?":`요청 ${n}개를 생성합니다 (API 비용 발생). 진행할까요?`))return;act("genMsg",()=>post("/api/generation/start",genBody()))};
+$("bGen").onclick=()=>{const n=+$("gN").value,o=$("gOrder").value==="custom"?" (사용자 룰 먼저)":"";if(!confirm(n===0?`남은 요청 전부를 생성합니다${o} (API 비용·수일 소요). 진행할까요?`:`요청 ${n}개를 생성합니다${o} (API 비용 발생). 진행할까요?`))return;act("genMsg",()=>post("/api/generation/start",genBody()))};
 $("bStop").onclick=()=>act("genMsg",()=>post("/api/generation/stop",{}));
 $("bKill").onclick=()=>{if(confirm("지금 하던 요청을 버리고 바로 멈춥니다. 진행할까요?"))act("genMsg",()=>post("/api/generation/stop",{force:true}))};
 $("bAgStart").onclick=()=>act("agMsg",()=>post("/api/agent/start",{at:$("agAt").value.trim()}));
@@ -3434,9 +4092,17 @@ $("mCard").addEventListener("click",async e=>{const btn=e.target.closest("[data-
  catch(err){out.textContent="실패: "+err.message}finally{btn.disabled=false}});
 /* ── 1. 진행 현황 ── */
 function bar(p){return `<div class="bar"><i style="width:${Math.min(100,p)}%"></i></div>`}
+function chgHtml(c){    // 바로 앞 입력 날짜와 비교한 룰 변화 (수집으로 룰이 몇 개 바뀌었는지)
+ if(!c||c.error)return"";const src=o=>Object.entries(o).map(([k,v])=>`${k} ${fmt(v)}`).join(" · ");
+ return `<div class="muted" style="margin-top:6px">입력 ${c.cur} ← ${c.prev}: 새 룰 ${fmt(c.added.total)}${c.added.total?` (${src(c.added.by_source)})`:""} · 빠진 룰 ${fmt(c.removed.total)}${c.removed.total?` (${src(c.removed.by_source)}${c.removed.duplicate?`, 중복 제거 ${fmt(c.removed.duplicate)}`:""})`:""} · 내용 바뀐 룰 ${fmt(c.changed)} → 현재 룰 ${c.net>0?"+":""}${fmt(c.net)}</div>`}
+async function refreshProgressWait(){    // 다시 계산을 시작하고 끝날 때까지(15초 안팎) 기다렸다가 새로 불러옴
+ await post("/api/progress/refresh");
+ for(let i=0;i<40;i++){await new Promise(ok=>setTimeout(ok,3000));if(!(await get("/api/progress")).computing)break}
+ await loadProgress();if(page==="rules")loadRules()}
 async function loadProgress(){const r=await get("/api/progress");P=r.data;
  if(!P){$("progBody").innerHTML=r.computing?"계산 중…":`아직 계산 결과가 없습니다. '다시 계산'을 누르세요.${r.error?"<br>"+esc(r.error):""}`;return}
  flagNames=P.flag_names;const fl=P.flags,fr=P.frontier,rq=P.requests,est=P.estimate_remaining,av=P.average_per_request;
+ const notYet=`입력 ${P.input_date} 로는 아직 생성 전`;    // 새 입력 날짜: 요청 파일은 다음 생성 때 이 날짜 폴더에 새로 만들어짐
  if(page==="run")estimate();
  const fsel=$("rFlag");if(fsel.options.length===1)fsel.innerHTML+=Object.keys(flagNames).map(k=>`<option value="${k}">${esc(flagNames[k])} (${k})</option>`).join("");
  if(page!=="progress")return;
@@ -3446,9 +4112,9 @@ async function loadProgress(){const r=await get("/api/progress");P=r.data;
  <div class="row" style="gap:40px;align-items:flex-start">
   <div style="min-width:300px;flex:1"><div class="muted">생성 대상 룰 중 완료</div><div class="big">${P.pct_done_of_target}%</div>${bar(P.pct_done_of_target)}
    <div>${fmt(P.target)}개 중 <b>${fmt(P.done)}</b>개 완료 · 샘플 anomalies ${fmt(P.samples.anomalies)} / normal ${fmt(P.samples.normal)}</div>
-   <div class="muted" style="margin-top:6px">현재 룰 ${fmt(P.rules)}개 중 학습데이터 보유 <b>${P.pct_with_data_of_all}%</b> (완료 ${fmt(fl.DONE)} + 기존 충분 ${fmt(fl.EXISTING)})</div>
-   <div style="margin-top:12px" class="kv"><b>어디까지</b><span>배치 ${fr.contiguous_done_batch} / ${fr.batches_total} 까지 빠짐없이 생성 (가장 뒤 배치 ${fr.last_touched_batch})</span>
-    <b>요청</b><span>${fmt(rq.total)}개 중 생성 ${fmt(rq.generated)} · 검토 ${fmt(rq.reviewed)} · 실패 ${fmt(rq.failed)} · 대기 ${fmt(rq.pending)}</span>
+   <div class="muted" style="margin-top:6px">현재 룰 ${fmt(P.rules)}개 중 학습데이터 보유 <b>${P.pct_with_data_of_all}%</b> (완료 ${fmt(fl.DONE)} + 기존 충분 ${fmt(fl.EXISTING)})</div>${chgHtml(r.change)}
+   <div style="margin-top:12px" class="kv"><b>어디까지</b><span>${!rq.total?notYet:fr.batches_total?`배치 ${fr.contiguous_done_batch} / ${fr.batches_total} 까지 빠짐없이 생성 (가장 뒤 배치 ${fr.last_touched_batch})`:"-"}</span>
+    <b>요청</b><span>${rq.total?`${fmt(rq.total)}개 중 생성 ${fmt(rq.generated)} · 검토 ${fmt(rq.reviewed)} · 실패 ${fmt(rq.failed)} · 대기 ${fmt(rq.pending)}`:`${notYet} · 다음 생성 때 미생성 ${fmt(fl.TODO)}룰을 요청 약 ${fmt(est.requests)}개로 새로 만듦`}</span>
     <b>마지막 완료</b><span>${P.last_done?esc(P.last_done.request)+" ("+P.last_done.at.replace("T"," ")+")":"-"}</span>
     <b>남은 작업 예상</b><span>${est.hours!=null?`요청 약 ${fmt(est.requests)}개 · 약 ${fmt(est.hours)}시간 · 토큰 생성 ${fmt(est.generator_tokens)} / 검토 ${fmt(est.reviewer_tokens)}`:"생성 기록이 쌓이면 계산"}</span>
     <b>요청 1개 평균</b><span>${av.generate_seconds!=null?`생성 ${av.generate_seconds}초 · 검토 ${av.review_seconds??"-"}초 · 토큰 생성 ${fmt(av.generator_tokens)} / 검토 ${fmt(av.reviewer_tokens)}`:"-"}</span>
@@ -3498,14 +4164,14 @@ async function initData(){if(!dInit){const r=await get("/api/data/dates");D=r.da
   $("dDate").innerHTML=(D.length>1?'<option value="all">전체 (모든 날짜)</option>':"")+D.slice().reverse().map(d=>`<option value="${d.date}">${d.date} (${fmt(d.events)}건)</option>`).join("");
   if(D.length)$("dDate").value=D.at(-1).date;dInit=true}
  if(dPending){$("dRule").value=dPending.rule||"";$("dDev").value=dPending.dev;if(D.length>1)$("dDate").value="all";   // 6. 의 '4.에서 보기'
-  $("dLabel").value=$("dCons").value=$("dQ").value="";$("dHold").value=dPending.hold||"";dHoldUi();dOff=0;dPending=null}
- loadData();loadVerify();loadEdits();loadSave();ensureFeat()}
-function dHoldUi(){const h=$("dHold").value;for(const id of["dLabel","dCons"]){$(id).disabled=!!h;if(h)$(id).value=""}}   // 보류 대상이 label·정합성을 정함
+  $("dLabel").value=$("dCons").value=$("dQ").value=$("dLlm").value="";$("dHold").value=dPending.hold||"";dHoldUi();dOff=0;dPending=null}
+ loadData();loadVerify();loadEdits();loadSave();loadRc();ensureFeat()}
+function dHoldUi(){const h=$("dHold").value;for(const id of["dLabel","dCons","dLlm"]){$(id).disabled=!!h;if(h)$(id).value=""}}   // 보류 대상이 label·정합성을 정함
 function dSummary(){const v=$("dDate").value,ds=v==="all"?D:D.filter(d=>d.date===v);const a=ds.reduce((s,d)=>s+(d.label.anomalies||0),0),n=ds.reduce((s,d)=>s+(d.label.normal||0),0);
  $("dSum").textContent=`· ${v==="all"?"전체":v} · ${fmt(a+n)}건 (anomalies ${fmt(a)} / normal ${fmt(n)}) · 룰 ${fmt(ds.reduce((s,d)=>s+d.rules,0))}개`;
  // 지금 조건에 맞는 모든 줄을 표의 열 그대로 CSV
- $("dDown").href="/download/frame?"+new URLSearchParams({date:v,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value});
- $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다.";if(dConv())$("dHelp").innerHTML=convHelp();}
+ $("dDown").href="/download/frame?"+new URLSearchParams({date:v,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value,llm:$("dLlm").value});
+ $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다. <b>LLM 재확인</b>: '불일치' 줄만 고른 LLM 에 다시 물은 판정(label 맞음·반대·학습에 부적합·판단 불가)과 근거 - 코드 판정과 따로 보이고, 반영은 위 버튼으로 수정·삭제를 저장합니다.";if(dConv())$("dHelp").innerHTML=convHelp();}
 async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=await get(`/api/data/verify?date=${v}&dev=${dSrc()}`)}catch(e){$("dVsum").textContent="";return}
  dV=s;dReady=s.status==="done"&&!!s.frame_ready;
  const run=s.status==="running";$("dVerifyStop").style.display=run?"":"none";$("dVerifyNew").disabled=$("dVerify").disabled=run;
@@ -3525,16 +4191,18 @@ async function startVerify(mode){try{const r=await post("/api/data/verify",{date
 $("dVerifyNew").onclick=()=>startVerify("new");
 $("dVerify").onclick=()=>{if(!dV||confirm(`모든 줄(${fmt(dV.total)}줄)을 지금 룰로 새로 확인합니다 (약 ${hms(dV.est_all_s)}). 진행할까요?`))startVerify("all")};
 $("dVerifyStop").onclick=async()=>{try{await post("/api/data/verify/stop",{date:$("dDate").value,dev:dSrc()});loadVerify()}catch(e){$("dVsum").textContent="실패: "+e.message}};
+let dSeq=0;   // 늦게 온 앞 조회(예: 모든 날짜 첫 조회는 몇 초)가 새 조건의 결과를 덮지 않게
 async function loadData(){dSummary();if(!D.length){$("dBody").innerHTML='<div class="muted">08_dataset 에 학습데이터가 없습니다.</div>';return}
- const qs=new URLSearchParams({date:$("dDate").value,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value,offset:dOff,limit:dLimit()});
- $("dBody").style.opacity=.5;let r;try{r=await get("/api/data/rows?"+qs)}catch(e){$("dBody").innerHTML=`<div class="muted">불러오지 못했습니다: ${esc(e.message)}</div>`;return}finally{$("dBody").style.opacity=1}
+ const qs=new URLSearchParams({date:$("dDate").value,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value,llm:$("dLlm").value,offset:dOff,limit:dLimit()}),seq=++dSeq;
+ $("dBody").style.opacity=.5;let r;try{r=await get("/api/data/rows?"+qs)}catch(e){if(seq===dSeq)$("dBody").innerHTML=`<div class="muted">불러오지 못했습니다: ${esc(e.message)}</div>`;return}finally{if(seq===dSeq)$("dBody").style.opacity=1}
+ if(seq!==dSeq)return;
  const all=$("dDate").value==="all";
- $("dBody").innerHTML=dConv()?convTable(r,all):`<table><thead><tr><th class="n">index</th><th>payload</th><th>method</th><th>label</th><th>label 사유</th><th>검증 결과</th><th>label 정합성</th><th>탐지 피처 <a href="#/features" style="font-weight:400">(설명)</a></th><th>수정·삭제</th></tr></thead><tbody>${r.rows.map((x,k)=>`<tr class="lv-${x.level}"><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td class="method">${esc(x.method)}</td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></td><td class="reason">${esc(x.reason)}</td><td class="chk">${x.checks.map(([s,t])=>`<div class="${s}">${s==="ok"?"✔":s==="warn"?"△":"✘"} ${esc(t)}</div>`).join("")}</td><td class="cons"><span class="chip c-${x.cons}">${esc(x.cons_text)}</span><div>${esc(x.cons_reason)}</div></td><td class="feat">${x.features.length?x.features.map(f=>`<div><code class="fn" data-f="${esc(f.name)}" data-d="${f.name.startsWith("k_")?"":esc(f.desc)}">${esc(f.name)}</code> = ${f.value} <span class="muted">${esc(f.desc)}</span></div>`).join("")+`<div class="muted">${x.label==="normal"?"✘ 정상인데 켜진 피처가 있음":`켜진 피처 ${x.features.length}개 → 모델이 공격으로 볼 근거`}</div>`:`<div class="muted">${x.label==="normal"?"켜진 피처 없음 → 정상으로 볼 근거":"켜진 피처 없음 → 이 피처로는 탐지 못 함"}</div>`}</td><td class="act">${editCell(x,k)}</td></tr>`).join("")}</tbody></table>`;
+ $("dBody").innerHTML=dConv()?convTable(r,all):`<table><thead><tr><th class="n">index</th><th>payload</th><th>method</th><th>label</th><th>label 사유</th><th>검증 결과</th><th>label 정합성</th><th>탐지 피처 <a href="#/features" style="font-weight:400">(설명)</a></th><th>수정·삭제</th></tr></thead><tbody>${r.rows.map((x,k)=>`<tr class="lv-${x.level}"><td class="n">${x.index}${all?`<div class="muted">${x.date}</div>`:""}</td><td><div class="payload">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td class="method">${esc(x.method)}</td><td><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></td><td class="reason">${esc(x.reason)}</td><td class="chk">${x.checks.map(([s,t])=>`<div class="${s}">${s==="ok"?"✔":s==="warn"?"△":"✘"} ${esc(t)}</div>`).join("")}</td><td class="cons"><span class="chip c-${x.cons}">${esc(x.cons_text)}</span><div>${esc(x.cons_reason)}</div>${x.llm?`<div class="llm"><span class="chip ${RCC[x.llm.v]||""}">LLM ${esc(RCV[x.llm.v]||x.llm.v)}</span> ${esc(x.llm.r)} <span class="muted">(${esc(x.llm.m)} · ${esc((x.llm.at||"").slice(5,16).replace("T"," "))})</span></div>`:""}</td><td class="feat">${x.features.length?x.features.map(f=>`<div><code class="fn" data-f="${esc(f.name)}">${esc(f.name)}</code> = ${f.value} <span class="muted">${esc(f.desc)}</span></div>`).join("")+`<div class="muted">${x.label==="normal"?"정상인데 켜짐 → 모델이 공격 쪽으로 볼 수 있음 (판정은 label 정합성 열)":`켜진 피처 ${x.features.length}개 → 모델이 공격으로 볼 근거`}</div>`:`<div class="muted">${r.ml_error?esc(r.ml_error):x.label==="normal"?"켜진 피처 없음 → 정상으로 볼 근거":"켜진 피처 없음 → 이 피처로는 탐지 못 함"}</div>`}${(x.vfeatures||[]).length?`<div class="muted" style="margin-top:4px">라벨 검증용: ${x.vfeatures.map(f=>`<code class="fn" data-f="${esc(f.name)}" data-d="${esc(f.desc)}">${esc(f.name)}</code>=${f.value}`).join(" · ")}</div>`:""}</td><td class="act">${editCell(x,k)}</td></tr>`).join("")}</tbody></table>`;
  dRows=r.rows;dTot=r.total;$("dCount").textContent=`${fmt(r.total)}건 중 ${r.total?dOff+1:0}–${Math.min(dOff+dLimit(),r.total)}`;$("dPrev").disabled=dOff===0;$("dNext").disabled=dOff+dLimit()>=r.total;}
 $("dDown").onclick=e=>{   // 저장된 '전체 검증' 결과가 없으면 줄마다 다시 확인하므로 오래 걸릴 수 있음
  if(dConv()){if(dTot>30000&&!confirm(`${fmt(dTot)}줄을 ${$("dDev").value==="fw"?"FW":"웹"} 로그로 바꿔 CSV 를 만듭니다 (${dur(dTot*0.001)}). 지금 받을까요?`))e.preventDefault();return}   // FW·웹: 변환만 (1천 줄에 약 1초)
  if(!dReady&&dTot>1000&&!confirm(`'전체 검증' 결과가 없어 ${fmt(dTot)}줄을 하나씩 다시 확인하며 CSV 를 만듭니다 (${dur(dTot*0.015)}).\n'전체 검증'을 먼저 하면 바로 받을 수 있습니다. 지금 받을까요?`))e.preventDefault()};
-for(const id of["dDate","dDev"])$(id).onchange=()=>{dOff=0;$("dCons").value="";loadData();loadVerify();loadEdits();loadSave()};
+for(const id of["dDate","dDev"])$(id).onchange=()=>{dOff=0;$("dCons").value=$("dLlm").value="";loadData();loadVerify();loadEdits();loadSave();loadRc()};
 /* 수정·삭제: 저장하면 '학습 로그에 반영'(1.4 다시 만들기) 때 학습 로그에 들어간다 */
 function editCell(x,k){if(!x.sk)return"";
  if(x.edit)return x.edit.action==="delete"?`<span class="chip c-BAD">삭제 예정</span><div><button class="sm" data-a="undo" data-r="${k}">되돌리기</button></div>`
@@ -3575,34 +4243,91 @@ $("dEdits").addEventListener("click",async e=>{const b=e.target.closest("button[
   loadEdits()}catch(err){alert("실패: "+err.message)}});
 $("dEditList").addEventListener("click",async e=>{const b=e.target.closest("button[data-u]");if(!b)return;const it=dE.items[+b.dataset.u];
  try{await post("/api/data/edit",{date:it.date,sk:it.sk,action:"undo"});$("dEditList").style.display="none";loadEdits();loadData()}catch(err){alert("실패: "+err.message)}});
-for(const id of["dLabel","dCons"])$(id).onchange=()=>{dOff=0;loadData()};
+/* LLM 재확인 ('불일치' 줄만, 3_6 별도 프로세스): 모델·추론 강도는 이번 실행만 (LLM_설정.md 는 그대로), 시작 전 대상·예상·확인 창 */
+const RCV={ok:"label 맞음",flip:"label 반대",unfit:"학습에 부적합",unknown:"판단 불가"},RCC={ok:"c-OK",flip:"c-BAD",unfit:"c-CHECK",unknown:""};
+let dRcS=null,dRcT=0,rcInit=false,rcWas=false,rcMsg="";
+async function loadRc(){clearTimeout(dRcT);const v=$("dDate").value,dv=dSrc();if(!v)return;let s;
+ try{s=await get(`/api/data/recheck?date=${v}&dev=${dv}`)}catch(e){$("dRc").textContent="";return}
+ if(v!==$("dDate").value||dv!==dSrc())return;     // 그사이 날짜·장비를 바꿨으면 (늦게 온 앞 응답) 버림
+ dRcS=s;const st=s.status||{},run=s.job.running,c=s.counts,del=(c.flip||0)+(c.unfit||0);
+ const fresh=!!st.pid&&(st.pid===s.job.lock.pid||st.pid===(s.job.ui||{}).pid)&&st.req_total!=null;   // 이번 실행이 쓴 상태 (아니면 지난 실행의 것)
+ if(!rcInit){rcInit=true;$("rcModels").innerHTML=s.known.map(m=>`<option value="${esc(m)}">`).join("");$("rcModel").placeholder=s.model||"provider:model";
+  $("rcEff").innerHTML=`<option value="">설정값 (${esc(s.effort||"비움 = 모델 기본")})</option><option value="-">넘기지 않음 (모델 기본)</option>`+s.efforts.map(e=>`<option>${e}</option>`).join("")}
+ let h="";
+ if(run&&!fresh)h=`<span><b>LLM 재확인 시작하는 중…</b> ('불일치' 줄과 그 룰을 읽는 중)</span>`;
+ else if(run){const fin=(st.req_done||0)+(st.req_fail||0);
+  h=`<span><b>LLM 재확인 중</b> (${esc(st.model||"")}) · 요청 ${fmt(fin)} / ${fmt(st.req_total||0)} · 판정 ${fmt(st.rows_done||0)} / ${fmt(st.rows_total||0)}줄${st.req_fail?` · 실패 ${st.req_fail}`:""}${st.eta_s!=null?` · 남은 약 ${hms(st.eta_s)}`:""}${s.job.stop_requested?" · <b>중지 요청됨</b> (보낸 요청까지)":""}</span>`}
+ else{h=`<b>LLM 재확인</b> <span class="muted">('불일치' ${fmt(s.bad)}줄)</span>`+Object.keys(RCV).map(k=>c[k]?`<span class="chip ${RCC[k]}" data-l="${k}">${RCV[k]} ${fmt(c[k])}</span>`:"").join("")+(s.todo?`<span class="chip" data-l="todo">아직 ${fmt(s.todo)}</span>`:"");
+  if(st.state==="running")h+=`<span class="muted">지난 재확인이 끝나지 않고 멈춤 (강제 중지 등) - 다시 시작하면 남은 줄만</span>`;
+  else if(st.finished_at)h+=`<span class="muted">${esc(isoClock(st.finished_at))} ${esc(st.model||"")} ${({done:"끝남",stopped:"중지됨",fail:"실패"})[st.state]||""}${st.req_fail?` · 요청 ${st.req_fail}개 실패 (다시 시작하면 그 줄만)`:""}${st.error?` · ${esc(st.error)}`:""}</span>`;
+  h+=`<button class="sm" data-r="box">LLM 재확인…</button>`+(del?`<button class="sm danger" data-r="delete">반대·부적합 ${fmt(del)}줄 → 삭제로 저장</button>`:"")+
+   (c.flip?`<button class="sm" data-r="flip">반대 ${fmt(c.flip)}줄 → label 바꾸기</button>`:"")+(s.applied?`<button class="sm" data-r="undo">LLM 반영 ${fmt(s.applied)}건 되돌리기</button>`:"")+
+   (rcMsg?`<span class="muted">${esc(rcMsg)}</span>`:"")}
+ $("dRc").innerHTML=s.bad||s.applied||run||st.state?h:"";      // '불일치' 도 지난 재확인도 없으면 숨김
+ $("rcStop").style.display=$("rcKill").style.display=run?"":"none";$("rcGo").disabled=$("rcPlan").disabled=run;
+ if(run)dRcT=setTimeout(loadRc,2000);
+ if(rcWas&&!run)loadData();                                    // 끝나면 표의 판정도 새로
+ rcWas=run}
+function rcBody(){return {model:$("rcModel").value.trim(),effort:$("rcEff").value,date:$("dDate").value}}
+async function rcEstimate(){$("rcEst").textContent="세는 중… ('불일치' 줄과 그 룰을 읽음, 호출 없음)";let p;
+ try{p=await post("/api/data/recheck/plan",rcBody())}catch(e){$("rcEst").textContent="실패: "+e.message;return null}
+ const usd=x=>x==null?"단가 미등록":x<0.01?"$0.01 미만":"$"+x.toFixed(2);
+ $("rcEst").innerHTML=`<b>${esc(p.model)}</b> · 대상 '불일치' ${fmt(p.rows)}줄 <span class="muted">(내용 기준 - IPS·WAF 의 같은 샘플은 한 번)</span>${p.done?` · 이 모델로 이미 ${fmt(p.done)}줄`:""} → <b>이번 ${fmt(p.todo)}줄 · 요청 ${fmt(p.requests)}개</b> <span class="muted">(같은 룰끼리 10줄씩)</span><br>
+  예상 토큰 입력 <b>${fmt(p.tokens_in)}</b> · 출력 <b>${fmt(p.tokens_out)}</b> · 시간 약 <b>${hms(p.seconds)}</b> <span class="muted">(동시 ${p.workers}개)</span> · 비용 <b>${p.subscription?"Claude 구독 사용량 (토큰 요금 없음)":usd(p.cost)}</b>
+  <div class="muted">${p.history?"이 모델의 지난 재확인 기록(줄당 평균)으로 계산":"이 모델의 재확인 기록이 없어 글자 수 ÷ 3 + 줄당 답 80·요청당 추론 토큰으로 어림 (실제와 다를 수 있음)"} · 같은 대상을 다른 모델로 (참고 단가, USD/100만 토큰 2026-10-29): ${p.others.map(o=>`${esc(o.model)} ${usd(o.cost)}`).join(" · ")}</div>`;
+ return p}
+$("rcPlan").onclick=rcEstimate;
+$("rcGo").onclick=async()=>{const p=await rcEstimate();if(!p)return;if(!p.todo){alert("새로 재확인할 줄이 없습니다 (이 모델로 모두 재확인함)");return}
+ if(!confirm(`'불일치' ${fmt(p.todo)}줄을 ${p.model} 로 다시 확인합니다.\n요청 ${fmt(p.requests)}개 · 예상 토큰 입력 ${fmt(p.tokens_in)} / 출력 ${fmt(p.tokens_out)} · ${p.subscription?"Claude 구독 사용량":"API 비용 "+(p.cost==null?"(단가 미등록)":"약 $"+p.cost.toFixed(2))} · 시간 약 ${hms(p.seconds)}\n별도 프로세스로 돌고, 판정은 표에 코드 판정과 따로 보입니다 (학습 로그·검증 결과는 바꾸지 않음). 진행할까요?`))return;
+ try{await post("/api/data/recheck/start",rcBody());rcMsg="";setTimeout(loadRc,800)}catch(e){alert("실패: "+e.message)}};
+$("rcStop").onclick=async()=>{try{await post("/api/data/recheck/stop",{});loadRc()}catch(e){alert("실패: "+e.message)}};
+$("rcKill").onclick=async()=>{if(!confirm("보내던 요청을 버리고 바로 멈춥니다 (그 요청의 판정은 저장되지 않음). 진행할까요?"))return;try{await post("/api/data/recheck/stop",{force:true});setTimeout(loadRc,800)}catch(e){alert("실패: "+e.message)}};
+$("dRc").addEventListener("click",async e=>{const ch=e.target.closest("[data-l]");if(ch){$("dHold").value="";dHoldUi();$("dLlm").value=ch.dataset.l;dOff=0;loadData();return}
+ const b=e.target.closest("button[data-r]");if(!b)return;const a=b.dataset.r,s=dRcS,c=s.counts;
+ if(a==="box"){const x=$("dRcBox");x.style.display=x.style.display==="none"?"":"none";return}
+ const msg={delete:`LLM 이 'label 반대'·'학습에 부적합'이라 한 ${fmt((c.flip||0)+(c.unfit||0))}줄을 삭제로 저장합니다.`,flip:`LLM 이 'label 반대'라 한 ${fmt(c.flip)}줄의 label 을 바꿔 저장합니다.`,undo:`LLM 재확인으로 저장한 수정·삭제 ${fmt(s.applied)}건을 되돌립니다.`}[a];
+ if(!confirm(msg+(a==="undo"?"":" 사람이 이미 수정·삭제를 저장한 샘플은 건너뜁니다. '학습 로그에 반영' 때 적용되고 목록에서 되돌릴 수 있습니다.")+" 진행할까요?"))return;
+ try{const r=await post("/api/data/recheck/apply",{date:$("dDate").value,dev:dSrc(),action:a});
+  rcMsg=a==="undo"?`되돌림 ${r.undone}건`:`저장 ${r.saved}건${r.skipped?` · 이미 수정·삭제한 샘플이라 건너뜀 ${r.skipped}건`:""}`;loadEdits();loadData();loadRc()}catch(err){alert("실패: "+err.message)}});
+for(const id of["dLabel","dCons","dLlm"])$(id).onchange=()=>{dOff=0;loadData()};
 $("dHold").onchange=()=>{dOff=0;dHoldUi();loadData()};
 $("dGo").onclick=()=>{dOff=0;loadData()};for(const id of["dRule","dQ"])$(id).onkeydown=e=>{if(e.key==="Enter"){dOff=0;loadData()}};
 $("dPrev").onclick=()=>{dOff=Math.max(0,dOff-dLimit());loadData()};$("dNext").onclick=()=>{dOff+=dLimit();loadData()};
 /* ── 5. 피처 ── */
 let FC=null,fFocus="",fLoading=null;
 function fkey(n){return n.startsWith("r_")?(n.endsWith("_all")?"r_<룰>_all":"r_<룰>_re<n>"):n}
-function featDoc(n){return FC?FC.items.find(i=>i.name===fkey(n))||null:null}
+const stdS=n=>n.replace(/^[a-z]+_payload_/,"");     // 표준 피처는 장비가 달라도 같은 피처 (IPS 이름 ↔ WAF 이름)
+function fSame(i,n){return i.name===fkey(n)||(!!i.std&&/^[a-z]+_payload_/.test(n)&&i.std===stdS(n))}
+function featDoc(n){return FC?FC.items.find(i=>fSame(i,n))||null:null}
 function ensureFeat(){if(FC)return Promise.resolve(FC);if(!fLoading)fLoading=get("/api/features?dev=ips").then(r=>FC=r).catch(()=>null).finally(()=>{fLoading=null});return fLoading}
 async function loadFeatures(focus){if(focus!==undefined)fFocus=focus;
  try{FC=await get("/api/features?dev="+$("fDev").value)}catch(e){$("fBody").innerHTML=`<tr><td colspan="9" class="muted">불러오지 못했습니다: ${esc(e.message)}</td></tr>`;return}
  const r=FC,gs=$("fGroup");if(gs.options.length===1)gs.innerHTML+=r.groups.map(g=>`<option>${esc(g.name)}</option>`).join("");
- $("fIntro").innerHTML=`ML 탐지 모델(4.1)이 payload 에서 뽑는 피처입니다. 공격일 때만 켜지는 <b>확실한 신호</b>만 두었습니다 (길이·헤더 수 같은 모호한 값은 쓰지 않음). 4. 신규 학습 데이터의 '탐지 피처'에 나오는 이름이 모두 여기 있습니다.`+
+ $("fIntro").innerHTML=`ML 탐지 모델이 payload 에서 보는 피처입니다. <b>표준모델 피처(34개)를 그대로 쓰고, 표준 피처가 못 잡는 것만 신규 피처(add_)로 더합니다</b> (표준 피처와 같은 내용은 신규 피처에 없음, 줄마다 '표준과 같아 뺀 갈래'). 4. 신규 학습 데이터의 '탐지 피처'도 이 이름입니다 (켜진 표준 피처 + 켜진 신규 피처, 범용 표준 피처 제외). <b>라벨 검증용</b>(k_·ra_·r_)은 ML 피처가 아니라 4. label 정합성 판정에 쓰는 신호이고, 판정 기준은 그대로입니다.`+
+  (r.combined&&r.combined.bundle?` 신규 피처는 <b>기존 피처 결합 가능</b>(같은 계열 표준 comb 피처에 합칠 수 있음, ${r.combined.combinable}개 - 줄마다 '합쳐질 표준 피처')과 <b>신규 피처로 생성 필요</b>(${r.combined.new_only}개)로 나눴습니다. 합친 정의는 '${esc(r.combined.bundle)}'(표준 피처 ${r.combined.targets}개에 갈래 ${r.combined.branches}개, 이름은 표준과 같음)이고 5.4 피처 실험 E13 에서 시험합니다 (6. 비교·'26 하반기' 선별에는 쓰지 않음).`:
+   r.combined&&r.combined.error?`<div class="muted" style="margin-top:4px">결합판(5_0d)을 읽지 못해 신규 피처를 나누지 않았습니다: ${esc(r.combined.error)}</div>`:"")+
+  (r.notes_found?"":`<div class="warn" style="margin-top:4px">로컬 대응표(09_features/_feature_overlap.json)가 없어 표준 피처 설명·기준 비율·대응을 보여 주지 못합니다 (11_supervised/experiments/03_피처겹침/notes.py 가 만듦).</div>`)+
   r.groups.map(g=>`<div style="margin-top:4px"><b>${esc(g.name)}</b> <code>${esc(g.prefix)}</code> ${esc(g.desc)}</div>`).join("")+`<div style="margin-top:4px">공격 룰 피처에 쓰는 룰: ${fmt(r.attack_rules)}개${r.note?` (${esc(r.note)})`:""}</div>`;
- $("fCountMsg").textContent=r.running?"켜진 줄 수 계산 중…":!r.dates.length?"켜진 줄 수가 아직 없습니다 - '켜진 줄 수 다시 계산'을 누르세요 (신규 학습 데이터 전체 검증과 같은 작업, 수 초~수 분)":r.missing.length?`검증 안 된 날짜 ${r.missing.length}개 (${r.missing.join(", ")}) - 다시 계산하면 포함`:"";
- if(r.running)setTimeout(()=>{if(page==="features")loadFeatures()},2000);
+ const v=r.view||{},pg=v.progress||{};
+ $("fCountMsg").textContent=(v.running?`표준·신규 피처 켜진 줄 수 계산 중… ${pg.step||""}${pg.total?` ${fmt(pg.done||0)}/${fmt(pg.total)}`:""}`:!(v.dates||[]).length?"표준·신규 피처의 켜진 줄 수가 아직 없습니다 - '켜진 줄 수 다시 계산'을 누르세요 (재검증 없이 피처만 계산, 처음 한 번 수 분)":v.stale?`표준·신규 피처 켜진 줄 수를 계산한 뒤(${(v.computed_at||"").replace("T"," ").slice(0,16)}) 학습 데이터가 바뀌었습니다 - 다시 계산하면 반영`:"")+
+  (r.missing.length?` · 라벨 검증용 켜진 줄 수는 4. 전체 검증 결과로 셉니다 (검증 안 된 날짜 ${r.missing.length}개)`:"");
+ if(v.running||r.running)setTimeout(()=>{if(page==="features")loadFeatures()},v.running?3000:6000);
  renderFeatures()}
-function renderFeatures(){const r=FC;if(!r)return;const g=$("fGroup").value,q=$("fQ").value.trim().toLowerCase(),la=r.labels.anomalies||0,ln=r.labels.normal||0,have=r.dates.length>0;
- $("fSum").textContent=`· ${r.items.length}개`+(have?` · 켜진 줄 수: ${$("fDev").value.toUpperCase()} 학습데이터 ${r.dates.length}개 날짜 (anomalies ${fmt(la)}줄 / normal ${fmt(ln)}줄)`:"");
+function renderFeatures(){const r=FC;if(!r)return;const g=$("fGroup").value,q=$("fQ").value.trim().toLowerCase(),v=r.view||{},vl=v.labels||{},dv=$("fDev").value.toUpperCase();
+ const L={view:[vl.anomalies||0,vl.normal||0,(v.dates||[]).length>0],verify:[r.labels.anomalies||0,r.labels.normal||0,r.dates.length>0]};
+ $("fSum").textContent=`· ${r.items.length}개`+(L.view[2]?` · 켜진 줄 수: 표준·신규 피처 = ${dv} 학습데이터 ${v.dates.length}개 날짜 (anomalies ${fmt(L.view[0])}줄 / normal ${fmt(L.view[1])}줄)`:"")+
+  (L.verify[2]?` · 라벨 검증용 = 전체 검증한 ${r.dates.length}개 날짜 (anomalies ${fmt(L.verify[0])}줄 / normal ${fmt(L.verify[1])}줄)`:"");
  const pc=(x,t)=>t&&x?` <span class="muted">(${(100*x/t).toFixed(1)}%)</span>`:"";let last="";
- $("fBody").innerHTML=r.items.filter(i=>(!g||i.group===g)&&(!q||[i.name,i.title,i.what,i.example,i.pattern].join(" ").toLowerCase().includes(q))).map(i=>{
-  const c=r.counts[i.name]||[0,0],head=i.group!==last?`<tr class="fgroup"><td colspan="9">${esc(i.group)}</td></tr>`:"";last=i.group;
-  return head+`<tr id="f-${esc(i.name)}"${i.name===fFocus?' class="hl"':""}><td class="nw"><code>${esc(i.name)}</code></td><td style="min-width:120px">${esc(i.title)}</td><td class="reason">${esc(i.what)}</td><td class="reason muted">${esc(i.example)}</td><td class="muted nw">${esc(i.value)}</td>`+
+ $("fBody").innerHTML=r.items.filter(i=>(!g||i.group===g)&&(!q||[i.name,i.title,i.what,i.example,i.pattern,i.ml].join(" ").toLowerCase().includes(q))).map(i=>{
+  const c=r.counts[i.name]||[0,0],[la,ln,have]=L[i.src]||L.verify,head=i.group!==last?`<tr class="fgroup"><td colspan="9">${esc(i.group)}</td></tr>`:"";last=i.group;
+  return head+`<tr id="f-${esc(i.name)}"${fFocus&&fSame(i,fFocus)?' class="hl"':""}><td class="nw"><code>${esc(i.name)}</code></td><td style="min-width:120px">${esc(i.title)}</td><td class="reason">${esc(i.what)}${i.ml?`<div class="muted" style="margin-top:3px">${esc(i.ml)}</div>`:""}</td><td class="reason muted">${esc(i.example)}</td><td class="muted nw">${esc(i.value)}</td>`+
    (have?`<td class="n nw">${fmt(c[0])}${pc(c[0],la)}</td><td class="n nw">${fmt(c[1])}${pc(c[1],ln)}</td><td class="n nw">${c[0]+c[1]?(100*c[0]/(c[0]+c[1])).toFixed(1)+"%":"-"}</td>`:'<td class="n muted">-</td><td class="n muted">-</td><td class="n muted">-</td>')+
-   `<td>${i.pattern?`<details><summary>보기</summary><div class="pat">${esc(i.pattern)}</div></details>`:""}</td></tr>`}).join("")||'<tr><td colspan="9" class="muted">없음</td></tr>';
- if(fFocus){const el=document.getElementById("f-"+fFocus);if(el)el.scrollIntoView({block:"center"})}}
+   `<td style="min-width:200px">${i.pattern?`<details><summary>보기</summary><div class="pat">${esc(i.pattern)}</div></details>`:""}`+
+   `${i.merge&&i.merge.length?`<details><summary class="muted">합쳐질 표준 피처 ${new Set(i.merge.map(m=>m.std)).size}개 (갈래 ${i.merge.length}개)</summary><div class="pat">${i.merge.map(m=>"→ "+esc(m.std)+" ← "+(m.how==="enc"?"[인코딩됐을 때만] ":m.how==="ua"?"[User-Agent] ":"")+esc(m.pattern)+"<br>   "+esc(m.why)).join("<br>")}</div></details>`:""}`+
+   `${i.dropped&&i.dropped.length?`<details><summary class="muted">표준과 같아 뺀 갈래 ${i.dropped.length}개</summary><div class="pat">${i.dropped.map(d=>esc(d.pattern)+" → "+esc(d.std)).join("<br>")}</div></details>`:""}</td></tr>`}).join("")||'<tr><td colspan="9" class="muted">없음</td></tr>';
+ if(fFocus){const el=$("fBody").querySelector("tr.hl");if(el)el.scrollIntoView({block:"center"})}}
 let fTm;$("fQ").oninput=()=>{clearTimeout(fTm);fTm=setTimeout(()=>{fFocus="";renderFeatures()},200)};$("fGroup").onchange=()=>{fFocus="";renderFeatures()};$("fDev").onchange=()=>loadFeatures();
-$("fCount").onclick=async()=>{try{await post("/api/data/verify",{date:"all",dev:$("fDev").value,mode:"new"});$("fCountMsg").textContent="켜진 줄 수 계산 중…";setTimeout(()=>loadFeatures(),1500)}catch(e){$("fCountMsg").textContent="실패: "+e.message}};
+$("fCount").onclick=async()=>{try{await post("/api/features/count",{dev:$("fDev").value});$("fCountMsg").textContent="표준·신규 피처 켜진 줄 수 계산 중…";setTimeout(()=>loadFeatures(),1500)}catch(e){$("fCountMsg").textContent="실패: "+e.message}};
 /* 피처 이름 말풍선 (4. 신규 학습 데이터의 '탐지 피처') */
 const tip=document.createElement("div");tip.className="tipbox";tip.hidden=true;document.body.appendChild(tip);let tipOn=null;
 function showTip(t){tipOn=t;const d=featDoc(t.dataset.f);
@@ -3618,18 +4343,83 @@ document.addEventListener("click",e=>{const t=e.target.closest&&e.target.closest
 let SS=null,sDev="ips",sPv=null,sPvT=0,sJT=0,sRunWas=false,sFormInit=false,sResInit=false;
 const sO={dates:null,sources:null,rules:{},types:{}};   // 날짜·출처 null = 전부 (뒤에 생긴 날짜도)
 function gchip(g){return `<span class="chip g${["제거","A","B","C"].indexOf(g)}">${esc(g)}</span>`}
-function sSpec(){const v=id=>{const x=$(id).value;return x==="all"?"all":+x};
- return {conditions:{dates:sO.dates||[],sources:sO.sources||[]},options:{A:v("oA"),B:v("oB"),C:v("oC"),exclude_bad:$("oBad").checked,exclude_rule_based:$("oRule").checked,exclude_python_ua_normal:$("oPy").checked},overrides:{rules:sO.rules,types:sO.types}}}
-function sSetForm(o,c,ov){for(const k of["A","B","C"])$("o"+k).value=String(o[k]);$("oBad").checked=!!o.exclude_bad;$("oRule").checked=!!o.exclude_rule_based;$("oPy").checked=!!o.exclude_python_ua_normal;
+function sSpec(){const v=k=>{const x=$("o"+k).value;return x==="all"?"all":x==="custom"?Math.max(0,Math.round(+$("o"+k+"n").value||0)):+x},t=Math.round(+$("oT").value||0);
+ return {conditions:{dates:sO.dates||[],sources:sO.sources||[]},options:{A:v("A"),B:v("B"),C:v("C"),exclude_bad:$("oBad").checked,exclude_rule_based:$("oRule").checked,exclude_python_ua_normal:$("oPy").checked,keep_llm_ok:$("oLlm").checked,target:t>0?t:null},overrides:{rules:sO.rules,types:sO.types}}}
+function sOptUi(){const t=+$("oT").value>0;   // 직접 입력 칸은 '패턴당 직접 입력' 일 때만, 목표 합계가 있으면 B 는 '목표 합계로 채움'
+ for(const k of["A","B","C"]){const fill=k==="B"&&t;$("o"+k).hidden=fill;$("o"+k+"n").hidden=fill||$("o"+k).value!=="custom"}$("oBf").hidden=!t}
+function sSetForm(o,c,ov){for(const k of["A","B","C"]){const std=["all","50","20","0"].includes(String(o[k]));$("o"+k).value=std?String(o[k]):"custom";if(!std)$("o"+k+"n").value=o[k]}
+ $("oT").value=o.target||"";sOptUi();$("oBad").checked=!!o.exclude_bad;$("oLlm").checked=!!o.keep_llm_ok;$("oRule").checked=!!o.exclude_rule_based;$("oPy").checked=!!o.exclude_python_ua_normal;
  sO.dates=c&&c.dates&&c.dates.length?c.dates.slice():null;sO.sources=c&&c.sources&&c.sources.length?c.sources.slice():null;sO.rules=Object.assign({},(ov&&ov.rules)||{});sO.types=Object.assign({},(ov&&ov.types)||{})}
+/* 선별 저장 상태: 지금 선별(미리 보기가 정리한 조건)을 기준(불러온·방금 담은 초안, 없으면 기본값)과 비교 → 바뀐 것·전후 선택 수·담기 버튼.
+   담기 전에 바꾼 것은 이 브라우저(localStorage)에 보관 → 새로 고치거나 화면을 다시 켜도 이어서 보임 (보관이 안 돼도 화면은 그대로 동작) */
+let sBase0={name:null,spec:null,at:"",sel:null,snap:""},sRestored="",sJobRun=false,sCnt={};
+const OPT_L={A:"A 부족한 데이터",B:"B 새 패턴",C:"C 이미 학습됨"},SWORK="rd.sup.work";
+function sNorm(o,c,ov){c=c||{};ov=ov||{};return {conditions:{dates:(c.dates||[]).slice().sort(),sources:(c.sources||[]).slice().sort()},
+ options:Object.assign({},SS.options,o||{}),overrides:{rules:Object.assign({},ov.rules||{}),types:Object.assign({},ov.types||{})}}}
+function sSetBase(x){const dc=x&&(((x.dev||{}).ips||{}).draft||(x.draft_counts||{}).ips)||{},sn=x&&x.snapshot;   // x = 초안 (버전 표의 줄 또는 담기 응답), null = 기본값
+ sBase0=x?{name:x.name,spec:sNorm(x.options,x.conditions,x.overrides),at:x.updated_at||x.created_at||"",sel:dc.sel,snap:sn&&sn.ips&&sn.waf?`${sn.ips}+${sn.waf}`:""}
+  :{name:null,spec:sNorm(),at:"",sel:null,snap:""}}
+function sDiff(a,b){   // 기준 a → 지금 b: [바뀐 수, 줄]
+ const out=[],cap=v=>v==="all"?"전부":v===0?"빼기":`패턴당 ${v}`,onoff=v=>v?"켬":"끔",eff=(o,k)=>k==="B"&&o.target?"목표 합계로 채움":cap(o[k]),tg=v=>v?fmt(v)+"개":"없음";let n=0;
+ for(const k of["A","B","C"])if(eff(a.options,k)!==eff(b.options,k)){n++;out.push(`${OPT_L[k]}: ${eff(a.options,k)} → <b>${eff(b.options,k)}</b>`)}
+ if((a.options.target||null)!==(b.options.target||null)){n++;out.push(`목표 합계: ${tg(a.options.target)} → <b>${tg(b.options.target)}</b>`)}
+ for(const k of["exclude_bad","keep_llm_ok","exclude_rule_based","exclude_python_ua_normal"])if(!!a.options[k]!==!!b.options[k]){n++;out.push(`${esc(SS.option_text[k]||k)}: ${onoff(a.options[k])} → <b>${onoff(b.options[k])}</b>`)}
+ for(const[key,lbl,all]of[["dates","날짜",sPv.all_dates],["sources","출처",sPv.all_sources]]){
+  const eff=x=>new Set(x.length?x:all),ea=eff(a.conditions[key]),eb=eff(b.conditions[key]),add=[...eb].filter(x=>!ea.has(x)),del=[...ea].filter(x=>!eb.has(x));
+  if(add.length){n+=add.length;out.push(`${lbl} 넣음: <b>${esc(add.join(", "))}</b>`)}
+  if(del.length){n+=del.length;out.push(`${lbl} 뺌: <b>${esc(del.join(", "))}</b>`)}}
+ const RL={exclude:"빼기",include:"넣기"},ra=a.overrides.rules,rb=b.overrides.rules,rs=[];
+ for(const id of new Set([...Object.keys(ra),...Object.keys(rb)]))if(ra[id]!==rb[id])rs.push(`${id} ${rb[id]?(ra[id]?RL[ra[id]]+" → ":"")+RL[rb[id]]:"조정 해제"}`);
+ if(rs.length){n+=rs.length;out.push(`룰 조정 ${rs.length}개: ${esc(rs.slice(0,4).join(", "))}${rs.length>4?` 외 ${rs.length-4}개`:""} <span class="muted">(아래 룰 표 '조정한 룰')</span>`)}
+ const ta=new Set(Object.keys(a.overrides.types)),tb=new Set(Object.keys(b.overrides.types)),tadd=[...tb].filter(x=>!ta.has(x)),tdel=[...ta].filter(x=>!tb.has(x));
+ if(tadd.length){n+=tadd.length;out.push(`공격 유형 빼기: <b>${esc(tadd.join(", "))}</b>`)}
+ if(tdel.length){n+=tdel.length;out.push(`공격 유형 빼기 해제: <b>${esc(tdel.join(", "))}</b>`)}
+ return [n,out]}
+function sCount(spec){   // 다른 조건의 선택 수 (지금 비교 결과로 미리 보기와 같은 계산, 같은 조건이면 다시 세지 않음). 세는 중이면 null
+ if(!sPv)return null;const key=JSON.stringify(spec)+"|"+sPv.snapshot;if(key in sCnt)return sCnt[key];
+ if(Object.keys(sCnt).length>20)sCnt={};sCnt[key]=null;
+ post("/api/sup/preview",Object.assign({base:SS.base,dev:sDev,view:""},spec)).then(r=>{sCnt[key]=r.none?{err:1}:{sel:r.sel,label:r.sel_label,rules:new Map(r.rules.map(x=>[x[0],x[7]]))};sState();renderRules()},()=>{sCnt[key]={err:1}});
+ return null}
+function sCur(){return sPv?sNorm(sPv.options,sPv.conditions,sPv.overrides):null}
+function sNowIso(){const d=new Date(),p=x=>String(x).padStart(2,"0");return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`}
+function sWorkSave(){if(!SS||!SS.base)return;try{localStorage.setItem(SWORK,JSON.stringify({base:SS.base,at:sNowIso(),name:$("sVName").value.trim(),baseName:sBase0.name,form:sSpec()}))}catch(e){}}
+function sWorkDrop(){try{localStorage.removeItem(SWORK)}catch(e){}}
+function sWorkLoad(base){try{const w=JSON.parse(localStorage.getItem(SWORK)||"null");return w&&w.base===base&&w.form?w:null}catch(e){return null}}
+function sInitForm(s){sSetBase(null);const w=sWorkLoad(s.base);if(!w){sSetForm(s.options,null,null);return}   // 처음 열 때: 보관한 작업이 있으면 이어서
+ const x=w.baseName&&s.versions.find(v=>v.name===w.baseName&&v.status==="draft");if(x)sSetBase(x);
+ sSetForm(Object.assign({},s.options,w.form.options),w.form.conditions,w.form.overrides);$("sVName").value=w.name||"";sRestored=w.at||""}
+function sDiscard(){const b=sBase0.spec;sSetForm(b.options,b.conditions,b.overrides);if(sBase0.name)$("sVName").value=sBase0.name;sRestored="";sWorkDrop();sPreview()}
+function sState(){const el=$("sState");if(!SS||!SS.base){el.innerHTML="";el.className="sstate";return}
+ const name=$("sVName").value.trim(),same=SS.versions.find(v=>v.name===name),cur=sCur(),[n,lines]=cur?sDiff(sBase0.spec,cur):[0,[]];
+ const fin=!!(sBase0.name&&SS.versions.some(v=>v.name===sBase0.name&&v.status==="final")),stale=!!(cur&&!fin&&sBase0.snap&&sBase0.snap!==sPv.snapshot);
+ const saved=!!(cur&&!n&&sBase0.name&&!fin&&!stale&&name===sBase0.name),locked=!!(same&&same.status==="final"),step=!cur?1:fin&&!n?5:saved?4:3;
+ const lbl=saved?"✔ 저장됨":!name?"버전 이름을 넣고 담기":locked?`'${name}' 은 확정된 버전 - 다른 이름을 쓰세요`:!same?`새 초안 '${name}' 으로 담기`
+  :name!==sBase0.name?`초안 '${name}' 덮어쓰기`:n?`변경 저장 (초안 '${name}')`:`다시 담기 (초안 '${name}')`;
+ const L=x=>x?`공격 ${fmt(x["공격"])} / 정상 ${fmt(x["정상"])}`:"",bname=esc(sBase0.name||"");let head,body="";
+ if(!cur)head='<span class="muted">미리 보기를 기다리는 중입니다 (IPS·WAF 비교 결과가 둘 다 있어야 보입니다)</span>';
+ else if(n){const bp=sCount(sBase0.spec),ok=bp&&!bp.err;
+  head=`<span class="chip c-CHECK">저장 안 된 변경 ${n}개</span><span>기준: ${sBase0.name?`${fin?"확정된 버전":"초안"} '${bname}' (${esc(isoClock(sBase0.at))} 저장)`:"기본값"}</span>`;
+  body=`<ul>${lines.map(l=>`<li>${l}</li>`).join("")}</ul><div>선택 ${ok?fmt(bp.sel):bp?"-":"(세는 중…)"} → <b>${fmt(sPv.sel)}</b>개 <span class="muted">(${ok?L(bp.label)+" → ":""}${L(sPv.sel_label)})</span></div>`+
+   (sRestored?`<div class="muted">새로 고치거나 화면을 다시 켜기 전(${esc(isoClock(sRestored))})에 바꾼 것을 이어서 보여 줍니다 (이 브라우저에 보관)</div>`:"")}
+ else if(fin)head=`<span class="chip c-OK">'${bname}' 확정됨</span><span>다음 버전은 기준 버전을 '${bname}' 으로 바꿔 비교한 뒤 새 이름으로 담습니다</span>`;
+ else if(stale)head=`<span class="chip c-CHECK">초안 '${bname}' 와 조건은 같지만 저장 뒤 비교 결과가 바뀜</span><span>저장 때 선택 ${fmt(sBase0.sel)} → 지금 <b>${fmt(sPv.sel)}</b>개 · 다시 담아야 확정할 수 있습니다</span>`;
+ else if(sBase0.name)head=`<span class="chip c-OK">초안 '${bname}' 와 같음</span><span>${esc(isoClock(sBase0.at))} 저장 · 선택 <b>${fmt(sPv.sel)}</b>개 (${L(sPv.sel_label)})${saved?" → 아래 버전 표에서 확정":""}</span>`;
+ else head=`<span class="chip">기본값 그대로</span><span>아직 초안에 담지 않음 · 선택 <b>${fmt(sPv.sel)}</b>개 (${L(sPv.sel_label)})</span>`;
+ const dis=sJobRun||saved||locked;
+ el.className="sstate"+(!cur?"":n||stale?" dirty":saved||fin?" clean":"");
+ el.innerHTML=`<div class="steps">${["조건 고르기","미리 보기 확인","담기 (저장)","버전 표에서 확정"].map((t,i)=>`<span class="step ${i+1<step?"done":i+1===step?"running":""}">${"①②③④"[i]} ${t}</span>`).join("")}</div>
+  <div class="head">${head}<span style="flex:1"></span>${n?`<button class="sm" data-sdiscard>바꾼 것 버리기 (${sBase0.name?`'${bname}'`:"기본값"}으로)</button>`:""}<button data-ssave${dis?" disabled":""}${saved?"":' class="primary"'}>${esc(lbl)}</button></div>${body}${sJobRun?'<div class="muted">비교·확정이 도는 중이라 지금은 담을 수 없습니다 (끝나면 새 비교 결과로 다시 셉니다)</div>':""}`;
+ const sb=$("sSave");sb.textContent=lbl;sb.disabled=dis;sb.classList.toggle("primary",!saved);
+ if(cur){if(n)sWorkSave();else{sWorkDrop();sRestored=""}}}
 async function loadSup(){let s;try{s=await get("/api/sup/state?base="+encodeURIComponent($("sBase").value||""))}catch(e){$("sSetup").innerHTML=`<div class="msg">불러오지 못했습니다: ${esc(e.message)}</div>`;return}
  SS=s;const opts=s.finals.map(n=>`<option${n===s.base?" selected":""}>${esc(n)}</option>`).join("");if($("sBase").innerHTML!==opts)$("sBase").innerHTML=opts;
- if(!sFormInit){sSetForm(s.options,null,null);sFormInit=true}
+ if(!sFormInit){sFormInit=true;sInitForm(s)}
+ else if(sBase0.name){const x=s.versions.find(v=>v.name===sBase0.name);if(!x)sSetBase(null);else if(x.status==="draft"&&(x.updated_at||x.created_at||"")!==sBase0.at)sSetBase(x)}   // 기준 초안이 지워졌거나 다른 곳에서 다시 담김
  $("sHdr").textContent=s.base?`· 기준 ${s.base} · 디스크 여유 ${s.disk_free_gb}GB`:"";
  $("sSetup").innerHTML=s.problems.length?`<div class="est"><b>넣을 것</b><ul style="margin:4px 0 0 18px;padding:0">${s.problems.map(p=>`<li>${esc(p)}</li>`).join("")}</ul><div class="muted">아래 '기준 버전 등록'에서 기존 학습데이터(표준모델 학습 형식 CSV)·원본 로그·표준모델 피처 파일 위치를 넣으세요.</div></div>`:"";
  const run=s.job.running,st=s.status||{};
- for(const id of["sRunNew","sRunAll"])$(id).disabled=run||!s.base||s.problems.length>0;$("sStop").style.display=run?"":"none";$("sSave").disabled=run;
- sEstimate();sJobView(run,st);renderVers();renderReg();
+ for(const id of["sRunNew","sRunAll"])$(id).disabled=run||!s.base||s.problems.length>0;$("sStop").style.display=run?"":"none";$("sSave").disabled=run;sJobRun=run;
+ sEstimate();sJobView(run,st);renderVers();renderReg();sState();
  if(run){clearTimeout(sJT);sJT=setTimeout(()=>{if(page==="sup")loadSup()},2000)}
  if(!sResInit||(sRunWas&&!run)){sResInit=true;loadSupRes();sPreview()}   // 처음 열 때, 비교·확정이 막 끝났을 때
  sRunWas=run;
@@ -3675,11 +4465,13 @@ async function loadSupRes(){if(!SS||!SS.base)return;let r;try{r=await get(`/api/
  $("sRes").innerHTML=`<div class="kv">${r.kv.map(([k,v,n])=>`<b>${esc(k)}</b><span>${esc(v)}${n?` <span class="muted">${esc(n)}</span>`:""}</span>`).join("")}</div>
   <div class="tw"><div>${stable(r,"등급별")}${stable(r,"A 근거")}</div><div>${stable(r,"기준 모델의 신규 탐지")}${stable(r,"품질")}</div></div>
   <details><summary>공격 유형·출처·날짜별, label 정합성, 데이터 흔적, 평가 분할</summary><div class="tw"><div>${stable(r,"공격 유형별")}</div><div>${stable(r,"출처별")}${stable(r,"날짜별")}${stable(r,"label 정합성")}</div><div>${stable(r,"흔적: User-Agent")}${stable(r,"흔적: 헤더·길이")}${stable(r,"표준모델 피처 1개만 켜지는 공격")}${stable(r,"평가 분할")}</div></div></details>`}
-function sPreviewSoon(){clearTimeout(sPvT);sPvT=setTimeout(sPreview,250)}
-async function sPreview(){clearTimeout(sPvT);if(!SS||!SS.base)return;let r;
- try{r=await post("/api/sup/preview",Object.assign({base:SS.base,dev:sDev,view:$("sView").value},sSpec()))}catch(e){$("sPrev").innerHTML=`<div class="muted">미리 보기 실패: ${esc(e.message)}</div>`;return}
- if(r.none){sPv=null;$("sPrev").innerHTML=`<div class="muted">IPS·WAF 비교 결과가 둘 다 있어야 공통 선별을 볼 수 있습니다${r.missing&&r.missing.length?` (없음: ${esc(r.missing.join("·"))})`:""}.</div>`;$("sRules").innerHTML="";$("sRuleCnt").textContent="";$("sSelHdr").textContent="";$("cDates").innerHTML=$("cSrc").innerHTML=$("sHold").innerHTML="";return}
- sPv=r;renderConds(r);renderHold(r);const vw=r.view;
+function sPreviewSoon(ms){clearTimeout(sPvT);sPvT=setTimeout(sPreview,typeof ms==="number"?ms:250);sWorkSave()}   // 숫자 칸은 다 친 뒤에 (ms)
+let sPvSeq=0;   // 늦게 온 앞 미리 보기가 새 결과를 덮지 않게 (목표 합계 첫 계산은 몇 초)
+async function sPreview(){clearTimeout(sPvT);if(!SS||!SS.base)return;let r;const seq=++sPvSeq;$("oSum").classList.add("muted");
+ try{r=await post("/api/sup/preview",Object.assign({base:SS.base,dev:sDev,view:$("sView").value},sSpec()))}catch(e){if(seq===sPvSeq)$("sPrev").innerHTML=`<div class="muted">미리 보기 실패: ${esc(e.message)}</div>`;return}
+ if(seq!==sPvSeq)return;$("oSum").classList.remove("muted");
+ if(r.none){sPv=null;$("sPrev").innerHTML=`<div class="muted">IPS·WAF 비교 결과가 둘 다 있어야 공통 선별을 볼 수 있습니다${r.missing&&r.missing.length?` (없음: ${esc(r.missing.join("·"))})`:""}.</div>`;$("sRules").innerHTML="";$("sRuleCnt").textContent="";$("sSelHdr").textContent="";$("cDates").innerHTML=$("cSrc").innerHTML=$("sHold").innerHTML=$("oSum").innerHTML="";sState();return}
+ sPv=r;renderConds(r);renderHold(r);sOptSum(r);const vw=r.view;
  $("sSelHdr").textContent=vw?`· IPS·WAF 공통 · 보류 데이터만 (${HOLDT[vw]}) ${fmt(r.cand)}개 · 그중 지금 선별에 들어간 것 ${fmt(r.hold[vw][1])}개`
   :`· IPS·WAF 공통 후보 ${fmt(r.cand)}개 중 선택 ${fmt(r.sel)}개 (공격 ${fmt(r.sel_label["공격"])} / 정상 ${fmt(r.sel_label["정상"])}) → 두 장비에 같은 샘플`;
  const ovl=r.overlap,os=r.one_side||{},ovr=k=>{const o=ovl[k];return `<b>${k}</b> 둘 다 ${fmt(o.cand[0])} · IPS 만 ${fmt(o.cand[1])} · WAF 만 ${fmt(o.cand[2])} <span class="muted">(선택 ${fmt(o.sel[0])} · ${fmt(o.sel[1])} · ${fmt(o.sel[2])})</span>`};
@@ -3697,7 +4489,15 @@ async function sPreview(){clearTimeout(sPvT);if(!SS||!SS.base)return;let r;
  $("sPrev").querySelectorAll("[data-t]").forEach(c=>c.onchange=()=>{if(c.checked)sO.types[c.dataset.t]="exclude";else delete sO.types[c.dataset.t];sPreviewSoon()});
  renderRules();
  $("sCand").textContent=vw?"보류 데이터 CSV 받기 (IPS·WAF 공통)":"후보 CSV 받기 (IPS·WAF 공통)";
- $("sCand").href="/download/sup/candidates?"+new URLSearchParams({base:SS.base,dev:sDev,spec:JSON.stringify(sSpec()),view:vw||""})}
+ $("sCand").href="/download/sup/candidates?"+new URLSearchParams({base:SS.base,dev:sDev,spec:JSON.stringify(sSpec()),view:vw||""});sState()}
+/* 등급별로 더해지는 수 → 합계 (선택 옆에 바로), 목표 합계면 B 에서 채운 수·패턴당 몇 개 */
+function sOptSum(r){const o=r.options,f=r.fill,sg=r.sel_grade||{},cap=v=>v==="all"?"전부":v===0?"빼기":`패턴당 ${fmt(v)}`;
+ $("oLlm").disabled=!o.exclude_bad;$("oLlmN").textContent=r.has_lk?`(후보의 '불일치' 중 ${fmt(r.llm_ok_bad)}개)`:"(비교 결과에 LLM 재확인 결과 없음 - 4.에서 재확인 뒤 다시 비교)";
+ const part=g=>`${g} ${g==="B"&&o.target?"목표로 채움":cap(o[g])} <b>+${fmt(sg[g])}</b>`+(g==="B"&&f&&f.added&&f.k!=null?` (패턴당 ${f.extra?`${f.k}~${f.k+1}`:f.k}개)`:"");
+ const note=!f?"":f.state==="over"?` <span class="warn">목표 ${fmt(f.target)}개보다 B 없이 고른 수(${fmt(f.base)}개)가 많아 B 를 넣지 않음</span>`
+  :f.state==="under"?` <span class="warn">B 를 모두 넣어도 최대 ${fmt(f.max)}개까지 (목표 ${fmt(f.target)}개)</span>`:` = 목표 ${fmt(f.target)}개`;
+ $("oSum").innerHTML=`${["A","B","C"].map(part).join(" · ")} → 합계 <b>${fmt(r.sel)}</b>개 <span class="muted">(공격 ${fmt(r.sel_label["공격"])} / 정상 ${fmt(r.sel_label["정상"])})</span>${note}`+
+  (f&&f.state==="exact"&&f.added&&f.k!=null?`<div class="muted">B 에서 +${fmt(f.added)}개: 패턴당 ${fmt(f.k)}개까지 넣고${f.extra?`, 남은 ${fmt(f.extra)}개는 ${fmt(f.k+1)}번째 샘플을 패턴을 돌아가며 1개씩`:""} · B 를 모두 넣으면 최대 ${fmt(f.max)}개</div>`:"")}
 const HOLDT={rule:"'정합 (룰 기준)' 공격",pyua:"python-requests UA 정상"};
 function renderHold(r){const h=r.hold||{},one=k=>{const x=h[k]||[0,0,0,0,0,0];
   const unv=k==="rule"&&r.unverified_att?` <span class="muted">(검증 전 공격 ${fmt(r.unverified_att)}개는 셀 수 없음 → 4.에서 '검증 안 한 데이터만 검증' 뒤 '새로 생긴 데이터만 비교')</span>`:"";
@@ -3712,20 +4512,24 @@ function renderConds(r){const box=(id,list,key,attr)=>{const el=$(id);el.innerHT
  box("cDates",r.all_dates,"dates","cd");box("cSrc",r.all_sources,"sources","cs")}
 function renderRules(){const r=sPv;if(!r){$("sRules").innerHTML="";return}const q=$("sRuleQ").value.trim().toLowerCase(),f=$("sRuleF").value;
  let rows=r.rules.filter(x=>(!q||x[0].toLowerCase().includes(q)||x[1].toLowerCase().includes(q))&&(f!=="ov"||x[8])&&(f!=="sel0"||!x[7]));
- const n=rows.length;rows=rows.slice(0,300);$("sRuleCnt").textContent=`${fmt(n)}개 룰${n>300?" 중 300개 표시 (검색으로 좁히세요)":""} · 조정 ${Object.keys(sO.rules).length}개`;
- $("sRules").innerHTML=`<table class="mini"><thead><tr><th>룰 id</th><th>공격 유형</th><th class="n">후보</th><th class="n">제거</th><th class="n">A</th><th class="n">B</th><th class="n">C</th><th class="n">선택</th><th>조정</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr><td class="nw">${esc(x[0])}</td><td>${esc(x[1])}</td>${[2,3,4,5,6].map(i=>`<td class="n">${fmt(x[i])}</td>`).join("")}<td class="n"><b>${fmt(x[7])}</b></td><td><select data-r="${esc(x[0])}"><option value="">기본</option><option value="exclude"${x[8]==="exclude"?" selected":""}>빼기</option><option value="include"${x[8]==="include"?" selected":""}>넣기 (상한 없이)</option></select></td><td class="nw"><a href="#/data" data-open="${esc(x[0])}">4.에서 보기</a></td></tr>`).join("")}</tbody></table>`}
+ const n=rows.length;rows=rows.slice(0,300);
+ const cur=sCur(),na=cur&&Object.keys(cur.overrides.rules).length?sCount(Object.assign({},cur,{overrides:{rules:{},types:cur.overrides.types}})):null,nm=na&&!na.err?na.rules:null;   // 조정한 룰: 조정 없이 고를 수 → 지금
+ $("sRuleCnt").textContent=`${fmt(n)}개 룰${n>300?" 중 300개 표시 (검색으로 좁히세요)":""} · 조정 ${Object.keys(sO.rules).length}개${Object.keys(sO.rules).length?" (노란 줄 · 선택 = 조정 없이 → 지금)":""}`;
+ $("sRules").innerHTML=`<table class="mini"><thead><tr><th>룰 id</th><th>공격 유형</th><th class="n">후보</th><th class="n">제거</th><th class="n">A</th><th class="n">B</th><th class="n">C</th><th class="n">선택</th><th>조정</th><th></th></tr></thead><tbody>${rows.map(x=>`<tr${x[8]?' class="adj"':""}><td class="nw">${esc(x[0])}</td><td>${esc(x[1])}</td>${[2,3,4,5,6].map(i=>`<td class="n">${fmt(x[i])}</td>`).join("")}<td class="n nw">${x[8]&&nm?`<span class="muted">${fmt(nm.get(x[0])||0)} →</span> `:""}<b>${fmt(x[7])}</b></td><td><select data-r="${esc(x[0])}"><option value="">기본</option><option value="exclude"${x[8]==="exclude"?" selected":""}>빼기</option><option value="include"${x[8]==="include"?" selected":""}>넣기 (상한 없이)</option></select></td><td class="nw"><a href="#/data" data-open="${esc(x[0])}">4.에서 보기</a></td></tr>`).join("")}</tbody></table>`}
 $("sRules").addEventListener("change",e=>{const s=e.target.closest("select[data-r]");if(!s)return;if(s.value)sO.rules[s.dataset.r]=s.value;else delete sO.rules[s.dataset.r];sPreviewSoon()});
 $("sRules").addEventListener("click",e=>{const a=e.target.closest("a[data-open]");if(!a)return;e.preventDefault();dPending={rule:a.dataset.open,dev:sDev,hold:$("sView").value};location.hash="#/data"});
 function vDesc(x){if(x.kind==="external")return esc(x.note||"");const o=x.options||{},c=x.conditions||{},ov=x.overrides||{},cap=k=>o[k]==="all"?"전부":o[k]===0?"빼기":`패턴당 ${o[k]}`;
- return `A ${cap("A")} · B ${cap("B")} · C ${cap("C")}`+(o.exclude_bad?" · 불일치 빼기":"")+(o.exclude_rule_based?" · 정합(룰 기준) 공격 빼기":"")+(o.exclude_python_ua_normal?" · python-requests 정상 빼기":"")+
+ const f=(((x.dev||{}).ips||{}).draft||{}).fill,fb=f&&f.added&&f.k!=null?` (패턴당 ${f.extra?`${f.k}~${f.k+1}`:f.k}개)`:"";
+ return (o.target?`<b>목표 합계 ${fmt(o.target)}</b> · `:"")+`A ${cap("A")} · B ${o.target?"목표로 채움"+fb:cap("B")} · C ${cap("C")}`+(o.exclude_bad?" · 불일치 빼기"+(o.keep_llm_ok?" (LLM 이 맞다고 한 것은 남김)":""):"")+(o.exclude_rule_based?" · 정합(룰 기준) 공격 빼기":"")+(o.exclude_python_ua_normal?" · python-requests 정상 빼기":"")+
   `<br>날짜 ${c.dates&&c.dates.length?esc(c.dates.join(", ")):"전부"} · 출처 ${c.sources&&c.sources.length?esc(c.sources.join(", ")):"전부"}`+(Object.keys(ov.rules||{}).length?` · 룰 조정 ${Object.keys(ov.rules).length}개`:"")+(Object.keys(ov.types||{}).length?` · 유형 빼기 ${esc(Object.keys(ov.types).join(", "))}`:"")}
 function renderVers(){const vs=SS.versions;$("sVerHdr").textContent=vs.length?`· ${vs.length}개 (확정 ${vs.filter(x=>x.status==="final").length})`:"";
  if(!vs.length){$("sVers").innerHTML='<div class="muted">버전이 없습니다 - 아래에서 기준 버전(기존 학습데이터)을 등록하세요.</div>';return}
  const dv=(x,d)=>{const c=x.dev[d]||{};if(x.status==="draft"&&c.draft)return `<span class="muted">추가 후보</span> <b>${fmt(c.draft.sel)}</b><div class="muted">공격 ${fmt(c.draft.sel_label["공격"])} / 정상 ${fmt(c.draft.sel_label["정상"])}</div>`+(x.mode==="combined"?'<div class="muted">IPS·WAF 같은 샘플</div>':'<div class="muted">장비별 (예전 방식)</div>');
    if(c.rows==null)return '<span class="muted">-</span>';const l=c.label||{};return `${fmt(c.rows)}<div class="muted">공격 ${fmt(l.anomalies)} / 정상 ${fmt(l.normal)}</div>`+(c.added!=null?`<div class="muted">기준 + 추가 ${fmt(c.added)}</div>`:"")};
- $("sVers").innerHTML=`<table class="mini"><thead><tr><th>버전</th><th>기준</th><th>상태</th><th>IPS 행</th><th>WAF 행</th><th>조건·선별</th><th>시각</th><th></th></tr></thead><tbody>${vs.map(x=>`<tr><td class="nw"><b>${esc(x.name)}</b>${x.tag?` <span class="muted">${esc(x.tag)}</span>`:""}</td><td class="nw">${esc(x.base||"-")}</td><td>${x.status==="final"?'<span class="chip c-OK">확정</span>':'<span class="chip c-CHECK">초안</span>'}</td><td class="nw">${dv(x,"ips")}</td><td class="nw">${dv(x,"waf")}</td><td class="reason">${vDesc(x)}</td><td class="muted nw">${esc((x.finalized_at||x.updated_at||x.created_at||"").replace("T"," ").slice(0,16))}</td><td class="nw">${x.status==="draft"?`<button class="sm" data-v="load" data-n="${esc(x.name)}">불러오기</button>`+(x.mode==="combined"?`<button class="sm primary" data-v="final" data-n="${esc(x.name)}">확정</button>`:`<button class="sm primary" data-v="resave" data-n="${esc(x.name)}" title="옵션·조정은 그대로, IPS·WAF 에 같은 샘플을 넣는 방식으로 다시 계산">새 방식으로 다시 담기</button>`)+`<button class="sm danger" data-v="del" data-n="${esc(x.name)}">삭제</button>`+(x.mode==="combined"?"":'<div class="muted" style="font-size:12px;white-space:normal;max-width:240px">장비별로 따로 고른 예전 초안 - 다시 담아야 확정됩니다</div>'):x.kind==="external"?'<span class="muted">등록한 기준</span>':`<span class="muted">11_supervised/versions/${esc(x.name)}/</span>`}</td></tr>`).join("")}</tbody></table>`}
+ $("sVers").innerHTML=`<table class="mini"><thead><tr><th>버전</th><th>기준</th><th>상태</th><th>IPS 행</th><th>WAF 행</th><th>조건·선별</th><th>시각</th><th></th></tr></thead><tbody>${vs.map(x=>`<tr${x.status==="draft"&&x.name===sBase0.name?' class="hl"':""}><td class="nw"><b>${esc(x.name)}</b>${x.status==="draft"&&x.name===sBase0.name?' <span class="chip c-RULE">지금 화면</span>':""}${x.tag?` <span class="muted">${esc(x.tag)}</span>`:""}</td><td class="nw">${esc(x.base||"-")}</td><td>${x.status==="final"?'<span class="chip c-OK">확정</span>':'<span class="chip c-CHECK">초안</span>'}</td><td class="nw">${dv(x,"ips")}</td><td class="nw">${dv(x,"waf")}</td><td class="reason">${vDesc(x)}</td><td class="muted nw">${esc((x.finalized_at||x.updated_at||x.created_at||"").replace("T"," ").slice(0,16))}</td><td class="nw">${x.status==="draft"?`<button class="sm" data-v="load" data-n="${esc(x.name)}">불러오기</button>`+(x.mode==="combined"?`<button class="sm primary" data-v="final" data-n="${esc(x.name)}">확정</button>`:`<button class="sm primary" data-v="resave" data-n="${esc(x.name)}" title="옵션·조정은 그대로, IPS·WAF 에 같은 샘플을 넣는 방식으로 다시 계산">새 방식으로 다시 담기</button>`)+`<button class="sm danger" data-v="del" data-n="${esc(x.name)}">삭제</button>`+(x.mode==="combined"?"":'<div class="muted" style="font-size:12px;white-space:normal;max-width:240px">장비별로 따로 고른 예전 초안 - 다시 담아야 확정됩니다</div>'):x.kind==="external"?'<span class="muted">등록한 기준</span>':`<span class="muted">11_supervised/versions/${esc(x.name)}/</span>`}</td></tr>`).join("")}</tbody></table>`}
 $("sVers").addEventListener("click",async e=>{const b=e.target.closest("button[data-v]");if(!b)return;const name=b.dataset.n,x=SS.versions.find(v=>v.name===name);
- try{if(b.dataset.v==="load"){sSetForm(Object.assign({},SS.options,x.options),x.conditions,x.overrides);$("sVName").value=name;sPreview();$("sSaveMsg").textContent=`'${name}' 초안을 불러왔습니다`;return}
+ try{if(b.dataset.v==="load"){const cur=sCur(),n=cur?sDiff(sBase0.spec,cur)[0]:0;if(n&&!confirm(`저장 안 된 변경 ${n}개를 버리고 초안 '${name}' 을 불러옵니다. 진행할까요?`))return;
+   sSetForm(Object.assign({},SS.options,x.options),x.conditions,x.overrides);$("sVName").value=name;sSetBase(x);sRestored="";sWorkDrop();renderVers();sPreview();$("sSaveMsg").textContent=`'${name}' 초안을 불러왔습니다`;return}
   if(b.dataset.v==="del"){if(!confirm(`초안 '${name}' 을 지웁니다. 진행할까요?`))return;await post("/api/sup/delete",{name});loadSup();return}
   if(b.dataset.v==="resave"){   // 예전 장비별 초안 → 같은 옵션·조정으로 IPS·WAF 공통 선별 다시 계산
    const r=await post("/api/sup/save",{name,base:x.base,conditions:x.conditions,options:x.options,overrides:x.overrides});
@@ -3746,15 +4550,25 @@ $("sRunNew").onclick=()=>sRun("new");$("sRunAll").onclick=()=>sRun("all");$("sIn
 $("sStop").onclick=async()=>{try{await post("/api/sup/stop",{});loadSup()}catch(e){alert("실패: "+e.message)}};
 $("sBase").onchange=()=>{sPv=null;sResInit=false;loadSup()};
 $("sDevSeg").addEventListener("click",e=>{const b=e.target.closest("button[data-d]");if(!b)return;sDev=b.dataset.d;$("sDevSeg").querySelectorAll("button").forEach(x=>x.classList.toggle("on",x===b));loadSupRes()});   // 선별은 IPS·WAF 공통이라 그대로
-for(const id of["oA","oB","oC","oBad","oRule","oPy"])$(id).onchange=sPreviewSoon;
+for(const id of["oBad","oLlm","oRule","oPy"])$(id).onchange=()=>sPreviewSoon();
+for(const k of["A","B","C"]){const s=$("o"+k),n=$("o"+k+"n");   // 패턴당 직접 입력: 칸을 보이고 (비었으면 10) 바로 다시 셈
+ s.onchange=()=>{if(s.value==="custom"&&n.value==="")n.value=10;sOptUi();if(s.value==="custom")n.focus();sPreviewSoon()};n.oninput=()=>sPreviewSoon(600)}
+$("oT").oninput=()=>{sOptUi();sPreviewSoon(600)};
 let sRq;$("sRuleQ").oninput=()=>{clearTimeout(sRq);sRq=setTimeout(renderRules,200)};$("sRuleF").onchange=renderRules;
 $("sSave").onclick=async()=>{const name=$("sVName").value.trim();if(!name){$("sSaveMsg").textContent="버전 이름을 넣으세요 (예: 26 하반기)";return}
  if(SS.versions.some(v=>v.name===name&&v.status==="draft")&&!confirm(`초안 '${name}' 을 지금 선별로 덮어씁니다. 진행할까요?`))return;
- try{const r=await post("/api/sup/save",Object.assign({name,base:SS.base},sSpec()));$("sSaveMsg").textContent=`'${name}' 에 담았습니다: IPS·WAF 같은 샘플 ${fmt(r.draft_counts.ips.sel)}개 → 아래 버전 표에서 확인 후 확정`;loadSup()}catch(e){$("sSaveMsg").textContent="실패: "+e.message}};
+ try{const r=await post("/api/sup/save",Object.assign({name,base:SS.base},sSpec()));sSetBase(r);sRestored="";sWorkDrop();
+  $("sSaveMsg").innerHTML=`<b>${esc(isoClock(r.updated_at))} '${esc(name)}' 에 담았습니다</b> · IPS·WAF 같은 샘플 ${fmt(r.draft_counts.ips.sel)}개 → 아래 버전 표의 강조한 줄에서 확인 후 확정`;loadSup()}catch(e){$("sSaveMsg").textContent="실패: "+e.message}};
+$("sState").addEventListener("click",e=>{if(e.target.closest("[data-ssave]"))$("sSave").click();else if(e.target.closest("[data-sdiscard]"))sDiscard()});
+$("sVName").addEventListener("input",sState);
 /* ── 주기적 갱신 ── */
-let lastRunning=false,ticks=0;
+let lastRunning=false,ticks=0,seenCollect=null,autoInput=null;
 async function tick(){try{await loadState();const running=S.generation.running;
  if((lastRunning&&!running)||(running&&++ticks%20===0)){await post("/api/progress/refresh");setTimeout(()=>{loadProgress();if(page==="rules")loadRules()},4000)}
+ // 수집(화면·에이전트)이 끝났거나 진행 현황이 최신 입력 날짜로 계산되지 않았으면 다시 계산 (입력 날짜마다 한 번)
+ const lc=(S.last_collect||{}).last_run_at||"",newest=(S.input_dates||[]).slice(-1)[0];
+ if((seenCollect!==null&&lc!==seenCollect)||(P&&newest&&P.input_date!==newest&&autoInput!==newest)){autoInput=newest;refreshProgressWait()}
+ seenCollect=lc;
  if(lastRunning&&!running&&page==="run")setTimeout(()=>{loadExcluded();loadModels(true)},5000);   // 생성이 끝나면 검토에서 뺀 샘플·모델별 기록도 새로
  if(running&&ticks%20===0&&page==="run"&&String((S.generation.lock||{}).by||"").includes("redo"))loadExcluded();   // 다시 만들기 중에는 1분마다
  lastRunning=running}catch(e){$("hdr").textContent="화면 서버에 연결할 수 없습니다 ("+e.message+")"}}

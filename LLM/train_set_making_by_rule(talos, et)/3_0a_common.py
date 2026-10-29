@@ -250,7 +250,9 @@ def generated_rules(exclude=None):
 
 
 def read_jsonl(path):
-    return [json.loads(l) for l in Path(path).read_text(encoding="utf-8").splitlines() if l.strip()]
+    # 줄은 '\n' 으로만 나눈다. str.splitlines() 는 U+0085(NEL)·U+2028/2029·\x0b·\x0c·\x1c~\x1e 에서도 나눠, 이런 글자가
+    # 그대로 든 JSON 줄(json.dumps(ensure_ascii=False), 예: 0xFF→0x00 전체 글자 나열 payload)을 깨뜨린다 (2026-10-29)
+    return [json.loads(l) for l in Path(path).read_text(encoding="utf-8").split("\n") if l.strip()]
 
 
 def write_jsonl(path, records):
@@ -408,7 +410,7 @@ def _kill_tree(proc):
 
 def _cli_result(stdout):
     """--output-format json 출력에서 결과 JSON (type = result). 없으면 None."""
-    for line in reversed((stdout or "").strip().splitlines()):
+    for line in reversed((stdout or "").strip().split("\n")):     # 결과 JSON 안의 U+0085·U+2028 은 줄바꿈이 아님 (read_jsonl)
         if line.strip().startswith("{"):
             try:
                 data = json.loads(line)
@@ -574,7 +576,7 @@ def add_usage(usage, role, u):
 
 def mock_response(user, run):
     """키 없이 흐름을 시험하는 가짜 응답. 생성 요청이면 룰 조건으로 샘플을, 검토 요청이면 전부 pass."""
-    items = [json.loads(l) for l in user.splitlines() if l.startswith("{")]
+    items = [json.loads(l) for l in user.split("\n") if l.startswith("{")]      # '\n' 으로만 (read_jsonl 과 같은 이유)
     out = []
     n_a = run_int(run, "생성 anomalies 수", 10)
     for item in items:

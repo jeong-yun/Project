@@ -20,8 +20,14 @@
 [비율]  생성 대상 = 전체 - EXCLUDED - EXISTING
         완료율 = DONE / 생성 대상,   학습데이터 보유율 = (DONE + EXISTING) / 전체 룰
 
+[거부 편향 경보] (2026-10-29, 위험 등록부 R01) 검토 모델이 '안전' 을 이유로 공격 샘플을 빼거나 판정을 거절하면 위험한 공격
+  유형일수록 학습데이터가 모자란다. 공격 유형별로 거부 비율 = (안전 사유로 뺀 공격 샘플 + 판정 거절로 빠진 공격 샘플) ÷ 생성된
+  공격 샘플 을 지금 결과(다시 만들기 반영) 전체와 가장 최근 날짜 폴더로 따로 세고, '거부 편향 경보 기준'(%, 기본 5)을 넘는 유형을
+  경고한다 (생성 공격 샘플이 '거부 편향 최소 샘플'(기본 100) 이상인 유형만). progress.json 의 review_bias, 3.5 로그의 [경고] 줄.
+  3.3 의 meta.json review_by_type 을 쓰고, 그 칸이 없는 예전 결과는 파일에서 한 번 세어 _progress/review_types.json 에 기억한다.
+
 [출력]  07_llm_output/_progress/
-     ├─ progress.json     ← 요약 (비율, 상태별 수, 출처·공격 유형별, 어디까지 했는지, 토큰·예상 남은 비용·시간)
+     ├─ progress.json     ← 요약 (비율, 상태별 수, 출처·공격 유형별, 어디까지 했는지, 토큰·예상 남은 비용·시간, 거부 편향)
      ├─ rule_status.csv   ← 룰별 상태 (엑셀용, 한글 열 이름)
      └─ rule_status.jsonl ← 같은 내용 (UI·코드용)
 
@@ -43,6 +49,8 @@ from pathlib import Path
 
 _spec = importlib.util.spec_from_file_location("llm_common", Path(__file__).resolve().parent / "3_0a_common.py")
 C = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(C)
+_rspec = importlib.util.spec_from_file_location("review_33", Path(__file__).resolve().parent / "3_3_review.py")
+R = importlib.util.module_from_spec(_rspec); _rspec.loader.exec_module(R)        # type_counts·SAFETY_RE (검토와 같은 기준)
 
 PROGRESS_DIR = C.LLM_OUTPUT_DIR / "_progress"
 AUG_DIR = "_4_augmented"
@@ -79,6 +87,34 @@ def _listdir(d):
         return {}
 
 
+def review_types(rmeta, rev_dir, gen_dir, name, ent_meta, ent_rej, cache, new_cache, key):
+    """요청 하나의 공격 유형별 [생성 공격, 검토 drop, 그중 안전 사유, 판정 거절]. meta.json 에 없으면 파일에서 세고 기억한다."""
+    if isinstance(rmeta.get("review_by_type"), dict):
+        return rmeta["review_by_type"]
+    sig = [ent_meta.stat().st_mtime_ns if ent_meta else 0, ent_rej.stat().st_mtime_ns if ent_rej else 0]
+    hit = cache.get(key)
+    if hit and hit.get("m") == sig:
+        new_cache[key] = hit
+        return hit["t"]
+    gen = C.read_jsonl(gen_dir / f"{name}.jsonl") if (gen_dir / f"{name}.jsonl").exists() else []
+    rej = C.read_jsonl(rev_dir / f"{name}.rejected.jsonl") if ent_rej else []
+    t = R.type_counts(gen, rej)
+    new_cache[key] = {"m": sig, "t": t}
+    return t
+
+
+def bias_summary(by_type, threshold, min_n):
+    """{유형: [생성 공격, 검토 drop, 안전 사유, 판정 거절]} → 유형별 비율과 경보 대상 (거부 비율 높은 순)."""
+    out, alerts = {}, []
+    for t, (gen, drop, safety, refused) in sorted(by_type.items()):
+        pct = round(100.0 * (safety + refused) / gen, 2) if gen else 0.0
+        out[t] = {"generated_attacks": gen, "dropped_by_reviewer": drop, "safety_dropped": safety, "refused": refused,
+                  "refusal_pct": pct, "drop_pct": round(100.0 * (drop + refused) / gen, 2) if gen else 0.0}
+        if gen >= min_n and pct > threshold:
+            alerts.append(t)
+    return out, sorted(alerts, key=lambda t: -out[t]["refusal_pct"])
+
+
 def scan_outputs(latest_base):
     """07_llm_output 의 모든 날짜 폴더 → {룰 id: [(상태, 룰 내용 지문, 날짜, 요청, anomalies, normal)]}, 요청 통계.
     요청 파일의 (룰 id, 내용 지문)은 수정 시각 기준으로 _progress/req_index.json 에 기억해 두고 바뀐 것만 다시 읽는다."""
@@ -89,6 +125,8 @@ def scan_outputs(latest_base):
     batches = collections.defaultdict(lambda: [0, 0])      # 최신 날짜 all 세트: 배치 번호 → [요청 수, 생성 끝난 요청 수]
     last_done = None
     cache, new_cache = _json(PROGRESS_DIR / "req_index.json", {}) or {}, {}
+    tcache, new_tcache = _json(PROGRESS_DIR / "review_types.json", {}) or {}, {}
+    bias = collections.defaultdict(lambda: collections.defaultdict(lambda: [0, 0, 0, 0]))   # 날짜 → 유형 → 수
     for base in C.output_dates():
         req_dir, gen_dir, rev_dir, aug_dir = base / C.REQ_DIR, base / C.GEN_DIR, base / C.REV_DIR, base / AUG_DIR
         req_ls, gen_ls, rev_ls, aug_ls = _listdir(req_dir), _listdir(gen_dir), _listdir(rev_dir), _listdir(aug_dir)
@@ -136,6 +174,13 @@ def scan_outputs(latest_base):
                 seconds["generate"].append(gmeta["seconds"])
             if rmeta and rmeta.get("seconds") is not None:
                 seconds["review"].append(rmeta["seconds"])
+            if rmeta is not None:          # 거부 편향 (R01): 공격 유형별 검토 결과
+                tc = review_types(rmeta, rev_dir, gen_dir, name, rev_ls.get(f"{name}.meta.json"),
+                                  rev_ls.get(f"{name}.rejected.jsonl"), tcache, new_tcache, key)
+                for t, v in tc.items():
+                    acc = bias[base.name][t]
+                    for k in range(4):
+                        acc[k] += v[k]
             if ameta and (last_done is None or ameta.get("finished_at", "") > last_done["at"]):
                 last_done = {"request": name, "date": base.name, "at": ameta.get("finished_at", "")}
             for rid, h in rules:
@@ -157,6 +202,9 @@ def scan_outputs(latest_base):
     tmp = PROGRESS_DIR / f"req_index.json.{os.getpid()}.tmp"
     tmp.write_text(json.dumps(new_cache, separators=(",", ":")), encoding="utf-8")
     tmp.replace(PROGRESS_DIR / "req_index.json")
+    ttmp = PROGRESS_DIR / f"review_types.json.{os.getpid()}.tmp"
+    ttmp.write_text(json.dumps(new_tcache, separators=(",", ":")), encoding="utf-8")
+    ttmp.replace(PROGRESS_DIR / "review_types.json")
     # '어디까지': 앞에서부터 빠짐없이 생성이 끝난 배치 수, 가장 뒤의 생성 배치
     contiguous = 0
     for b in sorted(batches):
@@ -166,7 +214,28 @@ def scan_outputs(latest_base):
     touched = max((b for b, (n, g) in batches.items() if g), default=0)
     frontier = {"batches_total": max(batches, default=0), "contiguous_done_batch": contiguous,
                 "last_touched_batch": touched}
-    return entries, req_stat, usage, seconds, frontier, last_done
+    return entries, req_stat, usage, seconds, frontier, last_done, bias
+
+
+def review_bias(bias, run):
+    """날짜별 유형별 수 → progress.json 의 review_bias (전체 + 가장 최근 날짜 폴더) 와 경보 목록."""
+    try:
+        threshold = float(run.get("거부 편향 경보 기준", 5))
+    except ValueError:
+        threshold = 5.0
+    min_n = C.run_int(run, "거부 편향 최소 샘플", 100)
+    total = collections.defaultdict(lambda: [0, 0, 0, 0])
+    for d in bias.values():
+        for t, v in d.items():
+            for k in range(4):
+                total[t][k] += v[k]
+    latest = max(bias, default="")
+    all_types, all_alerts = bias_summary(total, threshold, min_n)
+    last_types, last_alerts = bias_summary(bias.get(latest, {}), threshold, min_n)
+    return {"threshold_pct": threshold, "min_samples": min_n,
+            "definition": "(안전 사유로 뺀 공격 샘플 + 판정 거절로 빠진 공격 샘플) / 생성된 공격 샘플, 지금 결과(다시 만들기 반영)",
+            "all": {"by_type": all_types, "alerts": all_alerts},
+            "latest_date": latest, "latest": {"by_type": last_types, "alerts": last_alerts}}
 
 
 def compute(log=None):
@@ -183,7 +252,8 @@ def compute(log=None):
                     if (b / "_0_existing" / "coverage.json").exists()), None)
     cov = _json(cov_src / "_0_existing" / "coverage.json", {}) if cov_src else {}
 
-    entries, req_stat, usage, seconds, frontier, last_done = scan_outputs(latest_base)
+    entries, req_stat, usage, seconds, frontier, last_done, bias = scan_outputs(latest_base)
+    rb = review_bias(bias, run)
     rows, flags = [], collections.Counter()
     by_source = collections.defaultdict(collections.Counter)
     by_type = collections.defaultdict(collections.Counter)
@@ -261,7 +331,7 @@ def compute(log=None):
         "by_attack_type": dict(sorted(((k, group(v)) for k, v in by_type.items()), key=lambda kv: -kv[1]["target"])),
         "samples": dict(samples), "requests": req_stat, "frontier": frontier, "last_done": last_done,
         "usage": {k: dict(v) for k, v in usage.items()}, "average_per_request": avg, "estimate_remaining": est,
-        "seconds": round(time.time() - started, 1),
+        "review_bias": rb, "seconds": round(time.time() - started, 1),
     }
     PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
     C.write_jsonl(PROGRESS_DIR / "rule_status.jsonl", rows)
@@ -290,6 +360,17 @@ def compute(log=None):
             log.info("[3.5] 남은 요청 약 %d개 → 약 %.0f시간 (동시 생성 %d·검토 %d%s), 토큰 약 생성 %s · 검토 %s",
                      remaining, est["hours"], gw, rw, ", 생성·검토 함께" if overlap else "",
                      f"{est['generator_tokens'] or 0:,}", f"{est['reviewer_tokens'] or 0:,}")
+        for scope, name in (("all", "전체"), ("latest", f"최근 {rb['latest_date']}")):
+            types = rb[scope]["by_type"]
+            if rb[scope]["alerts"]:
+                log.warning("[3.5] [경고] 거부 편향 (%s): 검토 모델이 안전 사유로 빼거나 거절한 공격 샘플이 %s%% 를 넘는 유형 - %s "
+                            "(화면 2 '검토에서 뺀 샘플' 에서 확인, 다시 만들기 고려)", name, f"{rb['threshold_pct']:g}",
+                            ", ".join(f"{t} {types[t]['refusal_pct']:.1f}% ({types[t]['safety_dropped'] + types[t]['refused']}"
+                                      f"/{types[t]['generated_attacks']})" for t in rb[scope]["alerts"]))
+            elif types:
+                top = max(types, key=lambda t: types[t]["refusal_pct"])
+                log.info("[3.5] 거부 편향 (%s): 기준 %s%% 넘는 유형 없음 (가장 높은 %s %.1f%%)", name,
+                         f"{rb['threshold_pct']:g}", top, types[top]["refusal_pct"])
         log.info("[3.5] → %s (%.1f초)", PROGRESS_DIR, summary["seconds"])
     return summary
 

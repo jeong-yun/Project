@@ -15,6 +15,7 @@
   속도 (LLM_설정.md '## 실행'): 3.2·3.3 은 요청 여러 개를 동시에 보내고('생성 동시 요청 수' 3, '검토 동시 요청 수' 4),
     '생성·검토 동시 진행' = 예 이면 3.2 와 3.3 을 함께 돌려 생성된 요청부터 바로 검토한다.
   --max-requests N: 이번 실행에서 생성·검토할 요청 수. 이전 실행의 검토 대기분이 있으면 그것부터 검토하고 그만큼 덜 생성한다.
+  --custom-first: 사용자 룰(custom)이 든 요청부터 생성한다. 기본 순서는 배치 순서(ET → Talos → 사용자 룰)라 사용자 룰이 맨 뒤.
   각 단계는 이미 끝난 요청은 건너뛰므로, 중간에 멈춰도 다시 실행하면 이어서 진행한다.
   입력 날짜가 바뀌어도(1_0 이 새 05_llm_input/<날짜> 를 만들어도) 이어서 진행한다:
     - 시작할 때 입력 날짜를 하나 정해 3.1a·3.1·3.2 가 끝까지 같은 입력을 쓴다 (도중에 수집 에이전트가 새 입력을 만들어도)
@@ -31,6 +32,7 @@
     python 3_0_run_generation.py --generator mock --reviewer mock   # 키 없이 전체 흐름 시험
     python 3_0_run_generation.py                            # 변경분(delta) 요청 1개 생성·검토·증강
     python 3_0_run_generation.py --set all --max-requests 30
+    python 3_0_run_generation.py --set all --max-requests 70 --custom-first   # 사용자 룰이 든 요청부터
     python 3_0_run_generation.py --set all --max-requests 0 # 남은 요청 전부 (비용 주의)
     (화면) python 0_0_run_ui.py                             # 위 작업을 화면에서
 """
@@ -92,8 +94,8 @@ def run(args):
         log.error("05_llm_input 에 %s 입력이 없습니다 (먼저 1_0_run_daily.py)", args.date or "완성된")
         return 1
     pin = in_dir.name
-    log.info("입력 날짜 %s%s, 세트 %s, 요청 %s개%s", pin, "" if args.date else " (가장 최근)", args.set,
-             args.max_requests or "남은 전부", " (dry-run)" if args.dry_run else "")
+    log.info("입력 날짜 %s%s, 세트 %s, 요청 %s개%s%s", pin, "" if args.date else " (가장 최근)", args.set,
+             args.max_requests or "남은 전부", " (dry-run)" if args.dry_run else "", ", 사용자 룰 먼저" if args.custom_first else "")
     RT.update_lock("generation", input_date=pin)
     date = ["--date", pin]
     sweep = ["--date", args.date] if args.date else []      # 3.3·3.4: 날짜를 안 줬으면 모든 날짜 폴더의 대기분까지
@@ -101,6 +103,7 @@ def run(args):
     gen = date + ["--set", args.set, "--max-requests", str(args.max_requests), "--count-pending"]
     gen += ([] if args.date else ["--pending-all"])
     gen += (["--generator", args.generator] if args.generator else []) + (["--dry-run"] if args.dry_run else [])
+    gen += ["--custom-first"] if args.custom_first else []
     rev = sweep + (["--reviewer", args.reviewer] if args.reviewer else []) + (["--dry-run"] if args.dry_run else [])
     # 검토도 이번 요청 수만큼만 (이전 실행의 검토 대기분 포함, 오래된 것부터). 0 = 대기분 전부
     rev += ["--max-requests", str(args.max_requests)] if args.max_requests > 0 else []
@@ -147,6 +150,8 @@ def main():
     ap.add_argument("--generator", help="생성 모델 'provider:model'")
     ap.add_argument("--reviewer", help="검토 모델 'provider:model' 또는 'none'")
     ap.add_argument("--dry-run", action="store_true", help="LLM 호출 없이 준비와 건수만 확인")
+    ap.add_argument("--custom-first", action="store_true",
+                    help="사용자 룰(custom)이 든 요청부터 생성 (기본: 배치 순서 ET → Talos → 사용자 룰)")
     ap.add_argument("--no-dataset", action="store_true", help="마지막 1.4 (IPS/WAF 로그 변환) 를 건너뛴다")
     ap.add_argument("--status", action="store_true",
                     help="생성하지 않고 진행 현황만: 현재 룰 중 학습데이터를 만든 비율, 룰별 상태 플래그 (3.5)")
@@ -156,7 +161,7 @@ def main():
         return run_step("3_5_progress.py", [])
 
     holder = RT.acquire_lock("generation", by="3_0", set=args.set, max_requests=args.max_requests,
-                             dry_run=args.dry_run)
+                             dry_run=args.dry_run, custom_first=args.custom_first)
     if holder:
         log.error("학습데이터 생성이 이미 실행 중입니다 (PID %s, %s 시작) - 끝난 뒤 다시 실행하거나 UI 에서 확인하세요",
                   holder.get("pid"), holder.get("started_at"))

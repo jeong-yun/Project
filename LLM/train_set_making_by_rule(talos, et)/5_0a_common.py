@@ -201,6 +201,27 @@ def verify_codes(date, dev, stat):
     return v.get("codes") or None
 
 
+RECHECK = Path(os.environ.get("RULEDATA_RECHECK_DIR") or BASE / "07_llm_output" / "_recheck") / "results.jsonl"
+
+
+def llm_ok_keys():
+    """4. 화면 'LLM 재확인'(3_6)에서 가장 최근 판정이 'label 맞음'인 샘플 내용 지문(ck) - 6. 선별의 'LLM 이 맞다고 한
+    불일치는 남기기' 옵션에 쓴다 (5.5 가 비교 표의 lk 로 남김). 결과 파일이 없으면 빈 집합."""
+    latest = {}
+    try:
+        with open(RECHECK, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("ck"):
+                    latest[r["ck"]] = r.get("verdict")
+    except OSError:
+        pass
+    return {k for k, v in latest.items() if v == "ok"}
+
+
 def sample_key(label, rule_id, payload):
     """샘플 내용 지문 (로그를 다시 만들어도 같고, 화면에서 고치면 바뀐다)."""
     return hashlib.sha1(f"{label}\x00{rule_id}\x00{payload}".encode("utf-8", "replace")).hexdigest()[:20]
