@@ -39,9 +39,11 @@ from pydantic import ValidationError
 from st_click_detector import click_detector
 
 import board_ui
+import command_center_ui
 import concept_ui
 import design_ui
 import home_ui
+import office_ui
 from core import audio_edit, concept, followup, llm_factory, member_models, music, stock_calc, usage, verification
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -323,6 +325,18 @@ def chosen_off(node_id: str) -> tuple[str, str] | None:
 def name_of(node_id: str) -> str:
     node = nodes[node_id]
     return node.name or ranks_by_id[node.rank].name
+
+
+# 🏢 픽셀 사무실·🖥️ 커맨드 센터가 쓰는 팀 정보 (office_ui.py · command_center_ui.py)
+office_ctx = office_ui.OfficeCtx(
+    team_id=team_id, team_name=team.name, org=org, names={nid: name_of(nid) for nid in nodes},
+    ranks={nid: (n.rank, ranks_by_id[n.rank].name) for nid, n in nodes.items()},
+    specialties={nid: n.specialty for nid, n in nodes.items()}, parents=parents,
+    blocked={nid: f"{off[0]} — {off[1]}" for nid in nodes if (off := chosen_off(nid))},
+    models={nid: member_models.split_key(p.effective)[1] for nid, p in member_plans.items()},
+    storage=storage, runs=runs, settings=settings, data_dir=DATA_DIR, go_to_run=go_to_run,
+    web=WEB_SEARCH_TOOL in team.tools,
+)
 
 
 def make_graph():
@@ -1298,13 +1312,26 @@ st.markdown(
 def render_live() -> None:
     run = runs.get(run_key)
 
-    # 조직도 — 칸을 누르면 그 에이전트로 포커스 이동
-    clicked = click_detector(chart_html(run["statuses"] if run else {}, st.session_state[FOCUS_KEY], active_ids),
-                             key=f"chart_{team_id}")
-    if clicked and clicked.startswith(NODE_LINK) and clicked != st.session_state.get(CLICK_KEY):
-        st.session_state[CLICK_KEY] = clicked
-        st.session_state[FOCUS_KEY] = clicked[len(NODE_LINK):]
-        st.rerun(scope="fragment")  # 조직도의 파란 테두리(선택 표시)도 바로 옮기도록 이 영역만 다시 그림
+    if office_ui.view_picker() == office_ui.OFFICE:
+        # 🏢 픽셀 사무실 + 🖥️ 커맨드 센터 — 캐릭터를 누르면 조직도 클릭과 똑같이 그 에이전트로 포커스 이동
+        c_office, c_cc = st.columns([3, 2])
+        with c_office:
+            picked = office_ui.render_office(office_ctx, run, active_ids, st.session_state[FOCUS_KEY])
+        with c_cc:
+            command_center_ui.render(office_ctx, run, target, active_ids)
+        if picked:
+            st.session_state[FOCUS_KEY] = picked
+            st.rerun(scope="fragment")
+    else:
+        # 조직도 — 칸을 누르면 그 에이전트로 포커스 이동
+        clicked = click_detector(chart_html(run["statuses"] if run else {}, st.session_state[FOCUS_KEY], active_ids),
+                                 key=f"chart_{team_id}")
+        if clicked and clicked.startswith(NODE_LINK) and clicked != st.session_state.get(CLICK_KEY):
+            st.session_state[CLICK_KEY] = clicked
+            st.session_state[FOCUS_KEY] = clicked[len(NODE_LINK):]
+            st.rerun(scope="fragment")  # 조직도의 파란 테두리(선택 표시)도 바로 옮기도록 이 영역만 다시 그림
+        if st.toggle("🖥️ 커맨드 센터", key=f"cc_open_{team_id}"):
+            command_center_ui.render(office_ctx, run, target, active_ids)
 
     # 선택지 이름은 고정(에이전트 이름)으로 둔다 — 진행 상태를 이름에 넣으면 1초마다 선택지가 바뀌어 선택이 풀릴 수 있다
     focus = st.selectbox("🔎 에이전트 보기 (조직도의 칸을 눌러도 됩니다)", [NO_FOCUS, *[n.id for n in org.walk()]],
@@ -1692,6 +1719,7 @@ if not idle:
 # ════════════════════════════════════════════════════════════════════
 # 제출 → 백그라운드 실행 시작 (core/live.py)
 # ════════════════════════════════════════════════════════════════════
+request = request or command_center_ui.pop_request(team_id, web_available)  # 🖥️ 커맨드 센터 터미널에서 맡긴 한 줄
 if request:
     if running:
         st.warning("진행 중인 업무가 있습니다. 끝난 뒤에 새 업무를 맡겨 주세요.")
