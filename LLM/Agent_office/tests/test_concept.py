@@ -168,6 +168,71 @@ def test_bad_answer_reports_each_rule():
     assert any("<review_log>" in p for p in no_thought) and any("concept_plan" in p for p in no_thought)
 
 
+# 모델이 absorb·edits 를 엉뚱한 모양으로 쓴 경우 — 화면이 멈추던 일 (2026-10-27): 고쳐 읽고, 하네스는 다시 쓰라고 알린다
+BAD_SHAPES = [
+    ({"absorb": "GRPO"}, ["GRPO"]),
+    ({"absorb": [{"name": "GRPO", "reason": "편입"}, {"title": "CaTS"}]}, ["GRPO", "CaTS"]),
+    ({"absorb": [None, " GRPO ", 3, "GRPO", {"reason": "이름 없음"}]}, ["GRPO", "3"]),
+    ({"absorb": {"항목": "GRPO"}}, ["GRPO"]),
+]
+
+
+@pytest.mark.parametrize("bad,absorb", BAD_SHAPES)
+def test_malformed_absorb_is_normalized_and_flagged(bad, absorb):
+    answer = answer_with(GOOD_ENTRY, {**PLAN, **bad})
+    res = concept.parse_result(answer)
+    assert res.plan["absorb"] == absorb
+    assert any("absorb" in p for p in concept.check_answer(answer))
+    result = REGISTRY["concept_entry"].check(answer, {})
+    assert not result.passed and "absorb" in result.log
+
+
+def test_malformed_edits_and_other_fields_do_not_break(root):
+    plan = {**PLAN, "absorb": None, "tag": ["Perf"], "target": {"name": "GRPO"},
+            "summary": {**PLAN["summary"], "keywords": ["분리", "클리핑"]},
+            "basic_terms": ["용어A: 정의A", 7],
+            "edits": [{"entry": {"name": "GRPO"}, "find": None, "reason": 1}, "그냥 문장", None]}
+    res = concept.parse_result(answer_with(GOOD_ENTRY, plan))
+    p = res.plan
+    assert p["absorb"] == [] and p["tag"] == "Perf" and p["target"] == "GRPO" and p["summary"]["keywords"] == "분리, 클리핑"
+    assert p["basic_terms"] == [{"term": "용어A", "definition": "정의A"}]
+    assert p["edits"] == [{"entry": "GRPO", "find": "", "replace": "", "reason": "1"}]
+    text = " ".join(res.problems)
+    assert "edits" in text and "basic_terms" in text and "tag" in text and "target" in text
+    assert concept.apply_edits(cat.Catalog.load(root), p["edits"])[0].startswith("⚠️")  # 반영해도 멈추지 않고 수동 수정 안내
+    edits_dict = concept.parse_result(answer_with(GOOD_ENTRY, {**PLAN, "edits": {"entry": "GRPO", "find": "a", "replace": "b"}}))
+    assert edits_dict.plan["edits"][0]["entry"] == "GRPO" and any("edits" in x for x in edits_dict.problems)
+    assert concept.normalize_plan(["not", "a", "dict"])[0] == {}
+    assert concept.check_answer(answer_with(GOOD_ENTRY, PLAN)) == []  # 바른 계획은 그대로 통과
+
+
+def test_malformed_absorb_still_adopts_into_catalog(root):
+    import concept_ui
+
+    plan, err = concept_ui.check_adoptable(GOOD_ENTRY, json.dumps({**PLAN, "absorb": [{"name": "Calibrated Test-Time Scaling"}, None]}))
+    assert err == "" and plan["absorb"] == ["Calibrated Test-Time Scaling"]
+    changes = cat.apply_plan(cat.Catalog.load(root), plan, GOOD_ENTRY, D)
+    assert any("(통합)" in c.detail for c in changes)
+    assert concept_ui.check_adoptable(GOOD_ENTRY, "[1, 2]")[0] is None
+
+
+def test_result_screen_opens_with_malformed_plan():
+    """이미 저장된 결과(absorb 가 객체 목록)도 결과 화면이 열리고 경고만 보인다."""
+    from streamlit.testing.v1 import AppTest
+
+    def page(content):
+        import concept_ui
+
+        concept_ui.result_tabs(content, {"run_id": "r1", "question": "", "brief": None, "harness_options": {}})
+
+    plan = {**PLAN, "action": "update", "target": "GRPO", "absorb": [{"name": "CaTS", "reason": "편입"}, None],
+            "edits": ["문장"]}
+    at = AppTest.from_function(page, kwargs={"content": answer_with(GOOD_ENTRY, plan)}, default_timeout=30).run()
+    assert not at.exception, at.exception
+    assert any("통합으로 빠질 항목: CaTS" in c.value for c in at.caption)
+    assert any("absorb" in w.value for w in at.warning)
+
+
 def test_normalize_entry_to_catalog_style():
     # 실제 실행에서 모델이 쓴 형식 (분류 표시·붙여 쓴 절 제목·마크다운 불릿·참고문헌 불릿 없음)
     raw = """[2.AI] [Perf] DAPO(Decoupled Clip) (작성일: 26.10.20)
