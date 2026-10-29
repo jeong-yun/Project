@@ -115,10 +115,19 @@ autonomy:
   audit_file: autonomy/audit.jsonl   # data/ 기준 — 실행·건너뜀·승인 요청을 해시 체인으로 남긴다
   jobs: []
   # 예시 (level: observe = 보고서만 / propose = 바꿀 내용을 제안으로 저장, 적용은 사람이):
-  #  - id: weekly_access_review
-  #    team: _security_governance
+  # 🛡️ 보안 거버넌스 팀이 주 1회(168시간) 가상 회사 샘플 증적을 점검한다. 실제로 쓸 때는 evidence_dir 을
+  # 내 증적 폴더(비밀 값을 지운 설정·정책 사본)로 바꾼다. 호출 없이 계획만 보려면: python scripts/run_autonomous.py --dry-run
+  #  - id: weekly_control_check
+  #    team: security_governance
   #    task: control_check
-  #    inputs: {framework: ISMS-P, scope: 접근통제, evidence: "(점검할 설정·정책 발췌)"}
+  #    inputs: {framework: ISMS-P, scope: 접근통제·로그 관리, evidence_dir: teams/security_governance/samples/sample_corp/current}
+  #    every_hours: 168
+  #    level: observe
+  #  - id: weekly_config_drift
+  #    team: security_governance
+  #    task: drift_check
+  #    inputs: {framework: ISMS-P, evidence_dir: teams/security_governance/samples/sample_corp/current/config,
+  #             baseline_dir: teams/security_governance/samples/sample_corp/previous/config}
   #    every_hours: 168
   #    level: observe
 

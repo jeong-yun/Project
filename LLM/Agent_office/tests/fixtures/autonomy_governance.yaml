@@ -1,0 +1,19 @@
+# 자율 실행 예시 작업 (fixture) — 🛡️ 보안 거버넌스 팀 주 1회 observe, 가상 회사 샘플 증적
+# 계획만 보기 (호출 없음):  python scripts/run_autonomous.py --dry-run --jobs tests/fixtures/autonomy_governance.yaml
+# tests/test_governance.py 가 이 파일로 가짜 모델 실행(하네스 포함)을 끝까지 돌린다.
+jobs:
+  - id: weekly_control_check
+    team: security_governance
+    task: control_check
+    inputs: {framework: ISMS-P, scope: 접근통제·로그 관리, evidence_dir: teams/security_governance/samples/sample_corp/current}
+    every_hours: 168
+    level: observe
+  - id: weekly_config_drift
+    team: security_governance
+    task: drift_check
+    inputs:
+      framework: ISMS-P
+      evidence_dir: teams/security_governance/samples/sample_corp/current/config
+      baseline_dir: teams/security_governance/samples/sample_corp/previous/config
+    every_hours: 168
+    level: observe

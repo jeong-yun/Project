@@ -1,0 +1,114 @@
+# 🛡️ 보안 거버넌스 팀 — 설정·정책·로그 증적을 ISMS-P · ISO/IEC 27001:2022 · NIST CSF 2.0 통제 항목에 대응시켜
+# 충족 여부·인용 증적·미비점·개선안을 표와 JSON 으로 정리한다. 설정 drift(지난번과 달라진 설정)도 점검한다.
+#
+# 설계 문서: docs/AI_전용_업무_설계.md (1단계). 자율 실행(core/autonomy.py)으로 주 1회 돌릴 때도 이 팀은 보고서만 쓴다 (level: observe).
+#
+# 원칙
+#   - 증적에 없는 것은 '확인 불가' — 모델이 아는 '일반적인 회사의 상태'로 채우지 않는다
+#   - tools 에 web_search 를 넣지 않는다: 웹 검색어는 질문(내부 설정·정책 발췌)으로 만들어 외부로 나가므로
+#   - 통제 번호·인용 문구는 코드가 검사한다 (하네스 control_ids · evidence_quotes, core/governance.py)
+#       통제 목록: config/controls/*.yaml (공개 출처·개수는 각 파일 머리말)
+#   - 증적·diff·쓸 수 있는 통제 번호 목록은 governance_evidence 툴이 코드로 만들어 모든 팀원에게 근거 자료로 준다
+#
+# 시험용 가상 회사 증적: samples/sample_corp (실제 회사·사람·IP 아님). 업무 양식의 '샘플 증적' 칸을 켜면 쓴다.
+
+name: 🛡️ 보안 거버넌스 팀
+description: 설정·정책·로그 증적을 ISMS-P · ISO/IEC 27001:2022 · NIST CSF 2.0 통제 항목에 대응시켜 충족 여부·인용 증적·미비점·개선안을 정리하고, 설정 drift 를 점검한다. 웹 검색 없음.
+
+personas:
+  staff: 당신은 정보보호 관리체계 담당 신입입니다. 증적 문구를 원문 그대로 인용하고, 없는 것은 없다고 씁니다. 모르는 통제 번호는 지어내지 않고 비워 둡니다.
+  assistant_manager: 당신은 내부 감사 경험이 있는 담당자입니다. 증적이 통제 요구사항을 정말 만족하는지 하나씩 대조하고, 인용이 원문과 한 글자라도 다르면 고칩니다.
+  gm: 당신은 관리체계 인증 심사를 여러 번 받아 본 책임자입니다. 통제 항목 번호와 요구사항 해석이 맞는지, 증적이 그 항목의 증적이 맞는지 봅니다.
+  team_lead: 당신은 정보보호 책임자입니다. 경영진이 바로 읽을 수 있게 위험도 순으로 정리하고, 판정마다 근거(인용)가 붙어 있는지 확인합니다.
+
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장·거버넌스
+  specialty: 통제 점검 총괄 — 위험도 순 정리, 최종 보고서와 JSON
+  children:
+    - id: gm_mapping
+      rank: gm
+      name: 부장·통제 매핑
+      specialty: 증적을 프레임워크 통제 항목에 대응 (근거 자료의 통제 번호 목록에서만 고름)
+      children:
+        - id: am_evidence
+          rank: assistant_manager
+          name: 대리·증적 대조
+          specialty: 통제 요구사항과 증적 문구를 하나씩 대조해 충족 / 부분 충족 / 미흡 / 확인 불가 판정, 증적 원문 인용
+        - id: staff_gap
+          rank: staff
+          name: 사원·미비점
+          specialty: 미흡·부분 충족 항목의 미비점과 바로 할 수 있는 개선안 (설정 값·문서 문장 수준)
+
+review_criteria:
+  - 통제 항목 번호가 근거 자료의 통제 번호 목록에 있는가 (지어낸 번호가 없는가)
+  - 판정마다 증적 원문을 글자 그대로 인용했는가 (증적이 없으면 '확인 불가' 인가)
+  - 미흡 항목의 개선안이 구체적인가 (설정 값·문서 문장 수준)
+
+output_format: markdown
+
+tools: [governance_evidence]   # web_search 없음 — 내부 증적이 검색어로 나가지 않게
+
+harness:
+  validators: [json_keys, required_terms, control_ids, evidence_quotes]
+  final_only: [json_keys, required_terms, control_ids, evidence_quotes]   # 하위 실무자는 일부만 쓰므로 최종 답변에만
+  max_retries: 2
+
+tasks:
+  - id: control_check
+    title: 통제 항목 점검
+    description: 증적(설정·정책·로그 발췌)을 고른 프레임워크의 통제 항목별로 충족 여부·인용 증적·미비점·개선안으로 정리합니다. 통제 번호와 인용 문구는 코드가 다시 확인합니다. (개인정보·비밀 값은 지우고 붙여 넣으세요)
+    fields:
+      - {key: framework, label: 프레임워크, type: select, options: [ISMS-P, "ISO/IEC 27001:2022", NIST CSF 2.0], required: true}
+      - {key: scope, label: 점검 범위, placeholder: "예: 접근통제·로그 관리, 클라우드 계정"}
+      - {key: use_sample, label: 🧪 가상 회사(샘플상사) 샘플 증적으로 해 보기, type: checkbox}
+      - {key: evidence, label: 증적 (설정·정책·로그 발췌), type: textarea, help: "샘플 증적을 켜면 비워 둬도 됩니다"}
+    question: "{framework} 기준으로 증적을 통제 항목별로 점검해줘.\n점검 범위: {scope}\n샘플 증적(근거 자료의 가상 회사 샘플상사 증적 파일) 사용: {use_sample}\n[붙여 넣은 증적]\n{evidence}"
+    goal: "{framework} 통제 항목별 판정(충족/부분 충족/미흡/확인 불가)·인용 증적·미비점·개선안 표와 JSON 요약"
+    success_criteria:
+      - "통제 항목마다 항목 번호·이름 / 판정 / 증적 인용 / 미비점 / 개선안을 표로 쓴다"
+      - "미흡 → 부분 충족 → 확인 불가 → 충족 순으로 정렬한다"
+      - "답변 맨 끝에 지침의 ```json 블록을 정확히 1개 붙인다"
+    constraints:
+      - "통제 번호는 근거 자료의 '{framework} 통제 번호 목록'에 있는 것만 쓴다. 맞는 번호를 모르면 번호를 비우고 이름만 쓴다"
+      - "evidence 에는 증적 원문을 글자 그대로 복사한다 (요약·번역·고쳐 쓰기 금지). 증적에 없는 내용은 추정하지 않고 '확인 불가'로 쓴다"
+    instructions: |
+      [판정 기준] 충족 = 요구사항을 증적이 직접 보여 줌 / 부분 충족 = 일부만 / 미흡 = 증적이 요구사항과 반대 / 확인 불가 = 판단할 증적 없음
+      [인용 규칙] evidence 는 증적 파일의 한 줄(또는 연속된 몇 단어)을 그대로 복사한다. 떨어진 두 곳은 "…" 로 잇는다.
+        코드가 evidence 가 증적 원문에 글자 그대로 있는지 확인한다 (공백 차이만 무시). '확인 불가'가 아닌 판정은 evidence 가 있어야 한다.
+      [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"summary": {"framework": "{framework}", "checked": 3, "fail": 1, "partial": 1, "unknown": 1, "pass": 0},
+       "controls": [{"control_id": "2.5.6", "title": "접근권한 검토", "status": "미흡", "evidence": "인용한 증적 원문", "gap": "미비점", "fix": "개선안"}]}
+      status 는 "충족" / "부분 충족" / "미흡" / "확인 불가" 중 하나. 위 control_id·title 은 형식 예시일 뿐이다.
+    harness_options:
+      required_keys: [summary, controls]
+      required_terms: ["판정", "증적", "개선"]
+
+  - id: drift_check
+    title: 설정 drift 점검
+    description: 지난번 설정과 이번 설정을 코드가 줄 단위로 비교(diff)하고, 바뀐 줄마다 통제 영향(약화·강화·중립)과 되돌릴지 여부를 정리합니다.
+    fields:
+      - {key: framework, label: 프레임워크, type: select, options: [ISMS-P, "ISO/IEC 27001:2022", NIST CSF 2.0], required: true}
+      - {key: use_sample_drift, label: 🧪 가상 회사(샘플상사) 지난주·이번 주 설정으로 해 보기, type: checkbox}
+      - {key: before, label: 이전 설정, type: textarea, help: "샘플을 켜면 비워 둬도 됩니다"}
+      - {key: evidence, label: 현재 설정, type: textarea}
+    question: "{framework} 기준으로 이전 설정과 현재 설정의 차이(drift)가 통제에 주는 영향을 점검해줘.\n샘플 설정(근거 자료의 가상 회사 샘플상사 지난주·이번 주 설정과 코드 diff) 사용: {use_sample_drift}\n[이전 설정]\n{before}\n[현재 설정]\n{evidence}"
+    goal: "{framework} 기준 설정 변경별 통제 영향(약화/강화/중립)·관련 통제 항목·인용·조치(되돌림/유지/확인) 표와 JSON 요약"
+    success_criteria:
+      - "근거 자료의 코드 diff 에 나온 바뀐 줄을 하나도 빼지 않고 다룬다"
+      - "바뀐 줄마다 관련 통제 번호 / 영향 / 인용(바뀐 줄 원문) / 조치를 표로 쓴다"
+      - "답변 맨 끝에 지침의 ```json 블록을 정확히 1개 붙인다"
+    constraints:
+      - "통제 번호는 근거 자료의 '{framework} 통제 번호 목록'에 있는 것만 쓴다"
+      - "evidence 에는 바뀐 줄의 설정 원문을 글자 그대로 복사한다 (diff 의 +/- 기호는 빼도 된다)"
+      - "diff 에 없는 변경을 지어내지 않는다"
+    instructions: |
+      [영향] 약화 = 통제를 약하게 함(되돌림 권고) / 강화 = 통제를 강하게 함 / 중립 = 통제와 무관
+      [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"summary": {"framework": "{framework}", "changes": 2, "weakened": 1, "strengthened": 0, "neutral": 1},
+       "controls": [{"control_id": "2.6.6", "title": "원격접근 통제", "status": "미흡", "impact": "약화", "evidence": "바뀐 줄 원문", "gap": "무엇이 약해졌나", "fix": "되돌릴 설정 값"}]}
+      status 는 바뀐 뒤 상태 기준 "충족" / "부분 충족" / "미흡" / "확인 불가". 위 control_id·title 은 형식 예시일 뿐이다.
+    harness_options:
+      required_keys: [summary, controls]
+      required_terms: ["영향", "조치|되돌"]

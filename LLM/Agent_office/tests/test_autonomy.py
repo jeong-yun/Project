@@ -19,7 +19,7 @@ def audit(tmp_path):
 
 
 def make_cfg(**kw) -> AutonomyConfig:
-    jobs = kw.pop("jobs", [AutonomyJob(id="drift", team="_security_governance", task="control_check", every_hours=24)])
+    jobs = kw.pop("jobs", [AutonomyJob(id="drift", team="security_governance", task="control_check", every_hours=24)])
     return AutonomyConfig(**{"enabled": True, "daily_budget_usd": 1.0, "max_runs_per_day": 6, "jobs": jobs, **kw})
 
 
@@ -59,7 +59,7 @@ def test_runs_only_when_due(audit):
 
 
 def test_budget_cap_stops_new_runs(audit):
-    jobs = [AutonomyJob(id=f"j{i}", team="_security_governance", every_hours=1) for i in range(3)]
+    jobs = [AutonomyJob(id=f"j{i}", team="security_governance", every_hours=1) for i in range(3)]
     cfg, runner = make_cfg(jobs=jobs), FakeRunner(cost=0.6)
     results = run_due(cfg, runner, audit, runner.spent_today, NOW)
     assert [r.status for r in results] == ["done", "done", "skipped_budget"]  # 0.6 → 1.2 ≥ 1.0 이면 세 번째는 시작 안 함
@@ -68,7 +68,7 @@ def test_budget_cap_stops_new_runs(audit):
 
 
 def test_max_runs_per_day_counts_free_models_too(audit):
-    jobs = [AutonomyJob(id=f"j{i}", team="_security_governance", every_hours=1) for i in range(3)]
+    jobs = [AutonomyJob(id=f"j{i}", team="security_governance", every_hours=1) for i in range(3)]
     cfg, runner = make_cfg(jobs=jobs, max_runs_per_day=2), FakeRunner(cost=0.0)  # 무료·구독 모델: 비용 0 으로 잡힘
     assert [r.status for r in run_due(cfg, runner, audit, runner.spent_today, NOW)] == ["done", "done", "skipped_runs"]
 
@@ -79,7 +79,7 @@ def test_irreversible_actions_wait_for_approval(audit):
     result = run_due(observe, FakeRunner(actions=acts), audit, lambda: 0.0, NOW)[0]
     assert [a["action"] for a in result.pending_approvals] == ["propose", "git_push"]  # observe 는 보고서만
 
-    propose = make_cfg(jobs=[AutonomyJob(id="p", team="_security_governance", level="propose")])
+    propose = make_cfg(jobs=[AutonomyJob(id="p", team="security_governance", level="propose")])
     result = run_due(propose, FakeRunner(actions=acts), audit, lambda: 0.0, NOW)[0]
     assert [a["action"] for a in result.pending_approvals] == ["git_push"]
     for action in autonomy.IRREVERSIBLE_ACTIONS:  # 어느 수준에서도 스스로 하지 않는다
@@ -110,7 +110,7 @@ def test_audit_chain_detects_tampering(audit):
 
 
 def test_governance_team_skeleton_is_valid(ranks, models):
-    team = load_team("_security_governance")
+    team = load_team("security_governance")
     validate_config(ranks, models, [team])
     assert "web_search" not in team.tools  # 내부 증적이 검색어로 밖에 나가지 않게
     req = build_request(team.tasks[0], {"framework": "ISMS-P", "evidence": "계정 검토: 연 1회"})

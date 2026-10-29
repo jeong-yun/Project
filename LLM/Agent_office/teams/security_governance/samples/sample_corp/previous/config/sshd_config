@@ -1,0 +1,15 @@
+# /etc/ssh/sshd_config — web01.example.com (가상 서버, 2026-10-22 수집)
+Port 22
+ListenAddress 192.0.2.10
+PermitRootLogin no
+PubkeyAuthentication yes
+PasswordAuthentication no
+PermitEmptyPasswords no
+MaxAuthTries 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 0
+AllowGroups sshusers
+LogLevel VERBOSE
+Banner /etc/issue.net
+X11Forwarding no

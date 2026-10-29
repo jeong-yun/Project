@@ -1,0 +1,6 @@
+검토일,대상 시스템,계정,권한,검토 결과,조치
+2026-10-02,sample-corp-prod,user01,admins,유지,-
+2026-10-02,sample-corp-prod,user02,admins,유지,-
+2026-10-02,sample-corp-prod,user03,developers,유지,-
+2026-10-02,sample-corp-prod,user07,developers,퇴사자 계정,조치 예정
+2026-10-02,sample-corp-prod,svc-deploy,AdministratorAccess,과다 권한 의심,검토 중
