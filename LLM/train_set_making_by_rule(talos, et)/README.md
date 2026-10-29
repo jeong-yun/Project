@@ -14,6 +14,7 @@ Cisco Talos와 Proofpoint ET Open의 Snort 룰을 매일 자동으로 받고, �
 | --- | --- | --- |
 | `docs/코드참조/` | **코드가 읽거나, 코드를 만들 때 참조하는 문서** | [선별조건.md](docs/코드참조/선별조건.md) — 룰 선별·중복 제거 조건 (O/X를 고치면 다음 실행 때 자동 반영)<br>[LLM_프롬프트.md](docs/코드참조/LLM_프롬프트.md) — LLM 지시문 (`05_llm_input`에 prompt.md로 복사됨)<br>[LLM입력_형식.md](docs/코드참조/LLM입력_형식.md) — LLM 입력 레코드 필드 명세<br>[method_매핑.md](docs/코드참조/method_매핑.md) — 공격 유형 → IPS/WAF method 이름 (1.4가 읽음)<br>[LLM_설정.md](docs/코드참조/LLM_설정.md) — 생성·검토 모델 선택 (3.0이 읽음)<br>[LLM_검토_프롬프트.md](docs/코드참조/LLM_검토_프롬프트.md) — 검토 모델 지시문 |
 | `docs/보고용/` | **사람이 읽는 보고·근거 문서** | [룰_선별기준.md](docs/보고용/룰_선별기준.md) — 선별·중복 제거 판단 근거와 수치<br>[진행_설계_요약.md](docs/보고용/진행_설계_요약.md) — 진행 내용과 설계(라벨·생성·품질·속도·ML 피처) 요약 |
+| `docs/ai_governance/` | **AI 거버넌스 문서** (NIST AI RMF · ISO/IEC 42001 · AI 기본법) | [README.md](docs/ai_governance/README.md) — 문서 7개 안내: AI 시스템 목록, NIST AI RMF 대응표, 위험 등록부, 측정 지표, 사람의 관리·감독, AI 기본법 고영향 체크리스트, 마스킹 제안 |
 
 ## 빠른 시작
 
@@ -79,6 +80,7 @@ rule_data/
  ├─ README.md            ← 이 문서
  ├─ docs/코드참조/       ← 코드가 읽는 md, 형식 명세
  ├─ docs/보고용/         ← 사람용 보고 문서
+ ├─ docs/ai_governance/  ← AI 거버넌스 문서 (NIST AI RMF · ISO/IEC 42001)
  ├─ 00_custom_rules/     ← 사용자 룰(선택): 직접 만든 Snort 룰 .rules 파일 (README 참고)
  ├─ .env.example         ← 설정 양식 (.env 로 복사해서 사용)
  ├─ .env                 ← OINKCODE 등 비밀 설정 — 공유 금지

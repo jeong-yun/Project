@@ -64,7 +64,6 @@ HABITABLE = {"living", "kitchen", "dining", "office", "bedroom", "other"}  # 창
 CONNECT_PRIORITY = ["corridor", "stair", "living", "dining", "entrance", "kitchen", "other", "office", "utility",
                     "bedroom", "dressroom", "bathroom", "storage", "balcony"]
 DEFAULT_CORRIDOR = 1.2  # 자동 분할 복도 폭 (m)
-DEFAULT_STAIR = (3.6, 1.2)  # 자동 계단 크기 (길이 × 폭, 곧은 계단)
 OUTSIDE = "outside"
 
 # ── 방 프로그램 모델 (배치 엔진 core/floorplan_solver.py 와 설계 품질 검사가 같이 쓴다) ──

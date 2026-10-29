@@ -30,7 +30,7 @@ Windows **PowerShell** 기준이며, 명령은 한 줄씩 순서대로 실행합
 1. https://github.com 로그인 → 오른쪽 위 **+** → **New repository**
 2. 입력
    - **Repository name**: 예) `agent-office`
-   - **Public / Private**: 개인 프로젝트·포트폴리오면 Public, 비공개면 Private
+   - **Public / Private**: 공개해도 되는 개인 프로젝트면 Public, 비공개면 Private
    - ⚠️ **Add a README / .gitignore / license 는 모두 체크하지 않는다** (이미 폴더에 있음. 체크하면 첫 push 가 충돌함)
 3. **Create repository** → 화면에 나오는 주소를 복사해 둔다
    예) `https://github.com/<내계정>/agent-office.git`
@@ -242,7 +242,7 @@ git push                            # GitHub 에 올리기
 - `HBF 검색 실패 수정: 뉴스 검색 추가`
 - `today_worked: 10-20 진행 기록`
 
-> 하루 작업이 끝나면 `today_worked.md` 를 갱신하고 함께 커밋하면 JD 용 기록이 자동으로 쌓입니다.
+> 하루 작업이 끝나면 `today_worked.md` 를 갱신하고 함께 커밋하면 날짜별 진행 기록이 자동으로 쌓입니다.
 
 ---
 
