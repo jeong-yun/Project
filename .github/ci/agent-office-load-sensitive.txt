@@ -13,4 +13,5 @@ tests/test_floorplan_space.py::test_big_sample_corridors_stay_one_spine
 # 실제 시간을 재는 동시 실행 테스트 — 스레드가 늦게 시작하면 '겹침'·'걸린 시간' 판단이 흔들린다.
 tests/test_concurrency.py::test_sibling_drafts_overlap_and_parent_waits_for_all
 tests/test_concurrency.py::test_independent_subtrees_do_not_wait_for_each_other
+tests/test_concurrency.py::test_data_tools_and_web_search_run_together
 tests/test_feeds.py::test_slow_source_keeps_what_it_got_and_a_hung_source_times_out
