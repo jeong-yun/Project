@@ -141,7 +141,7 @@ class JobResult:
     cost_usd: float = 0.0
 
 
-# runner(job) → {"report": 보고서 텍스트, "actions": [{"action": "propose", ...}, ...]}
+# runner(job) → {"report": 보고서 텍스트, "actions": [{"action": "propose", ...}, ...], "audit": {run_end 줄에 덧붙일 값 (검증 결과 등)}}
 Runner = Callable[[AutonomyJob], dict]
 
 
@@ -188,6 +188,37 @@ def run_due(
                 audit.append("approval_requested", ts=now, job=job.id, action=act.get("action", ""),
                              summary=str(act.get("summary", ""))[:200])
         cost = max(spent_today() - before, 0.0)
-        audit.append("run_end", ts=now, job=job.id, cost_usd=round(cost, 4), pending=len(pending))
+        extra = {k: v for k, v in (out.get("audit") or {}).items() if k not in ("ts", "event", "job", "prev", "hash", "cost_usd", "pending")}
+        audit.append("run_end", ts=now, job=job.id, cost_usd=round(cost, 4), pending=len(pending), **extra)
         results.append(JobResult(job.id, "done", report=out.get("report", ""), pending_approvals=pending, cost_usd=cost))
     return results
+
+
+# ─── 화면용 읽기 (autonomy_ui.py · scripts/run_autonomous.py --dry-run) ─────────────
+
+
+def schedule(cfg: AutonomyConfig, audit: AuditLog, now: float) -> list[dict]:
+    """작업별 {job, team, task, level, every_hours, last, next, due, last_result} — 감사 로그만 읽는다 (호출 없음)."""
+    last = audit.last_runs()
+    finished: dict[str, dict] = {}
+    for rec in audit.entries():
+        if rec["event"] in ("run_end", "run_error", "skipped_budget", "skipped_runs"):
+            finished[rec["job"]] = rec
+    out = []
+    for job in cfg.jobs:
+        ts = last.get(job.id)
+        out.append({"job": job.id, "team": job.team, "task": job.task, "level": job.level, "every_hours": job.every_hours,
+                    "last": ts, "next": now if ts is None else ts + job.every_hours * 3600,
+                    "due": is_due(job, ts, now), "last_result": finished.get(job.id)})
+    return out
+
+
+def approval_queue(audit: AuditLog) -> list[dict]:
+    """사람 승인 대기 — 자율 수준 밖이라 실행하지 않고 남긴 행동 (최근 것이 앞). 승인·기각 처리는 아직 없다 (읽기 전용)."""
+    return [rec for rec in reversed(audit.entries()) if rec["event"] == "approval_requested"]
+
+
+def autonomy_cost_since(audit: AuditLog, since: float) -> float:
+    """자율 실행만의 추정 비용 합계 (run_end·run_error 의 cost_usd)."""
+    return sum(float(rec.get("cost_usd") or 0) for rec in audit.entries()
+               if rec["event"] in ("run_end", "run_error") and rec["ts"] >= since)

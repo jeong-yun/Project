@@ -6,6 +6,7 @@
   stock_data      : 종목 주가·수익률·이동평균·변동성·밸류에이션, 보유 종목 평가손익 (yfinance)
   travel_calendar : 여행 기간 N박 M일, 날짜별 요일, 계절, D-day (계산만, 외부 호출 없음)
   floorplan_input : 첨부 도면(JSON·DXF·그림·PDF) → 레이아웃 JSON + 면적표·검증 결과, 방 최소 치수 기준표 (설계 팀)
+  governance_evidence : 증적 묶음 · 설정 drift(코드 diff) · 통제 번호 목록 (보안 거버넌스 팀, 외부 호출 없음)
 
 새 툴 추가 방법
   1) 이 폴더에 run(question, inputs, models) -> ToolResult | None 함수를 만든다 (쓸 자료가 없으면 None)
@@ -16,7 +17,7 @@
 from collections.abc import Callable
 
 from core.schemas import ModelsConfig, ToolResult
-from core.tools import floorplan_input, stock_data, travel_calendar
+from core.tools import floorplan_input, governance_evidence, stock_data, travel_calendar
 
 ToolFn = Callable[[str, dict, ModelsConfig], ToolResult | None]
 
@@ -24,6 +25,7 @@ TOOLS: dict[str, ToolFn] = {
     "stock_data": stock_data.run,
     "travel_calendar": travel_calendar.run,
     "floorplan_input": floorplan_input.run,
+    "governance_evidence": governance_evidence.run,
 }
 
 

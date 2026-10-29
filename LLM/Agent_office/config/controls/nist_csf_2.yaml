@@ -1,0 +1,232 @@
+# NIST Cybersecurity Framework (CSF) 2.0 — 기능·범주·하위 범주
+#
+# 출처: NIST CSF 2.0 Reference Tool 내려받기 (CPRT, Excel)
+#       https://csrc.nist.gov/extensions/nudp/services/json/csf/download?olirids=all
+#       원문: NIST CSWP 29, The NIST Cybersecurity Framework (CSF) 2.0 (2024-02-26) https://doi.org/10.6028/NIST.CSWP.29
+#       받은 날 2026-10-29 · 원본 파일 SHA-256 c797130763fd1068bdf9a9110dd1bd2939f8075f814f253c22e8a9af653b46d6
+# 미국 정부 저작물(17 U.S.C. §105)이라 하위 범주 문장을 그대로 둔다.
+#
+# 개수 (원본에서 코드로 셈): 기능 6 · 범주 22 · 하위 범주 106
+#   Reference Tool 에는 CSF 1.1 에서 빠진(Withdrawn) 번호 79개도 들어 있다 → withdrawn 에 따로 둔다 (2.0 번호가 아님)
+
+framework: NIST CSF 2.0
+aliases: [NIST CSF 2.0, CSF 2.0, NIST CSF, CSF]
+version: "2.0 (2024-02-26)"
+count: 106
+functions:
+  - {id: "GV", name: "Govern"}
+  - {id: "ID", name: "Identify"}
+  - {id: "PR", name: "Protect"}
+  - {id: "DE", name: "Detect"}
+  - {id: "RS", name: "Respond"}
+  - {id: "RC", name: "Recover"}
+domains:
+  - {id: "GV.OC", name: "Organizational Context"}
+  - {id: "GV.OV", name: "Oversight"}
+  - {id: "GV.PO", name: "Policy"}
+  - {id: "GV.RM", name: "Risk Management Strategy"}
+  - {id: "GV.RR", name: "Roles, Responsibilities, and Authorities"}
+  - {id: "GV.SC", name: "Cybersecurity Supply Chain Risk Management"}
+  - {id: "ID.AM", name: "Asset Management"}
+  - {id: "ID.IM", name: "Improvement"}
+  - {id: "ID.RA", name: "Risk Assessment"}
+  - {id: "PR.AA", name: "Identity Management, Authentication, and Access Control"}
+  - {id: "PR.AT", name: "Awareness and Training"}
+  - {id: "PR.DS", name: "Data Security"}
+  - {id: "PR.IR", name: "Technology Infrastructure Resilience"}
+  - {id: "PR.PS", name: "Platform Security"}
+  - {id: "DE.AE", name: "Adverse Event Analysis"}
+  - {id: "DE.CM", name: "Continuous Monitoring"}
+  - {id: "RS.AN", name: "Incident Analysis"}
+  - {id: "RS.CO", name: "Incident Response Reporting and Communication"}
+  - {id: "RS.MA", name: "Incident Management"}
+  - {id: "RS.MI", name: "Incident Mitigation"}
+  - {id: "RC.CO", name: "Incident Recovery Communication"}
+  - {id: "RC.RP", name: "Incident Recovery Plan Execution"}
+controls:
+  - {id: "GV.OC-01", name: "The organizational mission is understood and informs cybersecurity risk management", domain: "GV.OC"}
+  - {id: "GV.OC-02", name: "Internal and external stakeholders are understood, and their needs and expectations regarding cybersecurity risk management are understood and considered", domain: "GV.OC"}
+  - {id: "GV.OC-03", name: "Legal, regulatory, and contractual requirements regarding cybersecurity - including privacy and civil liberties obligations - are understood and managed", domain: "GV.OC"}
+  - {id: "GV.OC-04", name: "Critical objectives, capabilities, and services that external stakeholders depend on or expect from the organization are understood and communicated", domain: "GV.OC"}
+  - {id: "GV.OC-05", name: "Outcomes, capabilities, and services that the organization depends on are understood and communicated", domain: "GV.OC"}
+  - {id: "GV.RM-01", name: "Risk management objectives are established and agreed to by organizational stakeholders", domain: "GV.RM"}
+  - {id: "GV.RM-02", name: "Risk appetite and risk tolerance statements are established, communicated, and maintained", domain: "GV.RM"}
+  - {id: "GV.RM-03", name: "Cybersecurity risk management activities and outcomes are included in enterprise risk management processes", domain: "GV.RM"}
+  - {id: "GV.RM-04", name: "Strategic direction that describes appropriate risk response options is established and communicated", domain: "GV.RM"}
+  - {id: "GV.RM-05", name: "Lines of communication across the organization are established for cybersecurity risks, including risks from suppliers and other third parties", domain: "GV.RM"}
+  - {id: "GV.RM-06", name: "A standardized method for calculating, documenting, categorizing, and prioritizing cybersecurity risks is established and communicated", domain: "GV.RM"}
+  - {id: "GV.RM-07", name: "Strategic opportunities (i.e., positive risks) are characterized and are included in organizational cybersecurity risk discussions", domain: "GV.RM"}
+  - {id: "GV.RR-01", name: "Organizational leadership is responsible and accountable for cybersecurity risk and fosters a culture that is risk-aware, ethical, and continually improving", domain: "GV.RR"}
+  - {id: "GV.RR-02", name: "Roles, responsibilities, and authorities related to cybersecurity risk management are established, communicated, understood, and enforced", domain: "GV.RR"}
+  - {id: "GV.RR-03", name: "Adequate resources are allocated commensurate with the cybersecurity risk strategy, roles, responsibilities, and policies", domain: "GV.RR"}
+  - {id: "GV.RR-04", name: "Cybersecurity is included in human resources practices", domain: "GV.RR"}
+  - {id: "GV.PO-01", name: "Policy for managing cybersecurity risks is established based on organizational context, cybersecurity strategy, and priorities and is communicated and enforced", domain: "GV.PO"}
+  - {id: "GV.PO-02", name: "Policy for managing cybersecurity risks is reviewed, updated, communicated, and enforced to reflect changes in requirements, threats, technology, and organizational mission", domain: "GV.PO"}
+  - {id: "GV.OV-01", name: "Cybersecurity risk management strategy outcomes are reviewed to inform and adjust strategy and direction", domain: "GV.OV"}
+  - {id: "GV.OV-02", name: "The cybersecurity risk management strategy is reviewed and adjusted to ensure coverage of organizational requirements and risks", domain: "GV.OV"}
+  - {id: "GV.OV-03", name: "Organizational cybersecurity risk management performance is evaluated and reviewed for adjustments needed", domain: "GV.OV"}
+  - {id: "GV.SC-01", name: "A cybersecurity supply chain risk management program, strategy, objectives, policies, and processes are established and agreed to by organizational stakeholders", domain: "GV.SC"}
+  - {id: "GV.SC-02", name: "Cybersecurity roles and responsibilities for suppliers, customers, and partners are established, communicated, and coordinated internally and externally", domain: "GV.SC"}
+  - {id: "GV.SC-03", name: "Cybersecurity supply chain risk management is integrated into cybersecurity and enterprise risk management, risk assessment, and improvement processes", domain: "GV.SC"}
+  - {id: "GV.SC-04", name: "Suppliers are known and prioritized by criticality", domain: "GV.SC"}
+  - {id: "GV.SC-05", name: "Requirements to address cybersecurity risks in supply chains are established, prioritized, and integrated into contracts and other types of agreements with suppliers and other relevant third parties", domain: "GV.SC"}
+  - {id: "GV.SC-06", name: "Planning and due diligence are performed to reduce risks before entering into formal supplier or other third-party relationships", domain: "GV.SC"}
+  - {id: "GV.SC-07", name: "The risks posed by a supplier, their products and services, and other third parties are understood, recorded, prioritized, assessed, responded to, and monitored over the course of the relationship", domain: "GV.SC"}
+  - {id: "GV.SC-08", name: "Relevant suppliers and other third parties are included in incident planning, response, and recovery activities", domain: "GV.SC"}
+  - {id: "GV.SC-09", name: "Supply chain security practices are integrated into cybersecurity and enterprise risk management programs, and their performance is monitored throughout the technology product and service life cycle", domain: "GV.SC"}
+  - {id: "GV.SC-10", name: "Cybersecurity supply chain risk management plans include provisions for activities that occur after the conclusion of a partnership or service agreement", domain: "GV.SC"}
+  - {id: "ID.AM-01", name: "Inventories of hardware managed by the organization are maintained", domain: "ID.AM"}
+  - {id: "ID.AM-02", name: "Inventories of software, services, and systems managed by the organization are maintained", domain: "ID.AM"}
+  - {id: "ID.AM-03", name: "Representations of the organization's authorized network communication and internal and external network data flows are maintained", domain: "ID.AM"}
+  - {id: "ID.AM-04", name: "Inventories of services provided by suppliers are maintained", domain: "ID.AM"}
+  - {id: "ID.AM-05", name: "Assets are prioritized based on classification, criticality, resources, and impact on the mission", domain: "ID.AM"}
+  - {id: "ID.AM-07", name: "Inventories of data and corresponding metadata for designated data types are maintained", domain: "ID.AM"}
+  - {id: "ID.AM-08", name: "Systems, hardware, software, services, and data are managed throughout their life cycles", domain: "ID.AM"}
+  - {id: "ID.RA-01", name: "Vulnerabilities in assets are identified, validated, and recorded", domain: "ID.RA"}
+  - {id: "ID.RA-02", name: "Cyber threat intelligence is received from information sharing forums and sources", domain: "ID.RA"}
+  - {id: "ID.RA-03", name: "Internal and external threats to the organization are identified and recorded", domain: "ID.RA"}
+  - {id: "ID.RA-04", name: "Potential impacts and likelihoods of threats exploiting vulnerabilities are identified and recorded", domain: "ID.RA"}
+  - {id: "ID.RA-05", name: "Threats, vulnerabilities, likelihoods, and impacts are used to understand inherent risk and inform risk response prioritization", domain: "ID.RA"}
+  - {id: "ID.RA-06", name: "Risk responses are chosen, prioritized, planned, tracked, and communicated", domain: "ID.RA"}
+  - {id: "ID.RA-07", name: "Changes and exceptions are managed, assessed for risk impact, recorded, and tracked", domain: "ID.RA"}
+  - {id: "ID.RA-08", name: "Processes for receiving, analyzing, and responding to vulnerability disclosures are established", domain: "ID.RA"}
+  - {id: "ID.RA-09", name: "The authenticity and integrity of hardware and software are assessed prior to acquisition and use", domain: "ID.RA"}
+  - {id: "ID.RA-10", name: "Critical suppliers are assessed prior to acquisition", domain: "ID.RA"}
+  - {id: "ID.IM-01", name: "Improvements are identified from evaluations", domain: "ID.IM"}
+  - {id: "ID.IM-02", name: "Improvements are identified from security tests and exercises, including those done in coordination with suppliers and relevant third parties", domain: "ID.IM"}
+  - {id: "ID.IM-03", name: "Improvements are identified from execution of operational processes, procedures, and activities", domain: "ID.IM"}
+  - {id: "ID.IM-04", name: "Incident response plans and other cybersecurity plans that affect operations are established, communicated, maintained, and improved", domain: "ID.IM"}
+  - {id: "PR.AA-01", name: "Identities and credentials for authorized users, services, and hardware are managed by the organization", domain: "PR.AA"}
+  - {id: "PR.AA-02", name: "Identities are proofed and bound to credentials based on the context of interactions", domain: "PR.AA"}
+  - {id: "PR.AA-03", name: "Users, services, and hardware are authenticated", domain: "PR.AA"}
+  - {id: "PR.AA-04", name: "Identity assertions are protected, conveyed, and verified", domain: "PR.AA"}
+  - {id: "PR.AA-05", name: "Access permissions, entitlements, and authorizations are defined in a policy, managed, enforced, and reviewed, and incorporate the principles of least privilege and separation of duties", domain: "PR.AA"}
+  - {id: "PR.AA-06", name: "Physical access to assets is managed, monitored, and enforced commensurate with risk", domain: "PR.AA"}
+  - {id: "PR.AT-01", name: "Personnel are provided with awareness and training so that they possess the knowledge and skills to perform general tasks with cybersecurity risks in mind", domain: "PR.AT"}
+  - {id: "PR.AT-02", name: "Individuals in specialized roles are provided with awareness and training so that they possess the knowledge and skills to perform relevant tasks with cybersecurity risks in mind", domain: "PR.AT"}
+  - {id: "PR.DS-01", name: "The confidentiality, integrity, and availability of data-at-rest are protected", domain: "PR.DS"}
+  - {id: "PR.DS-02", name: "The confidentiality, integrity, and availability of data-in-transit are protected", domain: "PR.DS"}
+  - {id: "PR.DS-10", name: "The confidentiality, integrity, and availability of data-in-use are protected", domain: "PR.DS"}
+  - {id: "PR.DS-11", name: "Backups of data are created, protected, maintained, and tested", domain: "PR.DS"}
+  - {id: "PR.PS-01", name: "Configuration management practices are established and applied", domain: "PR.PS"}
+  - {id: "PR.PS-02", name: "Software is maintained, replaced, and removed commensurate with risk", domain: "PR.PS"}
+  - {id: "PR.PS-03", name: "Hardware is maintained, replaced, and removed commensurate with risk", domain: "PR.PS"}
+  - {id: "PR.PS-04", name: "Log records are generated and made available for continuous monitoring", domain: "PR.PS"}
+  - {id: "PR.PS-05", name: "Installation and execution of unauthorized software are prevented", domain: "PR.PS"}
+  - {id: "PR.PS-06", name: "Secure software development practices are integrated, and their performance is monitored throughout the software development life cycle", domain: "PR.PS"}
+  - {id: "PR.IR-01", name: "Networks and environments are protected from unauthorized logical access and usage", domain: "PR.IR"}
+  - {id: "PR.IR-02", name: "The organization's technology assets are protected from environmental threats", domain: "PR.IR"}
+  - {id: "PR.IR-03", name: "Mechanisms are implemented to achieve resilience requirements in normal and adverse situations", domain: "PR.IR"}
+  - {id: "PR.IR-04", name: "Adequate resource capacity to ensure availability is maintained", domain: "PR.IR"}
+  - {id: "DE.CM-01", name: "Networks and network services are monitored to find potentially adverse events", domain: "DE.CM"}
+  - {id: "DE.CM-02", name: "The physical environment is monitored to find potentially adverse events", domain: "DE.CM"}
+  - {id: "DE.CM-03", name: "Personnel activity and technology usage are monitored to find potentially adverse events", domain: "DE.CM"}
+  - {id: "DE.CM-06", name: "External service provider activities and services are monitored to find potentially adverse events", domain: "DE.CM"}
+  - {id: "DE.CM-09", name: "Computing hardware and software, runtime environments, and their data are monitored to find potentially adverse events", domain: "DE.CM"}
+  - {id: "DE.AE-02", name: "Potentially adverse events are analyzed to better understand associated activities", domain: "DE.AE"}
+  - {id: "DE.AE-03", name: "Information is correlated from multiple sources", domain: "DE.AE"}
+  - {id: "DE.AE-04", name: "The estimated impact and scope of adverse events are understood", domain: "DE.AE"}
+  - {id: "DE.AE-06", name: "Information on adverse events is provided to authorized staff and tools", domain: "DE.AE"}
+  - {id: "DE.AE-07", name: "Cyber threat intelligence and other contextual information are integrated into the analysis", domain: "DE.AE"}
+  - {id: "DE.AE-08", name: "Incidents are declared when adverse events meet the defined incident criteria", domain: "DE.AE"}
+  - {id: "RS.MA-01", name: "The incident response plan is executed in coordination with relevant third parties once an incident is declared", domain: "RS.MA"}
+  - {id: "RS.MA-02", name: "Incident reports are triaged and validated", domain: "RS.MA"}
+  - {id: "RS.MA-03", name: "Incidents are categorized and prioritized", domain: "RS.MA"}
+  - {id: "RS.MA-04", name: "Incidents are escalated or elevated as needed", domain: "RS.MA"}
+  - {id: "RS.MA-05", name: "The criteria for initiating incident recovery are applied", domain: "RS.MA"}
+  - {id: "RS.AN-03", name: "Analysis is performed to establish what has taken place during an incident and the root cause of the incident", domain: "RS.AN"}
+  - {id: "RS.AN-06", name: "Actions performed during an investigation are recorded, and the records' integrity and provenance are preserved", domain: "RS.AN"}
+  - {id: "RS.AN-07", name: "Incident data and metadata are collected, and their integrity and provenance are preserved", domain: "RS.AN"}
+  - {id: "RS.AN-08", name: "An incident's magnitude is estimated and validated", domain: "RS.AN"}
+  - {id: "RS.CO-02", name: "Internal and external stakeholders are notified of incidents", domain: "RS.CO"}
+  - {id: "RS.CO-03", name: "Information is shared with designated internal and external stakeholders", domain: "RS.CO"}
+  - {id: "RS.MI-01", name: "Incidents are contained", domain: "RS.MI"}
+  - {id: "RS.MI-02", name: "Incidents are eradicated", domain: "RS.MI"}
+  - {id: "RC.RP-01", name: "The recovery portion of the incident response plan is executed once initiated from the incident response process", domain: "RC.RP"}
+  - {id: "RC.RP-02", name: "Recovery actions are selected, scoped, prioritized, and performed", domain: "RC.RP"}
+  - {id: "RC.RP-03", name: "The integrity of backups and other restoration assets is verified before using them for restoration", domain: "RC.RP"}
+  - {id: "RC.RP-04", name: "Critical mission functions and cybersecurity risk management are considered to establish post-incident operational norms", domain: "RC.RP"}
+  - {id: "RC.RP-05", name: "The integrity of restored assets is verified, systems and services are restored, and normal operating status is confirmed", domain: "RC.RP"}
+  - {id: "RC.RP-06", name: "The end of incident recovery is declared based on criteria, and incident-related documentation is completed", domain: "RC.RP"}
+  - {id: "RC.CO-03", name: "Recovery activities and progress in restoring operational capabilities are communicated to designated internal and external stakeholders", domain: "RC.CO"}
+  - {id: "RC.CO-04", name: "Public updates on incident recovery are shared using approved methods and messaging", domain: "RC.CO"}
+withdrawn:  # CSF 1.1 번호 → 2.0 에서 옮겨 간 곳 (Reference Tool 의 [Withdrawn] 문구)
+  "ID.AM-06": "Incorporated into GV.RR-02, GV.SC-02"
+  "ID.BE-01": "Incorporated into GV.OC-05"
+  "ID.BE-02": "Incorporated into GV.OC-01"
+  "ID.BE-03": "Incorporated into GV.OC-01"
+  "ID.BE-04": "Incorporated into GV.OC-04, GV.OC-05"
+  "ID.BE-05": "Incorporated into GV.OC-04"
+  "ID.GV-01": "Incorporated into GV.PO, GV.PO-01, GV.PO-02"
+  "ID.GV-02": "Incorporated into GV.OC-02, GV.RR, GV.RR-02"
+  "ID.GV-03": "Moved to GV.OC-03"
+  "ID.GV-04": "Moved to GV.RM-04"
+  "ID.RM-01": "Incorporated into GV.RM-01, GV.RM-06, GV.RR-03"
+  "ID.RM-02": "Incorporated into GV.RM-02, GV.RM-04"
+  "ID.RM-03": "Moved into GV.RM-02"
+  "ID.SC-01": "Incorporated into GV.RM-05, GV.SC-01, GV.SC-06, GV.SC-09, GV.SC-10"
+  "ID.SC-02": "Incorporated into GV.OC-02, GV.SC-03, GV.SC-04, GV.SC-07, ID.RA-10"
+  "ID.SC-03": "Moved to GV.SC-05"
+  "ID.SC-04": "Incorporated into GV.SC-07, ID.RA-10"
+  "ID.SC-05": "Incorporated into GV.SC-08, ID.IM-02"
+  "PR.AT-03": "Incorporated into PR.AT-01, PR.AT-02"
+  "PR.AT-04": "Incorporated into PR.AT-02"
+  "PR.AT-05": "Incorporated into PR.AT-02"
+  "PR.DS-03": "Incorporated into ID.AM-08, PR.PS-03"
+  "PR.DS-04": "Moved to PR.IR-04"
+  "PR.DS-05": "Incorporated into PR.DS-01, PR.DS-02, PR.DS-10"
+  "PR.DS-06": "Incorporated into PR.DS-01, DE.CM-09"
+  "PR.DS-07": "Incorporated into PR.IR-01"
+  "PR.DS-08": "Incorporated into ID.RA-09, DE.CM-09"
+  "PR.AC-01": "Incorporated into PR.AA-01, PR.AA-05"
+  "PR.AC-02": "Moved to PR.AA-06"
+  "PR.AC-03": "Incorporated into PR.AA-03, PR.AA-05, PR.IR-01"
+  "PR.AC-04": "Moved to PR.AA-05"
+  "PR.AC-05": "Incorporated into PR.IR-01"
+  "PR.AC-06": "Moved to PR.AA-02"
+  "PR.AC-07": "Moved to PR.AA-03"
+  "PR.IP-01": "Incorporated into PR.PS-01"
+  "PR.IP-02": "Incorporated into ID.AM-08, PR.PS-06"
+  "PR.IP-03": "Incorporated into PR.PS-01, ID.RA-07"
+  "PR.IP-04": "Moved to PR.DS-11"
+  "PR.IP-05": "Moved to PR.IR-02"
+  "PR.IP-06": "Incorporated into ID.AM-08"
+  "PR.IP-07": "Incorporated into ID.IM, ID.IM-03"
+  "PR.IP-08": "Moved to ID.IM-03"
+  "PR.IP-09": "Moved to ID.IM-04"
+  "PR.IP-10": "Incorporated into ID.IM-02, ID.IM-04"
+  "PR.IP-11": "Moved to GV.RR-04"
+  "PR.IP-12": "Incorporated into ID.RA-01, PR.PS-02"
+  "PR.MA-01": "Incorporated into ID.AM-08, PR.PS-03"
+  "PR.MA-02": "Incorporated into ID.AM-08, PR.PS-02"
+  "PR.PT-01": "Incorporated into PR.PS-04"
+  "PR.PT-02": "Incorporated into PR.DS-01, PR.PS-01"
+  "PR.PT-03": "Incorporated into PR.PS-01"
+  "PR.PT-04": "Incorporated into PR.AA-06, PR.IR-01"
+  "PR.PT-05": "Moved to PR.IR-03"
+  "DE.CM-04": "Incorporated into DE.CM-01, DE.CM-09"
+  "DE.CM-05": "Incorporated into DE.CM-01, DE.CM-09"
+  "DE.CM-07": "Incorporated into DE.CM-01, DE.CM-03, DE.CM-06, DE.CM-09"
+  "DE.CM-08": "Incorporated into ID.RA-01"
+  "DE.AE-01": "Incorporated into ID.AM-03"
+  "DE.AE-05": "Moved to DE.AE-08"
+  "DE.DP-01": "Incorporated into GV.RR-02"
+  "DE.DP-02": "Incorporated into DE.AE"
+  "DE.DP-03": "Incorporated into ID.IM-02"
+  "DE.DP-04": "Incorporated into DE.AE-06"
+  "DE.DP-05": "Incorporated into ID.IM, ID.IM-03"
+  "RS.AN-01": "Incorporated into RS.MA-02"
+  "RS.AN-02": "Incorporated into RS.MA-02, RS.MA-03, RS.MA-04"
+  "RS.AN-04": "Moved to RS.MA-03"
+  "RS.AN-05": "Moved to ID.RA-08"
+  "RS.CO-01": "Incorporated into PR.AT-01"
+  "RS.CO-04": "Incorporated into RS.MA-01, RS.MA-04"
+  "RS.CO-05": "Incorporated into RS.CO-03"
+  "RS.MI-03": "Incorporated into ID.RA-06"
+  "RS.RP-01": "Incorporated into RS.MA-01"
+  "RS.IM-01": "Incorporated into ID.IM-03, ID.IM-04"
+  "RS.IM-02": "Incorporated into ID.IM-03"
+  "RC.CO-01": "Incorporated into RC.CO-04"
+  "RC.CO-02": "Incorporated into RC.CO-04"
+  "RC.IM-01": "Incorporated into ID.IM-03, ID.IM-04"
+  "RC.IM-02": "Incorporated into ID.IM-03"

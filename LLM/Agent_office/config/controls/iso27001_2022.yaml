@@ -1,0 +1,114 @@
+# ISO/IEC 27001:2022 부속서 A — 통제 번호·짧은 이름만 (요구사항 문장은 넣지 않는다)
+#
+# ISO 원문은 저작권이 있다. 여기에는 번호와 짧은 이름만 둔다. 통제 내용은 구입한 표준 원문을 보라.
+# 번호 출처: NIST CSF 2.0 Reference Tool 의 Informative References 에 나오는 'ISO/IEC 27001:2022 Control x.y'
+#            번호를 코드로 모은 것 — 정확히 93개, 5.1~5.37 · 6.1~6.8 · 7.1~7.14 · 8.1~8.34 와 빠짐·남음 없이 일치
+#            https://csrc.nist.gov/extensions/nudp/services/json/csf/download?olirids=all
+# 이름 출처: 공개 요약 목록 https://www.tcsa.in/frameworks/iso-27001/controls (2026-10-29 확인) — 2차 자료라 원문과 다를 수 있다
+# 개수: 주제 4개 (조직 37 · 사람 8 · 물리 14 · 기술 34) = 93 — KPMG 요약(2023-02)의 93개와 같다
+#       https://assets.kpmg.com/content/dam/kpmg/cn/pdf/en/2023/02/iso-iec-27001-2022.pdf
+# 2013판 번호(A.9.2.1 처럼 세 단계, 114개)는 2022판 번호가 아니다 — 통제 번호 검증기가 걸러낸다
+
+framework: ISO/IEC 27001:2022
+aliases: [ISO/IEC 27001:2022, ISO 27001:2022, ISO/IEC 27001, ISO 27001, ISO27001]
+version: "2022 Annex A"
+count: 93
+domains:
+  - {id: "5", name: "Organizational controls", count: 37}
+  - {id: "6", name: "People controls", count: 8}
+  - {id: "7", name: "Physical controls", count: 14}
+  - {id: "8", name: "Technological controls", count: 34}
+controls:
+  - {id: "5.1", name: "Policies for information security", domain: "5"}
+  - {id: "5.2", name: "Information security roles and responsibilities", domain: "5"}
+  - {id: "5.3", name: "Segregation of duties", domain: "5"}
+  - {id: "5.4", name: "Management responsibilities", domain: "5"}
+  - {id: "5.5", name: "Contact with authorities", domain: "5"}
+  - {id: "5.6", name: "Contact with special interest groups", domain: "5"}
+  - {id: "5.7", name: "Threat intelligence", domain: "5"}
+  - {id: "5.8", name: "Information security in project management", domain: "5"}
+  - {id: "5.9", name: "Inventory of information and other associated assets", domain: "5"}
+  - {id: "5.10", name: "Acceptable use of information and other associated assets", domain: "5"}
+  - {id: "5.11", name: "Return of assets", domain: "5"}
+  - {id: "5.12", name: "Classification of information", domain: "5"}
+  - {id: "5.13", name: "Labelling of information", domain: "5"}
+  - {id: "5.14", name: "Information transfer", domain: "5"}
+  - {id: "5.15", name: "Access control", domain: "5"}
+  - {id: "5.16", name: "Identity management", domain: "5"}
+  - {id: "5.17", name: "Authentication information", domain: "5"}
+  - {id: "5.18", name: "Access rights", domain: "5"}
+  - {id: "5.19", name: "Information security in supplier relationships", domain: "5"}
+  - {id: "5.20", name: "Addressing information security within supplier agreements", domain: "5"}
+  - {id: "5.21", name: "Managing information security in the ICT supply chain", domain: "5"}
+  - {id: "5.22", name: "Monitoring, review and change management of supplier services", domain: "5"}
+  - {id: "5.23", name: "Information security for use of cloud services", domain: "5"}
+  - {id: "5.24", name: "Information security incident management planning and preparation", domain: "5"}
+  - {id: "5.25", name: "Assessment and decision on information security events", domain: "5"}
+  - {id: "5.26", name: "Response to information security incidents", domain: "5"}
+  - {id: "5.27", name: "Learning from information security incidents", domain: "5"}
+  - {id: "5.28", name: "Collection of evidence", domain: "5"}
+  - {id: "5.29", name: "Information security during disruption", domain: "5"}
+  - {id: "5.30", name: "ICT readiness for business continuity", domain: "5"}
+  - {id: "5.31", name: "Legal, statutory, regulatory and contractual requirements", domain: "5"}
+  - {id: "5.32", name: "Intellectual property rights", domain: "5"}
+  - {id: "5.33", name: "Protection of records", domain: "5"}
+  - {id: "5.34", name: "Privacy and protection of PII", domain: "5"}
+  - {id: "5.35", name: "Independent review of information security", domain: "5"}
+  - {id: "5.36", name: "Compliance with policies, rules and standards for information security", domain: "5"}
+  - {id: "5.37", name: "Documented operating procedures", domain: "5"}
+  - {id: "6.1", name: "Screening", domain: "6"}
+  - {id: "6.2", name: "Terms and conditions of employment", domain: "6"}
+  - {id: "6.3", name: "Information security awareness, education and training", domain: "6"}
+  - {id: "6.4", name: "Disciplinary process", domain: "6"}
+  - {id: "6.5", name: "Responsibilities after termination or change of employment", domain: "6"}
+  - {id: "6.6", name: "Confidentiality or non-disclosure agreements", domain: "6"}
+  - {id: "6.7", name: "Remote working", domain: "6"}
+  - {id: "6.8", name: "Information security event reporting", domain: "6"}
+  - {id: "7.1", name: "Physical security perimeters", domain: "7"}
+  - {id: "7.2", name: "Physical entry", domain: "7"}
+  - {id: "7.3", name: "Securing offices, rooms and facilities", domain: "7"}
+  - {id: "7.4", name: "Physical security monitoring", domain: "7"}
+  - {id: "7.5", name: "Protecting against physical and environmental threats", domain: "7"}
+  - {id: "7.6", name: "Working in secure areas", domain: "7"}
+  - {id: "7.7", name: "Clear desk and clear screen", domain: "7"}
+  - {id: "7.8", name: "Equipment siting and protection", domain: "7"}
+  - {id: "7.9", name: "Security of assets off-premises", domain: "7"}
+  - {id: "7.10", name: "Storage media", domain: "7"}
+  - {id: "7.11", name: "Supporting utilities", domain: "7"}
+  - {id: "7.12", name: "Cabling security", domain: "7"}
+  - {id: "7.13", name: "Equipment maintenance", domain: "7"}
+  - {id: "7.14", name: "Secure disposal or re-use of equipment", domain: "7"}
+  - {id: "8.1", name: "User endpoint devices", domain: "8"}
+  - {id: "8.2", name: "Privileged access rights", domain: "8"}
+  - {id: "8.3", name: "Information access restriction", domain: "8"}
+  - {id: "8.4", name: "Access to source code", domain: "8"}
+  - {id: "8.5", name: "Secure authentication", domain: "8"}
+  - {id: "8.6", name: "Capacity management", domain: "8"}
+  - {id: "8.7", name: "Protection against malware", domain: "8"}
+  - {id: "8.8", name: "Management of technical vulnerabilities", domain: "8"}
+  - {id: "8.9", name: "Configuration management", domain: "8"}
+  - {id: "8.10", name: "Information deletion", domain: "8"}
+  - {id: "8.11", name: "Data masking", domain: "8"}
+  - {id: "8.12", name: "Data leakage prevention", domain: "8"}
+  - {id: "8.13", name: "Information backup", domain: "8"}
+  - {id: "8.14", name: "Redundancy of information processing facilities", domain: "8"}
+  - {id: "8.15", name: "Logging", domain: "8"}
+  - {id: "8.16", name: "Monitoring activities", domain: "8"}
+  - {id: "8.17", name: "Clock synchronization", domain: "8"}
+  - {id: "8.18", name: "Use of privileged utility programs", domain: "8"}
+  - {id: "8.19", name: "Installation of software on operational systems", domain: "8"}
+  - {id: "8.20", name: "Networks security", domain: "8"}
+  - {id: "8.21", name: "Security of network services", domain: "8"}
+  - {id: "8.22", name: "Segregation of networks", domain: "8"}
+  - {id: "8.23", name: "Web filtering", domain: "8"}
+  - {id: "8.24", name: "Use of cryptography", domain: "8"}
+  - {id: "8.25", name: "Secure development life cycle", domain: "8"}
+  - {id: "8.26", name: "Application security requirements", domain: "8"}
+  - {id: "8.27", name: "Secure system architecture and engineering principles", domain: "8"}
+  - {id: "8.28", name: "Secure coding", domain: "8"}
+  - {id: "8.29", name: "Security testing in development and acceptance", domain: "8"}
+  - {id: "8.30", name: "Outsourced development", domain: "8"}
+  - {id: "8.31", name: "Separation of development, test and production environments", domain: "8"}
+  - {id: "8.32", name: "Change management", domain: "8"}
+  - {id: "8.33", name: "Test information", domain: "8"}
+  - {id: "8.34", name: "Protection of information systems during audit testing", domain: "8"}

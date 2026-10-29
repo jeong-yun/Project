@@ -1,0 +1,20 @@
+{
+  "_comment": "가상 클라우드 계정의 IAM 비슷한 설정 (샘플상사, 2026-10-29 수집)",
+  "account": "sample-corp-prod",
+  "password_policy": {"minimum_length": 10, "require_symbols": true, "max_age_days": 90},
+  "log_retention_days": 180,
+  "users": [
+    {"name": "user01", "groups": ["admins"], "mfa_enabled": true, "last_login": "2026-10-28"},
+    {"name": "user02", "groups": ["admins"], "mfa_enabled": false, "last_login": "2026-10-27"},
+    {"name": "user03", "groups": ["developers"], "mfa_enabled": true, "last_login": "2026-10-29"},
+    {"name": "user07", "groups": ["developers"], "mfa_enabled": false, "last_login": "2026-07-14", "note": "2026-07-15 퇴사"}
+  ],
+  "service_accounts": [
+    {"name": "svc-backup", "policy": "BackupWriteOnly", "access_key_age_days": 412},
+    {"name": "svc-deploy", "policy": "AdministratorAccess", "access_key_age_days": 35}
+  ],
+  "groups": {
+    "admins": {"policy": "AdministratorAccess"},
+    "developers": {"policy": "DeveloperPowerUser"}
+  }
+}

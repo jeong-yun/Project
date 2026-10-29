@@ -1,0 +1,12 @@
+# 경계 방화벽 규칙 (가상, iptables 형식) — fw01.example.com, 2026-10-29 수집
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+-A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -p tcp -s 198.51.100.0/24 --dport 22 -j ACCEPT
+-A INPUT -p tcp --dport 443 -j ACCEPT
+-A INPUT -p tcp --dport 3389 -j ACCEPT
+-A INPUT -p icmp --icmp-type echo-request -s 198.51.100.0/24 -j ACCEPT
+-A INPUT -j LOG --log-prefix "FW-DROP " --log-level 4
+COMMIT

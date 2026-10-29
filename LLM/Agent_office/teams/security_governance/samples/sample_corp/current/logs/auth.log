@@ -1,0 +1,8 @@
+Oct 28 02:11:04 web01 sshd[2311]: Failed password for invalid user admin from 203.0.113.45 port 52114 ssh2
+Oct 28 02:11:07 web01 sshd[2311]: Failed password for invalid user admin from 203.0.113.45 port 52114 ssh2
+Oct 28 02:11:10 web01 sshd[2311]: Failed password for invalid user test from 203.0.113.45 port 52120 ssh2
+Oct 28 02:11:12 web01 sshd[2311]: Disconnecting invalid user test 203.0.113.45 port 52120: Too many authentication failures
+Oct 28 09:02:51 web01 sshd[3120]: Accepted publickey for user01 from 198.51.100.21 port 61022 ssh2: ED25519 SHA256:EXAMPLEKEYFINGERPRINT
+Oct 28 09:03:15 web01 sudo:   user01 : TTY=pts/0 ; PWD=/home/user01 ; USER=root ; COMMAND=/usr/bin/systemctl restart nginx
+Oct 29 01:47:33 web01 sshd[4410]: Accepted password for user02 from 203.0.113.77 port 40112 ssh2
+Oct 29 01:49:02 web01 sudo:   user02 : TTY=pts/1 ; PWD=/home/user02 ; USER=root ; COMMAND=/usr/bin/cat /etc/shadow

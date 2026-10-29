@@ -1,5 +1,5 @@
 """🏠 메인 화면 — 📰 AI 브리핑·💡 개선 아이디어 카드·🔥 주목 저장소, 모델별 토큰 사용량·추정 비용,
-API 키별 내역(이름 붙이기), 이전 키, 가격표.
+API 키별 내역(이름 붙이기), 이전 키, 가격표, 🤖 자율 실행 상태(autonomy_ui.py).
 
 AI 브리핑·카드는 core/feeds.py 가 모아 data/feeds/ 에 저장한 것을 읽는다 (수집은 버튼이나 TTL 이 지났을 때 백그라운드로).
 
@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 import streamlit as st
 
+import autonomy_ui
 import board_ui
 from core import feeds, usage
 from core.storage import Storage
@@ -89,6 +90,7 @@ def render(storage: Storage, models, open_runs: list[dict], team_names: dict, go
 
     _team_shortcuts(open_runs, team_names, go_to_team)
     if settings is not None and data_dir is not None:
+        autonomy_ui.render(settings, Path(data_dir), storage)  # 🤖 자율 실행 상태·승인 대기열 (읽기 전용)
         _feeds(settings, models, Path(data_dir), list(team_names.values()))
 
     now_keys = current_keys(models)

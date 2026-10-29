@@ -9,6 +9,8 @@
   concept_entry : 개념 카탈로그 결과 형식 검사 (core/concept.py)
   music_prompt  : 음악 팀 가사·Lyria 프롬프트 형식 검사 (core/music.py)
   floorplan     : 설계 팀 레이아웃 JSON 을 코드로 완성·검증 (겹침·외곽·면적·동선·계단·최소 치수, core/floorplan.py)
+  control_ids   : 통제 번호가 고른 프레임워크 공개 목록(config/controls)에 있는지 (core/governance.py)
+  evidence_quotes: 인용한 증적 문구가 입력 증적에 글자 그대로 있는지 (core/governance.py)
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -227,3 +229,55 @@ class FloorplanValidator(Validator):
         rooms = sum(len(f.rooms) for f in layout.floors)
         warn = f", 경고 {len(report.warnings)}건: " + " / ".join(report.warnings[:4]) if report.warnings else ""
         return self.ok(f"레이아웃 검증 통과: {floors}개 층, 방 {rooms}개{warn}" + (" · " + " · ".join(metrics) if metrics else ""))
+
+
+@register
+class ControlIdsValidator(Validator):
+    name = "control_ids"
+    description = "통제 번호 검증 — 답변의 통제 번호가 고른 프레임워크(ISMS-P·ISO 27001:2022·NIST CSF 2.0) 공개 목록에 모두 있는지 (config/controls)"
+
+    def check(self, answer: str, options: dict):
+        from core import governance  # governance 가 harness.base 를 쓰므로 늦게 불러온다
+
+        framework = str(options.get("control_framework") or "").strip()
+        if not framework:
+            framework = str(((governance.answer_json(answer) or {}).get("summary") or {}).get("framework") or "").strip()
+        if not framework:
+            return self.ok("검사할 프레임워크 정보 없음")
+        try:
+            result = governance.check_control_ids(answer, framework)
+        except KeyError as e:
+            return self.fail(f"{e} — summary.framework 에 위 목록의 이름 하나를 정확히 써라.")
+        problems = []
+        if result.unknown:
+            problems.append(f"{result.framework} 목록에 없는 통제 번호 {len(result.unknown)}개: {', '.join(result.unknown[:12])}")
+        problems += result.hints[:6]
+        if result.name_mismatch:
+            problems.append("번호와 이름이 맞지 않음: " + " / ".join(result.name_mismatch[:6]))
+        if problems:
+            return self.fail(" / ".join(problems) + " — 근거 자료의 '통제 번호 목록'에 있는 번호·이름만 쓰고, 맞는 번호를 모르면 "
+                             "control_id 를 비우고 이름만 써라 (번호를 지어내지 않는다).")
+        return self.ok(f"{result.framework} 통제 번호 {result.checked}개 모두 목록에 있음")
+
+
+@register
+class EvidenceQuotesValidator(Validator):
+    name = "evidence_quotes"
+    description = "인용 문구 검증 — 답변 JSON 의 evidence(인용 증적)가 입력 증적에 글자 그대로 있는지 (공백은 하나로 맞춰 비교)"
+
+    def check(self, answer: str, options: dict):
+        from core import governance
+
+        source = str(options.get("evidence_text") or "")
+        if not source.strip():
+            return self.ok("비교할 입력 증적 없음")
+        result = governance.check_quotes(answer, source)
+        problems = []
+        if result.missing:
+            problems.append(f"입력 증적에 없는 인용 {len(result.missing)}건: " + " / ".join(result.missing[:8]))
+        if result.no_evidence:
+            problems.append(f"인용 없이 판정한 항목 {len(result.no_evidence)}건: {', '.join(result.no_evidence[:8])}")
+        if problems:
+            return self.fail(" / ".join(problems) + " — evidence 에는 증적 원문을 한 글자도 바꾸지 말고 그대로 복사해 넣어라 "
+                             "(요약·번역·고쳐 쓰기 금지, 떨어진 두 곳은 '…'로 잇는다). 인용할 증적이 없으면 status 를 '확인 불가'로 쓴다.")
+        return self.ok(f"인용 {result.checked}건 모두 입력 증적에 있음")
