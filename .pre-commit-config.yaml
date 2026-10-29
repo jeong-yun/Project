@@ -1,0 +1,15 @@
+# 커밋 직전 로컬 검사 (선택). 설치 방법은 SECURITY.md 의 '커밋 전 자동 검사' 참고.
+# CI 의 secret-scan 과 같은 gitleaks 버전·설정(.gitleaks.toml)을 쓴다.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks          # 이번 커밋에 넣는 내용에서 키·토큰 찾기 (값은 가려서 보여 줌)
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key          # -----BEGIN ... PRIVATE KEY----- 가 들어간 파일 막기
+      - id: check-added-large-files     # 1MB 넘는 새 파일 막기 (데이터·결과물은 레포 밖에 둔다)
+        args: [--maxkb=1024]
+      - id: check-merge-conflict

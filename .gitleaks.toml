@@ -1,0 +1,21 @@
+# gitleaks 설정 — 기본 규칙을 모두 쓰고, '진짜 오탐'만 좁게 예외로 둔다.
+# 예외를 넓히지 않는다: 폴더 전체나 규칙 전체를 끄지 않고, 파일 + 값 모양을 함께 지정한다.
+# 실제 키가 걸리면 예외에 넣지 말고 키를 폐기(revoke)한 뒤 SECURITY.md 의 절차를 따른다.
+
+title = "jeong-yun/Project gitleaks config"
+
+[extend]
+useDefault = true
+
+# Agent Office 사용량 기능 테스트가 쓰는 가짜 OpenAI 키 모양 문자열.
+# 키 지문(앞 몇 글자만 보여 주기) 기능을 시험하려고 일부러 키처럼 생긴 값을 넣었다. 실제 키 아님.
+#   예: sk-old-key-000000001111, sk-proj-ABCDEFGHIJKLMNOP1234, sk-test-0000000000001234
+[[allowlists]]
+description = "Agent Office 테스트용 가짜 OpenAI 키 (tests/test_usage.py)"
+condition = "AND"
+paths = ['''^LLM/Agent_office/tests/test_usage\.py$''']
+regexes = [
+  '''^sk-(?:old|new|now|test)-key-\d+$''',
+  '''^sk-proj-ABCDEFGHIJKLMNOP\d{4}$''',
+  '''^sk-test-0+1234$''',
+]

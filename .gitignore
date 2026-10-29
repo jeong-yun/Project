@@ -1,0 +1,37 @@
+# 레포 전체 공통 규칙 — 비밀·데이터·실행 결과는 공개 레포에 올리지 않는다.
+# 폴더별 .gitignore(LLM/Agent_office 등)는 그대로 두고, 여기서는 어디에 있든 막아야 할 것만 적는다.
+
+# ─── 비밀 설정·키 ───
+.env
+.env.*
+!.env.example
+env.zip
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+credentials*.json
+service-account*.json
+
+# ─── 데이터·실행 결과 (어느 폴더든) ───
+**/data/
+**/results/
+# 예외: Kaggle 공개 예제 데이터 (이미 공개된 학습용 CSV)
+!Titanic/data/
+
+# ─── 개인 이미지 (주식 팀 아바타) ───
+LLM/Agent_office/teams/stock/avatars/
+
+# ─── 파이썬·도구 부산물 ───
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# ─── 로컬 비밀 검사 도구 (내려받은 실행 파일·보고서) ───
+gitleaks
+gitleaks.exe
+gitleaks-report*.json
