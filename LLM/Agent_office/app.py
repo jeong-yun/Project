@@ -420,11 +420,15 @@ def node_html(node: OrgNode, statuses: dict, focus: str, active_ids: set | None,
         classes.append("ao-dim")  # 이번 질문에 참여하지 않는 칸은 흐리게
     if state == "working":
         classes.append("ao-st-working")
-    candidates = llm_factory.available_candidates(member_chains[node.id], models)
+    candidates = llm_factory.available_candidates(member_chains[node.id], models, team_id)
     model = candidates[0][0].model if candidates else "모델 없음"
     off = chosen_off(node.id)
+    primary = member_chains[node.id].primary
+    resting = llm_factory.skip_reason(primary, team_id)
     if off:  # 고른 모델이 꺼져 있으면 대안 모델을 슬쩍 보여 주지 않고 그대로 알린다
         model = f"⛔ {off[0]} 꺼짐" + (f" → {candidates[0][0].model}" if candidates else " · 실패 예정")
+    elif resting and candidates and candidates[0][0] != primary:  # 거부·한도로 잠시 건너뛰는 중
+        model = f"⚠️ {primary.model} 건너뜀({resting}) → {candidates[0][0].model}"
     badge = (
         f"<div><span class='ao-badge ao-b-{state}'>{html.escape(label)}{DOTS if state == 'working' else ''}</span></div>"
         if state
@@ -504,7 +508,10 @@ def render_meta(step: AgentAnswer) -> None:
         if step.input_tokens is not None or step.output_tokens is not None
         else ""
     )
-    fallback = " · ⚠️ 대안 모델" if step.is_fallback else ""
+    fallback = ""
+    if step.is_fallback:  # 왜 대안 모델이 썼는지 한 줄로 (자세한 오류는 '검증 기록'의 '건너뛴 모델')
+        first = step.errors[0] if step.errors else ""
+        fallback = f" · ⚠️ 대안 모델 — {first.split(': ', 1)[0]}: {llm_factory.failure_reason(first)}" if first else " · ⚠️ 대안 모델"
     attempts = f" · 작성 {step.attempts}회" if step.attempts > 1 else ""
     st.caption(f"{step.model.label} · {step.elapsed_sec}초{tokens}{fallback}{attempts}")
 

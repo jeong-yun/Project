@@ -85,6 +85,11 @@ class OrgNode(BaseModel):
     specialty: str = ""
     persona: str = ""  # 비우면 team.personas[rank] → ranks.yaml 의 role 순서로 대체
     avatar: str | None = None  # 이 에이전트 전용 이미지 경로 (선택)
+    # 팀 스킬 중 이 에이전트에게 넣을 절 — 절 제목 줄('[1단계·…')의 앞부분 목록. 비우면 스킬 전문 (OrgAgent)
+    #   실무자에게 맡은 일에 필요한 절만 주면 프롬프트가 짧아지고, 최종본 형식 같은 남의 일까지 쓰지 않는다
+    skill_sections: list[str] = Field(default_factory=list)
+    # 실무자 초안의 산출물 범위 — 있으면 브리프의 완료 기준(팀 전체 최종 답변 기준) 대신 이 범위만 쓴다
+    output_scope: str = ""
     children: list["OrgNode"] = Field(default_factory=list)
 
     def walk(self) -> list["OrgNode"]:
@@ -166,6 +171,10 @@ class Team(BaseModel):
     # 검증 설정 덮어쓰기 (config/verification.yaml 의 critic 위에 덮어씀)
     #   critic: {scope: all, max_self_corrections: 2, rules: [이 팀의 비평 규칙 …]}
     verification: dict = Field(default_factory=dict)
+    # 하위 1명 검토(review)에서 고쳐 쓰는 방식
+    #   rewrite: 지적을 반영한 답변 전문을 다시 씀 (기본)
+    #   edit   : 고칠 곳만 '찾을 문장 → 바꿀 문장'(edits)으로 — 긴 답변(개념 카탈로그 항목 1만 자)을 통째로 다시 쓰는 시간을 줄인다
+    review_mode: Literal["rewrite", "edit"] = "rewrite"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -203,6 +212,19 @@ class ReviewResult(BaseModel):
         description="revise 이면 지적을 모두 반영한(통합한) 완성 답변 전문. approve 이면 빈 문자열"
     )
     comment: str = Field(description="하위 에이전트에게 남기는 한두 문장의 조언")
+
+
+class TextEdit(BaseModel):
+    find: str = Field(description="검토 대상 답변에 있는 바꿀 부분을 글자 그대로 (그 답변 안에서 한 번만 나오도록 앞뒤를 조금 포함)")
+    replace: str = Field(description="그 부분을 바꿀 새 글 (지우려면 빈 문자열)")
+
+
+class ReviewEdits(ReviewResult):
+    """검토 결과 + 고칠 곳 목록 — 팀의 review_mode: edit (답변 전문을 다시 쓰지 않고 고칠 곳만 바꾼다)."""
+
+    edits: list[TextEdit] = Field(
+        description="revise 이면 고칠 곳마다 찾을 부분 → 바꿀 글. revised_answer 를 비웠을 때 이것을 검토 대상 답변에 차례로 적용한다"
+    )
 
 
 class CriticResult(BaseModel):
