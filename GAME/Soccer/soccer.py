@@ -44,7 +44,7 @@ v4 추가:
        J 태클 · M 모드전환 · R 리셋 · +/- 시뮬속도 · Tab 경기기록 · Esc 종료
 """
 
-import sys, math, random, argparse, time
+import sys, math, random, argparse, time, json
 from dataclasses import dataclass, field
 
 try:
@@ -141,6 +141,15 @@ ACC_FATIGUE = 0.8           # 컨디션 1 → 0 사이에서 패스·슛·헤더
 SUBS_MAX = 5                # 팀당 교체 인원(현행 규칙)
 SUB_AFTER_MIN = 55          # 이 시간 이후부터 교체
 SUB_ENERGY = 0.75           # 경기 체력이 이 아래면 교체 후보
+SUB_POLICY = {'auto': True, 'after_min': SUB_AFTER_MIN, 'energy': SUB_ENERGY, 'yellow_risk': True}
+BENCH_ROLES = ('GK', 'DEF', 'DEF', 'MID', 'MID', 'FWD', 'FWD')   # 벤치 7명
+SQUAD_SIZE = 11 + len(BENCH_ROLES)
+TEAM_NAMES = ('Blue', 'Red')
+SURNAMES = ('Kim', 'Park', 'Lee', 'Choi', 'Jung', 'Kang', 'Cho', 'Yoon', 'Jang', 'Lim',
+            'Han', 'Oh', 'Seo', 'Shin', 'Kwon', 'Hwang', 'Ahn', 'Song', 'Silva', 'Costa',
+            'Muller', 'Rossi', 'Garcia', 'Martin', 'Smith', 'Jones', 'Dubois', 'Novak',
+            'Jansen', 'Larsen', 'Moreau', 'Santos', 'Ferreira', 'Kowalski', 'Ito', 'Sato')
+PSTAT_KEYS = ('passes', 'passes_ok', 'shots', 'goals', 'tackles', 'tackles_won', 'fouls')
 FPS = 60
 DT = 1.0 / FPS
 HUMAN_TEAM = 0
@@ -207,6 +216,9 @@ class Player:
     run: float = 0.0            # 공격수: 뒷공간 침투 남은 시간
     beaten: float = 0.0         # 돌파당해 뒤처진 남은 시간(못 움직임)
     energy: float = 1.0         # 경기 체력(1 → 경기 내내 천천히 줄어듦). stamina는 스프린트용 단기 체력
+    name: str = ''              # v4.1: 이름·등번호·주 포지션(교체로 다른 자리에 들어가도 그대로)
+    number: int = 0
+    pos_role: str = ''
 
 @dataclass
 class Ball:
@@ -234,7 +246,7 @@ FORMATION = [   # 4-4-2 (공격 +x 기준 정규화 좌표)
 ]
 
 class World:
-    def __init__(self, match_len=None):
+    def __init__(self, match_len=None, squad=None):
         self.players = []
         self.ball = Ball()
         self.score = [0, 0]
@@ -262,13 +274,35 @@ class World:
         self.match_len = match_len      # 경기 길이(시뮬 초). None이면 끝없이(v3 방식)
         self.half = 1
         self.finished = False
-        self.next_pid = 2 * len(FORMATION)   # 교체 선수 번호
-        pid = 0
-        for team in (0, 1):
-            for role, fx, fy in FORMATION:
-                self.players.append(Player(team, role, fx, fy, rand_stats(role), pid=pid))
-                pid += 1
+        # v4.1: 스쿼드(선발 11 + 벤치 7) · 교체 · 선수별 기록 · 조작 선수 고정
+        self.team_names = list(TEAM_NAMES)
+        self.bench = [[], []]           # 팀별 벤치(경기장 밖 Player)
+        self.subbed_off = []            # 교체로 나간 선수(다시 못 들어옴)
+        self.sub_queue = []             # (팀, 나갈 pid, 들어올 pid) — 다음 멈춤에서 적용
+        self.sub_log = []               # (분, 팀, 나간 이름, 들어온 이름)
+        self.sub_policy = [dict(SUB_POLICY), dict(SUB_POLICY)]   # 팀별 AI 교체 정책
+        self.pstats = {}                # pid -> 선수별 경기 기록
+        self.reds = set()               # 퇴장당한 pid
+        self.human_pick = None          # 사람이 고정한 조작 선수 pid(None = 공 가까운 선수 자동)
+        self.last_kick = None           # (팀, pid) 마지막으로 찬 선수 — 골 기록용
+        self.last_passer = None
+        if squad is None:
+            pid = 0
+            for team in (0, 1):
+                for role, fx, fy in FORMATION:
+                    self.players.append(Player(team, role, fx, fy, rand_stats(role), pid=pid))
+                    pid += 1
+        else:
+            load_lineup(self, squad)
         self.first_kick = 0 if random.random() < 0.5 else 1   # 동전 던지기(예전엔 늘 0팀)
+        if squad is None:                                     # 벤치는 선발·동전 뒤에 만든다
+            for team in (0, 1):
+                for role in BENCH_ROLES:
+                    self.bench[team].append(Player(team, role, 0.0, 0.0, rand_stats(role),
+                                                   pos=[-5.0, -5.0], pid=len(self.players)
+                                                   + sum(map(len, self.bench))))
+            name_squad(self)
+        self.next_pid = len(self.players) + sum(map(len, self.bench))
         self.kickoff(self.first_kick)
 
     def opp_goal(self, team): return (L, W / 2) if team == 0 else (0.0, W / 2)
@@ -309,6 +343,8 @@ class World:
 
     def kickoff(self, team=0):
         # team = 킥오프하는 팀(실점한 팀). v3까지는 늘 같은 진형으로 시작해 0팀이 먼저 공을 잡았다
+        if self.time > 0:
+            on_stoppage(self)                              # 골·하프타임 = 공이 멈춤 → 교체
         self.ball.pos = [L / 2, W / 2, 0.0]
         self.ball.vel = [0.0, 0.0, 0.0]
         self.ball.owner = None
@@ -424,6 +460,7 @@ def update_possession(world):
         if world.pending_pass is not None:         # 패스 성공/실패 집계
             if best.team == world.pending_pass:
                 world.match['passes_ok'][best.team] += 1
+                pstat(world, world.last_passer, 'passes_ok')
             world.pending_pass = None
         world.pass_to = None
         if best.pid in world.offside_suspects and best.team == world.attack_team:
@@ -490,6 +527,7 @@ def aerial_contest(world):
     if world.pending_pass is not None:               # 크로스 성공 = 우리 편이 먼저 닿음
         if win.team == world.pending_pass:
             m['passes_ok'][win.team] += 1
+            pstat(world, world.last_passer, 'passes_ok')
         world.pending_pass = None
     world.pass_to = None
     if win.role == 'GK':                             # GK가 공중에서 잡음
@@ -547,6 +585,7 @@ def do_cross(world, p, tx, ty):
     # 크로스(패스 기록에도 포함 — 실제 기록처럼): 머리 높이 도착 + 공중 경합 대기
     world.match['passes'][p.team] += 1
     world.match['crosses'][p.team] += 1
+    pstat(world, p.pid, 'passes'); world.last_passer = p.pid
     lofted_kick(world, p, tx, ty, pass_error_deg(p) * 1.3)
     world.aerial = {'team': p.team, 'tried': set()}
     world.pending_pass = p.team
@@ -692,6 +731,8 @@ def step_ball(world, dt):
 # ---------------- 액션 해석 ----------------
 def kick(world, vx, vy, vz, team, kicker=None):
     b = world.ball
+    if kicker is not None:
+        world.last_kick = (team, kicker.pid)
     b.vel = [vx, vy, vz]
     b.owner = None; world.owner = None
     b.cooldown = KICK_COOLDOWN; b.last_team = team
@@ -807,6 +848,7 @@ def do_pass(world, p, power, opt=None):
         opts = pass_options(world, p)
         opt = opts[0] if opts else None
     world.match['passes'][p.team] += 1
+    pstat(world, p.pid, 'passes'); world.last_passer = p.pid
     if opt is None:
         gx, gy = world.opp_goal(p.team)
         dx, dy = vnorm(gx - p.pos[0], gy - p.pos[1])
@@ -859,6 +901,7 @@ def register_shot(world, p, pen):
     b = world.ball
     m = world.match
     m['shots'][p.team] += 1
+    pstat(world, p.pid, 'shots')
     gx, _ = world.opp_goal(p.team)
     cr = predict_cross(b, gx)
     on = cr is not None and abs(cr[1] - W / 2) < GOAL_W / 2 and cr[2] < CROSSBAR
@@ -882,9 +925,11 @@ def do_tackle(world, p):
         return
     p.tackle_cd = TACKLE_CD
     world.match['tackles'][p.team] += 1
+    pstat(world, p.pid, 'tackles')
     prob = 0.2 + 0.6 * logistic(0.08 * (p.stats.physical - o.stats.physical))
     if random.random() < prob:                       # 태클 성공 → 탈취
         world.match['tackles_won'][p.team] += 1
+        pstat(world, p.pid, 'tackles_won')
         b = world.ball
         dx, dy = vnorm(p.pos[0] - b.pos[0], p.pos[1] - b.pos[1])
         kick(world, dx * 4 + random.uniform(-2, 2),
@@ -898,6 +943,7 @@ def do_tackle(world, p):
 
 # ---------------- 파울 / 카드 / 세트피스 ----------------
 def send_off(world, p):
+    world.reds.add(p.pid)
     p.active = False
     p.pos = [-3.0, -3.0]; p.vel = [0.0, 0.0]
     set_event(world, "RED CARD")
@@ -923,6 +969,7 @@ def advantage_ok(world, victim):
 
 def award_foul(world, fouling, victim):
     world.match['fouls'][fouling.team] += 1
+    pstat(world, fouling.pid, 'fouls')
     if in_box(victim.pos[0], victim.pos[1], fouling.team):
         penalty(world, victim.team)
         set_event(world, "PENALTY")
@@ -951,7 +998,7 @@ def update_advantage(world, dt):
         world.advantage = None           # 이득을 봤다 → 그대로 진행
 
 def restart(world, team, x, y, kind, push=False):
-    maybe_subs(world)                       # 공이 멈췄을 때만 교체
+    on_stoppage(world)                      # 공이 멈췄을 때만 교체
     b = world.ball
     b.pos = [clamp(x, 1, L - 1), clamp(y, 1, W - 1), 0.0]
     b.vel = [0.0, 0.0, 0.0]
@@ -987,6 +1034,7 @@ def restart(world, team, x, y, kind, push=False):
                 p.pos[1] = b.pos[1] + ny * 9.15
 
 def penalty(world, attack_team):
+    on_stoppage(world)
     defend = 1 - attack_team
     spot_x = PEN_SPOT if defend == 0 else L - PEN_SPOT
     b = world.ball
@@ -1497,6 +1545,9 @@ def human_intent(keys):
                   sprint=keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
 
 def select_controlled(world):
+    hp = find_player(world, world.human_pick)
+    if hp is not None and hp.team == HUMAN_TEAM and hp.active and hp.role != 'GK':
+        world.controlled = hp; return            # v4.1: 사람이 고정한 선수
     o = world.owner
     if o is not None and o.team == HUMAN_TEAM and o.active and o.role != 'GK':
         world.controlled = o; return             # 우리 GK가 잡은 공은 AI GK가 처리(예전엔 사람이 GK를 몰고 나감)
@@ -1512,6 +1563,8 @@ def rules(world):
         if abs(b.pos[1] - W / 2) < GOAL_W / 2 and b.pos[2] < CROSSBAR:
             scorer = 0 if b.pos[0] > L else 1
             world.score[scorer] += 1
+            if world.last_kick and world.last_kick[0] == scorer:   # 골 = 마지막으로 찬 같은 팀 선수
+                pstat(world, world.last_kick[1], 'goals')
             set_event(world, "GOAL")
             world.kickoff(1 - scorer); return
         defend = 0 if b.pos[0] < 0 else 1
@@ -1602,250 +1655,224 @@ def update_clock(world):
         for p in world.players:                # 라커룸 휴식: 단기 체력 회복 + 경기 체력 조금
             p.stamina = 100.0
             p.energy = min(1.0, p.energy + HALFTIME_RECOVER)
-        maybe_subs(world)
-        world.kickoff(1 - world.first_kick)    # 후반은 상대 팀 킥오프(진영 교체는 단순화로 생략)
+        world.kickoff(1 - world.first_kick)       # 킥오프 직전에 교체(on_stoppage)    # 후반은 상대 팀 킥오프(진영 교체는 단순화로 생략)
     elif world.time >= world.match_len:
         world.finished = True
         set_event(world, "FULL TIME")
         world.event_timer = 1e9                # 배너 계속 표시
 
+def on_stoppage(world):
+    # 공이 멈춘 순간(재개·페널티·골 뒤 킥오프·하프타임): 대기 중 교체 적용 → AI 교체
+    apply_subs(world)
+    maybe_subs(world)
+
 def maybe_subs(world):
-    # AI 감독: SUB_AFTER_MIN분 뒤, 경기 체력이 SUB_ENERGY 아래인 가장 지친 필드 선수를 교체(팀당 SUBS_MAX명)
-    if not world.match_len or game_minute(world) < SUB_AFTER_MIN:
+    # AI 감독: 팀별 정책(sub_policy)으로 1명씩. 경기 체력이 낮은 선수 → 없으면 경고 누적 위험(수비·미드)
+    if not world.match_len:
         return
+    minute = game_minute(world)
     for team in (0, 1):
-        if world.match['subs'][team] >= SUBS_MAX:
+        pol = world.sub_policy[team]
+        if not pol['auto'] or minute < pol['after_min'] or subs_left(world, team) <= 0:
             continue
-        tired = [p for p in world.players if p.team == team and p.active and p.role != 'GK'
-                 and p.energy < SUB_ENERGY]
-        if not tired:
+        on = [p for p in world.players if p.team == team and p.active and p.role != 'GK'
+              and not any(q[1] == p.pid for q in world.sub_queue)]
+        tired = [p for p in on if p.energy < pol['energy']]
+        risky = [p for p in on if pol['yellow_risk'] and minute >= 60
+                 and world.cards.get(p.pid, 0) >= 1 and p.role in ('DEF', 'MID')]
+        out = min(tired, key=lambda p: p.energy) if tired else (risky[0] if risky else None)
+        if out is None:
             continue
-        out = min(tired, key=lambda p: p.energy)
-        new = Player(team, out.role, out.base_fx, out.base_fy, rand_stats(out.role),
-                     pos=list(out.pos), pid=world.next_pid)
-        world.next_pid += 1
-        world.players[world.players.index(out)] = new
+        inp = pick_bench(world, team, out.role)
+        if inp is not None and request_sub(world, team, out.pid, world.bench[team].index(inp))[0]:
+            apply_subs(world)
+
+def pick_bench(world, team, role):
+    # 같은 포지션 벤치 우선, 없으면 필드 선수(GK 자리는 GK만)
+    bench = world.bench[team]
+    same = [p for p in bench if p.pos_role == role]
+    if same or role == 'GK':
+        return same[0] if same else None
+    return next((p for p in bench if p.pos_role != 'GK'), None)
+
+def subs_left(world, team):
+    queued = sum(1 for q in world.sub_queue if q[0] == team)
+    return SUBS_MAX - world.match['subs'][team] - queued
+
+def find_player(world, pid):
+    if pid is None:
+        return None
+    return next((p for p in world.players if p.pid == pid), None)
+
+def request_sub(world, team, out_pid, bench_idx):
+    # 교체 요청(사람·AI 공통). 규칙 검사 후 대기열에 넣고 다음 멈춤에서 적용 → (성공 여부, 이유)
+    if world.finished:
+        return False, "match finished"
+    if subs_left(world, team) <= 0:
+        return False, f"no subs left ({SUBS_MAX} used)"
+    if out_pid in world.reds:
+        return False, "sent-off player cannot be replaced"
+    if any(p.pid == out_pid for p in world.subbed_off):
+        return False, "already substituted"
+    out = find_player(world, out_pid)
+    if out is None or out.team != team or not out.active:
+        return False, "player not on the pitch"
+    if not 0 <= bench_idx < len(world.bench[team]):
+        return False, "no such bench player"
+    inp = world.bench[team][bench_idx]
+    if any(q[1] == out_pid or q[2] == inp.pid for q in world.sub_queue):
+        return False, "already queued"
+    world.sub_queue.append((team, out_pid, inp.pid))
+    return True, "queued"
+
+def apply_subs(world):
+    # 대기 중 교체 적용: 들어온 선수는 나간 선수의 포메이션 자리·위치, 체력은 새것
+    queue, world.sub_queue = world.sub_queue, []
+    for team, out_pid, in_pid in queue:
+        out = find_player(world, out_pid)
+        inp = next((p for p in world.bench[team] if p.pid == in_pid), None)
+        if out is None or not out.active or inp is None:    # 그 사이 퇴장 등 → 취소
+            continue
+        inp.role, inp.base_fx, inp.base_fy = out.role, out.base_fx, out.base_fy
+        inp.pos = list(out.pos); inp.vel = [0.0, 0.0]
+        inp.stamina, inp.energy, inp.active = 100.0, 1.0, True
+        world.players[world.players.index(out)] = inp
+        world.bench[team].remove(inp)
+        world.subbed_off.append(out)
         world.offside_suspects.discard(out.pid)
+        if world.controlled is out:
+            world.controlled = None
+        if world.human_pick == out.pid:
+            world.human_pick = None
         world.match['subs'][team] += 1
+        world.sub_log.append((game_minute(world), team, out.name, inp.name))
         set_event(world, "SUBSTITUTION")
 
+# ---------------- v4.1: 스쿼드 · 선발 · 선수 정보 ----------------
+def name_squad(world):
+    # 이름은 난수를 안 쓰는 고정 목록에서(경기 재현성 그대로). 선발 1~11번, 벤치 12~18번
+    for team in (0, 1):
+        squad = [p for p in world.players if p.team == team] + world.bench[team]
+        for i, p in enumerate(squad):
+            p.name = SURNAMES[(i + team * SQUAD_SIZE) % len(SURNAMES)]
+            p.number = i + 1
+            p.pos_role = p.pos_role or p.role
 
-# ---------------- 렌더링 ----------------
-def w2s(x, y):
-    return (int(MARGIN + x * PPM), int(MARGIN + y * PPM))
+def load_lineup(world, squad):
+    # squad(dict): {"teams": [{"name", "players": [{"name","number","role","stats"}...],
+    #                          "lineup": [등번호 11개]} × 2]}
+    # 선발은 역할별로 포메이션 자리에 순서대로(4-4-2 = GK 1 · DEF 4 · MID 4 · FWD 2)
+    pid = 0
+    pool = []
+    for team, t in enumerate(squad['teams']):
+        world.team_names[team] = t.get('name', TEAM_NAMES[team])
+        by_num = {}
+        for e in t['players']:
+            st = Stats(**e['stats'])
+            p = Player(team, e['role'], 0.0, 0.0, st, pos=[-5.0, -5.0], name=e['name'],
+                       number=int(e['number']), pos_role=e['role'])
+            by_num[p.number] = p
+        lineup = [by_num[int(n)] for n in t['lineup']]
+        need = {r: sum(1 for f in FORMATION if f[0] == r) for r in ('GK', 'DEF', 'MID', 'FWD')}
+        have = {r: sum(1 for p in lineup if p.pos_role == r) for r in need}
+        if len(lineup) != len(FORMATION) or have != need:
+            raise ValueError(f"team {team} lineup must be 4-4-2 {need}, got {have}")
+        left = list(lineup)
+        for role, fx, fy in FORMATION:
+            p = next(q for q in left if q.pos_role == role)
+            left.remove(p)
+            p.base_fx, p.base_fy, p.pid = fx, fy, pid
+            world.players.append(p); pid += 1
+        pool.append([p for p in by_num.values() if p not in lineup])
+    for team in (0, 1):
+        for p in pool[team]:
+            p.pid = pid; pid += 1
+            world.bench[team].append(p)
 
-def draw_stats(screen, font, world):
-    # 경기 기록 패널(Tab)
-    m = world.match
-    p0, p1 = possession_pct(world)
-    def pct(t): return f"{round(100 * m['passes_ok'][t] / m['passes'][t])}%" \
-        if m['passes'][t] else "-"
-    rows = [("Possession", f"{p0}%", f"{p1}%"),
-            ("Shots", m['shots'][0], m['shots'][1]),
-            ("On target", m['on_target'][0], m['on_target'][1]),
-            ("Saves", m['saves'][0], m['saves'][1]),
-            ("Blocks", m['blocks'][0], m['blocks'][1]),
-            ("Pass acc.", pct(0), pct(1)),
-            ("Tackles won", f"{m['tackles_won'][0]}/{m['tackles'][0]}",
-             f"{m['tackles_won'][1]}/{m['tackles'][1]}"),
-            ("Fouls", m['fouls'][0], m['fouls'][1]),
-            ("Offsides", m['offsides'][0], m['offsides'][1]),
-            ("Corners", m['corners'][0], m['corners'][1]),
-            ("Crosses", m['crosses'][0], m['crosses'][1]),
-            ("Dribbles won", f"{m['dribbles_won'][0]}/{m['dribbles'][0]}",
-             f"{m['dribbles_won'][1]}/{m['dribbles'][1]}"),
-            ("Subs", m['subs'][0], m['subs'][1])]
-    w, h = 330, 30 + 22 * len(rows)
-    x0, y0 = SCREEN_W // 2 - w // 2, 80
-    panel = pygame.Surface((w, h), pygame.SRCALPHA)
-    panel.fill((0, 0, 0, 170))
-    screen.blit(panel, (x0, y0))
-    for i, (name, a, b) in enumerate(rows):
-        y = y0 + 15 + i * 22
-        screen.blit(font.render(str(a), True, TEAM_COLORS[0]), (x0 + 20, y))
-        surf = font.render(name, True, (235, 235, 235))
-        screen.blit(surf, (x0 + w // 2 - surf.get_width() // 2, y))
-        sb = font.render(str(b), True, TEAM_COLORS[1])
-        screen.blit(sb, (x0 + w - 20 - sb.get_width(), y))
+def squad_dict(world):
+    # 지금 스쿼드를 파일 형식(dict)으로 — --export-squad
+    out = {'teams': []}
+    for team in (0, 1):
+        on = [p for p in world.players if p.team == team]
+        rows = []
+        for p in on + world.bench[team] + [q for q in world.subbed_off if q.team == team]:
+            rows.append({'name': p.name, 'number': p.number, 'role': p.pos_role,
+                         'stats': {k: round(v, 1) for k, v in vars(p.stats).items()}})
+        out['teams'].append({'name': world.team_names[team], 'players': rows,
+                             'lineup': [p.number for p in on]})
+    return out
 
-def draw(screen, font, bigfont, world, human_mode, sim_speed, charge, show_stats=False):
-    screen.fill((22, 130, 55))
-    white = (235, 235, 235)
-    for i in range(0, int(L), 6):
-        if (i // 6) % 2 == 0:
-            x, _ = w2s(i, 0)
-            pygame.draw.rect(screen, (26, 140, 60), (x, MARGIN, int(6 * PPM), int(W * PPM)))
+def load_squad(path):
+    with open(path, encoding='utf-8') as fp:
+        return json.load(fp)
 
-    def line(x1, y1, x2, y2, wd=2):
-        pygame.draw.line(screen, white, w2s(x1, y1), w2s(x2, y2), wd)
+def swap_lineup(world, team, starter_pid, bench_idx):
+    # 킥오프 전 선발 바꾸기(교체 횟수 아님): 같은 주 포지션끼리만
+    if world.time > 0:
+        return False, "match already started"
+    a = find_player(world, starter_pid)
+    if a is None or a.team != team or not 0 <= bench_idx < len(world.bench[team]):
+        return False, "bad selection"
+    b = world.bench[team][bench_idx]
+    if a.pos_role != b.pos_role:
+        return False, f"position differs ({a.pos_role} vs {b.pos_role})"
+    b.role, b.base_fx, b.base_fy, b.pos, b.vel = a.role, a.base_fx, a.base_fy, list(a.pos), [0.0, 0.0]
+    a.pos = [-5.0, -5.0]
+    world.players[world.players.index(a)] = b
+    world.bench[team][bench_idx] = a
+    if world.human_pick == a.pid:
+        world.human_pick = None
+    return True, "swapped"
 
-    pygame.draw.rect(screen, white, (*w2s(0, 0), int(L * PPM), int(W * PPM)), 2)
-    line(L / 2, 0, L / 2, W)
-    pygame.draw.circle(screen, white, w2s(L / 2, W / 2), int(9.15 * PPM), 2)
-    pygame.draw.circle(screen, white, w2s(L / 2, W / 2), 3)
-    for gx in (0, L):
-        sgn = 1 if gx == 0 else -1
-        bx = gx + sgn * PBOX_DEPTH
-        line(gx, W / 2 - PBOX_HALF, bx, W / 2 - PBOX_HALF)
-        line(gx, W / 2 + PBOX_HALF, bx, W / 2 + PBOX_HALF)
-        line(bx, W / 2 - PBOX_HALF, bx, W / 2 + PBOX_HALF)
-        gax = gx + sgn * 5.5
-        line(gx, W / 2 - 9.16, gax, W / 2 - 9.16)
-        line(gx, W / 2 + 9.16, gax, W / 2 + 9.16)
-        line(gax, W / 2 - 9.16, gax, W / 2 + 9.16)
-        pygame.draw.circle(screen, white, w2s(gx + sgn * PEN_SPOT, W / 2), 3)  # 페널티 스폿
-        gpx = gx - sgn * 1.5
-        pygame.draw.rect(screen, (255, 230, 80),
-                         (*w2s(min(gx, gpx), W / 2 - GOAL_W / 2),
-                          int(1.5 * PPM), int(GOAL_W * PPM)))
+def pstat(world, pid, key):
+    if pid is None:
+        return
+    d = world.pstats.setdefault(pid, dict.fromkeys(PSTAT_KEYS, 0))
+    d[key] += 1
 
-    # 오프사이드 라인(공 가진 팀 기준)
-    if world.owner is not None and world.owner.active:
-        lx = offside_line(world, world.owner.team)
-        xpx = int(MARGIN + lx * PPM)
-        for yy in range(MARGIN, MARGIN + int(W * PPM), 14):
-            pygame.draw.line(screen, (255, 170, 50), (xpx, yy), (xpx, yy + 7), 1)
+def player_info(world, p):
+    # 선수 카드 내용(엔진 상태 그대로). UI는 이걸 그리기만 한다
+    st = world.pstats.get(p.pid, dict.fromkeys(PSTAT_KEYS, 0))
+    where = ('pitch' if p in world.players else 'bench' if p in world.bench[p.team]
+             else 'subbed off')
+    return {'name': p.name, 'number': p.number, 'team': world.team_names[p.team],
+            'position': p.pos_role or p.role, 'slot': p.role, 'where': where,
+            'stats': {k: round(v) for k, v in vars(p.stats).items()},
+            'stamina': round(p.stamina), 'energy': round(p.energy * 100),
+            'match': dict(st), 'yellow': world.cards.get(p.pid, 0),
+            'red': p.pid in world.reds}
 
-    b = world.ball                              # 공 + 높이
-    sx, sy = w2s(b.pos[0], b.pos[1])
-    pygame.draw.ellipse(screen, (0, 60, 20), (sx - 4, sy - 2, 8, 4))
-    hy = int(b.pos[2] * PPM * 0.7)
-    r = 4 + int(b.pos[2] * 1.5)
-    pygame.draw.circle(screen, (250, 250, 250), (sx, sy - hy), r)
-    pygame.draw.circle(screen, (0, 0, 0), (sx, sy - hy), r, 1)
-
-    for p in world.players:
-        if not p.active:
-            continue
-        px, py = w2s(p.pos[0], p.pos[1])
-        if human_mode and p is world.controlled:
-            pygame.draw.circle(screen, (255, 240, 90), (px, py), 12, 3)
-        if p.dive > 0 or p.down > 0:            # 다이브/쓰러짐: 옆으로 누운 타원
-            pygame.draw.ellipse(screen, TEAM_COLORS[p.team], (px - 6, py - 14, 12, 28))
-            pygame.draw.ellipse(screen, (15, 15, 15), (px - 6, py - 14, 12, 28), 1)
-            continue
-        pygame.draw.circle(screen, TEAM_COLORS[p.team], (px, py), 8)
-        pygame.draw.circle(screen, (240, 240, 240) if p.role == 'GK' else (15, 15, 15),
-                           (px, py), 8, 2 if p.role == 'GK' else 1)
-        if world.cards.get(p.pid):              # 경고 표시
-            pygame.draw.rect(screen, (240, 220, 40), (px + 6, py - 12, 4, 6))
-        pygame.draw.line(screen, (245, 245, 245), (px, py),
-                         (px + int(math.cos(p.facing) * 12),
-                          py + int(math.sin(p.facing) * 12)), 2)
-
-    n0 = sum(1 for p in world.players if p.team == 0 and p.active)
-    n1 = sum(1 for p in world.players if p.team == 1 and p.active)
-    screen.blit(bigfont.render(f"{world.score[0]} : {world.score[1]}", True, white),
-                (SCREEN_W // 2 - 30, 12))
-    mode = "HUMAN PLAY (M:switch)" if human_mode else f"AUTO SIM x{sim_speed} (M:switch)"
-    screen.blit(font.render(mode, True, white), (MARGIN, 14))
-    screen.blit(font.render(f"{n0}v{n1}", True, white), (SCREEN_W // 2 - 14, 44))
-    gm = game_minute(world)                    # 경기 시계(90분 배속) + 전/후반
-    half = "" if not world.match_len else ("FT " if world.finished else f"{world.half}H ")
-    screen.blit(font.render(f"{half}{int(gm):02d}:{int(gm * 60 % 60):02d}",
-                            True, white), (SCREEN_W - MARGIN - 90, 16))
-    screen.blit(font.render(
-        "Move:WASD/Arrows  Shift:Sprint  Space:Pass  K(hold):Shoot  J:Tackle  R:Reset  "
-        "Tab:Stats",
-        True, white), (MARGIN, SCREEN_H - 28))
-    if world.advantage is not None:             # 어드밴티지 진행 표시
-        screen.blit(font.render(f"ADVANTAGE {world.advantage['t']:.1f}s", True,
-                                (255, 240, 120)), (SCREEN_W // 2 + 60, 44))
-    if show_stats:
-        draw_stats(screen, font, world)
-    if human_mode and world.controlled:
-        c = world.controlled
-        screen.blit(font.render(
-            f"{c.role}  STA:{int(c.stamina)} NRG:{int(c.energy * 100)}  FIN:{int(c.stats.finishing)} "
-            f"PAC:{int(c.stats.pace)} PHY:{int(c.stats.physical)}",
-            True, white), (MARGIN, SCREEN_H - 50))
-        if charge > 0:
-            pygame.draw.rect(screen, white, (MARGIN, SCREEN_H - 68, 104, 8), 1)
-            pygame.draw.rect(screen, (255, 200, 60),
-                             (MARGIN + 2, SCREEN_H - 66, int(charge * 100), 4))
-    if world.event_timer > 0:                   # 이벤트 배너(Tab 패널이 켜져 있으면 그 아래)
-        surf = bigfont.render(world.event_text, True, (255, 240, 120))
-        by = SCREEN_H - 120 if show_stats else SCREEN_H // 2 - 18
-        screen.blit(surf, (SCREEN_W // 2 - surf.get_width() // 2, by))
+def switch_control(world):
+    # Q: 공에 (지금 선수 다음으로) 가까운 동료로 바꾸고 고정
+    b = world.ball
+    cands = sorted((p for p in world.players if p.team == HUMAN_TEAM and p.active
+                    and p.role != 'GK' and p is not world.controlled),
+                   key=lambda p: vlen(b.pos[0] - p.pos[0], b.pos[1] - p.pos[1]))
+    if cands:
+        world.human_pick = cands[0].pid
+        world.controlled = cands[0]
 
 
-# ---------------- 메인 ----------------
-def game_loop(match_len=600):
-    pygame.init()
-    screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
-    pygame.display.set_caption("Top-Down Soccer Prototype")
-    clock = pygame.time.Clock()
-    font = pygame.font.SysFont("consolas,arial", 16)
-    bigfont = pygame.font.SysFont("consolas,arial", 30, bold=True)
-
-    world = World(match_len)
-    human_mode = True
-    sim_speed = 1
-    charging = False
-    charge = 0.0
-    show_stats = False
-    running = True
-    while running:
-        for e in pygame.event.get():
-            if e.type == pygame.QUIT:
-                running = False
-            elif e.type == pygame.KEYDOWN:
-                if e.key == pygame.K_ESCAPE:
-                    running = False
-                elif e.key == pygame.K_m:
-                    human_mode = not human_mode
-                elif e.key == pygame.K_r:              # 리셋(경기가 끝났으면 새 경기)
-                    world = World(match_len) if world.finished else world
-                    world.kickoff()
-                elif e.key == pygame.K_TAB:
-                    show_stats = not show_stats
-                elif e.key in (pygame.K_PLUS, pygame.K_EQUALS):
-                    sim_speed = min(8, sim_speed + 1)
-                elif e.key == pygame.K_MINUS:
-                    sim_speed = max(1, sim_speed - 1)
-                elif human_mode and world.controlled is not None:
-                    c = world.controlled
-                    if e.key == pygame.K_SPACE and world.owner is c:
-                        do_pass(world, c, 0.6)
-                    elif e.key == pygame.K_j:
-                        do_tackle(world, c)
-                    elif e.key == pygame.K_k and world.owner is c:
-                        charging, charge = True, 0.0
-            elif e.type == pygame.KEYUP:
-                if e.key == pygame.K_k and charging:
-                    charging = False
-                    if human_mode and world.controlled is not None \
-                            and world.owner is world.controlled:
-                        do_shot(world, world.controlled, clamp(charge, 0.2, 1.0))
-
-        keys = pygame.key.get_pressed()
-        if charging:
-            charge = min(1.0, charge + DT * 1.5)
-        for _ in range(1 if human_mode else sim_speed):
-            step(world, DT, human_keys=keys if human_mode else None, human_mode=human_mode)
-        draw(screen, font, bigfont, world, human_mode, sim_speed, charge if charging else 0,
-             show_stats)
-        pygame.display.flip()
-        clock.tick(FPS)
-    pygame.quit()
+# ---------------- 렌더링 · 메인 루프 ----------------
+# v4.1: 화면 코드는 soccer_ui.py로 옮겼다(엔진은 화면 없이 돈다). main()이 불러 쓴다.
 
 
-def simulate(steps, seed=None, match_len=None):
+def simulate(steps, seed=None, match_len=None, squad=None):
     # 헤드리스 자동 경기. seed를 주면 같은 결과가 재현된다(테스트용)
     # match_len(초)을 주면 90분 경기(배속)로 돌고 종료 휘슬에서 멈춘다
     if seed is not None:
         random.seed(seed)
-    w = World(match_len)
+    w = World(match_len, squad)
     for _ in range(steps):
         if w.finished:
             break
         step(w, DT, human_keys=None, human_mode=False)
     return w
 
-def run_test(steps, seeds=(None,), match_len=None):
+def run_test(steps, seeds=(None,), match_len=None, squad=None):
     for seed in seeds:
         t0 = time.perf_counter()
-        w = simulate(steps, seed, match_len)
+        w = simulate(steps, seed, match_len, squad)
         ms = (time.perf_counter() - t0) / max(1, round(w.time / DT)) * 1000
         n0 = sum(1 for p in w.players if p.team == 0 and p.active)
         n1 = sum(1 for p in w.players if p.team == 1 and p.active)
@@ -1853,6 +1880,8 @@ def run_test(steps, seeds=(None,), match_len=None):
               f"events={dict(sorted(w.events.items()))}  time={w.time:.0f}s  "
               f"step={ms:.2f}ms")
         print(f"         {match_summary(w)}")
+        for mnt, team, out, inn in w.sub_log:
+            print(f"         SUB {mnt:4.0f}'  {w.team_names[team]}: {out} -> {inn}")
 
 
 def main():
@@ -1864,16 +1893,29 @@ def main():
                     help="경기 길이(실제 초). 90분을 이 시간으로 압축. 0이면 끝없이(기본 600초 = ×9배속)")
     ap.add_argument('--match', action='store_true',
                     help="헤드리스: 스텝 수 대신 --length 경기 하나를 종료 휘슬까지")
+    ap.add_argument('--squad', type=str, default=None,
+                    help="스쿼드·선발 JSON 파일(팀별 선수 18명 + lineup 등번호 11개)")
+    ap.add_argument('--export-squad', type=str, default=None,
+                    help="지금 시드의 자동 스쿼드를 JSON으로 저장하고 끝(고쳐서 --squad로)")
+    ap.add_argument('--no-select', action='store_true', help="GUI: 선발 선택 화면 건너뛰기")
     args = ap.parse_args()
     length = args.length or None
-    if args.test or args.match:
+    squad = load_squad(args.squad) if args.squad else None
+    if args.export_squad:
+        if args.seed:
+            random.seed(int(args.seed.split(',')[0]))
+        with open(args.export_squad, 'w', encoding='utf-8') as fp:
+            json.dump(squad_dict(World(length, squad)), fp, ensure_ascii=False, indent=1)
+        print("saved", args.export_squad)
+    elif args.test or args.match:
         seeds = [int(s) for s in args.seed.split(',')] if args.seed else [None]
         if args.match:
-            run_test(int((length or 600) / DT) + 1, seeds, length or 600)
+            run_test(int((length or 600) / DT) + 1, seeds, length or 600, squad)
         else:
-            run_test(args.test, seeds)
+            run_test(args.test, seeds, squad=squad)
     else:
-        game_loop(length)
+        import soccer_ui                      # 화면은 soccer_ui.py(엔진은 화면 없이 돈다)
+        soccer_ui.game_loop(length, squad, select=not args.no_select)
 
 
 if __name__ == "__main__":
