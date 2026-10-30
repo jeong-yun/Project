@@ -1,0 +1,16 @@
+# 자율 실행 예시 작업 (fixture) — 🏗️ 인프라 보안 팀 주 1회, 가상 회사 샘플 IaC
+# 계획만 보기 (호출 없음):  python scripts/run_autonomous.py --dry-run --jobs tests/fixtures/autonomy_infra.yaml
+# tests/test_infra_security.py 가 이 파일로 가짜 모델 실행(하네스 · 재검사 · 승인 요청)을 끝까지 돌린다.
+jobs:
+  - id: weekly_iac_check
+    team: infra_security
+    task: iac_check
+    inputs: {framework: ISMS-P, iac_dir: teams/infra_security/samples/sample_corp}
+    every_hours: 168
+    level: observe
+  - id: weekly_iac_fix
+    team: infra_security
+    task: iac_fix
+    inputs: {framework: ISMS-P, focus: HIGH 이상, iac_dir: teams/infra_security/samples/sample_corp}
+    every_hours: 168
+    level: propose
