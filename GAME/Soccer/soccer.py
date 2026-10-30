@@ -55,22 +55,22 @@ from soccer_ai import *                    # noqa: F401,F403 — AI
 # v4.1: 화면 코드는 soccer_ui.py로 옮겼다(엔진은 화면 없이 돈다). main()이 불러 쓴다.
 
 
-def simulate(steps, seed=None, match_len=None, squad=None):
+def simulate(steps, seed=None, match_len=None, squad=None, formations=None):
     # 헤드리스 자동 경기. seed를 주면 같은 결과가 재현된다(테스트용)
     # match_len(초)을 주면 90분 경기(배속)로 돌고 종료 휘슬에서 멈춘다
     if seed is not None:
         random.seed(seed)
-    w = World(match_len, squad)
+    w = World(match_len, squad, formations)
     for _ in range(steps):
         if w.finished:
             break
         step(w, DT, human_keys=None, human_mode=False)
     return w
 
-def run_test(steps, seeds=(None,), match_len=None, squad=None):
+def run_test(steps, seeds=(None,), match_len=None, squad=None, formations=None):
     for seed in seeds:
         t0 = time.perf_counter()
-        w = simulate(steps, seed, match_len, squad)
+        w = simulate(steps, seed, match_len, squad, formations)
         ms = (time.perf_counter() - t0) / max(1, round(w.time / DT)) * 1000
         n0 = sum(1 for p in w.players if p.team == 0 and p.active)
         n1 = sum(1 for p in w.players if p.team == 1 and p.active)
@@ -78,6 +78,8 @@ def run_test(steps, seeds=(None,), match_len=None, squad=None):
               f"events={dict(sorted(w.events.items()))}  time={w.time:.0f}s  "
               f"step={ms:.2f}ms")
         print(f"         {match_summary(w)}")
+        print(f"         formation {w.formation[0]} vs {w.formation[1]}"
+              + "".join(f"  ({m:.0f}' {w.team_names[t]} -> {f})" for m, t, f in w.formation_log))
         for mnt, team, out, inn in w.sub_log:
             print(f"         SUB {mnt:4.0f}'  {w.team_names[team]}: {out} -> {inn}")
 
@@ -96,24 +98,31 @@ def main():
     ap.add_argument('--export-squad', type=str, default=None,
                     help="지금 시드의 자동 스쿼드를 JSON으로 저장하고 끝(고쳐서 --squad로)")
     ap.add_argument('--no-select', action='store_true', help="GUI: 선발 선택 화면 건너뛰기")
+    ap.add_argument('--formation', type=str, default=None,
+                    help="포메이션 '0팀,1팀'(예: 4-3-3,4-4-2) 또는 하나(두 팀 같게). "
+                         "고를 수 있는 것: " + ", ".join(FORMATION_NAMES))
     args = ap.parse_args()
     length = args.length or None
     squad = load_squad(args.squad) if args.squad else None
+    forms = None
+    if args.formation:
+        forms = args.formation.split(',')
+        forms = forms * 2 if len(forms) == 1 else forms
     if args.export_squad:
         if args.seed:
             random.seed(int(args.seed.split(',')[0]))
         with open(args.export_squad, 'w', encoding='utf-8') as fp:
-            json.dump(squad_dict(World(length, squad)), fp, ensure_ascii=False, indent=1)
+            json.dump(squad_dict(World(length, squad, forms)), fp, ensure_ascii=False, indent=1)
         print("saved", args.export_squad)
     elif args.test or args.match:
         seeds = [int(s) for s in args.seed.split(',')] if args.seed else [None]
         if args.match:
-            run_test(int((length or 600) / DT) + 1, seeds, length or 600, squad)
+            run_test(int((length or 600) / DT) + 1, seeds, length or 600, squad, forms)
         else:
-            run_test(args.test, seeds, squad=squad)
+            run_test(args.test, seeds, squad=squad, formations=forms)
     else:
         import soccer_ui                      # 화면은 soccer_ui.py(엔진은 화면 없이 돈다)
-        soccer_ui.game_loop(length, squad, select=not args.no_select)
+        soccer_ui.game_loop(length, squad, select=not args.no_select, formations=forms)
 
 
 if __name__ == "__main__":

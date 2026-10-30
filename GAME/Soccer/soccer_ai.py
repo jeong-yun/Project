@@ -588,6 +588,28 @@ def maybe_subs(world):
         if inp is not None and request_sub(world, team, out.pid, world.bench[team].index(inp))[0]:
             apply_subs(world)
 
+def maybe_tactics(world):
+    # AI 감독의 전술: ① 퇴장으로 줄면 같은 포메이션으로 다시 배정(뒷줄 구멍 대신 앞쪽 자리를 비움)
+    # ② 정책(sub_policy)의 tactics가 켜져 있으면 지고 있을 때 chase_after분 뒤 공격형, 이기고 있을 때
+    #    protect_after분 뒤 수비형으로 한 번씩 바꾼다. 경기 길이가 없으면(끝없는 경기) ②는 안 함
+    for team in (0, 1):
+        n = sum(1 for p in world.players if p.team == team and p.active)
+        if n < 11 and world.tactic_state[team].get('reshaped') != n:
+            world.tactic_state[team]['reshaped'] = n
+            set_formation(world, team, world.formation[team])
+        pol = world.sub_policy[team]
+        if not world.match_len or not pol.get('tactics'):
+            continue
+        minute = game_minute(world)
+        diff = world.score[team] - world.score[1 - team]
+        st = world.tactic_state[team]
+        if diff < 0 and minute >= pol['chase_after'] and not st.get('chase'):
+            st['chase'] = True
+            set_formation(world, team, pol['chase_formation'])
+        elif diff > 0 and minute >= pol['protect_after'] and not st.get('protect'):
+            st['protect'] = True
+            set_formation(world, team, pol['protect_formation'])
+
 def pick_bench(world, team, role):
     # 같은 포지션 벤치 우선, 없으면 필드 선수(GK 자리는 GK만)
     bench = world.bench[team]

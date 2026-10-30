@@ -34,7 +34,8 @@ def draw_stats(screen, font, world):
     p0, p1 = possession_pct(world)
     def pct(t): return f"{round(100 * m['passes_ok'][t] / m['passes'][t])}%" \
         if m['passes'][t] else "-"
-    rows = [("Possession", f"{p0}%", f"{p1}%"),
+    rows = [("Formation", world.formation[0], world.formation[1]),
+            ("Possession", f"{p0}%", f"{p1}%"),
             ("Shots", m['shots'][0], m['shots'][1]),
             ("On target", m['on_target'][0], m['on_target'][1]),
             ("Saves", m['saves'][0], m['saves'][1]),
@@ -49,7 +50,7 @@ def draw_stats(screen, font, world):
             ("Dribbles won", f"{m['dribbles_won'][0]}/{m['dribbles'][0]}",
              f"{m['dribbles_won'][1]}/{m['dribbles'][1]}"),
             ("Subs", m['subs'][0], m['subs'][1])]
-    log = world.sub_log[-4:]
+    log = world.sub_log[-4:]                   # 최근 교체 4건
     w, h = 360, 30 + 22 * len(rows) + 20 * len(log)
     x0, y0 = SCREEN_W // 2 - w // 2, 80
     panel(screen, x0, y0, w, h, 170)
@@ -141,13 +142,15 @@ def draw(screen, font, bigfont, world, human_mode, sim_speed, charge, show_stats
     mode = "HUMAN PLAY (M:switch)" if human_mode else f"AUTO SIM x{sim_speed} (M:switch)"
     screen.blit(font.render(mode, True, WHITE), (MARGIN, 14))
     screen.blit(font.render(f"{n0}v{n1}", True, WHITE), (SCREEN_W // 2 - 14, 44))
+    for t, xx in ((0, SCREEN_W // 2 - 150), (1, SCREEN_W // 2 + 70)):   # 팀별 포메이션
+        screen.blit(font.render(world.formation[t], True, TEAM_COLORS[t]), (xx, 20))
     gm = game_minute(world)                    # 경기 시계(90분 배속) + 전/후반
     half = "" if not world.match_len else ("FT " if world.finished else f"{world.half}H ")
     screen.blit(font.render(f"{half}{int(gm):02d}:{int(gm * 60 % 60):02d}",
                             True, WHITE), (SCREEN_W - MARGIN - 90, 16))
     screen.blit(font.render(
         "WASD:Move Shift:Sprint Space:Pass K:Shoot J:Tackle Q:Switch L:Auto I:Info "
-        "P:Subs Tab:Stats R:Reset", True, WHITE), (MARGIN, SCREEN_H - 28))
+        "P:Subs F:Formation Tab:Stats", True, WHITE), (MARGIN, SCREEN_H - 28))
     if world.advantage is not None:             # 어드밴티지 진행 표시
         screen.blit(font.render(f"ADVANTAGE {world.advantage['t']:.1f}s", True,
                                 YELLOW), (SCREEN_W // 2 + 60, 44))
@@ -223,7 +226,8 @@ def squad_rows(world, team):
 def draw_squad(screen, font, bigfont, world, team, cur, mark, msg, show_card):
     screen.fill((18, 60, 40))
     rows, n_on = squad_rows(world, team)
-    title = f"SQUAD - {world.team_names[team]}" + (" (you)" if team == HUMAN_TEAM else " (CPU)")
+    title = f"SQUAD - {world.team_names[team]}" + (" (you)" if team == HUMAN_TEAM else " (CPU)") \
+        + f"   {world.formation[team]}"
     screen.blit(bigfont.render(title, True, TEAM_COLORS[team]), (40, 20))
     head = f"{'#':>3} {'Name':10} {'Pos':4}" + "".join(f"{a:>5}" for a, _ in STAT_COLS)
     screen.blit(font.render(head, True, GREY), (40, 70))
@@ -237,28 +241,46 @@ def draw_squad(screen, font, bigfont, world, team, cur, mark, msg, show_card):
         if mark is not None and rows[mark] is p:
             pygame.draw.rect(screen, YELLOW, (34, y - 2, 620, 21), 2)
         star = "*" if world.human_pick == p.pid else " "
+        if i < n_on and p.role != p.pos_role:      # 주 포지션과 다른 자리면 '→ 자리' 표시
+            star += f" ->{p.role}"
         line = f"{p.number:>3} {p.name:10} {p.pos_role:4}" + \
             "".join(f"{int(getattr(p.stats, k)):>5}" for _, k in STAT_COLS) + f" {star}"
         screen.blit(font.render(line, True, WHITE if i < n_on else (200, 200, 200)), (40, y))
         y += 22
     help1 = "Up/Down: move   Tab: other team   Enter x2: swap starter <-> bench (same position)"
-    help2 = "C: control this player (your team)   I: player card   Space: KICK OFF   Esc: quit"
+    help2 = "F: formation   C: control this player   I: card   Space: KICK OFF   Esc: quit"
     screen.blit(font.render(help1, True, WHITE), (40, SCREEN_H - 60))
     screen.blit(font.render(help2, True, WHITE), (40, SCREEN_H - 36))
     if msg:
         screen.blit(font.render(msg, True, YELLOW), (40, SCREEN_H - 90))
     if show_card and rows:
         draw_card(screen, font, world, rows[cur], SCREEN_W - 360, 94)
+    draw_formation(screen, font, world, team, rows[cur] if rows else None, SCREEN_W - 360, 300)
 
-def select_screen(screen, clock, font, bigfont, world, auto_keys=None):
-    # 킥오프 전 선발 선택. 엔진 함수(swap_lineup, human_pick)만 바꾼다. True = 킥오프, False = 종료
+def draw_formation(screen, font, world, team, hl, x0, y0, w=330, h=230):
+    # 포메이션 미리보기(아래 = 우리 골대, 위 = 공격 방향). 노란 테두리 = 지금 고른 선수
+    pygame.draw.rect(screen, (26, 120, 55), (x0, y0, w, h))
+    pygame.draw.rect(screen, WHITE, (x0, y0, w, h), 1)
+    pygame.draw.line(screen, WHITE, (x0, y0 + 8), (x0 + w, y0 + 8), 1)
+    for p in world.players:
+        if p.team != team or not p.active:
+            continue
+        px = x0 + int(p.base_fy * w)
+        py = y0 + h - 14 - int(p.base_fx / 0.75 * (h - 30))
+        pygame.draw.circle(screen, TEAM_COLORS[team], (px, py), 11)
+        pygame.draw.circle(screen, YELLOW if p is hl else (15, 15, 15), (px, py), 11,
+                           3 if p is hl else 1)
+        t = font.render(str(p.number), True, WHITE)
+        screen.blit(t, (px - t.get_width() // 2, py - 8))
+    screen.blit(font.render(world.formation[team], True, WHITE), (x0 + 6, y0 + 12))
+
+def select_screen(screen, clock, font, bigfont, world):
+    # 킥오프 전 선발 선택. 엔진 함수(swap_lineup, set_formation, human_pick)만 바꾼다.
+    # True = 킥오프, False = 종료
     team, cur, mark, msg, show_card = HUMAN_TEAM, 0, None, "", True
-    keys_iter = iter(auto_keys) if auto_keys is not None else None
     while True:
-        events = pygame.event.get() if keys_iter is None else \
-            [pygame.event.Event(pygame.KEYDOWN, key=k) for k in [next(keys_iter, pygame.K_SPACE)]]
         rows, n_on = squad_rows(world, team)
-        for e in events:
+        for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 return False
             if e.type != pygame.KEYDOWN:
@@ -275,6 +297,10 @@ def select_screen(screen, clock, font, bigfont, world, auto_keys=None):
                 team, cur, mark, msg = 1 - team, 0, None, ""
             elif e.key == pygame.K_i:
                 show_card = not show_card
+            elif e.key == pygame.K_f:                      # 포메이션 바꾸기(순환)
+                nxt = next_formation(world.formation[team])
+                set_formation(world, team, nxt)
+                msg = f"{world.team_names[team]} formation: {nxt}"
             elif e.key == pygame.K_c:
                 p = rows[cur]
                 if team != HUMAN_TEAM or cur >= n_on or p.role == 'GK':
@@ -296,6 +322,11 @@ def select_screen(screen, clock, font, bigfont, world, auto_keys=None):
         draw_squad(screen, font, bigfont, world, team, cur, mark, msg, show_card)
         pygame.display.flip()
         clock.tick(30)
+
+
+def next_formation(name):
+    names = list(FORMATION_NAMES)
+    return names[(names.index(name) + 1) % len(names)]
 
 
 # ---------------- 교체 패널(P) ----------------
@@ -360,8 +391,7 @@ def sub_panel_key(world, key, st):
 
 
 # ---------------- 메인 ----------------
-def game_loop(match_len=600, squad=None, select=True, script=None):
-    # script: 스크린샷용 자동 입력(None이면 사람이 조작)
+def game_loop(match_len=600, squad=None, select=True, formations=None):
     pygame.init()
     screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
     pygame.display.set_caption("Top-Down Soccer Prototype")
@@ -371,8 +401,9 @@ def game_loop(match_len=600, squad=None, select=True, script=None):
     small = pygame.font.SysFont("consolas,arial", 11)
 
     def new_world():
-        w = World(match_len, squad)
-        w.sub_policy[HUMAN_TEAM]['auto'] = False          # 사람 팀 교체는 사람이(M으로 자동 모드면 AI)
+        w = World(match_len, squad, formations)
+        w.sub_policy[HUMAN_TEAM]['auto'] = False          # 사람 팀 교체·전술은 사람이(M으로 자동 모드면 AI)
+        w.sub_policy[HUMAN_TEAM]['tactics'] = False
         return w
 
     world = new_world()
@@ -405,6 +436,7 @@ def game_loop(match_len=600, squad=None, select=True, script=None):
                 elif e.key == pygame.K_m:
                     human_mode = not human_mode
                     world.sub_policy[HUMAN_TEAM]['auto'] = not human_mode
+                    world.sub_policy[HUMAN_TEAM]['tactics'] = not human_mode
                 elif e.key == pygame.K_r:              # 리셋(경기가 끝났으면 새 경기)
                     if world.finished:
                         world = new_world()
@@ -415,6 +447,8 @@ def game_loop(match_len=600, squad=None, select=True, script=None):
                     show_card = not show_card
                     if not show_card:
                         info_pid = None
+                elif e.key == pygame.K_f:              # 우리 팀 포메이션 바꾸기(바로 적용)
+                    set_formation(world, HUMAN_TEAM, next_formation(world.formation[HUMAN_TEAM]))
                 elif e.key == pygame.K_p:              # 일시정지 + 교체 패널
                     subs_open = True
                     sub_st = {'stage': 'out', 'cur': 0, 'out': None, 'msg': ''}

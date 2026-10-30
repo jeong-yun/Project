@@ -60,6 +60,8 @@ LINE_SLOPE = 0.75
 LINE_DEF_OFS, LINE_DEF_MIN, LINE_DEF_MAX = -0.12, 0.10, 0.45
 LINE_ATT_OFS, LINE_ATT_MIN, LINE_ATT_MAX = -0.05, 0.15, 0.55
 ROLE_GAP = {'DEF': 0.0, 'MID': 0.17, 'FWD': 0.34}   # 수비 라인에서 각 라인까지 간격(수비 시)
+ROLE_BASE_FX = {'DEF': 0.22, 'MID': 0.46, 'FWD': 0.68}  # v4.2: 포메이션 자리의 fx가 이 값과 다르면
+                                                      # 그만큼 라인 간격에 더한다(4-2-3-1의 수비형·공격형 미드)
 # --- v4: 경기 시간 · 피로 ---
 MATCH_MINUTES = 90          # 표시 경기 시간(분). --length 초에 압축(기본 600초 = ×9)
 ENERGY_PER_MIN = 0.0035     # 실제 경기 1분마다 경기 체력 감소(운동량 1, 스태미나 스탯 보정 전)
@@ -68,7 +70,10 @@ ACC_FATIGUE = 0.8           # 컨디션 1 → 0 사이에서 패스·슛·헤더
 SUBS_MAX = 5                # 팀당 교체 인원(현행 규칙)
 SUB_AFTER_MIN = 55          # 이 시간 이후부터 교체
 SUB_ENERGY = 0.75           # 경기 체력이 이 아래면 교체 후보
-SUB_POLICY = {'auto': True, 'after_min': SUB_AFTER_MIN, 'energy': SUB_ENERGY, 'yellow_risk': True}
+SUB_POLICY = {'auto': True, 'after_min': SUB_AFTER_MIN, 'energy': SUB_ENERGY, 'yellow_risk': True,
+              # v4.2 AI 전술: 지면 70분 뒤 4-3-3, 이기면 80분 뒤 5-3-2(한 번씩)
+              'tactics': True, 'chase_after': 70, 'chase_formation': '4-3-3',
+              'protect_after': 80, 'protect_formation': '5-3-2'}
 BENCH_ROLES = ('GK', 'DEF', 'DEF', 'MID', 'MID', 'FWD', 'FWD')   # 벤치 7명
 SQUAD_SIZE = 11 + len(BENCH_ROLES)
 TEAM_NAMES = ('Blue', 'Red')
@@ -165,15 +170,45 @@ class Intent:
 
 
 # ---------------- 월드 ----------------
-FORMATION = [   # 4-4-2 (공격 +x 기준 정규화 좌표)
+FORMATION = [   # 4-4-2 (공격 +x 기준 정규화 좌표) — 기본
     ('GK', 0.05, 0.50),
     ('DEF', 0.22, 0.18), ('DEF', 0.22, 0.39), ('DEF', 0.22, 0.61), ('DEF', 0.22, 0.82),
     ('MID', 0.46, 0.18), ('MID', 0.46, 0.39), ('MID', 0.46, 0.61), ('MID', 0.46, 0.82),
     ('FWD', 0.68, 0.40), ('FWD', 0.68, 0.60),
 ]
 
+# v4.2: 고를 수 있는 포메이션(역할, 깊이 fx, 폭 fy). GK 1 + 필드 10. 깊이는 ROLE_BASE_FX와의 차이만 쓴다
+FORMATIONS = {
+    '4-4-2': FORMATION,
+    '4-3-3': [('GK', 0.05, 0.50),
+              ('DEF', 0.22, 0.18), ('DEF', 0.22, 0.39), ('DEF', 0.22, 0.61), ('DEF', 0.22, 0.82),
+              ('MID', 0.44, 0.30), ('MID', 0.44, 0.50), ('MID', 0.44, 0.70),
+              ('FWD', 0.66, 0.18), ('FWD', 0.70, 0.50), ('FWD', 0.66, 0.82)],
+    '4-2-3-1': [('GK', 0.05, 0.50),
+                ('DEF', 0.22, 0.18), ('DEF', 0.22, 0.39), ('DEF', 0.22, 0.61), ('DEF', 0.22, 0.82),
+                ('MID', 0.38, 0.38), ('MID', 0.38, 0.62),
+                ('MID', 0.55, 0.18), ('MID', 0.55, 0.50), ('MID', 0.55, 0.82),
+                ('FWD', 0.70, 0.50)],
+    '4-5-1': [('GK', 0.05, 0.50),
+              ('DEF', 0.22, 0.18), ('DEF', 0.22, 0.39), ('DEF', 0.22, 0.61), ('DEF', 0.22, 0.82),
+              ('MID', 0.46, 0.12), ('MID', 0.44, 0.32), ('MID', 0.42, 0.50), ('MID', 0.44, 0.68),
+              ('MID', 0.46, 0.88),
+              ('FWD', 0.70, 0.50)],
+    '3-5-2': [('GK', 0.05, 0.50),
+              ('DEF', 0.22, 0.28), ('DEF', 0.21, 0.50), ('DEF', 0.22, 0.72),
+              ('MID', 0.48, 0.10), ('MID', 0.44, 0.32), ('MID', 0.42, 0.50), ('MID', 0.44, 0.68),
+              ('MID', 0.48, 0.90),
+              ('FWD', 0.68, 0.40), ('FWD', 0.68, 0.60)],
+    '5-3-2': [('GK', 0.05, 0.50),
+              ('DEF', 0.24, 0.10), ('DEF', 0.22, 0.30), ('DEF', 0.21, 0.50), ('DEF', 0.22, 0.70),
+              ('DEF', 0.24, 0.90),
+              ('MID', 0.44, 0.30), ('MID', 0.44, 0.50), ('MID', 0.44, 0.70),
+              ('FWD', 0.68, 0.40), ('FWD', 0.68, 0.60)],
+}
+FORMATION_NAMES = tuple(FORMATIONS)
+
 class World:
-    def __init__(self, match_len=None, squad=None):
+    def __init__(self, match_len=None, squad=None, formations=None):
         self.players = []
         self.ball = Ball()
         self.score = [0, 0]
@@ -207,7 +242,13 @@ class World:
         self.subbed_off = []            # 교체로 나간 선수(다시 못 들어옴)
         self.sub_queue = []             # (팀, 나갈 pid, 들어올 pid) — 다음 멈춤에서 적용
         self.sub_log = []               # (분, 팀, 나간 이름, 들어온 이름)
-        self.sub_policy = [dict(SUB_POLICY), dict(SUB_POLICY)]   # 팀별 AI 교체 정책
+        self.sub_policy = [dict(SUB_POLICY), dict(SUB_POLICY)]   # 팀별 AI 교체·전술 정책
+        self.formation = list(formations or ('4-4-2', '4-4-2'))  # v4.2: 팀별 포메이션 이름
+        self.formation_log = []         # (분, 팀, 포메이션) — 경기 중 바꾼 기록
+        self.tactic_state = [{}, {}]    # AI 전술 변경 이력(한 번씩만)
+        for f in self.formation:
+            if f not in FORMATIONS:
+                raise ValueError(f"unknown formation {f!r}; choose from {', '.join(FORMATION_NAMES)}")
         self.pstats = {}                # pid -> 선수별 경기 기록
         self.reds = set()               # 퇴장당한 pid
         self.human_pick = None          # 사람이 고정한 조작 선수 pid(None = 공 가까운 선수 자동)
@@ -216,7 +257,7 @@ class World:
         if squad is None:
             pid = 0
             for team in (0, 1):
-                for role, fx, fy in FORMATION:
+                for role, fx, fy in FORMATIONS[self.formation[team]]:
                     self.players.append(Player(team, role, fx, fy, rand_stats(role), pid=pid))
                     pid += 1
         else:
@@ -260,7 +301,7 @@ class World:
             fx = p.base_fx
         else:                        # v4: 라인 하나(수비 라인)를 기준으로 미드·공격 라인이 따라붙는다
             att = self.attacking(p.team)
-            gap = ROLE_GAP[p.role] * (1.15 if att else 1.0)
+            gap = (ROLE_GAP[p.role] + (p.base_fx - ROLE_BASE_FX[p.role])) * (1.15 if att else 1.0)
             fx = clamp(self.def_line(p.team, ball, att) + gap, 0.04, 0.92)
         width = 1.0 if p.role == 'GK' or self.attacking(p.team) else 0.8   # 수비 땐 좁게
         fy = clamp(0.5 + (p.base_fy - 0.5) * width + (by - 0.5) * 0.25, 0.05, 0.95)
@@ -1076,9 +1117,56 @@ def update_clock(world):
         world.event_timer = 1e9                # 배너 계속 표시
 
 def on_stoppage(world):
-    # 공이 멈춘 순간(재개·페널티·골 뒤 킥오프·하프타임): 대기 중 교체 적용 → AI 교체
+    # 공이 멈춘 순간(재개·페널티·골 뒤 킥오프·하프타임): 대기 중 교체 적용 → AI 교체 → AI 전술
     apply_subs(world)
     ai.maybe_subs(world)
+    ai.maybe_tactics(world)
+
+# ---------------- v4.2: 포메이션 ----------------
+def assign_slots(players, slots):
+    # 선수들을 자리 목록에 배정 → slots 순서대로 선수 리스트. 비용이 낮은 쌍부터(욕심 배정):
+    #   지금 맡은 역할과 같으면 0, 주 포지션과 같으면 1, 다르면 2 + 폭(fy)·깊이(fx) 차이
+    #   GK 자리는 GK끼리만. 선수가 자리보다 적으면(퇴장) 가장 앞쪽(fx 큰) 자리부터 비운다
+    gk_slots = [i for i, sl in enumerate(slots) if sl[0] == 'GK']
+    gks = [p for p in players if p.role == 'GK' or (p.pos_role == 'GK' and p.role not in ROLE_GAP)]
+    out = [None] * len(slots)
+    for i, p in zip(gk_slots, gks):
+        out[i] = p
+    field = [p for p in players if p not in gks]
+    free = sorted((i for i, sl in enumerate(slots) if sl[0] != 'GK'), key=lambda i: slots[i][1])
+    free = free[:len(field)]
+    def cost(p, i):
+        role, fx, fy = slots[i]
+        c = 0 if p.role == role else 1 if p.pos_role == role else 2
+        return c + abs(p.base_fy - fy) * 0.8 + abs(p.base_fx - fx) * 0.3
+    pairs = sorted((cost(p, i), k, i) for k, p in enumerate(field) for i in free)
+    used_p, used_i = set(), set()
+    for c, k, i in pairs:
+        if k in used_p or i in used_i:
+            continue
+        out[i] = field[k]; used_p.add(k); used_i.add(i)
+    return out
+
+def set_formation(world, team, name):
+    # 포메이션 바꾸기(킥오프 전 · 경기 중 아무 때나 — 실제로도 전술 변경은 멈춤이 필요 없다)
+    # 뛰고 있는 선수만 새 자리에 배정. 퇴장으로 줄었으면 가장 앞 자리부터 비운다
+    if name not in FORMATIONS:
+        return False, f"unknown formation {name!r}"
+    slots = FORMATIONS[name]
+    on = [p for p in world.players if p.team == team and p.active]
+    for sl, p in zip(slots, assign_slots(on, slots)):
+        if p is not None:
+            p.role, p.base_fx, p.base_fy = sl
+    changed = world.formation[team] != name
+    world.formation[team] = name
+    if world.time > 0:
+        if changed:
+            world.formation_log.append((game_minute(world), team, name))
+            set_event(world, "FORMATION " + name)
+    else:                                   # 킥오프 전: 새 자리로 바로 세운다
+        world.kickoff(world.first_kick if hasattr(world, 'first_kick') else 0)
+    return True, name
+
 
 def subs_left(world, team):
     queued = sum(1 for q in world.sub_queue if q[0] == team)
@@ -1144,13 +1232,17 @@ def name_squad(world):
             p.pos_role = p.pos_role or p.role
 
 def load_lineup(world, squad):
-    # squad(dict): {"teams": [{"name", "players": [{"name","number","role","stats"}...],
+    # squad(dict): {"teams": [{"name", "formation"(선택), "players": [{"name","number","role","stats"}...],
     #                          "lineup": [등번호 11개]} × 2]}
-    # 선발은 역할별로 포메이션 자리에 순서대로(4-4-2 = GK 1 · DEF 4 · MID 4 · FWD 2)
+    # 선발 11명(GK 정확히 1명)을 포메이션 자리에 배정: 같은 주 포지션 자리 우선(assign_slots)
     pid = 0
     pool = []
     for team, t in enumerate(squad['teams']):
         world.team_names[team] = t.get('name', TEAM_NAMES[team])
+        if t.get('formation'):
+            if t['formation'] not in FORMATIONS:
+                raise ValueError(f"unknown formation {t['formation']!r}")
+            world.formation[team] = t['formation']
         by_num = {}
         for e in t['players']:
             st = Stats(**e['stats'])
@@ -1158,15 +1250,13 @@ def load_lineup(world, squad):
                        number=int(e['number']), pos_role=e['role'])
             by_num[p.number] = p
         lineup = [by_num[int(n)] for n in t['lineup']]
-        need = {r: sum(1 for f in FORMATION if f[0] == r) for r in ('GK', 'DEF', 'MID', 'FWD')}
-        have = {r: sum(1 for p in lineup if p.pos_role == r) for r in need}
-        if len(lineup) != len(FORMATION) or have != need:
-            raise ValueError(f"team {team} lineup must be 4-4-2 {need}, got {have}")
-        left = list(lineup)
-        for role, fx, fy in FORMATION:
-            p = next(q for q in left if q.pos_role == role)
-            left.remove(p)
-            p.base_fx, p.base_fy, p.pid = fx, fy, pid
+        n_gk = sum(1 for p in lineup if p.pos_role == 'GK')
+        if len(lineup) != 11 or n_gk != 1:
+            raise ValueError(f"team {team} lineup must be 11 players with exactly 1 GK, "
+                             f"got {len(lineup)} players / {n_gk} GK")
+        slots = FORMATIONS[world.formation[team]]
+        for (role, fx, fy), p in zip(slots, assign_slots(lineup, slots)):
+            p.role, p.base_fx, p.base_fy, p.pid = role, fx, fy, pid
             world.players.append(p); pid += 1
         pool.append([p for p in by_num.values() if p not in lineup])
     for team in (0, 1):
@@ -1183,7 +1273,8 @@ def squad_dict(world):
         for p in on + world.bench[team] + [q for q in world.subbed_off if q.team == team]:
             rows.append({'name': p.name, 'number': p.number, 'role': p.pos_role,
                          'stats': {k: round(v, 1) for k, v in vars(p.stats).items()}})
-        out['teams'].append({'name': world.team_names[team], 'players': rows,
+        out['teams'].append({'name': world.team_names[team], 'formation': world.formation[team],
+                             'players': rows,
                              'lineup': [p.number for p in on]})
     return out
 
