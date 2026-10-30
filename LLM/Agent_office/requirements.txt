@@ -35,7 +35,7 @@ matplotlib>=3.8,<4       # PNG·SVG 미리보기
 trimesh>=4.4,<6          # 3D 벽 세우기, GLB·OBJ·STL
 mapbox_earcut>=1.0       # trimesh 다각형 삼각분할
 manifold3d>=3.0          # STL 조각 합치기 (watertight)
-plotly>=5.20,<8          # 화면 3D 뷰어
+plotly>=7.1.0,<8          # 화면 3D 뷰어
 pypdfium2>=4.0           # PDF 첨부 → 그림 (비전 모델 입력)
 ifcopenshell>=0.8        # (선택) IFC 내보내기 — 설치가 안 되면 IFC 만 건너뛴다
 
