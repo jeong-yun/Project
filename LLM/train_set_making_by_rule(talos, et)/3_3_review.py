@@ -110,6 +110,7 @@ def merge(rule, gen, review, policy, rejected, unknown_policy="drop", realistic=
             s = C.repair_sample(s, rule)
         if realistic:
             s = C.realistic_sample(s, rule)
+        s = C.repeat_parts(s, rule)        # 큰 반복 (…){100,}: 넣은 파트·빈 줄을 코드가 기준 수 이상으로 (2026-10-30)
         chk = C.local_check(s, rule)
         # 룰 기준 라벨만 남긴다: anomalies = 룰이 탐지, normal = 룰이 탐지 안 함. 어긋나면(fail) 뺀다
         if chk["result"] == "fail" and policy == "drop":
@@ -474,6 +475,8 @@ def main(argv=None):
     ap.add_argument("--follow", type=int, metavar="PID",
                     help="이 생성(3.2) 프로세스가 끝날 때까지 새로 생성되는 결과를 바로 검토 (3_0 이 사용)")
     ap.add_argument("--dry-run", action="store_true", help="호출하지 않고 무엇을 할지만 출력")
+    ap.add_argument("--set", choices=["any", "delta", "all", "pick"], default="any",
+                    help="이 종류의 생성 결과만 (기본 전부, pick = 3_1 --rules 의 지정 룰 요청 - 3_0 --set pick 이 사용)")
     ap.add_argument("--redo-safety", action="store_true",
                     help="이미 검토한 것 중 거절·안전 사유로 뺀 룰만 '검토 대체 모델'로 다시 검토 → 3.4·1.4·3.5 (옛 결과는 _replaced)")
     ap.add_argument("--reuse-raw", metavar="DIR", help="(--redo-safety) 대체 모델로 미리 검토한 원문 폴더 <날짜>/raw/<이름>.try1.txt")
@@ -514,7 +517,8 @@ def main(argv=None):
         gens, todo = [], []
         for base in bases:
             gen_dir, rev_dir = base / C.GEN_DIR, base / C.REV_DIR
-            found = sorted(p for p in gen_dir.glob("*.jsonl")) if gen_dir.is_dir() else []
+            found = sorted(p for p in gen_dir.glob("*.jsonl")
+                           if args.set == "any" or p.stem.startswith(args.set + "_")) if gen_dir.is_dir() else []
             gens += found
             todo += [(base, g) for g in found if args.force or not (rev_dir / g.name).exists()]
         return gens, todo

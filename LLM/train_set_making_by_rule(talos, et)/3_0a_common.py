@@ -9,6 +9,7 @@
     common = load_common()
 """
 
+import base64
 import collections
 import contextlib
 import functools
@@ -29,7 +30,7 @@ import urllib.error
 import urllib.request
 import warnings
 from pathlib import Path
-from urllib.parse import unquote, unquote_plus
+from urllib.parse import unquote, unquote_plus, unquote_to_bytes
 
 BASE_DIR = Path(__file__).resolve().parent
 LLM_INPUT_DIR = BASE_DIR / "05_llm_input"
@@ -85,7 +86,13 @@ def setup_logging(name):
         return log
     LOG_DIR.mkdir(exist_ok=True)
     fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    fh = logging.FileHandler(LOG_DIR / f"{name}.log", encoding="utf-8")
+    path = LOG_DIR / f"{name}.log"
+    try:        # 시작할 때 5MB 를 넘었으면 <name>.log.1 로 넘긴다 (1개만 보관, 다른 프로세스가 쓰는 중이면 Windows 가 막아 그대로 이어 씀)
+        if path.stat().st_size > 5 * 2**20:
+            os.replace(path, path.with_name(path.name + ".1"))
+    except OSError:
+        pass
+    fh = logging.FileHandler(path, encoding="utf-8")
     fh.setFormatter(fmt)
     log.setLevel(logging.INFO)
     log.addHandler(fh)
@@ -143,6 +150,11 @@ def load_settings(path=SETTINGS_FILE):
     if "생성" not in roles:
         raise ValueError(f"{path.name} 의 '## 모델' 표에 '생성' 줄이 없습니다")
     return roles, providers, run
+
+
+def excluded_rules(path=SETTINGS_FILE):
+    """LLM_설정.md '## 생성 제외 룰' 표 → {룰 id: 사유}. 다시 만들어도 코드 검사를 넘을 수 없는 룰 (3.1 이 빼고, 3.5 가 EXCLUDED)."""
+    return {row[0]: (row[1] if len(row) > 1 else "") for row in md_tables(path).get("생성 제외 룰", []) if row and row[0]}
 
 
 def run_int(run, key, default):
@@ -604,19 +616,36 @@ def mock_response(user, run):
     return "\n".join(json.dumps(o, ensure_ascii=False) for o in out)
 
 
-_JSON_ESC = re.compile(r'\\(\\|x([0-9A-Fa-f]{2})|.)', re.S)
+_JSON_ESC = re.compile(r'\\(u[0-9A-Fa-f]{4}|[\\"/bfnrt]|.)', re.S)
 
 
 def _fix_json_escapes(s):
     """JSON 에 없는 이스케이프를 고친다. 모델이 바이너리를 \\x03 처럼 쓰면 객체 전체가 깨지기 때문.
-    \\xHH → \\u00HH (같은 바이트), 그 밖의 잘못된 \\c → 글자 그대로 (\\\\c). 올바른 이스케이프는 그대로 둔다."""
+    잘못된 \\c (\\xHH, 뒤에 16진수 4자리가 없는 \\u 포함) → 백슬래시를 하나 더 붙여 글자 그대로 (\\\\c).
+    그래서 \\xHH 는 http 에 '\\xHH' 네 글자로 남는다 (지시문이 바이너리를 쓰라는 모양, 코드 검사는 바이트로도 본다).
+    올바른 이스케이프는 그대로 둔다. (2026-10-30 전에는 \\xHH → 실제 문자 U+00HH)"""
     def fix(m):
-        if m.group(1) == "\\" or m.group(1) in '"/bfnrtu':
-            return m.group(0)
-        if m.group(2):
-            return "\\u00" + m.group(2)
-        return "\\\\" + m.group(1)
+        return m.group(0) if len(m.group(1)) == 5 or m.group(1) in '\\"/bfnrt' else "\\\\" + m.group(1)
     return _JSON_ESC.sub(fix, s)
+
+
+_FENCE = re.compile(r"```(?:json|jsonl)?")
+_RULE_OBJ = re.compile(r'\{\s*"id"\s*:')              # 룰 하나의 객체 시작 (생성·검토 응답 모두 "id" 가 첫 키)
+_NEXT_RULE_OBJ = re.compile(r'\n\s*\{\s*"id"\s*:')
+
+
+def _close_rule_obj(s, i):
+    """i 에서 시작한 룰 객체가 끝 '}' 하나만 빠진 경우 ('…}]' 다음 줄에 바로 다음 룰 객체, solar-pro4 에서 봄):
+    다음 룰 객체 앞까지에 '}' 를 붙여 읽는다 → (객체, 끝 위치) 또는 None."""
+    if not _RULE_OBJ.match(s, i):
+        return None
+    m = _NEXT_RULE_OBJ.search(s, i)
+    j = m.start() if m else len(s)
+    try:
+        obj = json.loads(s[i:j].rstrip().rstrip(",").rstrip() + "}")
+    except ValueError:
+        return None
+    return (obj, j) if isinstance(obj, dict) else None
 
 
 def parse_json_lines(text):
@@ -624,8 +653,9 @@ def parse_json_lines(text):
 
     허용: ``` 코드 블록, 배열 하나, 한 줄에 객체 하나(JSON Lines), 객체 하나가 여러 줄에 걸친 형태(들여쓰기),
           앞뒤 설명 문장. 문자열 안의 '{' 는 건너뛴다 (json 해석기로 객체 단위로 읽음).
+          룰 객체의 끝 '}' 하나가 빠진 형태도 고쳐 읽는다 (_close_rule_obj).
     """
-    s = _fix_json_escapes(re.sub(r"```(?:json|jsonl)?", "", text).strip())
+    s = _fix_json_escapes(_FENCE.sub("", text).strip())
     try:
         obj = json.loads(s)
         return obj if isinstance(obj, list) else [obj]
@@ -639,12 +669,50 @@ def parse_json_lines(text):
             break
         try:
             obj, end = dec.raw_decode(s, i)      # i 위치부터 객체 하나를 끝까지 읽는다 (여러 줄 가능)
-            if isinstance(obj, dict):
-                out.append(obj)
-            i = end
         except ValueError:
-            i += 1                               # 객체 시작이 아니면 다음 '{' 로
+            fixed = _close_rule_obj(s, i)
+            if fixed is None:
+                i += 1                           # 객체 시작이 아니면 다음 '{' 로
+                continue
+            obj, end = fixed
+        if isinstance(obj, dict):
+            out.append(obj)
+        i = end
     return out
+
+
+def salvage_rule(text, rid):
+    """응답이 룰 rid 의 객체 중간에서 끊겼을 때(긴 \\x00 나열 중 끊김 등) 그 안에서 끝까지 온 샘플만 꺼낸다
+    → {"id", "attack_type", "samples", "salvaged": True} 또는 None (끝까지 온 샘플이 없으면).
+    3.2 가 재시도까지 모두 끝난 뒤에도 빠진 룰에만 쓴다."""
+    s = _fix_json_escapes(_FENCE.sub("", text).strip())
+    m = re.search(r'\{\s*"id"\s*:\s*"' + re.escape(rid) + r'"', s)
+    if not m:
+        return None
+    nxt = _NEXT_RULE_OBJ.search(s, m.end())
+    head = s[m.end():nxt.start() if nxt else len(s)]
+    k = re.search(r'"samples"\s*:\s*\[', head)
+    if not k:
+        return None
+    at = re.search(r'"attack_type"\s*:\s*"((?:[^"\\]|\\.)*)"', head[:k.start()])
+    dec, samples, i = json.JSONDecoder(), [], k.end()
+    while True:
+        while i < len(head) and head[i] in " \t\r\n,":
+            i += 1
+        if i >= len(head) or head[i] != "{":
+            break
+        try:
+            obj, i = dec.raw_decode(head, i)
+        except ValueError:
+            break                                # 끊긴 샘플부터는 버린다
+        samples.append(obj)
+    if not samples:
+        return None
+    try:
+        attack_type = json.loads(f'"{at.group(1)}"') if at else None
+    except ValueError:
+        attack_type = None
+    return {"id": rid, "attack_type": attack_type, "samples": samples, "salvaged": True}
 
 
 # 긴 반복 표기 (LLM_프롬프트.md 생성 규칙 11): 생성 모델이 '%00%00…', '..\..\…' 를 직접 반복하다 멈추지 못하고
@@ -728,7 +796,21 @@ def _variants(text, where):
                     out.append(d)
             except Exception:
                 pass
-    return out
+    if not CHECK_FIXES:
+        return out
+    extra = []                                              # 코드 검사 고침 (CHECK_FIXES 주석)
+    if where == "uri":
+        extra += [re.sub(r"/{2,}", "/", t) for t in out]
+    if where in ("header", "raw_header"):
+        extra += ["\n" + text + "\n\n", "\r\n" + text.replace("\n", "\r\n") + "\r\n\r\n"]
+    if "\\x" in text:
+        extra += [_ESC_HEX.sub(lambda m: chr(int(m.group(1), 16)), t) for t in out]
+    if where in ("uri", "body", "cookie", "payload") and _PCT_HIGH.search(text):
+        try:
+            extra.append(unquote_to_bytes(text).decode("latin-1"))
+        except Exception:
+            pass
+    return out + [e for e in dict.fromkeys(extra) if e not in out]
 
 
 @functools.lru_cache(maxsize=None)
@@ -811,9 +893,92 @@ def regex_search(rx, pattern, flags, text):
         return None
 
 
+# R(상대) 정규식 (2026-10-30): Snort pcre 의 R 은 '바로 앞 content 가 끝난 자리'부터 검사한다 (^ 도 그 자리).
+# 예전에는 R 을 무시하고 메시지 맨 앞(요청 줄)에서 ^ 를 봐서, content "id=" 뒤 '^(UNION SELECT|…)' 같은 룰(et:1:2004803)은
+# 어떤 공격 샘플도 통과하지 못했다. 조건의 after = 기준 content (1.2·1.3 이 룰 원문 순서로 남김, 예전 입력·요청 파일은
+# with_anchors 가 룰 원문에서 다시 찾음). 기준 content 가 다른 버퍼(uri 등)에 있어도 정규식이 보는 텍스트에서 그 값을
+# 찾는 근사로 본다. 위치 옵션(depth·distance 등)은 지금처럼 보지 않는다.
+RELATIVE_REGEX = True          # False = 예전 검사 (비교·시험용)
+RELATIVE_MAX_TRIES = 50        # 기준 content 가 여러 번 나오면 앞에서부터 이만큼의 자리만 본다
+
+# 코드 검사 고침 (2026-10-30 오후, 진행보고 10-30 4·5절): 다시 만든 뒤에도 공격 0 인 132룰을 보니 70룰은 검사가 Snort 와
+# 달라서 떨어졌다. 아래를 고쳤다 (False = 고치기 전 검사, 비교·시험용).
+#   - 요청 방향(flow:to_server) 룰의 file_data 는 요청 본문 (예전 입력·요청 파일의 'response_body' 는 with_anchors 가 body 로)
+#   - base64_data: 앞 content 뒤 base64 를 디코딩한 값에서 찾는다. 원문도 함께 본다 (원문 그대로 넣어 통과한 기존 샘플을 그대로 두는 완화)
+#   - 헤더 버퍼: Snort 처럼 앞 줄바꿈(요청 줄 끝)·끝 빈 줄(\r\n\r\n)을 붙인 것도 함께 본다 (|0d 0a|Host|3a|, …|0d 0a 0d 0a| 룰)
+#   - 요청 줄: 소문자 메서드(get /)도 받는다 (대소문자를 틀린 메서드를 잡는 룰)
+#   - URI: 겹친 / 를 하나로 본 것도 함께 (Snort multi_slash 정규화)
+#   - 바이너리: 글자 \xNN (기존 장비 로그 표기)·%XX(80 이상)를 바이트로 본 것도 함께
+CHECK_FIXES = True
+_ESC_HEX = re.compile(r"\\x([0-9a-fA-F]{2})")
+_PCT_HIGH = re.compile(r"%[89a-fA-F][0-9a-fA-F]")
+_B64_RUN = re.compile(r"[A-Za-z0-9+/_-]{8,}={0,2}")
+_REQ_LINE = re.compile(r"^([A-Za-z][A-Za-z\-_]*) \S+ HTTP/\d|^HTTP/\d")
+_REQ_LINE_OLD = re.compile(r"^([A-Z][A-Z\-_]*) \S+ HTTP/\d|^HTTP/\d")
+_FLOW_TO_SERVER = re.compile(r"\bflow\s*:[^;]*\b(?:to_server|from_client)\b")
+
+
+def base64_view(payload):
+    """base64_data 조건이 보는 텍스트: base64 로 보이는 덩어리(8자 이상)를 디코딩한 값들 + 원문 (CHECK_FIXES 주석)."""
+    out = []
+    for t in _variants(payload, "payload"):
+        for m in _B64_RUN.finditer(t):
+            s = m.group(0).replace("-", "+").replace("_", "/")
+            try:
+                raw = base64.b64decode(s + "=" * (-len(s) % 4))
+            except ValueError:
+                continue
+            out.append(raw.decode("latin-1"))
+            try:
+                out.append(raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                pass
+    return "\n".join(list(dict.fromkeys(out)) + [payload])
+
+
+def request_file_data(raw):
+    """요청 방향(flow:to_server) 룰이 file_data 를 쓰는지 → 그 file_data 는 요청 본문 (Snort 3·Suricata 와 같음)."""
+    return "file_data" in raw and bool(_FLOW_TO_SERVER.search(raw))
+
+
+def _fd_body(c):
+    """조건의 응답 본문(response_body) 위치를 요청 본문(body)으로 (기준 content after 도)."""
+    if c.get("in") == "response_body":
+        c = dict(c, **{"in": "body"})
+    if (c.get("after") or {}).get("in") == "response_body":
+        c = dict(c, after=dict(c["after"], **{"in": "body"}))
+    return c
+
+
+@functools.lru_cache(maxsize=4096)
+def _anchor_rx(value, nocase):
+    return re.compile(re.escape(value), re.I if nocase else 0)
+
+
+def _after_pieces(text, after):
+    """R 정규식이 볼 텍스트들: 기준 content 가 나온 자리마다 그 바로 뒤부터 끝까지. 잘라서 넘겨야 ^ 가 그 자리에 맞는다
+    (rx.search(text, pos) 의 ^ 는 pos 에서 맞지 않음). 기준 content 가 없으면 빈 목록 (그 조건은 만족 못 함)."""
+    v = unescape_value(after.get("value", ""))
+    if not v:
+        return [text]
+    out = []
+    for m in _anchor_rx(v, bool(after.get("nocase"))).finditer(text):
+        out.append(text[m.end():])
+        if len(out) >= RELATIVE_MAX_TRIES:
+            break
+    return out
+
+
 def check_condition(c, parts):
     """조건 하나를 만족하면 True, 아니면 False, 판단 불가(정규식 오류·검사 시간 초과)면 None."""
     where = c.get("in", "payload")
+    after = c.get("after") if c["type"] == "regex" and RELATIVE_REGEX and "R" in c.get("flags", "") else None
+    if after and where == "payload" and after.get("in"):
+        # 버퍼 표시가 없는 R 정규식은 기준 content 의 버퍼에서 이어서 본다 (Suricata·Snort 3 와 같음).
+        # 예: content:"pool="; http_uri; pcre:"/^[^\x3d]{40,}/R" → URI 의 pool= 뒤만 (헤더까지 이어 보지 않음)
+        where = after["in"]
+    if where == "base64_data" and CHECK_FIXES and "base64_data" not in parts:
+        parts["base64_data"] = base64_view(parts["payload"])       # 샘플 하나에 한 번만 (parts 에 남김)
     texts = _variants(parts.get(where, parts["payload"]), where)
     if c["type"] == "content":
         v = unescape_value(c.get("value", ""))
@@ -828,14 +993,66 @@ def check_condition(c, parts):
             return None
         found, unknown = False, False
         for t in texts:
-            r = regex_search(rx, c["pattern"], flags, t)
-            if r:
-                found = True
+            for piece in (_after_pieces(t, after) if after else (t,)):
+                r = regex_search(rx, c["pattern"], flags, piece)
+                if r:
+                    found = True
+                    break
+                unknown = unknown or r is None
+            if found:
                 break
-            unknown = unknown or r is None
         if not found and unknown:
             return None
     return (not found) if c.get("negated") else found
+
+
+_ANCHORS = {"cache": {}, "mods": None}
+
+
+def _rule_anchors(text):
+    """룰 원문 → pcre 순서대로 R 기준 content ({in, value[, nocase]} 또는 None). 1.2 파서·1.3 조건 변환을 그대로 쓴다."""
+    if _ANCHORS["mods"] is None:
+        mods = []
+        for name, file in (("parse_rules_c", "1_2_parse_rules.py"), ("llm_input_c", "1_3_build_llm_input.py")):
+            spec = importlib.util.spec_from_file_location(name, BASE_DIR / file)
+            m = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(m)
+            mods.append(m)
+        _ANCHORS["mods"] = mods
+    p12, p13 = _ANCHORS["mods"]
+    parsed = p12.parse_rule(text, "x", "")
+    if not parsed:
+        return None
+    return [c.get("after") for c in p13.conditions(parsed) if c["type"] == "regex"]
+
+
+def with_anchors(rule):
+    """룰의 조건 목록 (검사용). 예전 입력·요청 파일이면 룰 원문을 보고 고친 사본:
+    - R 정규식에 기준 content(after)가 없으면(2026-10-30 전) 룰 원문에서 찾아 채운다.
+    - 요청 방향 룰의 file_data 조건이 응답 본문(response_body)이면(2026-10-30 오후 전) 요청 본문(body)으로."""
+    conds = rule.get("conditions", [])
+    raw = rule.get("rule") or ""
+    need_r = RELATIVE_REGEX and any(c.get("type") == "regex" and "R" in c.get("flags", "") and "after" not in c for c in conds)
+    need_fd = CHECK_FIXES and request_file_data(raw) and any(
+        c.get("in") == "response_body" or (c.get("after") or {}).get("in") == "response_body" for c in conds)
+    # 원문이 없으면(예: 1.4 의 {"conditions": …}) 채울 수 없으니 그대로 - 원문 없는 룰끼리 캐시 키가 같아 섞이지 않게
+    if not raw or not (need_r or need_fd):
+        return conds
+    key = (rule.get("id"), rule_hash(rule), need_r, need_fd)
+    hit = _ANCHORS["cache"].get(key)
+    if hit is None:
+        hit = list(conds)
+        if need_r:
+            regs = [i for i, c in enumerate(conds) if c.get("type") == "regex"]
+            anchors = _rule_anchors(raw)
+            if anchors is not None and len(anchors) == len(regs):
+                for i, a in zip(regs, anchors):
+                    if a and "R" in conds[i].get("flags", "") and "after" not in conds[i]:
+                        hit[i] = dict(conds[i], after=a)
+        if need_fd:
+            hit = [_fd_body(c) for c in hit]
+        _ANCHORS["cache"][key] = hit
+    return hit
 
 
 def local_check(sample, rule):
@@ -847,17 +1064,19 @@ def local_check(sample, rule):
     http = sample.get("http", "")
     if "|||" in http:
         return {"result": "fail", "reasons": ["'|||' 포함 (로그 구분자)"]}
-    if not re.match(r"^([A-Z][A-Z\-_]*) \S+ HTTP/\d|^HTTP/\d", http.lstrip()):
+    if not (_REQ_LINE if CHECK_FIXES else _REQ_LINE_OLD).match(http.lstrip()):
         return {"result": "fail", "reasons": [BAD_LINE]}
     parts = split_http(http)
-    results = [(c, check_condition(c, parts)) for c in rule.get("conditions", [])]
+    results = [(c, check_condition(c, parts)) for c in with_anchors(rule)]
     failed = [c for c, ok in results if ok is False]
     unknown = [c for c, ok in results if ok is None]
     if sample.get("label") == "anomalies":
         if failed:
             return {"result": "fail", "reasons": [
                 f"조건 불일치: {c['type']} in {c['in']} {'(negated) ' if c.get('negated') else ''}"
-                f"{(c.get('value') or c.get('pattern', ''))[:60]}" for c in failed]}
+                f"{(c.get('value') or c.get('pattern', ''))[:60]}"
+                + (f" ('{c['after'].get('value', '')}' 바로 뒤부터)" if c.get("after") and "R" in c.get("flags", "") else "")
+                for c in failed]}
         return {"result": "unknown" if unknown else "ok", "reasons": ["정규식 해석 불가"] if unknown else []}
     if results and not failed and not unknown:
         return {"result": "fail", "reasons": ["normal 샘플이 룰 조건을 모두 만족 (탐지될 수 있음)"]}
@@ -895,6 +1114,141 @@ def repair_sample(s, rule):
     if fixed["http"] == s["http"] or BAD_LINE in local_check(fixed, rule).get("reasons", []):
         return s
     return dict(fixed, note=(str(s.get("note") or "") + " [요청 줄 자동 수정]").strip())
+
+
+# ── 큰 반복 (…){100,} 을 코드로 (2026-10-30) ───────────────────────────
+# 정규식이 multipart 파트·빈 줄을 수백 번 반복해야 하는 룰(예: et:1:2072556 파트 100+, 2072557 빈 filename 100+,
+# 2014046 파트 250+)은 생성 모델이 수를 세지 못하거나 검토 모델이 '과도한 요청'으로 뺀다. 생성 모델은 파트 1~몇 개만 넣고,
+# 코드가 그 파트를 기준 수 이상 복사해 붙인 뒤 Content-Length 를 맞춘다 (3.2 의 코드 검사, 3.3 merge).
+REPEAT_PART_MIN = 20                # 이 수 이상 반복을 요구하는 그룹만 (작은 반복은 생성 모델이 직접)
+REPEAT_PART_MARGIN = 5              # 기준 수보다 조금 더
+REPEAT_PART_MAX_CHARS = 30000       # 늘린 http 최대 길이 (기존 학습 로그 payload 최대 약 2.5만 자, 06_기존 데이터)
+_GROUP_REP_RE = re.compile(r"\)\{(\d+)(?:,\d*)?\}")
+_BOUNDARY_RE = re.compile(r"(?im)^content-type:[ \t]*multipart/[\w.+-]+[^\n]*?boundary=\"?([^\";\s]+)")
+
+
+def _paren_pairs(pattern):
+    """정규식의 괄호 짝 {닫는 위치: 여는 위치} (이스케이프·문자 집합 안 괄호는 건너뜀)."""
+    pairs, stack, i, in_cls = {}, [], 0, False
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\":
+            i += 2
+            continue
+        if in_cls:
+            in_cls = ch != "]"
+        elif ch == "[":
+            in_cls = True
+            if pattern[i + 1:i + 2] == "^":
+                i += 1
+            if pattern[i + 1:i + 2] == "]":           # []…] / [^]…] : 첫 ] 는 글자
+                i += 1
+        elif ch == "(":
+            stack.append(i)
+        elif ch == ")" and stack:
+            pairs[i] = stack.pop()
+        i += 1
+    return pairs
+
+
+def group_repeats(pattern):
+    """(…){n,…} 그룹 반복 → [(안쪽 정규식 문자열, n)] (n >= REPEAT_PART_MIN)."""
+    out, pairs = [], None
+    for m in _GROUP_REP_RE.finditer(pattern):
+        n = int(m.group(1))
+        if n < REPEAT_PART_MIN:
+            continue
+        pairs = pairs if pairs is not None else _paren_pairs(pattern)
+        if m.start() not in pairs:
+            continue
+        inner = pattern[pairs[m.start()] + 1:m.start()]
+        inner = re.sub(r"^\?(?::|P?<[A-Za-z_]\w*>)", "", inner)    # (?:…) (?P<n>…) (?<n>…)
+        out.append((inner, n))
+    return out
+
+
+def _crlf(t):
+    return t.replace("\r\n", "\n").replace("\n", "\r\n")
+
+
+def _set_length(http):
+    """본문 길이로 Content-Length 를 다시 (헤더에 있을 때만)."""
+    head, sep, body = http.partition("\n\n")
+    if not sep or not re.search(r"(?im)^content-length:", head):
+        return http
+    return re.sub(r"(?im)^(content-length:[ \t]*)\d+", lambda m: f"{m.group(1)}{len(body.encode('utf-8'))}", head, count=1) + sep + body
+
+
+def _part_matches(irx, p):
+    return bool(irx.search(_crlf(p)) or irx.search(p))
+
+
+def _repeat_multipart(http, irx, need):
+    """multipart 본문에서 irx 에 맞는 파트(가장 짧은 것)를 복사해 닫는 경계 앞에 붙여 need 개로. 바꿀 수 없으면 None.
+    다 붙이면 REPEAT_PART_MAX_CHARS 를 넘을 때는 파트 헤더는 두고 내용만 짧게 줄인 사본을 붙인다."""
+    head, sep, body = http.partition("\n\n")
+    m = _BOUNDARY_RE.search(head) if sep else None
+    if not m:
+        return None
+    b = "--" + m.group(1)
+    segs = body.split(b)
+    if len(segs) < 3 or not segs[-1].startswith("--"):
+        return None
+    parts = segs[1:-1]
+    hits = [p for p in parts if _part_matches(irx, p)]
+    if not hits or len(hits) >= need:
+        return None
+    unit = min(hits, key=len)
+    if len(http) + (need - len(hits)) * (len(b) + len(unit)) > REPEAT_PART_MAX_CHARS:
+        ph, psep, pbody = unit.partition("\n\n")
+        slim = ph + psep + (pbody.strip("\n").split("\n")[0][:16] or "1") + "\n" if psep else unit
+        unit = slim if _part_matches(irx, slim) else unit
+    body2 = segs[0] + "".join(b + p for p in parts + [unit] * (need - len(hits))) + b + segs[-1]
+    return http[:len(head)] + sep + body2
+
+
+def _repeat_blank_lines(http, irx, need):
+    """빈 줄(CRLF) 반복: 가장 긴 줄바꿈 묶음을 need 개로. 끝에 붙은 묶음은 안 됨 (1.4 가 로그 한 줄로 바꿀 때 끝 줄바꿈을 지움)."""
+    if not irx.fullmatch("\r\n"):
+        return None
+    runs = [m for m in re.finditer(r"\n{2,}", http) if http[m.end():].strip("\n")]
+    if not runs:
+        return None
+    r = max(runs, key=lambda m: len(m.group(0)))
+    if len(r.group(0)) >= need:
+        return None
+    return http[:r.end()] + "\n" * (need - len(r.group(0))) + http[r.end():]
+
+
+def repeat_parts(sample, rule):
+    """정규식이 (…){n} (n >= REPEAT_PART_MIN) 처럼 파트·빈 줄을 많이 반복해야 하는 룰의 anomalies 샘플 → 코드가 반복을 채운 사본.
+    늘린 뒤 코드 검사가 ok 일 때만 바꾸고 note 에 표시한다. 대상이 아니거나 늘려도 안 되면 그대로."""
+    if sample.get("label") != "anomalies" or not valid_sample(sample):
+        return sample
+    targets = [(c, inner, n) for c in with_anchors(rule) if c.get("type") == "regex" and not c.get("negated")
+               for inner, n in group_repeats(c.get("pattern", ""))]
+    if not targets or local_check(sample, rule)["result"] == "ok":
+        return sample
+    http, done = sample["http"].replace("\r\n", "\n"), []
+    for c, inner, n in targets:
+        flags = 0
+        for ch, fl in (("i", re.I), ("s", re.S), ("m", re.M), ("x", re.X)):
+            if ch in c.get("flags", ""):
+                flags |= fl
+        try:
+            irx = re.compile(inner, flags)
+        except re.error:
+            continue
+        new = _repeat_multipart(http, irx, n + REPEAT_PART_MARGIN) or _repeat_blank_lines(http, irx, n + REPEAT_PART_MARGIN)
+        if new:
+            http = new
+            done.append(n + REPEAT_PART_MARGIN)
+    if not done or len(http) > REPEAT_PART_MAX_CHARS:
+        return sample
+    out = dict(sample, http=_set_length(http))
+    if local_check(out, rule)["result"] != "ok":
+        return sample
+    return dict(out, note=(str(sample.get("note") or "") + f" [코드: 반복 부분을 {max(done)}개로 늘림]").strip())
 
 
 def norm_payload(p):
@@ -1086,12 +1440,20 @@ def regex_examples(pattern, flags="", n=3):
 def rule_regex_examples(rule, n=3):
     """룰의 정규식 조건마다 예시 → [{"cond": 조건 번호, "in": 위치, "examples": [...]}] (없으면 [])."""
     out = []
-    for i, c in enumerate(rule.get("conditions", [])):
+    for i, c in enumerate(with_anchors(rule)):
         if c.get("type") == "regex" and not c.get("negated") and c.get("pattern"):
             ex = regex_examples(c["pattern"], c.get("flags", ""), n)
             if ex:
-                out.append({"cond": i, "in": c.get("in", "payload"), "examples": list(ex)})
+                if c.get("after") and "R" in c.get("flags", ""):     # R: 기준 content 바로 뒤에 붙는 모양으로 보여 줌
+                    ex = [unescape_value(c["after"].get("value", "")) + e for e in ex]
+                item = {"cond": i, "in": c.get("in", "payload"), "examples": list(ex)}
+                if c.get("in") in ("header", "raw_header") and _ENDS_AT_END.search(c["pattern"]):
+                    item["note"] = "정규식이 $ 로 끝남 → 이 헤더를 마지막 헤더 줄로 둔다 (뒤에 다른 헤더 없이)"
+                out.append(item)
     return out
+
+
+_ENDS_AT_END = re.compile(r"(?<!\\)\$\)*$")          # 정규식 끝이 $ (괄호 닫기 뒤도)
 
 
 # ── 여러 룰 한꺼번에 대조 (3.1a·3.4·4.1 공용) ─────────────────────────────
@@ -1144,7 +1506,7 @@ class RuleMatcher:
             need = [unescape_value(c["value"]).lower() for c in r["conditions"]
                     if c["type"] == "content" and not c.get("negated") and c.get("in") != "method"]
             longs = [v for v in need if len(v) >= 4]
-            item = {"id": r["id"], "conditions": r["conditions"], "need": need,
+            item = {"id": r["id"], "conditions": with_anchors(r), "need": need,
                     "partial": bool(UNCHECKED_RE.search(r.get("rule", ""))),
                     "anchor": max(longs, key=len) if longs else None}
             self.rules.append(item)

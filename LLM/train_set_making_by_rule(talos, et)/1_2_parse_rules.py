@@ -417,6 +417,11 @@ def parse_rule(line, source, filename):
             p = parse_pcre(value)
             if p["buffer"] is None:
                 p["buffer"] = sticky
+            # R(상대) = 바로 앞 content 가 끝난 자리부터 검사 (^ 도 그 자리). 룰 원문 순서의 그 content 를 남긴다
+            # (contents·pcres 를 따로 모으면 순서를 잃음, 2026-10-30). sticky buffer 뒤 content 가 없으면 버퍼 처음 기준
+            if "R" in p["flags"] and last_content is not None and not last_content["negated"]:
+                p["after"] = {"value": last_content["value"], "buffer": last_content["buffer"],
+                              "nocase": bool(last_content.get("nocase"))}
             rule["pcres"].append(p)
         elif name == "msg":
             rule["msg"] = unquote(value)[1]
@@ -550,11 +555,14 @@ def analyze_http(rule):
     if raw_req:
         reasons.add("raw_http_request")
 
-    # 요청/응답 구분: flow 방향 + 사용 버퍼로 판단
+    # 요청/응답 구분: flow 방향이 먼저, 없으면 사용 버퍼로 판단
+    # (2026-10-30: to_client 응답 룰이 http_cookie(Set-Cookie)·원시 HTTP content 때문에 요청으로 분류되던 것 22룰)
     flow = set(rule["flow"])
-    if flow & {"to_server", "from_client"} or buffers & REQUEST_BUFFERS or raw_req:
+    if flow & {"to_client", "from_server"}:
+        side = "response"
+    elif flow & {"to_server", "from_client"} or buffers & REQUEST_BUFFERS or raw_req:
         side = "request"
-    elif flow & {"to_client", "from_server"} or buffers & RESPONSE_BUFFERS or "file_data" in buffers:
+    elif buffers & RESPONSE_BUFFERS or "file_data" in buffers:
         side = "response"
     else:
         side = "unknown"

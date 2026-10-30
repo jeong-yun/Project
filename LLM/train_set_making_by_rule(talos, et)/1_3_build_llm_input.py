@@ -30,6 +30,7 @@
 import argparse
 import collections
 import datetime as dt
+import importlib.util
 import json
 import logging
 import os
@@ -54,6 +55,14 @@ BUFFER_NAMES = {
     "http_method": "method", "http_stat_code": "status_code", "http_stat_msg": "status_msg",
     "file_data": "response_body", "base64_data": "base64_data", "raw": "payload",
 }
+
+
+def buf_name(buffer, r):
+    """버퍼 → 위치 이름. file_data 는 요청 방향(flow:to_server) 룰이면 요청 본문(body), 아니면 응답 본문 (2026-10-30:
+    요청 룰의 file_data 를 응답 본문으로 적어 요청 샘플이 절대 통과하지 못하던 것, 131룰)."""
+    if buffer == "file_data" and set(r.get("flow") or []) & {"to_server", "from_client"}:
+        return "body"
+    return BUFFER_NAMES.get(buffer, buffer)
 
 # 공격 유형 추정: msg 를 위에서부터 비교해 처음 맞는 유형 (학습 라벨 참고용, 정답은 원본 룰)
 ATTACK_TYPES = [
@@ -128,6 +137,24 @@ def attack_type(r):
     return "other"
 
 
+_P12 = {}
+
+
+def regex_anchors(r):
+    """pcre 마다 R(상대) 기준 content (없으면 None). 1.2 가 남긴 pcres[*].after 를 쓰고, 예전에 파싱해 둔 결과라 없으면
+    (바뀌지 않은 소스는 1.2 가 다시 파싱하지 않음) 룰 원문을 1.2 파서로 다시 읽는다."""
+    if not any("R" in p["flags"] for p in r["pcres"]) or any("after" in p for p in r["pcres"]):
+        return [p.get("after") for p in r["pcres"]]
+    if "m" not in _P12:
+        spec = importlib.util.spec_from_file_location("parse_rules_for_13", BASE_DIR / "1_2_parse_rules.py")
+        _P12["m"] = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_P12["m"])
+    again = _P12["m"].parse_rule(r["raw"], r["source"], r.get("file", ""))
+    if not again or len(again["pcres"]) != len(r["pcres"]):
+        return [None] * len(r["pcres"])
+    return [p.get("after") for p in again["pcres"]]
+
+
 def conditions(r):
     """content / pcre 를 LLM 이 읽기 쉬운 '탐지 조건' 목록으로 바꾼다.
 
@@ -136,10 +163,12 @@ def conditions(r):
       {"type": "content", "in": "body", "value": "cmd=", "nocase": true}
       {"type": "content", "in": "header", "value": "curl", "negated": true}   ← 있으면 안 되는 값
       {"type": "regex", "in": "uri", "pattern": "service\\x3d...", "flags": "U"}  ← 정규식 (Snort pcre)
+      {"type": "regex", "in": "payload", "pattern": "^(UNION SELECT|...)", "flags": "Ri",
+       "after": {"in": "uri", "value": "id="}}   ← R(상대): 기준 content 'id=' 가 끝난 자리부터 검사 (^ 도 그 자리)
     """
     out = []
     for c in r["contents"]:
-        item = {"type": "content", "in": BUFFER_NAMES.get(c["buffer"], c["buffer"]), "value": c["value"]}
+        item = {"type": "content", "in": buf_name(c["buffer"], r), "value": c["value"]}
         if c.get("nocase"):
             item["nocase"] = True
         if c.get("negated"):
@@ -148,11 +177,15 @@ def conditions(r):
         if pos:
             item["position"] = pos
         out.append(item)
-    for p in r["pcres"]:
-        item = {"type": "regex", "in": BUFFER_NAMES.get(p["buffer"], p["buffer"]),
+    for p, a in zip(r["pcres"], regex_anchors(r)):
+        item = {"type": "regex", "in": buf_name(p["buffer"], r),
                 "pattern": p["pattern"], "flags": p["flags"]}
         if p.get("negated"):
             item["negated"] = True
+        if a:                                                  # R(상대) 정규식의 기준 content (2026-10-30)
+            item["after"] = {"in": buf_name(a["buffer"], r), "value": a["value"]}
+            if a.get("nocase"):
+                item["after"]["nocase"] = True
         out.append(item)
     return out
 

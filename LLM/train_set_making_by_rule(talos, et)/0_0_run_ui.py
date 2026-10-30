@@ -8,7 +8,7 @@
                           출처·공격 유형별 %, 남은 요청·예상 시간·토큰 (3_5_progress.py 계산)
   2. 생성·수집            학습데이터 생성(건수 확인·파일럿·시작·중지·강제 중지, 3_0_run_generation.py)
                           수집 에이전트 시작·중지(매일 정해진 시각), 지금 1회 수집 (1_0_run_daily.py)
-  3. 룰별 상태            상태 플래그·출처·검색으로 찾기, CSV 내려받기 (07_llm_output/_progress/rule_status.csv)
+  3. 룰별 상태            상태 플래그·출처·검색으로 찾기, '제외' 룰의 제외 사유, CSV 내려받기 (07_llm_output/_progress/rule_status.csv)
   4. 신규 학습 데이터     08_dataset 의 IPS·WAF 신규 학습데이터를 날짜·장비별 표(데이터 프레임)로 보기, CSV 내려받기
                           - index, payload, method, label, label 사유, 검증 결과, label 정합성, 탐지 피처
                             label 사유 = 어떤 룰의 어떤 조건을 만족/불일치했는지 + 생성 메모
@@ -635,15 +635,17 @@ def _count_change(prev, cur):
 
 
 C_REQ, C_GEN, C_REV, C_FAIL_LIMIT = "_1_requests", "_2_generated", "_3_reviewed", 2   # 3_0a_common.*_DIR, 3_2_generate.FAIL_LIMIT
-_creq = {"key": None, "val": None, "busy": False, "files": {}}    # 결과, 요청 파일 → (수정 시각, 사용자 룰 수)
+_creq = {"key": None, "val": None, "busy": False, "files": {}, "metas": {}}  # 결과, 요청 파일 → (수정 시각, 룰 id), 생성 meta → (수정 시각, 빠진 룰)
 _creq_lock = threading.Lock()
 
 
 def custom_requests():
     """화면 2 '생성 순서': 가장 최근 입력 날짜의 생성 대기 요청 중 사용자 룰(id 가 custom:)이 든 요청, 세트별
     {pending: 대기 요청, custom: 사용자 룰이 든 요청, rules: 그 안의 사용자 룰, ahead: 기본 순서(이름순)에서 그 앞의 대기 요청}
-    + review_wait: 생성됐지만 검토 안 된 결과 (모든 날짜 폴더 - 3_0 은 요청 수에서 이만큼 덜 생성한다).
-    요청·생성·검토 폴더가 바뀌었을 때만 배경에서 다시 센다 (요청 파일은 수정 시각이 같으면 다시 읽지 않음, 처음은 2초쯤).
+    + review_wait: 생성됐지만 검토 안 된 결과 (모든 날짜 폴더 - 3_0 은 요청 수에서 이만큼 덜 생성한다)
+    + retry: 다음 실행의 3.1 이 새 요청으로 다시 넣을 사용자 룰 (_custom_retry)
+    + flags·noauto: 사용자 룰의 상태별 수, 자동으로 다시 만들지 않는 룰(샘플 없음·생성 실패) id (화면 1·3 과 같은 rule_status).
+    요청·생성·검토 폴더나 rule_status 가 바뀌었을 때만 배경에서 다시 센다 (요청 파일은 수정 시각이 같으면 다시 읽지 않음, 처음은 2초쯤).
     세는 동안은 지난 결과, 처음이면 None."""
     dates = input_dates()
     if not dates:
@@ -744,7 +746,7 @@ def _custom_retry(base, gen, ids_of):
     gen_dir = base / C_GEN
     cb = {n.split("_")[1] for n, ids in ids_of.items() if n.startswith("all_") and any(i.startswith("custom:") for i in ids)}
     rel = {i for n, ids in ids_of.items() if n.startswith("all_") and n.split("_")[1] in cb for i in ids}
-    old, metas, assigned, retry = _creq.get("metas", {}), {}, set(), set()
+    old, metas, assigned, retry = _creq["metas"], {}, set(), set()
     for name, ids in ids_of.items():
         if not (name.startswith("all_") or f"{name}.jsonl" in gen) or rel.isdisjoint(ids):
             continue
@@ -812,11 +814,25 @@ def rules_page(q):
         rows = [r for r in rows if r["flag"] == flag]
     if source:
         rows = [r for r in rows if r["source"] == source]
-    if text:
+    if text:                    # 제외 사유(3.5 reason, 예전 판에는 없음)로도 찾음
         rows = [r for r in rows if text in r["id"].lower() or text in r["rule_name"].lower()
-                or text in r["attack_type"].lower()]
+                or text in r["attack_type"].lower() or text in (r.get("reason") or "").lower()]
     offset, limit = page_args(q)
     return {"total": len(rows), "offset": offset, "rows": rows[offset:offset + limit]}
+
+
+def rule_status_csv():
+    """화면 3 'CSV 내려받기': 3.5 가 쓴 rule_status.csv 그대로. 예전 3.5 판이 써서 '제외 사유' 열이 없으면 빈 열을 붙인다."""
+    data = CSV_FILE.read_bytes()
+    rows = list(csv.reader(io.StringIO(data.decode("utf-8-sig", errors="replace"))))
+    if not rows or "제외 사유" in rows[0]:
+        return data
+    rows[0].append("제외 사유")
+    for r in rows[1:]:
+        r.append("")
+    out = io.StringIO()
+    csv.writer(out).writerows(rows)
+    return out.getvalue().encode("utf-8-sig")
 
 
 # ── 학습데이터 (08_dataset) ──────────────────────────────────────────────
@@ -907,7 +923,8 @@ def label_info(log_path):
 def matching(date, dev, label, rule, text, cons="", hold="", llm=""):
     """조건에 맞는 줄 번호 목록 (0부터). 조건이 없으면 None (= 모든 줄). cons = label 정합성 (전체 검증 결과 필요).
     hold = 보류 대상 (6. 선별의 보류 옵션과 같은 기준): rule = '정합 (룰 기준)' 공격, pyua = python-requests UA 정상.
-    llm = LLM 재확인 (3_6): '불일치' 줄 중 그 판정, todo = 아직 안 함, any = 재확인한 것 전부."""
+    llm = LLM 재확인 (3_6): 재확인 대상('불일치'·'정합 (룰 기준)') 줄 중 그 판정, any = 재확인한 것 전부,
+    todo = '불일치' 중 아직 안 함 ('정합 (룰 기준)' 은 룰당 표본만 묻으므로 '아직'을 세지 않음)."""
     path = _log_path(date, dev)
     if hold == "rule":
         label, cons = "anomalies", "RULE"
@@ -928,7 +945,8 @@ def matching(date, dev, label, rule, text, cons="", hold="", llm=""):
         want = CODE_NUM[cons]
         keep = [i for i in keep if i < len(v["codes"]) and v["codes"][i] == want]
     if llm:                                             # 줄별 결과의 내용 지문(k)으로 그 줄의 가장 최근 재확인을 찾는다
-        bad = [i for i in keep if i < len(v["codes"]) and v["codes"][i] == CODE_NUM["BAD"]]
+        cand = (CODE_NUM["BAD"],) if llm == "todo" else (CODE_NUM["BAD"], CODE_NUM["RULE"])
+        bad = [i for i in keep if i < len(v["codes"]) and v["codes"][i] in cand]
         cache, latest = frame_cache(date, dev), recheck_latest()
         heads = [ROW_KEY.match(x) for x in read_lines(cache, bad)] if cache and bad else [None] * len(bad)
         got = {i: latest.get(m.group(1)) if m else None for i, m in zip(bad, heads)}
@@ -1545,7 +1563,32 @@ _saved = {}          # verify.json → (수정 시각, 내용)
 CODE_NUM = {"OK": "1", "RULE": "2", "CHECK": "3", "BAD": "4"}
 # analyze 판정 규칙 판 (줄별 결과의 lv). 올리면 예전 판으로 확인한 줄 중 '불일치' 만 다시 확인한다 (나머지는 그대로 다시 씀).
 # 2 = anomalies 의 룰 조건 불일치를 로그 형식이 잃는 정보(끝 줄바꿈·본문의 글자 '\n')를 되살려 다시 확인 (2026-10-26)
-VERIFY_LOGIC = 2
+# 3 = R(상대) 정규식을 바로 앞 content 뒤에서 검사 (3_0a_common.check_condition, 2026-10-30). 판 3 전 결과는 '불일치'
+#     말고도 R 정규식 룰의 줄을 다시 확인한다 (정합이던 normal 이 룰에 걸리거나, 불일치이던 공격이 맞을 수 있음)
+# 4 = 코드 검사 고침 (3_0a_common CHECK_FIXES, 2026-10-30 오후): 요청 방향 file_data → 요청 본문, base64_data 디코딩,
+#     헤더 앞뒤 줄바꿈, 소문자 메서드, URI //, 글자 \xNN·%XX(80 이상) → 바이트. 판 4 전 결과는 '불일치' 말고도
+#     이 고침이 닿는 줄(_v4_touch)을 다시 확인한다
+VERIFY_LOGIC = 4
+
+
+def _has_r(rule):
+    """R(상대) 정규식이 있는 룰인지 (판 3 전 결과를 다시 확인할 줄)."""
+    return bool(rule) and any(c.get("type") == "regex" and "R" in c.get("flags", "") for c in rule.get("conditions", []))
+
+
+_V4_PAY = re.compile(r"\\x[0-9a-fA-F]{2}|%[89a-fA-F][0-9a-fA-F]|^[a-z]")
+
+
+def _v4_touch(rule, payload):
+    """판 4 의 코드 검사 고침이 결과를 바꿀 수 있는 줄: file_data·base64_data·헤더 조건이 있는 룰,
+    또는 payload 에 글자 \\xNN·%80 이상·소문자 메서드·URI 의 // 가 있는 줄."""
+    if rule and ("file_data" in rule.get("rule", "")
+                 or any(c.get("in") in ("base64_data", "header", "raw_header") for c in rule.get("conditions", []))):
+        return True
+    if _V4_PAY.search(payload or ""):
+        return True
+    head = (payload or "").split(" ", 2)
+    return len(head) > 1 and "//" in head[1]
 MS_PER_LINE = 12.0   # 검증 기록이 없을 때 새로 확인하는 줄 1개의 시간 (데이터에 따라 8~30ms)
 REUSE_SEC = 0.0003   # 이미 확인한 결과를 그대로 쓰는 줄 1개의 시간
 ROW_HEAD = re.compile(rb'^\{"k": "([0-9a-f]+)", "in": "([^"]*)"')
@@ -1645,8 +1688,12 @@ def _known_rows(date, dev, in_dir):
 
 
 def _stale_bad(v):
-    """예전 판정 규칙(VERIFY_LOGIC 전)으로 끝난 검증의 '불일치' 줄 수 - '검증 안 한 데이터만' 이 다시 확인한다."""
-    return (v.get("summary") or {}).get("BAD", 0) if v.get("logic", 1) < VERIFY_LOGIC else 0
+    """예전 판정 규칙(VERIFY_LOGIC 전)으로 끝난 검증의 '불일치' 줄 수 - '검증 안 한 데이터만' 이 다시 확인한다.
+    판 4 전 검증은 R 정규식 룰·코드 검사 고침이 닿는 줄도 다시 확인하므로 '불일치' 가 0 이어도 1 이상."""
+    if v.get("logic", 1) >= VERIFY_LOGIC:
+        return 0
+    bad = (v.get("summary") or {}).get("BAD", 0)
+    return max(bad, 1) if v.get("logic", 1) < 4 else bad
 
 
 def _all_verified(date, dev):
@@ -1751,7 +1798,10 @@ def _verify_work(date, dev, mode, path, v):
                         a = json.loads(srcs[no].readline())
                     a.pop("k", None)
                     row_in = a.pop("in", None) or old_in
-                    if a.get("cons") == "BAD" and a.get("lv", 1) < VERIFY_LOGIC:   # 판정 규칙이 바뀐 뒤 '불일치' 는 다시 확인
+                    # 판정 규칙이 바뀐 뒤 '불일치' 는 다시 확인 (판 3 전이면 R 정규식 룰의 줄도, 판 4 전이면 코드 검사 고침이 닿는 줄도)
+                    if a.get("lv", 1) < VERIFY_LOGIC and (a.get("cons") == "BAD"
+                                                          or (a.get("lv", 1) < 3 and _has_r(ctx[1].get(meta.get("id"))))
+                                                          or (a.get("lv", 1) < 4 and _v4_touch(ctx[1].get(meta.get("id")), payload))):
                         a, row_in = analyze(payload, lab, meta, ctx), in_dir
                         v["analyzed"] += 1
                     else:
@@ -2046,10 +2096,11 @@ def delete_bad(date, dev):
     return {"deleted": n}
 
 
-# ── 4. LLM 재확인 ('불일치' 줄만, 3_6 별도 프로세스 - 화면을 다시 켜도 계속) ─────────────────────────
+# ── 4. LLM 재확인 ('불일치' 줄 전부 또는 '정합 (룰 기준)' 줄의 룰당 표본, 3_6 별도 프로세스 - 화면을 다시 켜도 계속) ──────
 # 판정은 07_llm_output/_recheck/results.jsonl (줄 내용 지문 k 마다, 코드 판정 cons 와 따로). 반영은 기존 수정·삭제(edits)로.
 RECHECK_V = {"ok": "label 맞음", "flip": "label 반대", "unfit": "학습에 부적합", "unknown": "판단 불가"}   # 3_6 VERDICTS 와 같음
 RECHECK_WHY = "LLM 재확인"                               # 반영한 수정·삭제의 사유 앞부분 (되돌리기가 이것만 찾음)
+RECHECK_RULE_WHY = "LLM 재확인 [정합 (룰 기준)]"          # 그중 '정합 (룰 기준)' 줄에서 반영한 것 ('불일치' 것과 따로 되돌림)
 ROW_KEY = re.compile(r'^\{"k": "([0-9a-f]+)"')          # 줄별 결과(frame) 한 줄의 내용 지문
 _rc = {"M": None, "res": (None, {})}                    # 3_6 모듈, results.jsonl (수정 시각, 내용 지문 → 가장 최근 판정)
 
@@ -2086,19 +2137,36 @@ def _rc_scope(date):
     return dates if date in ("", "all") else [date]
 
 
+def _rc_target(e):
+    """수정·삭제 하나 → LLM 재확인으로 저장한 것이면 그 대상 ('bad'·'rule'), 아니면 None."""
+    why = str(e.get("why", ""))
+    return "rule" if why.startswith(RECHECK_RULE_WHY) else "bad" if why.startswith(RECHECK_WHY) else None
+
+
+def _rc_new(M):
+    """3_6 이 '정합 (룰 기준)' 대상을 아는 판인지 (화면만 먼저 다시 켰을 때 예전 3_6 이면 '불일치'만)."""
+    return hasattr(M, "rule_counts")
+
+
 def recheck_state(q):
-    """화면 4 'LLM 재확인': 실행 상태(.run/recheck.json), 지금 날짜·장비의 '불일치' 줄과 판정 수, 반영한 수, 모델 목록·기본값."""
+    """화면 4 'LLM 재확인': 실행 상태(.run/recheck.json), 지금 날짜·장비의 '불일치' 줄과 판정 수, 반영한 수,
+    지금 날짜(두 장비, 내용 기준)의 '정합 (룰 기준)' 줄·재확인한 줄의 판정 수·룰 수·반영한 수, 모델 목록·기본값."""
     M, dev = recheck_mod(), _q(q, "dev", "ips")
     if dev not in ("ips", "waf"):
         raise ValueError("dev")
-    latest, cnt, bad, applied = recheck_latest(), {k: 0 for k in RECHECK_V}, 0, 0
-    for d in _rc_scope(_q(q, "date")):
+    scope = _rc_scope(_q(q, "date"))
+    latest, cnt, bad, applied, rapplied = recheck_latest(), {k: 0 for k in RECHECK_V}, 0, 0, 0
+    for d in scope:
         for r in M.bad_rows(d, dev):
             bad += 1
             x = latest.get(r["k"])
             if x:
                 cnt[x["verdict"]] = cnt.get(x["verdict"], 0) + 1
-        applied += sum(1 for e in read_edits(d).values() if str(e.get("why", "")).startswith(RECHECK_WHY))
+        for e in read_edits(d).values():
+            t = _rc_target(e)
+            applied += t == "bad"
+            rapplied += t == "rule"
+    rule = dict(M.rule_counts(latest, scope), applied=rapplied) if _rc_new(M) else None
     _, t = _read_settings()
     rev = next((r for r in t.get("모델", []) if len(r) >= 3 and r[0] == "검토"), None)
     run = {r[0]: r[1] for r in t.get("실행", []) if len(r) >= 2}
@@ -2108,12 +2176,13 @@ def recheck_state(q):
     return {"job": job_state("recheck"), "status": RT.read_status("recheck"), "bad": bad, "counts": cnt,
             "todo": bad - sum(cnt.values()), "applied": applied, "verdicts": RECHECK_V, "efforts": EFFORTS, "known": known,
             "model": f"{rev[1]}:{rev[2]}" if rev and rev[1] not in ("", "-", "none") else "",
-            "effort": run.get("검토 추론 강도", "")}
+            "effort": run.get("검토 추론 강도", ""), "rule": rule}
 
 
 def _rc_args(b):
-    """화면의 모델·추론 강도·날짜 → (model, effort, dates). model '' = LLM_설정.md 검토 모델,
-    effort '' = '검토 추론 강도' 값, '-' = 넘기지 않음 (모델 기본값). 이번 실행에만 쓰고 LLM_설정.md 는 바꾸지 않는다."""
+    """화면의 대상·날짜·장비·표본·모델·추론 강도 → 3_6 인자 {model, effort, dates, target, devs, per_rule, llm_only}.
+    model '' = LLM_설정.md 검토 모델, effort '' = '검토 추론 강도' 값, '-' = 넘기지 않음 (모델 기본값).
+    이번 실행에만 쓰고 LLM_설정.md 는 바꾸지 않는다. 장비 all = 두 장비 (같은 내용은 한 번)."""
     model = str(b.get("model") or "").strip()
     if model and (not MODEL_RE.match(model) or model == "none"):
         raise ValueError("모델 ('provider:model')")
@@ -2121,23 +2190,57 @@ def _rc_args(b):
     if eff not in ("", "-", *EFFORTS):
         raise ValueError(f"추론 강도 (비우거나 - 또는 {'·'.join(EFFORTS)})")
     dates = _rc_scope(b.get("date") or "all")
-    return model, (eff or None), (None if (b.get("date") or "all") == "all" else dates)
+    target, devs = b.get("target") or "bad", b.get("devs") or "all"
+    if target not in ("bad", "rule"):
+        raise ValueError("대상 (bad·rule)")
+    if devs not in ("all", "ips", "waf"):
+        raise ValueError("장비 (all·ips·waf)")
+    try:
+        per_rule = int(b.get("per_rule") or 3)
+    except (TypeError, ValueError):
+        raise ValueError("룰당 개수 (1~1000)")
+    if not 1 <= per_rule <= 1000:
+        raise ValueError("룰당 개수 (1~1000)")
+    if target == "rule" and not _rc_new(recheck_mod()):
+        raise ValueError("지금 불러온 3_6_recheck_labels.py 가 '정합 (룰 기준)' 대상을 모르는 예전 판입니다 - 새 판으로 바뀐 뒤 화면을 다시 켜세요")
+    return {"model": model, "effort": eff or None, "dates": None if (b.get("date") or "all") == "all" else dates,
+            "target": target, "devs": ("ips", "waf") if devs == "all" else (devs,), "per_rule": per_rule,
+            "llm_only": b.get("llm_only", True) is not False}
 
 
 def recheck_plan(b):
     """시작 전 확인: 대상 줄·이미 한 줄·요청 수·예상 토큰·시간·비용 (호출 없음)."""
-    model, eff, dates = _rc_args(b)
-    return recheck_mod().estimate(model, eff, dates)
+    a, M = _rc_args(b), recheck_mod()
+    if not _rc_new(M):                                  # 예전 3_6 ('불일치'·두 장비만)
+        return M.estimate(a["model"], a["effort"], a["dates"])
+    return M.estimate(a["model"], a["effort"], a["dates"], target=a["target"], devs=a["devs"], per_rule=a["per_rule"],
+                      llm_only=a["llm_only"])
 
 
 def recheck_start(b):
     if job_state("recheck")["running"]:
         raise ValueError("LLM 재확인이 이미 도는 중입니다")
-    model, eff, dates = _rc_args(b)
-    args = (["--model", model] if model else []) + (["--effort", eff] if eff else []) + \
-           (["--dates", ",".join(dates)] if dates else [])
+    a = _rc_args(b)
+    args = (["--model", a["model"]] if a["model"] else []) + (["--effort", a["effort"]] if a["effort"] else []) + \
+           (["--dates", ",".join(a["dates"])] if a["dates"] else [])
+    if a["target"] == "rule":
+        args += ["--target", "rule", "--per-rule", str(a["per_rule"])] + ([] if a["llm_only"] else ["--with-augmented"])
+    if len(a["devs"]) == 1:
+        args += ["--devs", a["devs"][0]]
     RT.clear_stop("recheck")
     return {"pid": spawn("recheck", args), "args": args}
+
+
+def recheck_rules(q):
+    """'정합 (룰 기준)' 룰별 요약 (지금 날짜, 두 장비·내용 기준, 줄마다 가장 최근 판정)
+    → {rows: [[룰 id, 공격 유형, 정합 (룰 기준) 줄, 재확인, 맞음, 반대, 부적합, 판단 불가]]} (부적합 비율·재확인 수 큰 순)."""
+    M = recheck_mod()
+    if not _rc_new(M):
+        return {"rows": []}
+    rows = [[s["rule_id"], s["attack_type"], s["rows"], s["n"], s["ok"], s["flip"], s["unfit"], s["unknown"]]
+            for s in M.rule_summary(recheck_latest(), _rc_scope(_q(q, "date")))]
+    rows.sort(key=lambda x: (-x[6] / x[3], -x[3], x[0]))
+    return {"rows": rows}
 
 
 def recheck_stop(b):
@@ -2151,20 +2254,35 @@ def recheck_stop(b):
     return {"stop": True}
 
 
+def _rc_rule_rows(M, d):
+    """그 날짜의 '정합 (룰 기준)' 줄 (두 장비, 샘플 지문 sk 기준으로 한 번) - 반영할 때 bad_rows 대신."""
+    out, seen = [], set()
+    for dev in ("ips", "waf"):
+        for k, rid, _llm, _line, sk, label, _typ in M.rule_pool(d, dev):
+            if sk and sk not in seen:
+                seen.add(sk)
+                out.append({"k": k, "sk": sk, "rule_id": rid, "label": label})
+    return out
+
+
 def recheck_apply(b):
-    """LLM 재확인 판정을 수정·삭제로 저장 (지금 날짜·장비의 '불일치' 줄, '학습 로그에 반영' 때 적용·되돌릴 수 있음).
-    delete = label 반대·학습에 부적합 → 삭제, flip = label 반대 → label 바꾸기, undo = LLM 재확인으로 저장한 수정·삭제를 되돌림.
+    """LLM 재확인 판정을 수정·삭제로 저장 ('학습 로그에 반영' 때 적용·되돌릴 수 있음). 대상 target:
+    bad = 지금 날짜·장비의 '불일치' 줄, rule = 지금 날짜(두 장비)의 '정합 (룰 기준)' 줄 중 재확인한 줄.
+    delete = label 반대·학습에 부적합 → 삭제, flip = label 반대 → label 바꾸기, undo = 그 대상에서 LLM 재확인으로 저장한 수정·삭제를 되돌림.
     사람이 이미 수정·삭제를 저장한 샘플은 건드리지 않는다 (건너뛴 수로 알림)."""
-    act, dev = b.get("action"), b.get("dev", "ips")
-    if act not in ("delete", "flip", "undo") or dev not in ("ips", "waf"):
-        raise ValueError("action/dev")
+    act, dev, target = b.get("action"), b.get("dev", "ips"), b.get("target") or "bad"
+    if act not in ("delete", "flip", "undo") or dev not in ("ips", "waf") or target not in ("bad", "rule"):
+        raise ValueError("action/dev/target")
     M, latest, out = recheck_mod(), recheck_latest(), {"saved": 0, "skipped": 0, "undone": 0}
+    if target == "rule" and not _rc_new(M):
+        raise ValueError("지금 불러온 3_6_recheck_labels.py 가 '정합 (룰 기준)' 대상을 모르는 예전 판입니다")
+    why0 = RECHECK_RULE_WHY if target == "rule" else RECHECK_WHY
     for d in _rc_scope(b.get("date") or "all"):
-        rows = [] if act == "undo" else M.bad_rows(d, dev)
+        rows = [] if act == "undo" else _rc_rule_rows(M, d) if target == "rule" else M.bad_rows(d, dev)
         with _edit_lock:
             edits, n0 = read_edits(d), (out["saved"], out["undone"])
             if act == "undo":
-                for sk in [s for s, e in edits.items() if str(e.get("why", "")).startswith(RECHECK_WHY)]:
+                for sk in [s for s, e in edits.items() if _rc_target(e) == target]:
                     edits.pop(sk)
                     out["undone"] += 1
             for r in rows:
@@ -2175,7 +2293,7 @@ def recheck_apply(b):
                     out["skipped"] += 1
                     continue
                 e = {"action": "delete" if act == "delete" else "edit", "id": r["rule_id"], "orig_label": r["label"],
-                     "why": f"{RECHECK_WHY} ({x.get('model', '')}): {RECHECK_V[x['verdict']]} - {x.get('reason', '')}"[:300],
+                     "why": f"{why0} ({x.get('model', '')}): {RECHECK_V[x['verdict']]} - {x.get('reason', '')}"[:300],
                      "at": RT.now_iso()}
                 if act == "flip":
                     e["label"] = "normal" if r["label"] == "anomalies" else "anomalies"
@@ -3452,6 +3570,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, edits_summary(_q(q, "date")))
             if u.path == "/api/data/recheck":
                 return self._send(200, recheck_state(q))
+            if u.path == "/api/data/recheck/rules":
+                return self._send(200, recheck_rules(q))
             if u.path == "/api/data/conv/save":
                 return self._send(200, conv_save_state(_q(q, "date"), _q(q, "dev")))
             if u.path == "/api/excluded":
@@ -3488,7 +3608,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("dev")
                 return self._send(200, dict(feature_catalog(dev), **feature_counts(dev)))
             if u.path == "/download/rule_status.csv" and CSV_FILE.exists():
-                return self._send(200, CSV_FILE.read_bytes(), "text/csv; charset=utf-8",
+                return self._send(200, rule_status_csv(), "text/csv; charset=utf-8",
                                   {"Content-Disposition": "attachment; filename=rule_status.csv"})
             if u.path == "/download/frame":             # 데이터 프레임 (화면의 열 그대로, 조건에 맞는 모든 줄)
                 total, name, chunks = frame_csv(q)
@@ -3687,7 +3807,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-top:8px}
 .chk{font-size:12px;line-height:1.5;min-width:220px}td.method{min-width:130px}.chk .ok{color:var(--ok)}.chk .warn{color:var(--warn)}.chk .bad{color:var(--bad);font-weight:600}
 tr.lv-bad td{background:rgba(214,69,69,.06)}.reason{font-size:12.5px;min-width:240px}
 .pager{display:flex;gap:8px;align-items:center;margin-top:10px}
-.est{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:13px;line-height:1.6}.est b{font-weight:600}#gOrderInfo .warn{color:var(--warn);font-weight:600}
+.est{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:13px;line-height:1.6}.est b{font-weight:600}#gOrderInfo .warn,.est .warn{color:var(--warn);font-weight:600}
 .c-OK{background:#d7f3e3;color:#13633a}.c-RULE{background:#dde8fb;color:#1f4fa3}.c-CHECK{background:#fff0d1;color:#8a5a00}.c-BAD{background:#fde0e0;color:#a32424}
 .vsum{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:13px}button.sm{padding:2px 8px;font-size:12px;margin:0 2px 2px 0}td.act{min-width:130px}
 .modal{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:50;display:none;align-items:center;justify-content:center;padding:16px}.mbox{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;width:min(940px,100%);max-height:92vh;overflow:auto}.mbox h3{margin:0 0 10px;font-size:15px}.mbox textarea{width:100%;min-height:260px;font:12px/1.45 Consolas,monospace;padding:8px;border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);margin-top:8px}#edRes{margin:8px 0;font-size:13px}#dEditList{margin-top:8px;max-height:360px;overflow:auto}.vsum .chip{cursor:pointer;font-size:12.5px;padding:2px 10px}
@@ -3707,7 +3827,7 @@ tr.hl td{background:rgba(47,111,222,.12)}.fgroup td{background:var(--bg);font-we
 label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var(--fg)}.g0{background:var(--chip);color:var(--muted)}.g1{background:#fde0e0;color:#a32424}.g2{background:#dde8fb;color:#1f4fa3}.g3{background:#d7f3e3;color:#13633a}
 .hold{display:flex;gap:6px 18px;flex-wrap:wrap;margin-top:8px;font-size:12.5px}.hold a,a[data-hv]{cursor:pointer;color:var(--accent);text-decoration:underline}
 .sstate{margin-top:8px;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:var(--bg);font-size:13px;line-height:1.6}.sstate.dirty{border:2px solid var(--warn)}.sstate.clean{border:2px solid var(--ok)}.sstate .steps{margin:0 0 8px}
-.sstate .head{display:flex;gap:6px 12px;flex-wrap:wrap;align-items:center;font-size:14px}.sstate .head .chip{font-size:14px;padding:2px 12px;font-weight:600}.sstate ul{margin:4px 0 2px 18px;padding:0}tr.adj td{background:rgba(183,121,31,.12)}.optc{display:flex;gap:4px;align-items:center}.optf{padding:5px 8px;border:1px dashed var(--warn);border-radius:7px;color:var(--fg);font-size:13px}.optsum{margin-top:6px;font-size:13px;line-height:1.6}.optsum .warn{color:var(--warn);font-weight:600}.rcbox{margin-top:6px;padding:8px 10px;border:1px dashed var(--line);border-radius:8px}td.cons .llm{margin-top:4px}
+.sstate .head{display:flex;gap:6px 12px;flex-wrap:wrap;align-items:center;font-size:14px}.sstate .head .chip{font-size:14px;padding:2px 12px;font-weight:600}.sstate ul{margin:4px 0 2px 18px;padding:0}tr.adj td{background:rgba(183,121,31,.12)}.optc{display:flex;gap:4px;align-items:center}.optf{padding:5px 8px;border:1px dashed var(--warn);border-radius:7px;color:var(--fg);font-size:13px}.optsum{margin-top:6px;font-size:13px;line-height:1.6}.optsum .warn{color:var(--warn);font-weight:600}.rcbox{margin-top:6px;padding:8px 10px;border:1px dashed var(--line);border-radius:8px}td.cons .llm{margin-top:4px}#dRcRules{margin-top:8px;max-height:420px;overflow:auto;font-size:13px}#dRcRules .row{margin:4px 0}
 .tw{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start}.tw>div{min-width:260px;flex:1}.tw h4{margin:10px 0 4px;font-size:13px}table.mini td,table.mini th{padding:3px 6px}.ck{display:inline-flex;gap:3px;align-items:center;margin-right:8px}
 @media (max-width:480px){main{padding:10px}.grid{grid-template-columns:1fr}}
 </style></head><body>
@@ -3776,8 +3896,8 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
 <section class="page" id="p-rules"><div class="card"><h2>룰별 상태 <a href="/download/rule_status.csv" style="float:right;font-size:13px;font-weight:400">CSV 내려받기</a></h2>
  <div class="row"><label>상태<select id="rFlag"><option value="">전체</option></select></label>
   <label>출처<select id="rSrc"><option value="">전체</option><option value="talos">talos</option><option value="et">et</option><option value="custom">custom</option></select></label>
-  <label>검색 (룰 id·이름·유형)<input id="rQ" style="width:260px"></label><span class="muted" id="rCount"></span></div>
- <div style="overflow-x:auto"><table style="margin-top:10px"><thead><tr><th>룰 id</th><th>상태</th><th>공격 유형</th><th>룰 이름</th><th>날짜 폴더 / 요청</th><th class="n">anomalies</th><th class="n">normal</th><th class="n">기존</th></tr></thead><tbody id="rBody"></tbody></table></div>
+  <label>검색 (룰 id·이름·유형·제외 사유)<input id="rQ" style="width:260px"></label><span class="muted" id="rCount"></span></div>
+ <div style="overflow-x:auto"><table style="margin-top:10px"><thead><tr><th>룰 id</th><th>상태</th><th title="'제외' 룰만: 생성 제외 유형(정보성 등) · 생성 대상 방향 아님(HTTP 응답) · LLM_설정.md '생성 제외 룰' 의 메모 (3.5 가 남김)">제외 사유</th><th>공격 유형</th><th>룰 이름</th><th>날짜 폴더 / 요청</th><th class="n">anomalies</th><th class="n">normal</th><th class="n">기존</th></tr></thead><tbody id="rBody"></tbody></table></div>
  <div class="pager"><button id="rPrev">이전</button><button id="rNext">다음</button></div></div></section>
 
 <!-- 4. 신규 학습 데이터 -->
@@ -3795,13 +3915,19 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
  </div>
  <div class="vsum" id="dVsum"></div><div class="vsum" id="dSaveSum" style="display:none"></div>
  <div class="vsum" id="dEdits"></div><div id="dEditList" style="display:none"></div>
- <div class="vsum" id="dRc"></div>
+ <div class="vsum" id="dRc"></div><div class="vsum" id="dRcR"></div><div id="dRcRules" style="display:none"></div>
  <div class="rcbox" id="dRcBox" style="display:none"><div class="row">
+  <label>대상<select id="rcTarget"><option value="bad">불일치 (전부)</option><option value="rule">정합 (룰 기준) - 룰당 표본</option></select></label>
+  <label>날짜<select id="rcDate"></select></label>
+  <label>장비<select id="rcDev"><option value="all">두 장비 (같은 샘플은 한 번)</option><option value="cur" id="rcDevCur"></option></select></label>
+  <span class="optc" id="rcSample" hidden><label class="inl"><input type="checkbox" id="rcLlmOnly" checked> LLM 원본만 (증강 제외)</label>
+   <label>룰당<span class="optc"><select id="rcPer"><option>1</option><option selected>3</option><option>5</option><option value="custom">직접 입력</option></select><input id="rcPerN" type="number" min="1" max="1000" step="1" value="10" style="width:64px" hidden></span></label></span></div>
+ <div class="row">
   <label>모델 <span class="muted">(이번 실행만 · 비우면 검토 모델)</span><input id="rcModel" list="rcModels" style="width:230px"><datalist id="rcModels"></datalist></label>
   <label>추론 강도<select id="rcEff"></select></label>
   <button id="rcPlan">대상·예상 보기 (호출 없음)</button><button class="primary" id="rcGo">재확인 시작</button>
   <button id="rcStop" style="display:none">중지 (지금 요청까지)</button><button class="danger" id="rcKill" style="display:none">강제 중지</button></div>
-  <div class="est" id="rcEst"><span class="muted">'불일치' 줄만 고른 LLM 에 보내 label 이 맞는지 다시 묻습니다 (API 비용 또는 Claude 구독 사용량). '대상·예상 보기'는 호출하지 않고 대상 줄·요청 수·예상 토큰·시간·비용만 셉니다. 시작하면 별도 프로세스로 돌아 화면을 다시 켜도 계속되고, 판정은 표에 코드 판정과 따로 보입니다 (학습 로그·검증 결과는 바꾸지 않음).</span></div></div>
+  <div class="est" id="rcEst"><span class="muted">고른 대상의 줄을 고른 LLM 에 보내 label 이 맞는지 다시 묻습니다 (API 비용 또는 Claude 구독 사용량). '불일치'는 줄 전부, '정합 (룰 기준)'은 룰마다 고른 수만큼(표본, 같은 조건이면 같은 줄)입니다. '대상·예상 보기'는 호출하지 않고 대상 줄·요청 수·예상 토큰·시간·비용만 셉니다. 시작하면 별도 프로세스로 돌아 화면을 다시 켜도 계속되고, 판정은 표에 코드 판정과 따로 보입니다 (학습 로그·검증 결과는 바꾸지 않음).</span></div></div>
  <div class="muted" style="margin-top:8px;font-size:12.5px" id="dHelp"></div>
  <div id="dBody" style="margin-top:10px;overflow-x:auto"></div>
  <div class="pager"><button id="dPrev">이전</button><span class="muted" id="dCount"></span><button id="dNext">다음</button></div></div></section>
@@ -4127,7 +4253,7 @@ $("refresh").onclick=async()=>{await post("/api/progress/refresh");$("progBody")
 /* ── 3. 룰별 상태 ── */
 async function loadRules(){const qs=new URLSearchParams({flag:$("rFlag").value,source:$("rSrc").value,q:$("rQ").value,offset:rOff,limit:50});
  const r=await get("/api/rules?"+qs);$("rCount").textContent=`${fmt(r.total)}개 중 ${r.total?rOff+1:0}–${Math.min(rOff+50,r.total)}`;
- $("rBody").innerHTML=r.rows.map(x=>`<tr><td>${esc(x.id)}</td><td>${chip(x.flag)}</td><td>${esc(x.attack_type)}</td><td>${esc(x.rule_name)}</td><td class="muted">${esc(x.date)} ${esc(x.request)}</td><td class="n">${x.anomalies||""}</td><td class="n">${x.normal||""}</td><td class="n">${x.existing||""}</td></tr>`).join("");
+ $("rBody").innerHTML=r.rows.map(x=>`<tr><td>${esc(x.id)}</td><td>${chip(x.flag)}</td><td class="muted">${x.flag==="EXCLUDED"?esc(x.reason||""):""}</td><td>${esc(x.attack_type)}</td><td>${esc(x.rule_name)}</td><td class="muted">${esc(x.date)} ${esc(x.request)}</td><td class="n">${x.anomalies||""}</td><td class="n">${x.normal||""}</td><td class="n">${x.existing||""}</td></tr>`).join("");
  $("rPrev").disabled=rOff===0;$("rNext").disabled=rOff+50>=r.total;}
 let tm;$("rQ").oninput=()=>{clearTimeout(tm);tm=setTimeout(()=>{rOff=0;loadRules()},300)};$("rFlag").onchange=$("rSrc").onchange=()=>{rOff=0;loadRules()};
 $("rPrev").onclick=()=>{rOff=Math.max(0,rOff-50);loadRules()};$("rNext").onclick=()=>{rOff+=50;loadRules()};
@@ -4171,7 +4297,7 @@ function dSummary(){const v=$("dDate").value,ds=v==="all"?D:D.filter(d=>d.date==
  $("dSum").textContent=`· ${v==="all"?"전체":v} · ${fmt(a+n)}건 (anomalies ${fmt(a)} / normal ${fmt(n)}) · 룰 ${fmt(ds.reduce((s,d)=>s+d.rules,0))}개`;
  // 지금 조건에 맞는 모든 줄을 표의 열 그대로 CSV
  $("dDown").href="/download/frame?"+new URLSearchParams({date:v,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value,llm:$("dLlm").value});
- $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다. <b>LLM 재확인</b>: '불일치' 줄만 고른 LLM 에 다시 물은 판정(label 맞음·반대·학습에 부적합·판단 불가)과 근거 - 코드 판정과 따로 보이고, 반영은 위 버튼으로 수정·삭제를 저장합니다.";if(dConv())$("dHelp").innerHTML=convHelp();}
+ $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다. <b>LLM 재확인</b>: '불일치' 줄 전부 또는 '정합 (룰 기준)' 줄의 룰당 표본을 고른 LLM 에 다시 물은 판정(label 맞음·반대·학습에 부적합·판단 불가)과 근거 - 코드 판정과 따로 보이고, 반영은 위 버튼으로 수정·삭제를 저장합니다 (대상마다 따로 되돌림). '정합 (룰 기준)'의 룰별 요약에서 부적합이 많은 룰을 6. 선별의 '룰 조정 - 빼기'로 넘길 수 있습니다.";if(dConv())$("dHelp").innerHTML=convHelp();}
 async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=await get(`/api/data/verify?date=${v}&dev=${dSrc()}`)}catch(e){$("dVsum").textContent="";return}
  dV=s;dReady=s.status==="done"&&!!s.frame_ready;
  const run=s.status==="running";$("dVerifyStop").style.display=run?"":"none";$("dVerifyNew").disabled=$("dVerify").disabled=run;
@@ -4243,52 +4369,108 @@ $("dEdits").addEventListener("click",async e=>{const b=e.target.closest("button[
   loadEdits()}catch(err){alert("실패: "+err.message)}});
 $("dEditList").addEventListener("click",async e=>{const b=e.target.closest("button[data-u]");if(!b)return;const it=dE.items[+b.dataset.u];
  try{await post("/api/data/edit",{date:it.date,sk:it.sk,action:"undo"});$("dEditList").style.display="none";loadEdits();loadData()}catch(err){alert("실패: "+err.message)}});
-/* LLM 재확인 ('불일치' 줄만, 3_6 별도 프로세스): 모델·추론 강도는 이번 실행만 (LLM_설정.md 는 그대로), 시작 전 대상·예상·확인 창 */
-const RCV={ok:"label 맞음",flip:"label 반대",unfit:"학습에 부적합",unknown:"판단 불가"},RCC={ok:"c-OK",flip:"c-BAD",unfit:"c-CHECK",unknown:""};
-let dRcS=null,dRcT=0,rcInit=false,rcWas=false,rcMsg="";
+/* LLM 재확인 (3_6 별도 프로세스): 대상 '불일치'(줄 전부) 또는 '정합 (룰 기준)'(룰당 표본). 모델·추론 강도는 이번 실행만 (LLM_설정.md 는 그대로),
+   시작 전 대상·예상·확인 창. 줄 1: 실행 상태 + '불일치' 판정·반영, 줄 2: '정합 (룰 기준)' 판정·룰별 요약·반영 (대상마다 따로 되돌림).
+   FW·웹 보기에서는 IPS 라고 쓰지 않는다 (rcDevName) */
+const RCV={ok:"label 맞음",flip:"label 반대",unfit:"학습에 부적합",unknown:"판단 불가"},RCC={ok:"c-OK",flip:"c-BAD",unfit:"c-CHECK",unknown:""},RCT={bad:"불일치",rule:"정합 (룰 기준)"};
+let dRcS=null,dRcT=0,rcInit=false,rcWas=false,rcMsg="",rcMsgR="",rcSyncKey="",rcRulesD=null,rcThr=50,rcMinN=2;
+function rcDevName(d){return d==="ips"&&dConv()?"원본 payload":d.toUpperCase()}
+function rcSampleUi(){const r=$("rcTarget").value==="rule";$("rcSample").hidden=!r;$("rcPerN").hidden=!r||$("rcPer").value!=="custom"}
+function rcBoxSync(){const dd=$("dDate"),sel=$("rcDate");   // 날짜 목록 = 화면의 날짜 목록 (고른 값은 화면 날짜로), '지금 장비만' 이름
+ sel.innerHTML=[...dd.options].map(o=>`<option value="${esc(o.value)}">${esc(o.text)}</option>`).join("");sel.value=dd.value;
+ $("rcDevCur").textContent=rcDevName(dSrc())+" 만";rcSampleUi()}
+function rcChips(c,cons){return Object.keys(RCV).map(k=>c[k]?`<span class="chip ${RCC[k]}" data-l="${k}" data-c="${cons}">${RCV[k]} ${fmt(c[k])}</span>`:"").join("")}
 async function loadRc(){clearTimeout(dRcT);const v=$("dDate").value,dv=dSrc();if(!v)return;let s;
- try{s=await get(`/api/data/recheck?date=${v}&dev=${dv}`)}catch(e){$("dRc").textContent="";return}
+ try{s=await get(`/api/data/recheck?date=${v}&dev=${dv}`)}catch(e){$("dRc").textContent=$("dRcR").textContent="";return}
  if(v!==$("dDate").value||dv!==dSrc())return;     // 그사이 날짜·장비를 바꿨으면 (늦게 온 앞 응답) 버림
- dRcS=s;const st=s.status||{},run=s.job.running,c=s.counts,del=(c.flip||0)+(c.unfit||0);
+ const key=v+"|"+$("dDev").value;if(key!==rcSyncKey){rcSyncKey=key;rcBoxSync();$("dRcRules").style.display="none"}
+ dRcS=s;const st=s.status||{},run=s.job.running,c=s.counts,del=(c.flip||0)+(c.unfit||0),R=s.rule,tn=RCT[st.target]||RCT.bad;
  const fresh=!!st.pid&&(st.pid===s.job.lock.pid||st.pid===(s.job.ui||{}).pid)&&st.req_total!=null;   // 이번 실행이 쓴 상태 (아니면 지난 실행의 것)
  if(!rcInit){rcInit=true;$("rcModels").innerHTML=s.known.map(m=>`<option value="${esc(m)}">`).join("");$("rcModel").placeholder=s.model||"provider:model";
-  $("rcEff").innerHTML=`<option value="">설정값 (${esc(s.effort||"비움 = 모델 기본")})</option><option value="-">넘기지 않음 (모델 기본)</option>`+s.efforts.map(e=>`<option>${e}</option>`).join("")}
- let h="";
- if(run&&!fresh)h=`<span><b>LLM 재확인 시작하는 중…</b> ('불일치' 줄과 그 룰을 읽는 중)</span>`;
+  $("rcEff").innerHTML=`<option value="">설정값 (${esc(s.effort||"비움 = 모델 기본")})</option><option value="-">넘기지 않음 (모델 기본)</option>`+s.efforts.map(e=>`<option>${e}</option>`).join("");
+  $("rcTarget").options[1].disabled=!R}             // 3_6 이 예전 판이면 '불일치'만
+ let h="<b>LLM 재확인</b>";
+ if(run&&!fresh)h+=`<span>시작하는 중… ('${tn}' 줄과 그 룰을 읽는 중)</span>`;
  else if(run){const fin=(st.req_done||0)+(st.req_fail||0);
-  h=`<span><b>LLM 재확인 중</b> (${esc(st.model||"")}) · 요청 ${fmt(fin)} / ${fmt(st.req_total||0)} · 판정 ${fmt(st.rows_done||0)} / ${fmt(st.rows_total||0)}줄${st.req_fail?` · 실패 ${st.req_fail}`:""}${st.eta_s!=null?` · 남은 약 ${hms(st.eta_s)}`:""}${s.job.stop_requested?" · <b>중지 요청됨</b> (보낸 요청까지)":""}</span>`}
- else{h=`<b>LLM 재확인</b> <span class="muted">('불일치' ${fmt(s.bad)}줄)</span>`+Object.keys(RCV).map(k=>c[k]?`<span class="chip ${RCC[k]}" data-l="${k}">${RCV[k]} ${fmt(c[k])}</span>`:"").join("")+(s.todo?`<span class="chip" data-l="todo">아직 ${fmt(s.todo)}</span>`:"");
-  if(st.state==="running")h+=`<span class="muted">지난 재확인이 끝나지 않고 멈춤 (강제 중지 등) - 다시 시작하면 남은 줄만</span>`;
-  else if(st.finished_at)h+=`<span class="muted">${esc(isoClock(st.finished_at))} ${esc(st.model||"")} ${({done:"끝남",stopped:"중지됨",fail:"실패"})[st.state]||""}${st.req_fail?` · 요청 ${st.req_fail}개 실패 (다시 시작하면 그 줄만)`:""}${st.error?` · ${esc(st.error)}`:""}</span>`;
-  h+=`<button class="sm" data-r="box">LLM 재확인…</button>`+(del?`<button class="sm danger" data-r="delete">반대·부적합 ${fmt(del)}줄 → 삭제로 저장</button>`:"")+
+  h+=`<span><b>도는 중</b> ('${tn}'${st.per_rule?` 룰당 ${st.per_rule}개`:""} · ${esc(st.model||"")}) · 요청 ${fmt(fin)} / ${fmt(st.req_total||0)} · 판정 ${fmt(st.rows_done||0)} / ${fmt(st.rows_total||0)}줄${st.req_fail?` · 실패 ${st.req_fail}`:""}${st.eta_s!=null?` · 남은 약 ${hms(st.eta_s)}`:""}${s.job.stop_requested?" · <b>중지 요청됨</b> (보낸 요청까지)":""}</span>`}
+ else if(st.state==="running")h+=`<span class="muted">지난 재확인이 끝나지 않고 멈춤 (강제 중지 등) - 다시 시작하면 남은 줄만</span>`;
+ else if(st.finished_at)h+=`<span class="muted">${esc(isoClock(st.finished_at))} '${tn}' · ${esc(st.model||"")} ${({done:"끝남",stopped:"중지됨",fail:"실패"})[st.state]||""}${st.req_fail?` · 요청 ${st.req_fail}개 실패 (다시 시작하면 그 줄만)`:""}${st.error?` · ${esc(st.error)}`:""}</span>`;
+ h+=`<button class="sm" data-r="box">LLM 재확인…</button>`;
+ if(s.bad||s.applied){h+=`<span class="muted">'불일치' ${fmt(s.bad)}줄</span>`+rcChips(c,"BAD")+(s.todo?`<span class="chip" data-l="todo" data-c="BAD">아직 ${fmt(s.todo)}</span>`:"");
+  if(!run)h+=(del?`<button class="sm danger" data-r="delete">반대·부적합 ${fmt(del)}줄 → 삭제로 저장</button>`:"")+
    (c.flip?`<button class="sm" data-r="flip">반대 ${fmt(c.flip)}줄 → label 바꾸기</button>`:"")+(s.applied?`<button class="sm" data-r="undo">LLM 반영 ${fmt(s.applied)}건 되돌리기</button>`:"")+
    (rcMsg?`<span class="muted">${esc(rcMsg)}</span>`:"")}
- $("dRc").innerHTML=s.bad||s.applied||run||st.state?h:"";      // '불일치' 도 지난 재확인도 없으면 숨김
+ $("dRc").innerHTML=s.bad||s.applied||run||st.state||(R&&R.rows)?h:"";      // 대상 줄도 지난 재확인도 없으면 숨김
+ let hr="";
+ if(R&&(R.checked||R.applied)){const rc=R.counts,rdel=(rc.flip||0)+(rc.unfit||0);
+  hr=`<b>정합 (룰 기준)</b> <span class="muted">${fmt(R.rows)}줄 중 재확인 ${fmt(R.checked)}줄 · 룰 ${fmt(R.rules)}개 (두 장비, 내용 기준)</span>`+rcChips(rc,"RULE")+`<button class="sm" data-r="rules">룰별 요약</button>`+
+   (!run&&rdel?`<button class="sm danger" data-r="delete" data-t="rule">반대·부적합 ${fmt(rdel)}줄 → 삭제로 저장</button>`:"")+(!run&&rc.flip?`<button class="sm" data-r="flip" data-t="rule">반대 ${fmt(rc.flip)}줄 → label 바꾸기</button>`:"")+
+   (!run&&R.applied?`<button class="sm" data-r="undo" data-t="rule">LLM 반영 ${fmt(R.applied)}건 되돌리기</button>`:"")+(rcMsgR?`<span class="muted">${esc(rcMsgR)}</span>`:"")}
+ $("dRcR").innerHTML=hr;
  $("rcStop").style.display=$("rcKill").style.display=run?"":"none";$("rcGo").disabled=$("rcPlan").disabled=run;
  if(run)dRcT=setTimeout(loadRc,2000);
- if(rcWas&&!run)loadData();                                    // 끝나면 표의 판정도 새로
+ if(rcWas&&!run){loadData();if($("dRcRules").style.display!=="none")loadRcRules()}   // 끝나면 표의 판정·룰별 요약도 새로
  rcWas=run}
-function rcBody(){return {model:$("rcModel").value.trim(),effort:$("rcEff").value,date:$("dDate").value}}
-async function rcEstimate(){$("rcEst").textContent="세는 중… ('불일치' 줄과 그 룰을 읽음, 호출 없음)";let p;
- try{p=await post("/api/data/recheck/plan",rcBody())}catch(e){$("rcEst").textContent="실패: "+e.message;return null}
- const usd=x=>x==null?"단가 미등록":x<0.01?"$0.01 미만":"$"+x.toFixed(2);
- $("rcEst").innerHTML=`<b>${esc(p.model)}</b> · 대상 '불일치' ${fmt(p.rows)}줄 <span class="muted">(내용 기준 - IPS·WAF 의 같은 샘플은 한 번)</span>${p.done?` · 이 모델로 이미 ${fmt(p.done)}줄`:""} → <b>이번 ${fmt(p.todo)}줄 · 요청 ${fmt(p.requests)}개</b> <span class="muted">(같은 룰끼리 10줄씩)</span><br>
+function rcPer(){return $("rcPer").value==="custom"?Math.max(1,Math.min(1000,Math.round(+$("rcPerN").value||1))):+$("rcPer").value}
+function rcBody(){return {model:$("rcModel").value.trim(),effort:$("rcEff").value,date:$("rcDate").value||$("dDate").value,target:$("rcTarget").value,
+ devs:$("rcDev").value==="all"?"all":dSrc(),per_rule:rcPer(),llm_only:$("rcLlmOnly").checked}}
+async function rcEstimate(b){b=b||rcBody();const rule=b.target==="rule";
+ $("rcEst").textContent=rule?"세는 중… ('정합 (룰 기준)' 줄에서 룰마다 표본을 고르고 그 줄과 룰만 읽음, 호출 없음 - 처음은 30초쯤)":"세는 중… ('불일치' 줄과 그 룰을 읽음, 호출 없음)";let p;
+ try{p=await post("/api/data/recheck/plan",b)}catch(e){$("rcEst").textContent="실패: "+e.message;return null}
+ const usd=x=>x==null?"단가 미등록":x<0.01?"$0.01 미만":"$"+x.toFixed(2),s=p.stats;
+ const uv=Object.entries((p.unverified||[]).reduce((a,[d,v])=>((a[v]=a[v]||[]).push(d.slice(5)),a),{})).map(([v,ds])=>`${rcDevName(v)} ${ds.join(", ")}`).join(" · ");
+ const what=s?`'정합 (룰 기준)' ${fmt(s.pool)}줄 (룰 ${fmt(s.rules)}개${s.llm_only?` · 그중 LLM 원본 ${fmt(s.llm)}줄`:""}) → 룰 ${fmt(s.rules_sampled)}개 × 최대 ${fmt(s.per_rule)}개 = 표본 ${fmt(p.rows)}줄`:`대상 '불일치' ${fmt(p.rows)}줄`;
+ $("rcEst").innerHTML=`<b>${esc(p.model)}</b> · ${what} <span class="muted">(내용 기준 - 장비가 달라도 같은 샘플은 한 번)</span>${p.done?` · 이 모델로 이미 ${fmt(p.done)}줄`:""} → <b>이번 ${fmt(p.todo)}줄 · 요청 ${fmt(p.requests)}개</b> <span class="muted">(같은 룰끼리 이어서 10줄씩)</span><br>
   예상 토큰 입력 <b>${fmt(p.tokens_in)}</b> · 출력 <b>${fmt(p.tokens_out)}</b> · 시간 약 <b>${hms(p.seconds)}</b> <span class="muted">(동시 ${p.workers}개)</span> · 비용 <b>${p.subscription?"Claude 구독 사용량 (토큰 요금 없음)":usd(p.cost)}</b>
+  ${p.subscription&&p.requests?`<div class="warn">Claude CLI 는 토큰 요금 대신 Claude 구독 사용량을 씁니다 - 요청 ${fmt(p.requests)}개면 사용량을 많이 써서 한도에 닿을 수 있고 (닿으면 남은 요청은 멈춤), 같은 구독으로 하는 다른 Claude 작업도 막힐 수 있습니다.</div>`:""}
+  ${uv?`<div class="warn">검증이 끝나지 않았거나 그 뒤 로그가 바뀌어 빠진 날짜·장비: ${esc(uv)} <span class="muted" style="font-weight:400">(그 날짜·장비에서 '검증 안 한 데이터만 검증' 뒤 다시 세면 들어감)</span></div>`:""}
   <div class="muted">${p.history?"이 모델의 지난 재확인 기록(줄당 평균)으로 계산":"이 모델의 재확인 기록이 없어 글자 수 ÷ 3 + 줄당 답 80·요청당 추론 토큰으로 어림 (실제와 다를 수 있음)"} · 같은 대상을 다른 모델로 (참고 단가, USD/100만 토큰 2026-10-29): ${p.others.map(o=>`${esc(o.model)} ${usd(o.cost)}`).join(" · ")}</div>`;
  return p}
-$("rcPlan").onclick=rcEstimate;
-$("rcGo").onclick=async()=>{const p=await rcEstimate();if(!p)return;if(!p.todo){alert("새로 재확인할 줄이 없습니다 (이 모델로 모두 재확인함)");return}
- if(!confirm(`'불일치' ${fmt(p.todo)}줄을 ${p.model} 로 다시 확인합니다.\n요청 ${fmt(p.requests)}개 · 예상 토큰 입력 ${fmt(p.tokens_in)} / 출력 ${fmt(p.tokens_out)} · ${p.subscription?"Claude 구독 사용량":"API 비용 "+(p.cost==null?"(단가 미등록)":"약 $"+p.cost.toFixed(2))} · 시간 약 ${hms(p.seconds)}\n별도 프로세스로 돌고, 판정은 표에 코드 판정과 따로 보입니다 (학습 로그·검증 결과는 바꾸지 않음). 진행할까요?`))return;
- try{await post("/api/data/recheck/start",rcBody());rcMsg="";setTimeout(loadRc,800)}catch(e){alert("실패: "+e.message)}};
+$("rcPlan").onclick=()=>rcEstimate();
+for(const id of["rcTarget","rcPer"])$(id).onchange=rcSampleUi;
+$("rcGo").onclick=async()=>{const b=rcBody(),p=await rcEstimate(b);if(!p)return;if(!p.todo){alert("새로 재확인할 줄이 없습니다 (이 모델로 모두 재확인함)");return}
+ const what=b.target==="rule"?`'정합 (룰 기준)' 표본 ${fmt(p.todo)}줄 (룰당 최대 ${b.per_rule}개${b.llm_only?", LLM 원본만":""})`:`'불일치' ${fmt(p.todo)}줄`;
+ if(!confirm(`다시 확인합니다: ${what} · 모델 ${p.model}\n요청 ${fmt(p.requests)}개 · 예상 토큰 입력 ${fmt(p.tokens_in)} / 출력 ${fmt(p.tokens_out)} · ${p.subscription?"Claude 구독 사용량":"API 비용 "+(p.cost==null?"(단가 미등록)":"약 $"+p.cost.toFixed(2))} · 시간 약 ${hms(p.seconds)}${p.subscription?`\n\n※ Claude CLI: 토큰 요금은 없지만 요청 ${fmt(p.requests)}개만큼 Claude 구독 사용량을 많이 씁니다 (한도에 닿으면 남은 요청은 멈춤, 같은 구독의 다른 작업도 막힐 수 있음).`:""}\n별도 프로세스로 돌고, 판정은 표에 코드 판정과 따로 보입니다 (학습 로그·검증 결과는 바꾸지 않음). 진행할까요?`))return;
+ try{await post("/api/data/recheck/start",b);rcMsg=rcMsgR="";setTimeout(loadRc,800)}catch(e){alert("실패: "+e.message)}};
 $("rcStop").onclick=async()=>{try{await post("/api/data/recheck/stop",{});loadRc()}catch(e){alert("실패: "+e.message)}};
 $("rcKill").onclick=async()=>{if(!confirm("보내던 요청을 버리고 바로 멈춥니다 (그 요청의 판정은 저장되지 않음). 진행할까요?"))return;try{await post("/api/data/recheck/stop",{force:true});setTimeout(loadRc,800)}catch(e){alert("실패: "+e.message)}};
-$("dRc").addEventListener("click",async e=>{const ch=e.target.closest("[data-l]");if(ch){$("dHold").value="";dHoldUi();$("dLlm").value=ch.dataset.l;dOff=0;loadData();return}
- const b=e.target.closest("button[data-r]");if(!b)return;const a=b.dataset.r,s=dRcS,c=s.counts;
- if(a==="box"){const x=$("dRcBox");x.style.display=x.style.display==="none"?"":"none";return}
- const msg={delete:`LLM 이 'label 반대'·'학습에 부적합'이라 한 ${fmt((c.flip||0)+(c.unfit||0))}줄을 삭제로 저장합니다.`,flip:`LLM 이 'label 반대'라 한 ${fmt(c.flip)}줄의 label 을 바꿔 저장합니다.`,undo:`LLM 재확인으로 저장한 수정·삭제 ${fmt(s.applied)}건을 되돌립니다.`}[a];
- if(!confirm(msg+(a==="undo"?"":" 사람이 이미 수정·삭제를 저장한 샘플은 건너뜁니다. '학습 로그에 반영' 때 적용되고 목록에서 되돌릴 수 있습니다.")+" 진행할까요?"))return;
- try{const r=await post("/api/data/recheck/apply",{date:$("dDate").value,dev:dSrc(),action:a});
-  rcMsg=a==="undo"?`되돌림 ${r.undone}건`:`저장 ${r.saved}건${r.skipped?` · 이미 수정·삭제한 샘플이라 건너뜀 ${r.skipped}건`:""}`;loadEdits();loadData();loadRc()}catch(err){alert("실패: "+err.message)}});
+async function rcClick(e){const ch=e.target.closest("[data-l]");
+ if(ch){$("dHold").value="";dHoldUi();$("dCons").value=ch.dataset.c||"";$("dLlm").value=ch.dataset.l;dOff=0;loadData();return}
+ const b=e.target.closest("button[data-r]");if(!b)return;const a=b.dataset.r,t=b.dataset.t||"bad",s=dRcS;
+ if(a==="box"){const x=$("dRcBox");x.style.display=x.style.display==="none"?"":"none";if(!x.style.display)rcBoxSync();return}
+ if(a==="rules"){const x=$("dRcRules");x.style.display=x.style.display==="none"?"":"none";if(!x.style.display)loadRcRules();return}
+ const c=t==="rule"?s.rule.counts:s.counts,n=t==="rule"?s.rule.applied:s.applied,tn=t==="rule"?"'정합 (룰 기준)' ":"",v=$("dDate").value;
+ const msg={delete:`LLM 이 'label 반대'·'학습에 부적합'이라 한 ${tn}${fmt((c.flip||0)+(c.unfit||0))}줄을 삭제로 저장합니다.`,flip:`LLM 이 'label 반대'라 한 ${tn}${fmt(c.flip)}줄의 label 을 바꿔 저장합니다.`,undo:`${tn}LLM 재확인으로 저장한 수정·삭제 ${fmt(n)}건을 되돌립니다.`}[a];
+ if(!confirm(msg+(t==="rule"?` (${v==="all"?"모든 날짜":v}, 두 장비)`:"")+(a==="undo"?"":" 사람이 이미 수정·삭제를 저장한 샘플은 건너뜁니다. '학습 로그에 반영' 때 적용되고 목록에서 되돌릴 수 있습니다.")+" 진행할까요?"))return;
+ try{const r=await post("/api/data/recheck/apply",{date:v,dev:dSrc(),action:a,target:t});
+  const m=a==="undo"?`되돌림 ${r.undone}건`:`저장 ${r.saved}건${r.skipped?` · 이미 수정·삭제한 샘플이라 건너뜀 ${r.skipped}건`:""}`;if(t==="rule")rcMsgR=m;else rcMsg=m;loadEdits();loadData();loadRc()}catch(err){alert("실패: "+err.message)}}
+for(const id of["dRc","dRcR"])$(id).addEventListener("click",rcClick);
+/* '정합 (룰 기준)' 룰별 요약: 부적합 비율·재확인 수 큰 순. 기준(부적합 비율·재확인 수)에 드는 룰 → 화면 6 선별의 '룰 조정 - 빼기' (담기 전) */
+async function loadRcRules(){const el=$("dRcRules"),v=$("dDate").value;el.innerHTML='<span class="muted">룰별로 세는 중…</span>';let r;
+ try{r=await get(`/api/data/recheck/rules?date=${v}`)}catch(e){el.textContent="실패: "+e.message;return}
+ if(v!==$("dDate").value)return;rcRulesD=r.rows;
+ el.innerHTML=!rcRulesD.length?'<span class="muted">재확인한 \'정합 (룰 기준)\' 줄이 아직 없습니다.</span>':`<div class="row"><b>룰별 요약</b> <span class="muted">(${v==="all"?"모든 날짜":esc(v)} · 두 장비, 내용 기준 · 줄마다 가장 최근 판정 · 재확인한 룰 ${fmt(rcRulesD.length)}개)</span></div>
+  <div class="row">부적합 비율<input id="rcThr" type="number" min="1" max="100" value="${rcThr}" style="width:58px">% 이상 · 재확인<input id="rcMinN" type="number" min="1" value="${rcMinN}" style="width:52px">줄 이상인 룰 <b id="rcPick"></b>
+   <button class="sm" id="rcToSup">화면 6 선별에서 빼기</button><span class="muted">화면 6 '룰 조정'에 '빼기'로 넣습니다 (담기 전이라 미리 보기에서 확인한 뒤 담기)</span></div><div id="rcTbl"></div>`;
+ renderRcRules()}
+function rcPicked(){return (rcRulesD||[]).filter(x=>x[3]>=rcMinN&&x[6]*100>=rcThr*x[3])}
+function renderRcRules(){if(!$("rcTbl"))return;const pick=new Set(rcPicked().map(x=>x[0])),rows=rcRulesD.slice(0,300),pct=x=>Math.round(100*x[6]/x[3])+"%";
+ $("rcPick").textContent=`${fmt(pick.size)}개`;$("rcToSup").disabled=!pick.size;
+ $("rcTbl").innerHTML=`<table class="mini"><thead><tr><th>룰 id</th><th>공격 유형</th><th class="n">정합 (룰 기준) 줄</th><th class="n">재확인</th><th class="n">맞음</th><th class="n">반대</th><th class="n">부적합</th><th class="n">판단 불가</th><th class="n">부적합 비율</th></tr></thead><tbody>${rows.map(x=>`<tr${pick.has(x[0])?' class="adj"':""}><td><a href="#" data-rule="${esc(x[0])}">${esc(x[0])}</a></td><td>${esc(x[1]||"")}</td>${x.slice(2,8).map(n=>`<td class="n">${fmt(n)}</td>`).join("")}<td class="n"><b>${pct(x)}</b></td></tr>`).join("")}</tbody></table>`+
+  (rcRulesD.length>300?`<div class="muted">부적합 비율이 높은 300개까지 보임 (전체 ${fmt(rcRulesD.length)}개, 빼기 기준은 전체에 적용)</div>`:"")}
+$("dRcRules").addEventListener("input",e=>{if(e.target.id==="rcThr")rcThr=Math.max(1,Math.min(100,+e.target.value||1));else if(e.target.id==="rcMinN")rcMinN=Math.max(1,+e.target.value||1);else return;renderRcRules()});
+$("dRcRules").addEventListener("click",e=>{const a=e.target.closest("a[data-rule]");
+ if(a){e.preventDefault();$("dHold").value="";dHoldUi();$("dRule").value=a.dataset.rule;$("dCons").value="RULE";$("dLlm").value="any";dOff=0;loadData();return}
+ if(e.target.id!=="rcToSup")return;const ids=rcPicked().map(x=>x[0]);if(!ids.length)return;
+ if(!confirm(`부적합 비율 ${rcThr}% 이상 · 재확인 ${rcMinN}줄 이상인 룰 ${fmt(ids.length)}개를 화면 6 선별의 '룰 조정 - 빼기'로 넣습니다.\n아직 담기 전이라 화면 6 미리 보기에서 확인한 뒤 '담기'를 눌러야 저장됩니다. '넣기'로 조정해 둔 룰은 그대로 둡니다. 진행할까요?`))return;
+ supExclude(ids)});
+let sPendEx=null;   // 화면 4 → 화면 6 '룰 조정 - 빼기' (화면 6 폼이 아직 없으면 처음 열 때 넣음)
+function supExclude(ids){sPendEx=ids.slice();if(sFormInit)sApplyEx();location.hash="#/sup"}
+function sApplyEx(){if(!sPendEx||!SS)return;const ids=sPendEx;sPendEx=null;
+ if(!SS.base){$("sSaveMsg").textContent="기준 버전이 없어 화면 4 에서 넘긴 룰 조정을 넣지 못했습니다";return}
+ let add=0,same=0,keep=0;for(const id of ids){const v=sO.rules[id];if(v==="include")keep++;else if(v==="exclude")same++;else{sO.rules[id]="exclude";add++}}
+ $("sSaveMsg").textContent=`화면 4 LLM 재확인에서 넘긴 룰 ${fmt(ids.length)}개 → '빼기' 조정 ${fmt(add)}개 더함${same?` · 이미 빼기 ${fmt(same)}개`:""}${keep?` · '넣기'로 조정해 둔 ${fmt(keep)}개는 그대로`:""} (아직 담기 전 - 미리 보기 확인 뒤 담기)`;
+ sWorkSave();sPreview()}
 for(const id of["dLabel","dCons","dLlm"])$(id).onchange=()=>{dOff=0;loadData()};
 $("dHold").onchange=()=>{dOff=0;dHoldUi();loadData()};
 $("dGo").onclick=()=>{dOff=0;loadData()};for(const id of["dRule","dQ"])$(id).onkeydown=e=>{if(e.key==="Enter"){dOff=0;loadData()}};
@@ -4413,7 +4595,7 @@ function sState(){const el=$("sState");if(!SS||!SS.base){el.innerHTML="";el.clas
  if(cur){if(n)sWorkSave();else{sWorkDrop();sRestored=""}}}
 async function loadSup(){let s;try{s=await get("/api/sup/state?base="+encodeURIComponent($("sBase").value||""))}catch(e){$("sSetup").innerHTML=`<div class="msg">불러오지 못했습니다: ${esc(e.message)}</div>`;return}
  SS=s;const opts=s.finals.map(n=>`<option${n===s.base?" selected":""}>${esc(n)}</option>`).join("");if($("sBase").innerHTML!==opts)$("sBase").innerHTML=opts;
- if(!sFormInit){sFormInit=true;sInitForm(s)}
+ if(!sFormInit){sFormInit=true;sInitForm(s);if(sPendEx)sApplyEx()}   // 화면 4 에서 넘긴 '빼기' 룰 (처음 열 때)
  else if(sBase0.name){const x=s.versions.find(v=>v.name===sBase0.name);if(!x)sSetBase(null);else if(x.status==="draft"&&(x.updated_at||x.created_at||"")!==sBase0.at)sSetBase(x)}   // 기준 초안이 지워졌거나 다른 곳에서 다시 담김
  $("sHdr").textContent=s.base?`· 기준 ${s.base} · 디스크 여유 ${s.disk_free_gb}GB`:"";
  $("sSetup").innerHTML=s.problems.length?`<div class="est"><b>넣을 것</b><ul style="margin:4px 0 0 18px;padding:0">${s.problems.map(p=>`<li>${esc(p)}</li>`).join("")}</ul><div class="muted">아래 '기준 버전 등록'에서 기존 학습데이터(표준모델 학습 형식 CSV)·원본 로그·표준모델 피처 파일 위치를 넣으세요.</div></div>`:"";

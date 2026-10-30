@@ -42,6 +42,7 @@ import json
 import random
 import re
 import sys
+import threading
 import time
 import warnings
 from pathlib import Path
@@ -407,17 +408,23 @@ def read_logs(paths, sample, seed):
 VIEW_DIR = FEATURE_DIR / "_view"
 VIEW_LOCK = "features_view"
 _mods = {}
+_mods_lock = threading.Lock()
 
 
 def _sup_mods():
-    """5.0a(버전·신규 학습 데이터 읽기)·5.0b(표준모델 피처 파일 읽기·계산). pandas 를 쓰므로 필요할 때만 읽는다."""
-    if not _mods:
-        for key, f in (("C5", "5_0a_common.py"), ("F5", "5_0b_features.py")):
-            spec = importlib.util.spec_from_file_location(f"view_{key}", Path(__file__).resolve().parent / f)
-            m = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(m)
-            _mods[key] = m
-    return _mods["C5"], _mods["F5"]
+    """5.0a(버전·신규 학습 데이터 읽기)·5.0b(표준모델 피처 파일 읽기·계산). pandas 를 쓰므로 필요할 때만 읽는다.
+    잠금 안에서 둘 다 읽은 뒤 한꺼번에 넣는다: 화면을 켠 직후 요청 여러 개가 함께 와도 한 번만 읽고, 반쯤 찬 표를 보지 않는다
+    (2026-10-30: 5.0b 를 읽는 몇 초 사이에 온 두 번째 요청이 KeyError 'F5' → 화면 5 첫 로드 'Failed to fetch')."""
+    with _mods_lock:
+        if not _mods:
+            got = {}
+            for key, f in (("C5", "5_0a_common.py"), ("F5", "5_0b_features.py")):
+                spec = importlib.util.spec_from_file_location(f"view_{key}", Path(__file__).resolve().parent / f)
+                m = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(m)
+                got[key] = m
+            _mods.update(got)
+        return _mods["C5"], _mods["F5"]
 
 
 def _legacy(dev):

@@ -18,7 +18,7 @@
 | `mitre` | | `{"tactic": "TA0001", "technique": "T1190", "technique_name": "..."}` | MITRE ATT&CK (ET만 제공) |
 | `severity` | | `Major` | 심각도 (ET만 제공) |
 | `enabled` | O | `true` | 기본 정책에서 켜진 룰인지 (Talos는 대부분 false) |
-| `side` | O | `request` / `response` / `unknown` | HTTP 요청 룰인지 응답 룰인지 |
+| `side` | O | `request` / `response` / `unknown` | HTTP 요청 룰인지 응답 룰인지. flow 방향이 먼저 (`to_client` 면 응답), 없으면 사용 버퍼로 (2026-10-30: 응답 룰이 http_cookie 등 때문에 요청으로 분류되던 것) |
 | `methods` | O | `["GET"]` / `["ANY"]` | 룰이 지정한 HTTP method. `["ANY"]` = 룰이 method를 검사하지 않음 (어떤 method든 가능) |
 | `method_hint` | | `["POST"]` | `methods`가 `["ANY"]`일 때 가장 자연스러운 method (body 검사 있으면 POST, 없으면 GET) |
 | `methods_excluded` | | `["POST"]` | 이 method면 탐지 안 됨 |
@@ -40,12 +40,13 @@
 | 키 | 설명 |
 | --- | --- |
 | `type` | `content`(문자열 포함) / `regex`(정규식, Snort pcre) |
-| `in` | 검사 위치: `uri`, `raw_uri`, `header`, `raw_header`, `cookie`, `raw_cookie`, `body`, `method`, `status_code`, `status_msg`, `response_body`, `base64_data`, `payload` |
+| `in` | 검사 위치: `uri`, `raw_uri`, `header`, `raw_header`, `cookie`, `raw_cookie`, `body`, `method`, `status_code`, `status_msg`, `response_body`, `base64_data`, `payload`. `file_data` 는 요청 방향(`flow:to_server`) 룰이면 `body`(요청 본문), 아니면 `response_body` (2026-10-30). `base64_data` 는 앞 content 뒤 base64 를 디코딩한 데이터 (코드 검사는 디코딩한 값과 원문을 함께 본다) |
 | `value` | 디코딩된 값. 출력할 수 없는 바이트는 `\xNN` |
 | `nocase` | 대소문자 무시 (true일 때만 있음) |
 | `negated` | 이 값이 없어야 함 (true일 때만 있음) |
 | `position` | `depth`, `offset`, `distance`, `within` 중 있는 것만 |
 | `pattern`, `flags` | 정규식과 플래그 (U=uri, H=header, P=body, i=대소문자 무시 등). `type: "regex"`에만 있음 |
+| `after` | R(상대) 정규식의 기준 content `{"in", "value"[, "nocase"]}` - 룰 원문에서 바로 앞 content. 정규식은 이 값이 끝난 바로 뒤부터 검사 (`^` 도 그 자리). 정규식 `in` 이 `payload`(버퍼 표시 없음)면 `after.in` 버퍼에서만 이어서 검사. R 정규식에만 있음 (2026-10-30~) |
 
 ## attack_type 값
 

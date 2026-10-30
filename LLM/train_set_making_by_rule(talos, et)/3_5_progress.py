@@ -15,7 +15,7 @@
   EMPTY      샘플 없음   생성했지만 검토·코드 검사에서 샘플이 모두 빠짐 → 확인 필요
   FAILED     생성 실패   응답 해석 실패가 반복돼 자동으로 건너뛰는 중 (3_2 --force 로 다시)
   EXISTING   기존 충분   기존 학습 로그에 이미 충분(기본 1000건 이상) → 생성하지 않음
-  EXCLUDED   제외        정보성(informational)·HTTP 응답 방향 룰 → 생성 대상 아님
+  EXCLUDED   제외        정보성(informational)·HTTP 응답 방향 룰, LLM_설정.md '생성 제외 룰' → 생성 대상 아님 (reason 열에 사유)
 
 [비율]  생성 대상 = 전체 - EXCLUDED - EXISTING
         완료율 = DONE / 생성 대상,   학습데이터 보유율 = (DONE + EXISTING) / 전체 룰
@@ -66,10 +66,10 @@ FLAGS = {   # 플래그: (한글, 설명)
     "EMPTY": ("샘플 없음", "검토·코드 검사에서 모두 빠짐"),
     "FAILED": ("생성 실패", "응답 해석 실패 반복 → 건너뛰는 중"),
     "EXISTING": ("기존 충분", "기존 학습 로그에 충분"),
-    "EXCLUDED": ("제외", "정보성·HTTP 응답 룰"),
+    "EXCLUDED": ("제외", "정보성·HTTP 응답 룰·생성 제외 룰"),
 }
 RANK = {"DONE": 7, "REVIEWED": 6, "GENERATED": 5, "QUEUED": 4, "FAILED": 3, "EMPTY": 2, "MISSING": 1}
-REQ_RE = re.compile(r"^(?P<set>all|delta)_b(?P<batch>\d+)_")
+REQ_RE = re.compile(r"^(?P<set>all|delta|pick)_b(?P<batch>\d+)_")
 
 
 def _json(path, default=None):
@@ -246,6 +246,7 @@ def compute(log=None):
     _, _, run = C.load_settings()
     skip = {t.strip() for t in run.get("생성 제외 attack_type", "").split(",") if t.strip() not in ("", "-")}
     sides = {s.strip() for s in run.get("생성 대상 side", "request").split(",") if s.strip()}
+    excl = C.excluded_rules()          # LLM_설정.md '생성 제외 룰' (다시 만들어도 코드 검사를 넘을 수 없는 룰, 2026-10-30)
     hi = C.run_int(run, "기존 데이터 충분 기준", 1000)
     latest_base = C.output_dir(in_dir.name)
     cov_src = next((b for b in [latest_base] + C.output_dates()[::-1]
@@ -263,9 +264,18 @@ def compute(log=None):
         existing = cov.get(rid, {}).get("count", 0)
         row = {"id": rid, "source": rid.split(":")[0], "attack_type": r.get("attack_type", ""),
                "side": r.get("side", ""), "rule_name": r.get("rule_name", ""), "existing": existing,
-               "date": "", "request": "", "anomalies": 0, "normal": 0}
+               "date": "", "request": "", "anomalies": 0, "normal": 0, "reason": ""}
         if r.get("attack_type") in skip or r.get("side", "request") not in sides:
             flag = "EXCLUDED"
+            row["reason"] = (f"생성 제외 유형 ({r.get('attack_type')})" if r.get("attack_type") in skip
+                             else f"생성 대상 방향 아님 ({r.get('side') or '?'})")
+        elif rid in excl:
+            flag = "EXCLUDED"
+            row["reason"] = "생성 제외 룰: " + excl[rid]
+            same = [e for e in entries.get(rid, []) if e[1] == h]
+            if same:          # 이미 만든 샘플은 그대로 둔다 (어디 있는지만 보여 주고, 샘플 합계에는 넣지 않음)
+                best = max(same, key=lambda e: (RANK[e[0]], e[2], e[3]))
+                row.update(date=best[2], request=best[3], anomalies=best[4], normal=best[5])
         elif existing >= hi:
             flag = "EXISTING"
         else:
@@ -339,10 +349,10 @@ def compute(log=None):
     with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["룰 id", "플래그", "상태", "출처", "공격 유형", "방향", "룰 이름", "기존 샘플 수",
-                    "날짜 폴더", "요청", "anomalies", "normal"])
+                    "날짜 폴더", "요청", "anomalies", "normal", "제외 사유"])
         for r in rows:
             w.writerow([r["id"], r["flag"], r["status"], r["source"], r["attack_type"], r["side"], r["rule_name"],
-                        r["existing"], r["date"], r["request"], r["anomalies"], r["normal"]])
+                        r["existing"], r["date"], r["request"], r["anomalies"], r["normal"], r.get("reason", "")])
     tmp.replace(PROGRESS_DIR / "rule_status.csv")
     ptmp = PROGRESS_DIR / f"progress.json.{os.getpid()}.tmp"
     ptmp.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
