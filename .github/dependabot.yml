@@ -1,28 +1,38 @@
-# 의존성 보안 업데이트 — 매주 한 번 확인하고, 한 번에 여는 PR 수는 작게 둔다.
+# 의존성 업데이트 — 메일·PR 이 쌓이지 않게 '한 달에 한 번, 묶어서, 꼭 필요할 때만' 연다.
 # PR 은 자동으로 합치지 않는다. Agent Office 테스트(CI)가 통과한 것만 직접 검토해서 합친다.
+#
+# - 한 달에 한 번, 생태계마다 PR 하나로 묶는다 (pip 하나, GitHub Actions 하나).
+# - requirements.txt 는 '최소 버전 이상' 범위라서 새 버전이 이미 범위 안이면 고칠 것이 없다.
+#   increase-if-necessary: 새 버전이 범위 밖일 때만(예: streamlit <1.67 인데 1.67 이 나옴) PR 을 연다.
+#   (CI 는 늘 범위 안의 최신 버전을 설치해서 시험하므로, 하한만 올리는 PR 은 시험 내용이 같다.)
+# - 메이저 버전(예: pillow 13, plotly 8, langchain 1.x)은 API 가 바뀌므로 자동 PR 을 열지 않는다 — 따로 검증 후 손으로 올린다.
+#   update-types 로만 막기 때문에 보안 취약점 수정 PR(security updates)은 막히지 않는다.
+# - GAME/Soccer 는 2026-06 에 한 번 올린 뒤 손대지 않는 pygame 데모이고, 범위도 'pygame>=2.6' 하나뿐이라 뺐다.
+#   (취약점 알림(Dependabot alerts)은 이 파일과 상관없이 저장소 전체에 계속 온다.)
 version: 2
 updates:
   - package-ecosystem: pip
     directory: /LLM/Agent_office
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 3
+      interval: monthly
+    versioning-strategy: increase-if-necessary
+    open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
     groups:
-      # 작은 버전(패치·마이너) 올림은 PR 하나로 묶어 리뷰 부담을 줄인다
-      agent-office-minor:
-        update-types: [minor, patch]
-
-  - package-ecosystem: pip
-    directory: /GAME/Soccer
-    schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 1
+      agent-office-pip:
+        applies-to: version-updates
+        patterns: ["*"]
+      agent-office-pip-security:
+        applies-to: security-updates
+        patterns: ["*"]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
-      interval: weekly
-      day: monday
-    open-pull-requests-limit: 2
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      github-actions:
+        patterns: ["*"]

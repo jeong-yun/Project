@@ -35,8 +35,8 @@
 |---|---|---|
 | `secret-scan` (gitleaks) | push·PR 마다 | 새로 들어온 커밋에 키·토큰이 있으면 실패. 값은 로그에 가려서 보여 줌 |
 | `secret-scan` 수동 실행 | Actions 탭에서 직접 | 전체 히스토리와 현재 파일 전체를 점검 |
-| `agent-office-tests` | `main` 으로 가는 push·PR | Agent Office 테스트 전체 (API 키·네트워크 없이 실행) |
-| Dependabot | 매주 월요일 | 파이썬 패키지·GitHub Actions 보안 업데이트 PR (자동 병합 안 함) |
+| `agent-office-tests` | `main` 으로 가는 push·PR 중 Agent Office 가 바뀐 것 | Agent Office 테스트 전체 (API 키·네트워크 없이 실행) |
+| Dependabot | 한 달에 한 번 | Agent Office 파이썬 패키지·GitHub Actions 업데이트를 묶음 PR 하나씩으로 (메이저 버전은 제외, 자동 병합 안 함). 취약점 수정 PR(저장소 설정의 Dependabot security updates 를 켠 경우)은 이 일정·메이저 제외와 상관없이 따로 옴 |
 
 ## 키가 새어 나갔을 때
 

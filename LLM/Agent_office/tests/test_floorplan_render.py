@@ -89,10 +89,15 @@ def test_labels_fit_without_overlap_in_narrow_rooms(pool):
 
 
 def test_label_shrinks_wraps_then_uses_callout():
-    # 0.9m 폭 '수납' 은 줄여서 방 안에, 0.7m 폭 '드레스룸(안방)' 은 지시선으로
+    # 좁은 '수납' 은 줄여서 방 안에, 0.7m 폭 '드레스룸(안방)' 은 지시선으로.
+    # '수납' 방 폭은 설치된 한글 글꼴로 잰다 — 가장 큰 글자로는 안 들어가고 한 단계 작은 글자로는 들어가는 폭.
+    # (0.9m 로 고정하면 맑은 고딕에서만 맞고, 글자가 조금 좁은 나눔고딕(CI)에서는 큰 글자 그대로 들어간다)
+    big, small = floorplan_render.LABEL_SIZES[:2]
+    usable = floorplan_render.text_width("수납", True) * (big + small) / 2
+    w = round(usable + 0.12 + 2 * 0.06, 3)  # + 내벽 두께(양쪽 반씩) + 라벨 여백(양쪽 0.06)
     layout = parse_layout({"outline": {"w": 6, "h": 4}, "floors": [{"rooms": [
-        {"id": "a", "type": "living", "name": "거실", "rect": {"x": 0, "y": 0, "w": 4.4, "h": 4}},
-        {"id": "s", "type": "storage", "name": "수납", "rect": {"x": 4.4, "y": 0, "w": 0.9, "h": 4}},
+        {"id": "a", "type": "living", "name": "거실", "rect": {"x": 0, "y": 0, "w": 5.3 - w, "h": 4}},
+        {"id": "s", "type": "storage", "name": "수납", "rect": {"x": 5.3 - w, "y": 0, "w": w, "h": 4}},
         {"id": "d", "type": "dressroom", "name": "드레스룸(안방)", "rect": {"x": 5.3, "y": 0, "w": 0.7, "h": 4}},
     ]}]})
     plan = floorplan_render.plan_floor(layout, 0)
@@ -209,6 +214,22 @@ def test_png_svg_and_paper_scale(pool):
     svg = floorplan_render.to_svg(pool, 0).decode("utf-8")
     assert svg.startswith("<?xml") and "label:bed5" in svg
     assert [floorplan_render.paper_scale(*wh) for wh in ((30, 20), (60, 30), (61, 30))] == [100, 150, 200]
+
+
+def test_renders_without_korean_font(pool, monkeypatch):
+    """한글 글꼴이 없는 PC(예: 글꼴을 안 깐 Linux)에서도 멈추지 않고 그린다 — 한글은 '없는 글자' 네모 폭으로 잰다.
+    예전엔 load_char 가 "No glyphs have been loaded" 로 멈춰 GitHub Actions 에서 평면도 테스트 16개가 실패했다."""
+    caches = (floorplan_render._fonts, floorplan_render._glyph, floorplan_render.text_width)
+    for cache in caches:
+        cache.cache_clear()
+    monkeypatch.setattr(floorplan_render, "korean_font", lambda: None)
+    try:
+        assert floorplan_render.text_width("거실") > 0
+        image = Image.open(io.BytesIO(floorplan_render.to_png(pool, 0, dpi=40)))
+        assert image.format == "PNG" and image.width > 200
+    finally:
+        for cache in caches:
+            cache.cache_clear()  # 다음 테스트는 실제 글꼴로 다시 잰다
 
 
 def test_narrow_tub_bathroom_gets_small_bathtub():
