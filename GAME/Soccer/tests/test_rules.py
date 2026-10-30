@@ -164,7 +164,8 @@ def test_save_chance_drops_with_stretch_and_speed():
         return saved / n
     easy = save_rate(0.2, 20)
     hard = save_rate(1.0, 30)
-    assert easy > 0.75 and hard < easy - 0.25
+    # v4: GK 기본 선방값 0.45 → 0.35(필드 슛 선방률을 실제 70% 근처로). 쉬운 슛 기준도 0.75 → 0.70
+    assert easy > 0.70 and hard < easy - 0.25
 
 def test_shot_block_by_defender(monkeypatch):
     w = make_world()
@@ -299,10 +300,11 @@ def test_full_match_runs_and_is_sane(seed):
     ms = (time.perf_counter() - t0) / 6000 * 1000
     m = w.match
     assert ms < 8.0, f"step too slow: {ms:.2f}ms"         # 60FPS 예산(16.7ms)의 절반 이하
-    assert sum(m['shots']) > 0
+    # v4: '100초 안에 슛·선방이 꼭 나온다'는 조건은 뺐다. v3는 200초에 슛 27.6개(실제의 약 14배)라
+    # 늘 성립했지만, 실제 축구는 100초에 슛 0.5개꼴이다. 슛·선방 수는 test_v4의 여러 경기 지표 테스트가 본다
+    assert sum(m['passes']) > 0
     assert sum(m['on_target']) <= sum(m['shots'])
     assert sum(w.score) <= sum(m['on_target'])            # 골은 유효슛에서만(자책 제외 근사)
-    assert sum(m['saves']) > 0
     assert sum(1 for p in w.players if p.active) >= 18
 
 def test_possession_is_balanced_over_seeds():
