@@ -847,7 +847,10 @@ def _glyph(ch: str, bold: bool) -> tuple[Path | None, float]:
     """글자 하나의 (윤곽 경로 — 높이 1, 앞으로 나가는 폭)."""
     fonts = _fonts(bold)
     font = next((f for f in fonts if f.get_char_index(ord(ch))), fonts[0])
-    advance = font.load_char(ord(ch), flags=LoadFlags.NO_HINTING).linearHoriAdvance / 65536 / 100
+    # 어느 글꼴에도 없는 글자(예: 한글 글꼴이 없는 Linux 의 한글)는 index 0 = '없는 글자' 네모의 폭.
+    # load_char 는 이때 "No glyphs have been loaded" 로 멈춘다 (matplotlib 3.10+).
+    index = font.get_char_index(ord(ch))
+    advance = font.load_glyph(index, flags=LoadFlags.NO_HINTING).linearHoriAdvance / 65536 / 100
     if ch.isspace():
         return None, advance
     tp = TextPath((0, 0), ch, size=1, prop=FontProperties(family=_families(), weight="bold" if bold else "normal"))
