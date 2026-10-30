@@ -143,9 +143,10 @@ def test_solver_places_without_overlap_with_aspect_adjacency_and_daylight(small)
             assert max(w, h) / min(w, h) <= limit + 0.02, r.id  # 장단변비
         if r.type in ("bedroom", "living"):
             assert any(s[1][0] - s[0][0] + s[1][1] - s[0][1] >= 0.9 for s in light_walls(floor, r, outline)), r.id  # 외벽
-    assert shared(polys["bed2"], polys["bath"]) >= 0.9  # LLM 이 쓴 adjacent
-    assert shared(polys["kitchen"], polys["dining"]) >= 0.9  # 기본 필수 이웃
-    assert shared(polys["living"], polys["dining"]) >= 2.4  # 트인 방(LDK)은 넓게 맞닿음
+    eps = 1e-6  # 좌표 합산의 부동소수점 오차 (예: 2.3999999999999995 → 2.4)
+    assert shared(polys["bed2"], polys["bath"]) >= 0.9 - eps  # LLM 이 쓴 adjacent
+    assert shared(polys["kitchen"], polys["dining"]) >= 0.9 - eps  # 기본 필수 이웃
+    assert shared(polys["living"], polys["dining"]) >= 2.4 - eps  # 트인 방(LDK)은 넓게 맞닿음
     m = report.metrics["1층"]
     assert m["required_ok"] == m["required"] and m["daylight_ok"] == m["daylight"]
 
