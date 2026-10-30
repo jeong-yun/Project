@@ -30,7 +30,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-VIEWS = ["home", "general", "stock", "travel", "concept", "music", "design"]
+VIEWS = ["home", "general", "stock", "travel_domestic", "concept", "music", "design"]
 KEY_ENVS = ["OPENAI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "UPSTAGE_API_KEY", "FREELLM_API_KEY"]
 
 _timing = {"script": 0.0, "profile": None}
@@ -148,7 +148,7 @@ def main() -> None:
             rows[view] = (first, s, t)
             print(f"{view:<8} {first:>12.0f} {s:>12.0f} {t:>11.0f}")
 
-        order = ["home", "general", "stock", "home", "travel", "concept", "home", "music", "design", "general"]
+        order = ["home", "general", "stock", "home", "travel_domestic", "concept", "home", "music", "design", "general"]
         switches = []
         for _ in range(max(1, args.n // 2)):
             for view in order:

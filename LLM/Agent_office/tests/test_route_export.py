@@ -100,5 +100,5 @@ def test_export_adopted_writes_markdown_and_map(tmp_path):
 
 
 def test_travel_team_has_route_map_feature():
-    assert "route_map" in load_team("travel").features
+    assert "route_map" in load_team("travel_domestic").features and "route_map" in load_team("travel_abroad").features
     assert "route_map" not in load_team("stock").features

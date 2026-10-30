@@ -39,6 +39,7 @@ from pydantic import ValidationError
 from st_click_detector import click_detector
 
 import board_ui
+import building_ui
 import command_center_ui
 import concept_ui
 import design_ui
@@ -60,6 +61,7 @@ from core.config import (
     load_verification,
     parent_map,
     resolve_avatar,
+    skill_dirs,
     subtree,
     team_org,
     validate_config,
@@ -140,6 +142,8 @@ def get_storage() -> Storage:
 
 
 storage = get_storage()
+# 나뉜 팀(예: 여행 → 국내·해외)은 옛 팀 id 의 지난 업무·교훈·사용량을 읽을 때 이어 붙인다 (DB 는 그대로)
+storage.set_team_links({t.id: (t.legacy.team, t.legacy.match) for t in teams if t.legacy})
 DECIDED = ("adopted", "rejected")
 # 모델 호출마다 토큰·추정 비용을 저장소에 기록 (🏠 메인 화면) — 화면에서 고친 가격이 가격표보다 우선
 usage.set_sink(storage.record_usage)
@@ -156,6 +160,7 @@ def shared_runs() -> dict:
     runs = {}
     for row in storage.list_runs(limit=200):  # 최신 순 → 같은 칸이면 최신 것만
         if row["status"] == "awaiting_human":
+            row = {**row, "team_id": storage.team_for(row["team_id"], row["question"])}  # 옛 팀 id → 지금 팀
             runs.setdefault((row["team_id"], row["root_id"]), restore_run(row))
     return runs
 
@@ -182,6 +187,7 @@ TEAM_KEY, HISTORY_KEY = "team_pick", "history_open"
 
 
 VIEW_KEY, HOME, TEAM_VIEW = "view", "home", "team"
+FREE_FORM = "free"  # 업무 선택의 '💬 자유 질문'
 
 
 def go_to_run(run: dict) -> None:
@@ -191,10 +197,13 @@ def go_to_run(run: dict) -> None:
     st.session_state[f"target_{run['team_id']}"] = run["root_id"]
 
 
-def go_to_team(team: str) -> None:
-    """메인 화면의 팀 버튼 — 그 팀 업무 화면으로."""
+def go_to_team(team: str, question: str = "") -> None:
+    """메인 화면의 팀 방·버튼 — 그 팀 업무 화면으로. question 이 있으면(🧭 부서장) 자유 질문 칸에 채워 둔다."""
     st.session_state[VIEW_KEY] = TEAM_VIEW
     st.session_state[TEAM_KEY] = team
+    if question:
+        st.session_state[f"task_pick_{team}"] = FREE_FORM
+        st.session_state["q_text"] = question
 
 
 def short(text: str, n: int = 38) -> str:
@@ -214,6 +223,7 @@ if st.query_params.get("view") == board_ui.BOARD_VIEW:
     # 📺 전체 화면 보드 (TV·키오스크) — 사이드바·메뉴 없이 보드만 (board_ui.py)
     board_ui.render_board_page(models, settings, DATA_DIR)
     st.stop()
+building_ui.apply_nav(go_to_team)  # 🏙 빌딩에서 누른 팀 방·부서·로비 (위젯을 그리기 전에 처리해야 함)
 if VIEW_KEY not in st.session_state:  # 주소창의 ?view= 를 먼저 본다 (기본은 메인)
     st.session_state[VIEW_KEY] = TEAM_VIEW if st.query_params.get("view") == TEAM_VIEW else HOME
 with st.sidebar:
@@ -222,7 +232,8 @@ with st.sidebar:
 st.query_params["view"] = view
 if view == HOME:
     home_open = [r for r in runs.values() if r["status"] not in DECIDED and r["team_id"] in team_names]
-    home_ui.render(storage, models, home_open, team_names, go_to_team, settings=settings, data_dir=DATA_DIR)
+    home_ui.render(storage, models, home_open, team_names, go_to_team, settings=settings, data_dir=DATA_DIR,
+                   teams=teams, ranks=ranks)
     st.stop()
 
 with st.sidebar:
@@ -271,6 +282,9 @@ with st.sidebar:
 
     # 채택해서 저장한 결과 파일 — 내려받기
     saved = list_results(RESULTS_DIR, team_id, limit=10)
+    if team.legacy:  # 나뉘기 전 옛 팀 폴더에 저장된 결과도 함께 (파일은 옮기지 않음)
+        saved = sorted([*saved, *list_results(RESULTS_DIR, team.legacy.team, limit=10)],
+                       key=lambda p: p.stat().st_mtime, reverse=True)[:10]
     with st.expander(f"📂 저장된 결과 파일 ({len(saved)})"):
         st.caption(f"채택한 결과는 `{RESULTS_DIR.name}/{team_id}/` 폴더에 저장됩니다.")
         for path in saved:
@@ -298,14 +312,14 @@ with st.sidebar:
         st.caption(
             "🧪 하네스: " + (", ".join(f"{v}({HARNESS_REGISTRY[v].description})" for v in validators) if validators else "없음")
         )
-        skills_dir = BASE_DIR / "teams" / team_id / "skills"
-        skill_files = sorted(p.stem for p in skills_dir.glob("*.md")) if skills_dir.exists() else []
+        skill_files = sorted(p.stem for d in skill_dirs(team_id) for p in d.glob("*.md"))
         st.caption("📚 팀 스킬: " + (", ".join(skill_files) if skill_files else "없음"))
 
 org = team_org(team, ranks)
 nodes = {n.id: n for n in org.walk()}
 parents = parent_map(org)
-member_choices = member_store.load(team_id)
+LEGACY_ID = team.legacy.team if team.legacy else None  # 나뉘기 전 옛 팀 — 팀원 모델 선택을 물려받는다
+member_choices = member_store.load(team_id, LEGACY_ID)
 # 에이전트별 모델 후보 (팀원 모델 선택 반영 — 아무도 안 골랐으면 직급 설정 그대로). 조직도·에이전트 패널 표시용
 member_plans = member_models.plan(org, models, team, member_choices)
 member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
@@ -342,7 +356,7 @@ office_ctx = office_ui.OfficeCtx(
 def make_graph():
     return build_office_graph(
         org, ranks, team, models, settings, verification_cfg, storage=storage, checkpointer=get_checkpointer(),
-        member_models=member_store.load(team_id),  # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로
+        member_models=member_store.load(team_id, LEGACY_ID),  # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로
     )
 
 
@@ -1450,8 +1464,8 @@ def member_widget_key(node_id: str) -> str:
 def on_member_model_change(node_id: str) -> None:
     """선택을 저장하고, 규칙을 어기게 된 하위를 낮춘 뒤 무엇이 바뀌었는지 알림으로 남긴다 (위젯 콜백)."""
     new_key = st.session_state.get(member_widget_key(node_id)) or ""
-    choices, changes = member_models.apply_choice(org, base_models, team, member_store.load(team_id), node_id, new_key)
-    member_store.save(team_id, choices)
+    choices, changes = member_models.apply_choice(org, base_models, team, member_store.load(team_id, LEGACY_ID), node_id, new_key)
+    member_store.save(team_id, choices, LEGACY_ID)
     if changes:
         lines = [f"{name_of(c.node_id)}: {member_models.split_key(c.before)[1]} → {member_models.split_key(c.after)[1]}"
                  for c in changes]
@@ -1461,7 +1475,7 @@ def on_member_model_change(node_id: str) -> None:
 
 
 def reset_member_models() -> None:
-    member_store.save(team_id, {})
+    member_store.save(team_id, {}, LEGACY_ID)
     st.session_state[MEMBER_NOTE_KEY] = "모든 팀원을 기본(직급 설정)으로 되돌렸습니다."
 
 
@@ -1531,7 +1545,6 @@ def render_member_models() -> None:
 # ════════════════════════════════════════════════════════════════════
 # 본문 ④ 업무 맡기기 — 팀 업무 양식 또는 자유 질문
 # ════════════════════════════════════════════════════════════════════
-FREE_FORM = "free"
 web_available = WEB_SEARCH_TOOL in team.tools
 
 

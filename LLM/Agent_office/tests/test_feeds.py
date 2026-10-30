@@ -488,7 +488,10 @@ def test_home_screen_shows_briefing_repos_cards_and_marks_card(tmp_path, monkeyp
         assert any("acme/agent-kit" in t for t in texts)
         captions = [c.value for c in at.caption]
         assert any("마지막 수집" in c and "$0.0021" in c and "gemini-3.5-flash" in c for c in captions)
-        assert "#### 📊 모델별 사용량 (30일)" in texts  # 기존 사용량 화면은 그대로
+        assert "#### 📊 모델별 사용량 (30일)" not in texts  # 고른 섹션만 그린다 (사용량은 💰 섹션)
+        at.radio(key="home_section").set_value("usage").run()
+        assert not at.exception and "#### 📊 모델별 사용량 (30일)" in [m.value for m in at.markdown]
+        at.radio(key="home_section").set_value("brief").run()
 
         ui = next(c for c in snap["cards"] if c["title"] == "카드 상태 보드")
         next(b for b in at.button if b.key == f"card_interested_{ui['id']}").click().run()

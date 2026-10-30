@@ -138,6 +138,8 @@ def test_home_screen_shows_usage_current_and_previous_keys_and_saves_names(tmp_p
     st.cache_resource.clear()
     try:
         at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
+        at.session_state["home_section"] = "usage"  # 빌딩 아래 섹션: 💰 사용량·API 키·가격표
+        at.session_state["building_list"] = True  # 📋 목록으로 보기 — 팀 버튼으로 이동
         at.run()
         assert not at.exception
         assert at.title[0].value == "🏠 Agent Office"

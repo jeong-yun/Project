@@ -102,6 +102,7 @@ class Storage:
             # WAL 모드면 쓰기가 -wal 파일에 먼저 쌓이므로 그 파일도 지문에 넣는다 (기본 모드는 DB 파일만 보면 된다)
             wal = conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         self._extra_sig_files = (f"{self.db_path}-wal",) if wal else ()
+        self.team_links: dict[str, tuple[str, str]] = {}  # {새 팀 id: (옛 팀 id, 옛 업무를 고를 말)} — set_team_links
         # 교훈·결정 요약을 knowledge/ 와 맞춘다 (AGENT_OFFICE_KNOWLEDGE_DIR 가 있을 때만 — core/feedback_sync.py)
         self._sync_feedback(pull=True)
 
@@ -148,6 +149,39 @@ class Storage:
         with closing(self._connect()) as conn, conn:
             return conn.execute(sql, params).fetchall()
 
+    # ─── 나뉜 팀의 옛 기록 (예: travel → 국내·해외 여행팀) ─────────────────────
+    # DB 의 team_id 는 고치지 않는다. 새 팀으로 읽을 때 옛 팀 id 의 기록을 함께 읽을 뿐이다 (사용자 데이터 보존).
+
+    def set_team_links(self, links: dict[str, tuple[str, str]]) -> None:
+        """{새 팀 id: (옛 팀 id, 옛 업무 질문에서 찾을 말)} — team.yaml 의 legacy 에서 만든다 (화면을 그릴 때마다 불러도 됨)."""
+        self.team_links = dict(links)
+
+    def _team_ids(self, team_id: str) -> tuple[str, ...]:
+        link = self.team_links.get(team_id)
+        return (team_id, link[0]) if link else (team_id,)
+
+    def team_for(self, team_id: str, question: str = "") -> str:
+        """기록의 팀 id → 지금 팀 id. 옛 팀이면 질문에 그 팀의 말이 있는 새 팀 (없으면 id 순으로 첫 새 팀)."""
+        heirs = sorted(new for new, (old, _) in self.team_links.items() if old == team_id)
+        if not heirs:
+            return team_id
+        return next((new for new in heirs if self.team_links[new][1] and self.team_links[new][1] in question), heirs[0])
+
+    def owns_run(self, team_id: str, row: dict) -> bool:
+        """이 팀 화면에 보일 기록인가. 옛 팀 기록은 질문에 이 팀의 말이 있거나, 어느 새 팀의 말도 없을 때 (숨기는 기록 없음)."""
+        if row["team_id"] == team_id:
+            return True
+        link = self.team_links.get(team_id)
+        if not link or row["team_id"] != link[0]:
+            return False
+        heirs = [new for new, (old, _) in self.team_links.items() if old == link[0]]
+        matched = [new for new in heirs if self.team_links[new][1] and self.team_links[new][1] in (row.get("question") or "")]
+        return not matched or team_id in matched
+
+    @staticmethod
+    def _in(ids: tuple[str, ...]) -> str:
+        return "team_id IN (" + ",".join("?" * len(ids)) + ")"
+
     # ─── runs ────────────────────────────────────────────────────
 
     def create_run(self, run_id: str, team_id: str, root_id: str, question: str) -> None:
@@ -174,11 +208,12 @@ class Storage:
 
     def list_runs(self, team_id: str | None = None, limit: int = 50) -> list[dict]:
         if team_id:
+            ids = self._team_ids(team_id)  # 나뉜 팀이면 옛 팀 기록도 (질문의 말로 골라서)
             rows = self._execute(
-                "SELECT * FROM runs WHERE team_id=? ORDER BY created_at DESC LIMIT ?", (team_id, limit)
+                f"SELECT * FROM runs WHERE {self._in(ids)} ORDER BY created_at DESC LIMIT ?", (*ids, limit * len(ids))
             )
-        else:
-            rows = self._execute("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))
+            return [self._run_row(r) for r in rows if self.owns_run(team_id, dict(r))][:limit]
+        rows = self._execute("SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,))
         return [self._run_row(r) for r in rows]
 
     def delete_run(self, run_id: str) -> None:
@@ -225,25 +260,28 @@ class Storage:
             )
 
     def recent_lessons(self, team_id: str, agent_id: str, limit: int) -> list[str]:
-        """프롬프트에 주입할 최근 활성 교훈 (오래된 것 → 최신 순)."""
+        """프롬프트에 주입할 최근 활성 교훈 (오래된 것 → 최신 순). 나뉜 팀은 옛 팀 교훈도 함께 물려받는다."""
+        ids = self._team_ids(team_id)
         rows = self._execute(
-            "SELECT lesson FROM lessons WHERE team_id=? AND agent_id=? AND active=1 ORDER BY id DESC LIMIT ?",
-            (team_id, agent_id, limit),
+            f"SELECT lesson FROM lessons WHERE {self._in(ids)} AND agent_id=? AND active=1 ORDER BY id DESC LIMIT ?",
+            (*ids, agent_id, limit),
         )
         return [r["lesson"] for r in reversed(rows)]
 
     def list_lessons(self, team_id: str, agent_id: str | None = None) -> list[dict]:
+        ids = self._team_ids(team_id)
         if agent_id:
             rows = self._execute(
-                "SELECT * FROM lessons WHERE team_id=? AND agent_id=? ORDER BY id DESC", (team_id, agent_id)
+                f"SELECT * FROM lessons WHERE {self._in(ids)} AND agent_id=? ORDER BY id DESC", (*ids, agent_id)
             )
         else:
-            rows = self._execute("SELECT * FROM lessons WHERE team_id=? ORDER BY id DESC", (team_id,))
+            rows = self._execute(f"SELECT * FROM lessons WHERE {self._in(ids)} ORDER BY id DESC", ids)
         return [dict(r) for r in rows]
 
     def lesson_counts(self, team_id: str) -> dict[str, int]:
+        ids = self._team_ids(team_id)
         rows = self._execute(
-            "SELECT agent_id, COUNT(*) AS n FROM lessons WHERE team_id=? AND active=1 GROUP BY agent_id", (team_id,)
+            f"SELECT agent_id, COUNT(*) AS n FROM lessons WHERE {self._in(ids)} AND active=1 GROUP BY agent_id", ids
         )
         return {r["agent_id"]: r["n"] for r in rows}
 
@@ -296,15 +334,23 @@ class Storage:
 
     def usage_by_agent(self, team_id: str, since: float | None = None) -> dict[str, list[dict]]:
         """팀원별 사용량 {에이전트 id: [{provider, model, calls, tokens, cost_usd}…]} (호출 많은 순) — 화면 '🎛 팀원 모델 선택'."""
+        ids = self._team_ids(team_id)
         sql = ("SELECT agent_id, provider, model, SUM(calls) AS calls, SUM(input_tokens + output_tokens) AS tokens, "
-               "SUM(cost_usd) AS cost_usd FROM usage WHERE team_id = ? AND agent_id != ''"
+               f"SUM(cost_usd) AS cost_usd FROM usage WHERE {self._in(ids)} AND agent_id != ''"
                + (" AND ts >= ?" if since is not None else "")
                + " GROUP BY agent_id, provider, model ORDER BY calls DESC")
         out: dict[str, list[dict]] = {}
-        for r in self._execute(sql, (team_id, since) if since is not None else (team_id,)):
+        for r in self._execute(sql, (*ids, since) if since is not None else ids):
             row = dict(r)
             out.setdefault(row.pop("agent_id"), []).append(row)
         return out
+
+    def usage_by_team(self, since: float | None = None) -> dict[str, dict]:
+        """팀별 합계 {팀 id: {calls, cost_usd}} — 🏢 빌딩의 층별 비용 미터. 옛 팀 id 는 그대로 (나누기는 화면이 정한다)."""
+        sql = ("SELECT team_id, SUM(calls) AS calls, SUM(cost_usd) AS cost_usd FROM usage WHERE team_id != ''"
+               + (" AND ts >= ?" if since is not None else "") + " GROUP BY team_id")
+        return {r["team_id"]: {"calls": r["calls"] or 0, "cost_usd": r["cost_usd"] or 0.0}
+                for r in self._execute(sql, (since,) if since is not None else ())}
 
     def usage_daily(self, since: float | None = None) -> list[dict]:
         """날짜별 추정 비용·토큰 (현지 시각 기준)."""

@@ -1,0 +1,57 @@
+# 🏢 빌딩 — 부서와 팀 (🏠 메인 화면의 픽셀 빌딩, core/building.py)
+#
+# 층 규칙
+#   - 1층은 로비 (👤 사용자 · 📰 안내 데스크 · 🤖 승인 데스크 · 💰 관리실)
+#   - 2층부터 아래 부서 순서대로 팀 방을 채운다. 한 층에는 팀 방이 rooms_per_floor 개까지 들어간다.
+#   - 부서는 되도록 한 층에 모은다: 지금 층에 남은 칸이 모자라면 다음 층에서 시작한다.
+#     rooms_per_floor 보다 큰 부서는 여러 층을 이어서 쓴다.
+#   - 여기에 없는 팀(teams/ 에 새로 만든 팀)은 맨 위 '기타' 부서에 자동으로 들어간다 → 팀이 늘면 층도 늘어난다.
+#
+# 팀 추가 방법: teams/<새 팀>/team.yaml 을 만들고, 아래 알맞은 부서의 teams 에 id 를 적는다 (안 적어도 '기타'로 보인다).
+# color 는 방 간판·부서 띠 색 (#RRGGBB).
+
+rooms_per_floor: 4
+
+departments:
+  - id: research
+    name: 리서치·지식부
+    emoji: 🔬
+    color: "#3B82F6"
+    description: 무엇이든 조사·정리하고, IT 개념 카탈로그를 원전 기준으로 다듬는다.
+    teams: [general, concept]
+
+  - id: invest
+    name: 투자부
+    emoji: 💹
+    color: "#10B981"
+    description: 공시·리포트·시세를 근거로 종목 판단과 매매 전략을 세운다.
+    teams: [stock]
+
+  - id: travel
+    name: 여행부
+    emoji: ✈️
+    color: "#F59E0B"
+    description: 날짜·인원·예산을 받아 그대로 따라 할 수 있는 국내·해외 여행 계획서를 만든다.
+    teams: [travel_domestic, travel_abroad]
+
+  - id: creative
+    name: 크리에이티브부
+    emoji: 🎨
+    color: "#A855F7"
+    description: 노래·반주를 만들고, 집·건물 평면도와 3D 모델을 그린다.
+    teams: [music, design]
+
+  - id: security
+    name: 보안부
+    emoji: 🛡️
+    color: "#EF4444"
+    description: 보안 통제 항목 증적을 점검하고, 인프라 코드(IaC)의 위험을 찾아 수정안을 낸다.
+    teams: [security_governance, infra_security]
+
+# 부서에 적지 않은 팀이 들어가는 곳
+other:
+  id: etc
+  name: 기타
+  emoji: 📦
+  color: "#64748B"
+  description: 아직 부서를 정하지 않은 팀 — config/departments.yaml 에 적으면 그 부서 층으로 옮겨 간다.

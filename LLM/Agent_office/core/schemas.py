@@ -148,6 +148,14 @@ class TaskTemplate(BaseModel):
     instructions: str = ""
     validators: list[str] = Field(default_factory=list)  # 이 업무에서 추가로 돌릴 하네스 검증기
     harness_options: dict = Field(default_factory=dict)  # 검증기 옵션 (예: required_terms). 문자열 값의 {key} 도 입력값으로 바뀐다
+    fixed: dict[str, str] = Field(default_factory=dict)  # 화면에 칸 없이 늘 같은 입력값 (예: 해외 여행팀 {scope: 해외})
+
+
+class LegacyLink(BaseModel):
+    """팀을 나눈 뒤 옛 팀 id 의 기록을 이어 받기 — DB·파일은 고치지 않고 읽을 때만 붙인다 (core/storage.py)."""
+
+    team: str  # 옛 팀 id (예: travel)
+    match: str = ""  # 옛 업무 중 질문에 이 말이 있는 것만 이 팀에 보인다. 어느 팀의 말도 없으면 모든 팀에 보인다
 
 
 class Team(BaseModel):
@@ -175,6 +183,8 @@ class Team(BaseModel):
     #   rewrite: 지적을 반영한 답변 전문을 다시 씀 (기본)
     #   edit   : 고칠 곳만 '찾을 문장 → 바꿀 문장'(edits)으로 — 긴 답변(개념 카탈로그 항목 1만 자)을 통째로 다시 쓰는 시간을 줄인다
     review_mode: Literal["rewrite", "edit"] = "rewrite"
+    skills_from: list[str] = Field(default_factory=list)  # 함께 쓰는 스킬 폴더 (teams/ 기준, 예: _shared/travel)
+    legacy: LegacyLink | None = None  # 나뉘기 전 옛 팀의 지난 업무·교훈·팀원 모델 선택·저장 파일을 이어 받기
 
 
 # ════════════════════════════════════════════════════════════════════

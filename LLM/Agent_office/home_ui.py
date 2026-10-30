@@ -1,5 +1,6 @@
-"""🏠 메인 화면 — 📰 AI 브리핑·💡 개선 아이디어 카드·🔥 주목 저장소, 모델별 토큰 사용량·추정 비용,
-API 키별 내역(이름 붙이기), 이전 키, 가격표, 🤖 자율 실행 상태(autonomy_ui.py).
+"""🏠 메인 화면 — 🏙 픽셀 빌딩(층·부서·팀 방, building_ui.py), 🤖 자율 실행 상태(autonomy_ui.py),
+그 아래 섹션 하나: 📰 AI 브리핑·💡 개선 아이디어 카드·🔥 주목 저장소 / 💰 모델별 토큰 사용량·추정 비용,
+API 키별 내역(이름 붙이기), 이전 키, 가격표. 고른 섹션만 그려서 화면을 다시 그리는 비용을 줄인다.
 
 AI 브리핑·카드는 core/feeds.py 가 모아 data/feeds/ 에 저장한 것을 읽는다 (수집은 버튼이나 TTL 이 지났을 때 백그라운드로).
 
@@ -18,6 +19,7 @@ import streamlit as st
 
 import autonomy_ui
 import board_ui
+import building_ui
 from core import feeds, usage
 from core.storage import Storage
 
@@ -74,15 +76,26 @@ def fmt_day(ts: float | None) -> str:
 
 
 def render(storage: Storage, models, open_runs: list[dict], team_names: dict, go_to_team,
-           settings: dict | None = None, data_dir: Path | None = None) -> None:
+           settings: dict | None = None, data_dir: Path | None = None, teams: list | None = None,
+           ranks: list | None = None) -> None:
     st.title("🏠 Agent Office")
-    st.caption("AI 소식·이 앱 개선 아이디어, 모델별 토큰 사용량과 추정 비용, API 키별 사용 내역을 봅니다. "
-               "팀 업무는 왼쪽 '화면'에서 🏢 팀 업무를 고르세요.")
 
-    _team_shortcuts(open_runs, team_names, go_to_team)
+    if teams is not None and ranks is not None:
+        building_ui.render(storage, teams, ranks, open_runs, go_to_team, models=models)  # 🏙 픽셀 빌딩 + 🧭 부서장
+    else:
+        _team_shortcuts(open_runs, team_names, go_to_team)
+    # 빌딩 아래에 볼 내용 — 고른 섹션 하나만 그린다 (📰 브리핑 / 💰 사용량)
+    st.session_state.setdefault(building_ui.SECTION_KEY, "brief")
+    section = st.radio("아래에 볼 내용", list(building_ui.SECTIONS), format_func=building_ui.SECTIONS.get, horizontal=True,
+                       key=building_ui.SECTION_KEY, label_visibility="collapsed")
     if settings is not None and data_dir is not None:
-        autonomy_ui.render(settings, Path(data_dir), storage)  # 🤖 자율 실행 상태·승인 대기열 (읽기 전용)
-        _feeds(settings, models, Path(data_dir), list(team_names.values()))
+        # 🤖 자율 실행 상태·승인 대기열 — 어느 섹션이든 늘 보이고, 승인 대기가 있으면 펼쳐진다 (로비 🤖 승인 데스크를 눌러도 펼침)
+        autonomy_ui.render(settings, Path(data_dir), storage,
+                           expanded=bool(st.session_state.pop(building_ui.AUTONOMY_OPEN_KEY, False)))
+    if section == "brief":
+        if settings is not None and data_dir is not None:
+            _feeds(settings, models, Path(data_dir), list(team_names.values()))
+        return
 
     now_keys = current_keys(models)
     for key_id, (provider, masked) in now_keys.items():  # 아직 호출 전이어도 이름을 미리 붙일 수 있게

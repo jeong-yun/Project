@@ -206,16 +206,21 @@ class MemberModelStore:
             return {}
         return data if isinstance(data, dict) else {}
 
-    def load(self, team_id: str) -> dict[str, str]:
-        team = self._read_all().get(team_id) or {}
+    def load(self, team_id: str, inherit: str | None = None) -> dict[str, str]:
+        """inherit = 나뉘기 전 옛 팀 id — 이 팀이 아직 한 번도 저장하지 않았으면 옛 팀의 선택을 그대로 쓴다 (파일은 안 고침)."""
+        data = self._read_all()
+        team = data.get(team_id) if team_id in data or not inherit else data.get(inherit)
+        team = team or {}
         return {k: v for k, v in team.items() if isinstance(k, str) and isinstance(v, str) and v} if isinstance(team, dict) else {}
 
-    def save(self, team_id: str, choices: dict[str, str]) -> None:
+    def save(self, team_id: str, choices: dict[str, str], inherit: str | None = None) -> None:
         with self._lock:
             data = self._read_all()
             cleaned = {k: v for k, v in choices.items() if v}
             if cleaned:
                 data[team_id] = cleaned
+            elif inherit and data.get(inherit):
+                data[team_id] = {}  # '기본으로' 되돌림을 기억 — 지우면 옛 팀 선택이 다시 보인다
             else:
                 data.pop(team_id, None)
             self.path.parent.mkdir(parents=True, exist_ok=True)
