@@ -111,12 +111,22 @@ def load_skills(team_id: str) -> str:
 
     스킬은 사람이 직접 쓰는 '고정 지침'이고, 교훈(lessons)은 사람의 결정에서 자동으로 쌓이는 '학습'이다.
     둘 다 모든 에이전트의 시스템 프롬프트에 들어간다. 파일을 추가·수정하면 다음 질문부터 반영된다.
+    team.yaml 의 skills_from 에 적은 공용 스킬 폴더(여러 팀이 함께 쓰는 지침)도 먼저 읽는다.
     """
-    skills_dir = TEAMS_DIR / team_id / "skills"
-    if not skills_dir.exists():
-        return ""
-    parts = [f"## 스킬: {p.stem}\n{p.read_text(encoding='utf-8').strip()}" for p in sorted(skills_dir.glob("*.md"))]
-    return "\n\n".join(parts)
+    files = [p for folder in skill_dirs(team_id) for p in sorted(folder.glob("*.md"))]
+    return "\n\n".join(f"## 스킬: {p.stem}\n{p.read_text(encoding='utf-8').strip()}" for p in files)
+
+
+def _team_yaml(team_id: str) -> dict:
+    """읽기 전용 — 복사하지 않고 캐시를 그대로 준다 (아바타 찾기처럼 자주 불리는 곳용, 고쳐 쓰지 말 것)."""
+    path = TEAMS_DIR / team_id / "team.yaml"
+    return _yaml_cache.get(str(path), file_sig(path), lambda: _parse_yaml(path)) if path.exists() else {}
+
+
+def skill_dirs(team_id: str) -> list[Path]:
+    """스킬 폴더 — skills_from 의 공용 폴더가 먼저, 그 팀의 skills/ 가 나중 (있는 폴더만)."""
+    shared = _team_yaml(team_id).get("skills_from") or []
+    return [d for d in (*(TEAMS_DIR / s for s in shared), TEAMS_DIR / team_id / "skills") if d.is_dir()]
 
 
 # ─── 조직도 ──────────────────────────────────────────────────────────
@@ -189,6 +199,13 @@ def validate_config(ranks: list[Rank], models: ModelsConfig, teams: list[Team]) 
         task_ids = [t.id for t in team.tasks]
         if len(task_ids) != len(set(task_ids)):
             raise ConfigError(f"teams/{team.id}/team.yaml 에 중복된 업무 id 가 있습니다: {task_ids}")
+        missing_skills = [d for d in team.skills_from if not (TEAMS_DIR / d).is_dir()]
+        if missing_skills:
+            raise ConfigError(f"teams/{team.id}/team.yaml skills_from 에 없는 폴더: {missing_skills} (teams/ 기준 경로)")
+    team_ids = {t.id for t in teams}
+    taken = [t.id for t in teams if t.legacy and t.legacy.team in team_ids]
+    if taken:
+        raise ConfigError(f"legacy.team 은 지금은 없는 옛 팀 id 여야 합니다 (지금 있는 팀과 겹침): {taken}")
 
 
 def used_model_keys(models: ModelsConfig, teams: list[Team] = ()) -> set[str]:
@@ -256,16 +273,20 @@ def resolve_avatar(team_id: str, rank: Rank, working: bool = False, node: OrgNod
       4) assets/avatars/<직급id>.png           ← 공용 기본 이미지
     working=True 면 각 단계에서 '<이름>_working.png'(답변·검토 중 이미지)를 먼저 찾는다.
     """
-    team_dir = TEAMS_DIR / team_id / "avatars"
+    team_dirs = [TEAMS_DIR / team_id / "avatars"]
+    legacy = (_team_yaml(team_id).get("legacy") or {}).get("team")
+    if legacy:  # 팀을 나눈 경우 옛 팀 폴더(teams/<옛 id>/avatars)에 남은 이미지도 찾는다
+        team_dirs.append(TEAMS_DIR / legacy / "avatars")
     common = BASE_DIR / rank.avatar if rank.avatar else None
 
     candidates: list[tuple[Path, str]] = []  # (폴더, 파일 이름에서 확장자 뺀 부분)
     if node and node.avatar:
         custom = BASE_DIR / node.avatar
         candidates.append((custom.parent, custom.stem))
-    if node:
-        candidates.append((team_dir, node.id))
-    candidates.append((team_dir, rank.id))
+    for team_dir in team_dirs:
+        if node:
+            candidates.append((team_dir, node.id))
+        candidates.append((team_dir, rank.id))
     if common:
         candidates.append((common.parent, common.stem))
 

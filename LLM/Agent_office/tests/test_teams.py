@@ -26,7 +26,7 @@ def stock():
 
 @pytest.fixture
 def travel():
-    return load_team("travel")
+    return load_team("travel_domestic")
 
 
 @pytest.fixture
@@ -44,10 +44,10 @@ def fake_market(monkeypatch):
 
 def test_new_teams_are_valid(ranks, models):
     teams = {t.id: t for t in list_teams()}
-    assert {"stock", "travel"} <= teams.keys()
+    assert {"stock", "travel_domestic", "travel_abroad"} <= teams.keys()
     validate_config(ranks, models, list(teams.values()))
     assert [t.id for t in teams["stock"].tasks] == ["recommend", "judge", "forecast", "trade", "position", "portfolio"]
-    assert "travel_calendar" in teams["travel"].tools and "stock_data" in teams["stock"].tools
+    assert "travel_calendar" in teams["travel_abroad"].tools and "stock_data" in teams["stock"].tools
     assert len(team_org(teams["stock"], ranks).walk()) == 7
 
 
@@ -94,12 +94,14 @@ def test_required_fields_and_dates_are_checked(stock, travel):
     with pytest.raises(TaskInputError, match="종목"):
         build_request(task_of(stock, "judge"), {"stock": ""})
     with pytest.raises(TaskInputError, match="도착일"):
-        build_request(travel.tasks[0], {"scope": "국내", "start_date": "2026-11-23", "end_date": "2026-11-20"})
+        build_request(travel.tasks[0], {"start_date": "2026-11-23", "end_date": "2026-11-20"})
 
 
-def test_travel_task_derives_days_for_harness(travel):
-    req = build_request(travel.tasks[0], {"scope": "해외", "start_date": "2026-11-20", "end_date": "2026-11-23"})
-    assert "3박 4일" in req.question and "목적지" not in req.question  # 비운 목적지 줄은 빠짐
+def test_travel_task_derives_days_for_harness():
+    abroad = load_team("travel_abroad")
+    req = build_request(abroad.tasks[0], {"start_date": "2026-11-20", "end_date": "2026-11-23"})
+    assert "3박 4일 해외 여행" in req.question and "목적지" not in req.question  # 비운 목적지 줄은 빠짐, scope 는 고정값
+    assert req.tool_inputs["scope"] == "해외"  # 여행 달력이 남반구 안내를 붙이는 기준
     assert req.harness_options["trip_days"] == 4 and "itinerary_days" in req.validators
 
 
@@ -173,7 +175,7 @@ def test_tool_results_reach_prompts_and_harness(ranks, models, travel, use_scrip
     script = use_script(Script(text=plan_text, ReviewResult=make_review("approve", 9),
                                Delegation=make_delegation("am_spots", "staff_food")))
     org = team_org(travel, ranks)
-    req = build_request(travel.tasks[0], {"scope": "국내", "start_date": "2026-11-20", "end_date": "2026-11-22"})
+    req = build_request(travel.tasks[0], {"start_date": "2026-11-20", "end_date": "2026-11-22"})
     graph = build_office_graph(org, ranks, travel, models, {}, NO_CRITIC)
     events = list(stream_office(graph, org, req.question, "am_spots", brief=req.brief, auto_brief=False,
                                 tool_inputs=req.tool_inputs, extra_validators=req.validators, harness_options=req.harness_options))

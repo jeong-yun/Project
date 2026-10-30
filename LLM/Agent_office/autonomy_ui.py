@@ -49,7 +49,7 @@ def _result_text(rec: dict | None) -> str:
     return " · ".join(parts)
 
 
-def render(settings: dict, data_dir: Path, storage: Storage, now: float | None = None) -> None:
+def render(settings: dict, data_dir: Path, storage: Storage, now: float | None = None, expanded: bool = False) -> None:
     cfg = autonomy.load_config(settings)
     audit = autonomy.AuditLog(Path(data_dir) / cfg.audit_file)
     now = time.time() if now is None else now
@@ -64,7 +64,7 @@ def render(settings: dict, data_dir: Path, storage: Storage, now: float | None =
     log_text = "감사 로그 온전" if ok else f"⚠️ 감사 로그 {bad_line}번째 줄부터 어긋남"
     title = f"🤖 자율 실행 · {state} · 작업 {len(cfg.jobs)}개 · 승인 대기 {len(queue)}건 · {log_text}"
     # 마지막 요청을 결정해 대기열이 비어도 결과 알림을 볼 수 있게 펼친 채로 둔다
-    with st.expander(title, expanded=bool(queue) or not ok or _flash_key("home") in st.session_state):
+    with st.expander(title, expanded=expanded or bool(queue) or not ok or _flash_key("home") in st.session_state):
         st.caption("켜고 끄기·작업은 `config/settings.yaml` 의 `autonomy`, 실행은 `scripts/run_autonomous.py` "
                    "(작업 스케줄러가 1시간마다 부르면 때가 된 작업만). 화면에서 하는 일은 승인 대기열의 승인·기각뿐입니다. "
                    "설계: `docs/AI_전용_업무_설계.md`")

@@ -45,7 +45,7 @@ class OfficeCtx:
 
 
 def view_picker() -> str:
-    st.session_state.setdefault(VIEW_KEY, CHART)
+    st.session_state.setdefault(VIEW_KEY, OFFICE)  # 처음에는 픽셀 사무실 (조직도는 토글로)
     return st.radio("보기", [CHART, OFFICE], format_func=VIEW_LABELS.get, horizontal=True, key=VIEW_KEY,
                     label_visibility="collapsed")
 

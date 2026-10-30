@@ -1,6 +1,6 @@
-# 여행 팀 평가 케이스 — python -m evals.run_eval evals/cases/travel.yaml
+# 🌏 해외 여행팀 평가 케이스 — python -m evals.run_eval evals/cases/travel.yaml
 
-team: travel
+team: travel_abroad
 
 cases:
   - id: osaka_3n4d
@@ -10,7 +10,7 @@ cases:
       destination: 오사카
       start_date: "2026-11-20"
       end_date: "2026-11-23"
-      departure: 서울
+      airport: 인천
       people: "성인 2, 초등학생 1"
       budget: "총 250만원"
       style: 맛집·테마파크

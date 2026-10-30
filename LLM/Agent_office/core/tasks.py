@@ -103,7 +103,7 @@ def build_request(task: TaskTemplate, values: dict, extra_request: str = "") -> 
     missing = [f.label for f in task.fields if f.required and _is_empty(values.get(f.key))]
     if missing:
         raise TaskInputError(f"필수 입력이 비어 있습니다: {', '.join(missing)}")
-    full = derive_values({f.key: values.get(f.key) for f in task.fields} | values)
+    full = derive_values({f.key: values.get(f.key) for f in task.fields} | values | task.fixed)
 
     question = render(task.question, full)
     if extra_request.strip():
