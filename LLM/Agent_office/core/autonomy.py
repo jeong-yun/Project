@@ -13,17 +13,26 @@
   propose : 위 + 바꿀 내용을 '제안'으로 저장 (propose — 예: 수정 PR 초안, 정책 문구)
   되돌릴 수 없는 행동(push·merge·삭제·외부 전송·설정 적용·배포)을 스스로 하는 수준은 만들지 않는다.
 
-감사 로그 (audit.jsonl) — 실행 시작·끝·건너뜀·승인 요청을 한 줄씩 남긴다.
+감사 로그 (audit.jsonl) — 실행 시작·끝·건너뜀·승인 요청·사람 결정을 한 줄씩 남긴다.
   줄마다 앞 줄의 해시를 넣어(해시 체인) 중간 줄을 고치거나 지우면 verify() 가 그 줄 번호를 찾아낸다.
   마지막 실행 시각도 이 로그에서 읽으므로 상태 파일을 따로 두지 않는다.
+  화면·CLI·스케줄 스크립트가 같은 파일에 동시에 쓸 수 있어 append 는 잠금 파일(audit.jsonl.lock)을 잡고 쓴다.
+
+승인 요청 — 허용 밖 행동은 request_id 와 함께 approval_requested 로 남기고, 행동의 내용(payload, 예: 패치)은
+  autonomy/requests/<id>.json 에 따로 두고 그 sha256 을 로그 줄에 적는다 (승인한 내용 = 실행할 내용인지 확인용).
+  승인·기각·실행은 core/approvals.py.
 
 실제 업무 실행(runner)은 함수로 넘겨받는다 — 테스트는 가짜 runner, 스크립트는 워크플로우를 사람 결정 없이 돌리는 runner.
 """
 
 import hashlib
 import json
+import os
+import threading
 import time
+import uuid
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -51,11 +60,20 @@ class AutonomyJob(BaseModel):
     level: Level = "observe"
 
 
+class ApprovalsConfig(BaseModel):
+    """사람 승인 처리 (core/approvals.py)."""
+
+    expiry_days: float = 14  # 이보다 오래 결정하지 않은 요청은 approval_expired (실행 없음)
+    patch_repo: str = ""  # create_branch_with_patch 가 브랜치를 만들 git 저장소 (비우면 이 앱이 들어 있는 저장소)
+    worktree_dir: str = ""  # 그 브랜치를 꺼낼 새 작업 폴더의 부모 (비우면 저장소 옆 <저장소>-autonomy-worktrees)
+
+
 class AutonomyConfig(BaseModel):
     enabled: bool = False
     daily_budget_usd: float = 1.0
     max_runs_per_day: int = 6
     audit_file: str = "autonomy/audit.jsonl"  # 데이터 폴더(data/) 기준
+    approvals: ApprovalsConfig = Field(default_factory=ApprovalsConfig)
     jobs: list[AutonomyJob] = Field(default_factory=list)
 
 
@@ -86,11 +104,60 @@ def _digest(prev: str, record: dict) -> str:
     return hashlib.sha256((prev + body).encode("utf-8")).hexdigest()
 
 
+_THREAD_LOCKS: dict[str, threading.RLock] = {}
+_LOCK_DEPTH: dict[str, int] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+LOCK_WAIT_SEC = 30.0  # 다른 쪽이 잠금을 이만큼 놓지 않으면 TimeoutError
+LOCK_STALE_SEC = 120.0  # 이보다 오래된 잠금 파일은 죽은 프로세스가 남긴 것으로 보고 지운다
+
+
 class AuditLog:
     """추가만 하는 JSONL 감사 로그 (해시 체인)."""
 
     def __init__(self, path: Path | str):
         self.path = Path(path)
+
+    @property
+    def lock_path(self) -> Path:
+        return self.path.with_name(self.path.name + ".lock")
+
+    @contextmanager
+    def locked(self):
+        """이 로그를 읽고 이어 쓰는 동안 다른 스레드·프로세스가 끼어들지 못하게 한다 (같은 스레드에서는 겹쳐 잡아도 됨).
+
+        화면(승인 버튼)·CLI·스케줄 스크립트가 동시에 쓰면 두 줄이 같은 앞 줄 해시를 가져 체인이 갈라지므로 필요하다.
+        """
+        key = str(self.path.resolve())
+        with _THREAD_LOCKS_GUARD:
+            rlock = _THREAD_LOCKS.setdefault(key, threading.RLock())
+        with rlock:
+            if _LOCK_DEPTH.get(key, 0) == 0:
+                self._acquire_file()
+            _LOCK_DEPTH[key] = _LOCK_DEPTH.get(key, 0) + 1
+            try:
+                yield
+            finally:
+                _LOCK_DEPTH[key] -= 1
+                if _LOCK_DEPTH[key] == 0:
+                    self.lock_path.unlink(missing_ok=True)
+
+    def _acquire_file(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + LOCK_WAIT_SEC
+        while True:
+            try:
+                os.close(os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                return
+            except FileExistsError:
+                try:
+                    if time.time() - self.lock_path.stat().st_mtime > LOCK_STALE_SEC:
+                        self.lock_path.unlink(missing_ok=True)
+                        continue
+                except FileNotFoundError:
+                    continue
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"감사 로그 잠금을 {LOCK_WAIT_SEC:g}초 안에 얻지 못했습니다: {self.lock_path}") from None
+                time.sleep(0.05)
 
     def entries(self) -> list[dict]:
         if not self.path.exists():
@@ -98,13 +165,13 @@ class AuditLog:
         return [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
     def append(self, event: str, **fields) -> dict:
-        items = self.entries()
-        prev = items[-1]["hash"] if items else ""
-        record = {"ts": fields.pop("ts", time.time()), "event": event, **fields, "prev": prev}
-        record["hash"] = _digest(prev, record)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        with self.locked():
+            items = self.entries()
+            prev = items[-1]["hash"] if items else ""
+            record = {"ts": fields.pop("ts", time.time()), "event": event, **fields, "prev": prev}
+            record["hash"] = _digest(prev, record)
+            with open(self.path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
         return record
 
     def verify(self) -> tuple[bool, int | None]:
@@ -127,6 +194,39 @@ class AuditLog:
 
     def runs_since(self, since: float) -> int:
         return sum(1 for rec in self.entries() if rec["event"] == "run_start" and rec["ts"] >= since)
+
+
+# ─── 승인 요청 ─────────────────────────────────────────────────────────
+
+MAX_PAYLOAD_CHARS = 500_000  # 패치 하나가 이보다 크면 내용을 저장하지 않고 요청만 남긴다 (승인해도 실행 실패)
+
+
+def payload_path(audit: AuditLog, request_id: str) -> Path:
+    """승인 요청의 내용(payload) 파일 — 감사 로그 옆 requests/<id>.json."""
+    return audit.path.parent / "requests" / f"{request_id}.json"
+
+
+def request_approval(audit: AuditLog, *, job: str, action: str, summary: str = "", payload=None,
+                     ts: float | None = None, **fields) -> dict:
+    """허용 밖 행동을 실행하지 않고 사람 승인 대기열에 넣는다 → approval_requested 줄 (request_id 포함).
+
+    payload: dict 또는 pydantic 모델 (create_branch_with_patch·save_proposal 은 core.approvals.Proposal).
+    내용은 파일로 따로 두고 sha256 만 로그에 적는다 — 승인 뒤 파일이 바뀌었으면 실행하지 않는다.
+    """
+    rid = uuid.uuid4().hex[:12]
+    extra: dict = {}
+    if payload is not None:
+        data = payload.model_dump(mode="json") if isinstance(payload, BaseModel) else payload
+        body = json.dumps(data, ensure_ascii=False, sort_keys=True, indent=1)
+        if len(body) > MAX_PAYLOAD_CHARS:
+            extra["payload_error"] = f"내용이 너무 큼 ({len(body):,}자 > {MAX_PAYLOAD_CHARS:,}자) — 저장하지 않음"
+        else:
+            path = payload_path(audit, rid)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(body, encoding="utf-8")
+            extra["payload_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return audit.append("approval_requested", ts=time.time() if ts is None else ts, job=job, action=action,
+                        summary=str(summary)[:200], request_id=rid, **fields, **extra)
 
 
 # ─── 실행 ─────────────────────────────────────────────────────────────
@@ -184,9 +284,9 @@ def run_due(
         pending = []
         for act in out.get("actions", []):
             if gate(job.level, act.get("action", "")) == "approval":
-                pending.append(act)
-                audit.append("approval_requested", ts=now, job=job.id, action=act.get("action", ""),
-                             summary=str(act.get("summary", ""))[:200])
+                rec = request_approval(audit, ts=now, job=job.id, action=act.get("action", ""), summary=act.get("summary", ""),
+                                       payload=act.get("payload"), level=job.level, team=job.team, task=job.task)
+                pending.append({**act, "request_id": rec["request_id"]})
         cost = max(spent_today() - before, 0.0)
         extra = {k: v for k, v in (out.get("audit") or {}).items() if k not in ("ts", "event", "job", "prev", "hash", "cost_usd", "pending")}
         audit.append("run_end", ts=now, job=job.id, cost_usd=round(cost, 4), pending=len(pending), **extra)
@@ -214,8 +314,13 @@ def schedule(cfg: AutonomyConfig, audit: AuditLog, now: float) -> list[dict]:
 
 
 def approval_queue(audit: AuditLog) -> list[dict]:
-    """사람 승인 대기 — 자율 수준 밖이라 실행하지 않고 남긴 행동 (최근 것이 앞). 승인·기각 처리는 아직 없다 (읽기 전용)."""
-    return [rec for rec in reversed(audit.entries()) if rec["event"] == "approval_requested"]
+    """사람 승인 대기 — 자율 수준 밖이라 실행하지 않고 남긴 행동 중 아직 결정(승인·기각·만료)이 없는 것 (최근 것이 앞).
+
+    줄마다 "id"(요청 id)가 붙는다. 승인·기각·만료 처리는 core/approvals.py.
+    """
+    from core import approvals  # approvals 가 이 모듈을 쓰므로 여기서 읽는다
+
+    return approvals.pending(audit)
 
 
 def autonomy_cost_since(audit: AuditLog, since: float) -> float:
