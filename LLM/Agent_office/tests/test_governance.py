@@ -212,7 +212,7 @@ def test_autonomy_panel_renders_on_home(tmp_path, monkeypatch):
         panel = next(e for e in at.expander if e.label.startswith("🤖 자율 실행"))
         assert "꺼짐" in panel.label and "승인 대기 1건" in panel.label and "감사 로그 온전" in panel.label
         assert any(m.value.startswith("##### 👤 승인 대기열 (1건)") for m in at.markdown)
-        assert any("apply_config" in str(df.value.to_dict()) for df in at.dataframe)
+        assert any("apply\\_config" in m.value for m in at.markdown)  # 요청 카드 — 글자 그대로(마크다운 이스케이프). 버튼은 test_approvals
 
         # 로그를 고치면 화면이 어긋남을 알린다
         audit_file = data_dir / "autonomy" / "audit.jsonl"

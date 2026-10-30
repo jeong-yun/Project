@@ -481,6 +481,27 @@
 
 ---
 
+## 2026-10-30
+
+**👤 승인 대기열 — 승인·기각을 실제로 처리 ("사람은 승인만")**
+- 작업: 읽기 전용이던 승인 대기열에서 사람이 요청마다 승인·기각할 수 있게 했다 ([설계 문서 5.5장](docs/AI_전용_업무_설계.md)).
+  - `core/approvals.py`: 대기열·이력, 승인/기각/만료, 실행기 2개(`save_proposal` 제안 저장, `create_branch_with_patch` 새 worktree·새 로컬 브랜치에 패치 커밋), 패치 payload 스키마 `Proposal`(인프라 보안 팀이 이 모양으로 낸다)
+  - `core/autonomy.py`: 요청마다 `request_id`, payload 파일 + sha256, 감사 로그 잠금(화면·CLI·스케줄러가 동시에 써도 체인이 안 갈라짐), `approvals` 설정(만료 일수·패치 저장소·작업 폴더)
+  - 화면: 🏠 '🤖 자율 실행' 패널, 🖥️ 커맨드 센터 🔔·⏱ 탭에 요청 카드(왜 묻는지·승인하면 무슨 일·diff·재검사·비용·메모) + [✅ 승인]→확인 / [❌ 기각] + 결정 이력
+  - CLI: `scripts/run_autonomous.py --approvals` · `--approve <id>` · `--reject <id> [--comment]`
+- 기술: 해시 체인 감사 로그에 결정 이벤트를 이어 쓰기(append-only), 승인 내용 무결성(sha256), 멱등 실행, 기본 거부 실행기 목록, git worktree 격리, unified diff 경로 검사, 파일 잠금, Streamlit AppTest
+- 성과:
+  - push·merge·삭제·외부 전송·설정 적용·배포는 승인해도 실행하지 않고, 사람이 할 명령만 보여 준다. 그 명령에는 모양을 검사한 이름만 넣는다.
+  - 승인 뒤 내용이 바뀌면 실행하지 않는다. 로그가 어긋나 있으면 결정을 받지 않는다.
+  - 자동 테스트 21건을 추가했다: 체인 이어 쓰기, 두 번 승인, 모르는·되돌릴 수 없는 행동 7종, 실행 실패, 만료, 조작 탐지, 패치 스키마, 동시 쓰기, 임시 git 저장소에서 새 브랜치에만 커밋, CLI, 화면 2개(🏠 패널 · 커맨드 센터).
+  - 전체 자동 테스트 530건 통과 (API 키·네트워크 없이). 브라우저(임시 데이터 폴더)에서 제안 저장 승인 1건·push 기각 1건을 눌러 확인했다.
+- 한계·다음 할 일:
+  - 실패한 승인의 재시도 버튼이 없다.
+  - 결정한 사람은 늘 `user`다(로그인 없음).
+  - 인프라 보안 팀이 실제 패치를 내면 기각률·채택률을 잰다.
+
+---
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

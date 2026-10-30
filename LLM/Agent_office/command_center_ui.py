@@ -4,6 +4,7 @@
   ▸ 터미널   팀장에게 한 줄. '다들 뭐 해?' 같은 상태 질문은 LLM 없이 바로 한 줄씩 보고 (core/office.rundown),
              그 밖의 말은 평소처럼 업무로 맡긴다 (app.py 가 pop_request 로 받아 자유 질문으로 시작)
   📈 모니터 · ✓ 업무 · 🔔 결정 대기 · ⏱ 자동 실행 · 📚 기억 · ◆ 조직도 · 📜 활동 · ⌘ 명령어 · 🛠 팀원
+  🔔·⏱ 탭에는 자율 실행의 👤 승인 대기열(승인·기각 버튼)도 그린다 (autonomy_ui.render_queue — 🏠 패널과 같은 것)
 """
 
 import html
@@ -12,6 +13,7 @@ from datetime import datetime
 
 import streamlit as st
 
+import autonomy_ui
 import office_ui
 from core import autonomy, office
 from core.live import STAGES, stage_of
@@ -207,22 +209,27 @@ def _tasks(ctx, run, target, active_ids) -> None:
     st.markdown(_box(parts), unsafe_allow_html=True)
 
 
+def _autonomy(ctx) -> tuple[autonomy.AutonomyConfig, autonomy.AuditLog]:
+    cfg = autonomy.load_config(ctx.settings)
+    return cfg, autonomy.AuditLog(ctx.data_dir / cfg.audit_file)
+
+
 def _ask(ctx, run, target, active_ids) -> None:
     waiting = [r for r in ctx.runs.values() if r["done"] and r["status"] == "awaiting_human" and not r.get("error")]
     if not waiting:
         st.markdown(_box([_line("사람 결정을 기다리는 업무가 없습니다.", "ao-cc-dim")]), unsafe_allow_html=True)
-        return
-    st.markdown(_box([_line(f"🔔 결정을 기다리는 업무 {len(waiting)}개 — 눌러서 결정하러 가기", "ao-cc-lead")]),
-                unsafe_allow_html=True)
+    else:
+        st.markdown(_box([_line(f"🔔 결정을 기다리는 업무 {len(waiting)}개 — 눌러서 결정하러 가기", "ao-cc-lead")]),
+                    unsafe_allow_html=True)
     for r in sorted(waiting, key=lambda r: r["started_at"], reverse=True):
         if st.button(f"🔔 {r['team_id']} · {r['question'][:40]}", key=f"cc_ask_{r['run_id']}", on_click=ctx.go_to_run,
                      args=(r,), use_container_width=True):
             st.rerun()  # 팀·문의 대상이 바뀌므로 화면 전체를 다시
+    autonomy_ui.render_queue(*_autonomy(ctx), "cc_ask", show_history=False)  # 자율 실행이 남긴 승인 요청도 여기서 결정
 
 
 def _triggers(ctx, run, target, active_ids) -> None:
-    cfg = autonomy.load_config(ctx.settings)
-    audit = autonomy.AuditLog(ctx.data_dir / cfg.audit_file)
+    cfg, audit = _autonomy(ctx)
     now = time.time()
     last = audit.last_runs()
     parts = [
@@ -235,8 +242,9 @@ def _triggers(ctx, run, target, active_ids) -> None:
         parts.append(_line(f"⏱ {job.id} · {job.team} · {job.every_hours:g}시간마다 · {job.level} · "
                            f"마지막 {_when(prev) if prev else '없음'} · 다음 {nxt}"))
     if not cfg.jobs:
-        parts.append(_line("정해 둔 자동 작업이 없습니다 (settings.yaml autonomy.jobs). 읽기 전용 화면입니다.", "ao-cc-dim"))
+        parts.append(_line("정해 둔 자동 작업이 없습니다 (settings.yaml autonomy.jobs).", "ao-cc-dim"))
     st.markdown(_box(parts), unsafe_allow_html=True)
+    autonomy_ui.render_queue(cfg, audit, "cc_trig", now=now)
 
 
 def _memory(ctx, run, target, active_ids) -> None:

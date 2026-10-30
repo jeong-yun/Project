@@ -5,6 +5,9 @@
     python scripts/run_autonomous.py             # 실제 실행 (autonomy.enabled: true 일 때만, API 비용)
     python scripts/run_autonomous.py --dry-run --jobs tests/fixtures/autonomy_governance.yaml
                                                  # settings 대신 작업 파일(예시)로 계획만 보기 — 켜짐으로 간주, 호출 없음
+    python scripts/run_autonomous.py --approvals                 # 사람 승인 대기열 + 최근 결정 (호출 없음)
+    python scripts/run_autonomous.py --approve <id> [--comment 메모]   # 승인 → 안전한 행동만 실행 (core/approvals.py)
+    python scripts/run_autonomous.py --reject <id> [--comment 메모]    # 기각 (실행 없음)
 
 작업 스케줄러에 1시간마다 등록해 두면 작업마다 every_hours 가 지난 것만 실행된다.
 보고서는 data/autonomy/reports/<작업>/<시각>.md, 기록은 data/autonomy/audit.jsonl (해시 체인).
@@ -24,7 +27,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core import autonomy, governance, usage  # noqa: E402
+from core import approvals, autonomy, governance, usage  # noqa: E402
 from core.config import load_env, load_models, load_ranks, load_settings, load_team, load_verification, team_org  # noqa: E402
 from core.storage import Storage  # noqa: E402
 from core.tasks import build_request  # noqa: E402
@@ -86,10 +89,54 @@ def load_jobs_file(path: str, settings: dict) -> autonomy.AutonomyConfig:
     return autonomy.AutonomyConfig(**{**base, **data, "enabled": True})
 
 
+def show_approvals(audit: autonomy.AuditLog, cfg: autonomy.AutonomyConfig) -> None:
+    queue = autonomy.approval_queue(audit)
+    entries = audit.entries()
+    print(f"승인 대기 {len(queue)}건 (만료 {cfg.approvals.expiry_days:g}일)")
+    for q in queue:
+        run_cost, total = approvals.costs(entries, q)
+        cost = "실행 중" if run_cost is None else f"${run_cost:.4f}"
+        print(f"  [{q['id']}] {datetime.fromtimestamp(q['ts']):%Y-%m-%d %H:%M} · {q.get('job', '')} · {q.get('action', '')}"
+              f" · {q.get('summary', '')}\n      비용 이번 실행 {cost} · 작업 합계 ${total:.4f}\n"
+              f"      승인하면: {approvals.on_approve(q.get('action', ''))}")
+    hist = approvals.history(audit, entries)[:10]
+    if hist:
+        print("최근 결정")
+    for h in hist:
+        print(f"  [{h['id']}] {datetime.fromtimestamp(h['decided']):%Y-%m-%d %H:%M} · {h['action']} · "
+              f"{DECISION_TEXT[h['decision']]}{' → ' + h['outcome']['event'] if h['outcome'] else ''}"
+              f"{' · ' + h['comment'] if h['comment'] else ''}")
+
+
+DECISION_TEXT = {"granted": "승인", "rejected": "기각", "expired": "만료"}
+
+
+def show_decision(out: dict) -> None:
+    dec, res = out["decision"], out["outcome"]
+    if out["status"] == "already":
+        print(f"이미 결정된 요청입니다 — {DECISION_TEXT[approvals.DECISION_EVENTS[dec['event']]]} "
+              f"({datetime.fromtimestamp(dec['ts']):%Y-%m-%d %H:%M}). 다시 실행하지 않습니다.")
+    elif out["status"] == "expired":
+        print(f"만료된 요청입니다 ({dec['age_days']}일 지남) — 실행하지 않았습니다.")
+    else:
+        print(f"{DECISION_TEXT[out['status']]} 기록 완료 ({dec['request_id']}).")
+    if res:
+        print(f"결과: {res['event']}" + (f" · {res['error']}" if res.get("error") else ""))
+        for key in ("export_dir", "branch", "worktree", "commit"):
+            if (res.get("result") or {}).get(key):
+                print(f"  {key}: {res['result'][key]}")
+        for step in res.get("manual_steps") or []:
+            print(f"  사람이 직접: {step}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="자율 실행 (때가 된 작업만)")
     parser.add_argument("--dry-run", action="store_true", help="호출 없이 계획만 보기")
     parser.add_argument("--jobs", help="settings 대신 이 작업 파일(YAML, {jobs: [...]})로 — --dry-run 과 함께만")
+    parser.add_argument("--approvals", action="store_true", help="사람 승인 대기열·최근 결정 보기 (호출 없음)")
+    parser.add_argument("--approve", metavar="ID", help="승인 요청 하나를 승인 (안전한 행동만 실행)")
+    parser.add_argument("--reject", metavar="ID", help="승인 요청 하나를 기각 (실행 없음)")
+    parser.add_argument("--comment", default="", help="--approve·--reject 에 붙일 메모")
     parser.add_argument("--data", default=os.getenv("AGENT_OFFICE_DATA_DIR") or str(ROOT / "data"), help="runs.db 가 있는 폴더")
     args = parser.parse_args()
     if hasattr(sys.stdout, "reconfigure"):
@@ -103,6 +150,21 @@ def main() -> None:
     storage = Storage(data_dir / settings.get("storage", {}).get("db_file", "runs.db"))
     audit = autonomy.AuditLog(data_dir / cfg.audit_file)
     now = time.time()
+
+    if args.approvals or args.approve or args.reject:
+        if args.approve and args.reject:
+            parser.error("--approve 와 --reject 는 함께 쓰지 않습니다")
+        approvals.expire_stale(audit, cfg.approvals, now)
+        if args.approve or args.reject:
+            try:
+                show_decision(approvals.decide(audit, cfg.approvals, args.approve or args.reject,
+                                               "grant" if args.approve else "reject", args.comment, via="cli", now=now))
+            except approvals.ApprovalError as e:
+                print(f"결정을 기록하지 않았습니다: {e}")
+                sys.exit(1)
+        else:
+            show_approvals(audit, cfg)
+        return
 
     def spent_today() -> float:
         return sum(r["cost_usd"] or 0.0 for r in storage.usage_summary(since=autonomy.day_start(now)))
@@ -122,6 +184,7 @@ def main() -> None:
     if not ok:
         print("감사 로그가 어긋나 실행하지 않습니다 — 로그를 확인하세요.")
         return
+    approvals.expire_stale(audit, cfg.approvals, now)
 
     load_env()
     usage.set_sink(storage.record_usage)  # 자율 실행 비용도 🏠 사용량에 '자율 실행'으로 잡힌다

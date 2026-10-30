@@ -319,8 +319,9 @@ CLI 팁       20초마다 하나 — 명령 1개·설명 1줄·설치·지침 �
                             (진행 중이거나 결정 대기 결과가 있으면 맡기지 않고 알려 줌 — 결정 대기 결과가 지워지지 않게)
                  📈 모니터  진행 단계 줄 · 경과 시간 · 에이전트별 상태 · 작성 중인 초안 글자 수
                  ✓ 업무     모든 팀의 열린 업무 + 이 팀 최근 업무 8개
-                 🔔 결정 대기 사람 결정을 기다리는 업무 (누르면 그 업무로 이동)
-                 ⏱ 자동 실행 settings.yaml 의 autonomy (켜짐 여부·예산·하루 상한·작업마다 마지막/다음 실행) — 읽기 전용
+                 🔔 결정 대기 사람 결정을 기다리는 업무 (누르면 그 업무로 이동) + 자율 실행 👤 승인 대기열 (승인·기각 버튼)
+                 ⏱ 자동 실행 settings.yaml 의 autonomy (켜짐 여부·예산·하루 상한·작업마다 마지막/다음 실행)
+                            + 👤 승인 대기열과 결정 이력 (설정은 화면에서 바꾸지 않음)
                  📚 기억     에이전트별 교훈 수와 최근 교훈 2개
                  ◆ 조직도    글자 조직도 + 상태 (그림 조직도로 바꾸는 버튼)
                  📜 활동     이번 업무의 단계 기록 + 자율 실행 감사 로그 최근 8줄
@@ -716,7 +717,17 @@ A 는 하네스가 검증한 기본 배치, 처음에는 검증을 통과한 안
 - **증적 툴** `governance_evidence` — 증적 폴더·붙여 넣은 글을 '데이터' 표시선으로 묶고, 이전·현재 설정을 **코드가 줄 단위로 diff** 하고, 고른 프레임워크의 통제 번호 목록을 모든 팀원에게 근거 자료로 준다. 외부 호출 없음.
 - **하네스** `control_ids` · `evidence_quotes` (위 표) — 실패하면 한국어 오류 문장을 돌려줘 다시 쓰게 하고, 자율 실행에서는 끝까지 실패한 보고서 맨 위에 '⚠️ 미검증'을 붙인다.
 - **가상 회사 샘플 증적** `teams/security_governance/samples/sample_corp/` — 정책 발췌·sshd·방화벽·IAM 비슷한 JSON·인증 로그·접근권한 검토 기록, 지난주·이번 주 설정. IP 는 문서 전용 대역(RFC 5737), 도메인은 example.com 만. 업무 양식의 '🧪 샘플 증적' 칸을 켜면 쓴다.
-- **🤖 자율 실행 패널** (🏠 메인 위쪽, `autonomy_ui.py`, 읽기 전용) — 켜짐 여부, 작업별 마지막·다음 실행과 마지막 결과(지어낸 번호·인용 불일치 건수·비용·걸린 시간), 오늘 비용 대 예산, 오늘 실행 수 대 상한, 감사 로그 해시 체인 검증, 사람 승인 대기열(`approval_requested`).
+- **🤖 자율 실행 패널** (🏠 메인 위쪽, `autonomy_ui.py`) — 켜짐 여부, 작업별 마지막·다음 실행과 마지막 결과(지어낸 번호·인용 불일치 건수·비용·걸린 시간), 오늘 비용 대 예산, 오늘 실행 수 대 상한, 감사 로그 해시 체인 검증, 사람 승인 대기열.
+- **👤 승인 대기열** (`core/approvals.py`, 🏠 패널 · 🖥️ 커맨드 센터 🔔·⏱ 탭 · CLI) — 요청마다 무엇을·왜 묻는지·패치 미리보기(diff)·재검사 결과·비용을 보여 주고 **[✅ 승인] → 확인 / [❌ 기각]** (메모 선택). 결정은 같은 해시 체인 감사 로그에 `approval_granted`·`approval_rejected` + 실행 결과(`action_executed`·`action_failed`·`action_not_executed`)로 이어 쓴다. 두 번 눌러도 한 번만 실행, 14일 지나면 `approval_expired`(실행 없음), 로그가 어긋나 있으면 결정을 받지 않는다.
+
+  | 행동 | 승인하면 |
+  | --- | --- |
+  | `save_proposal` | 제안(패치·새 내용)을 `data/autonomy/proposals/<id>/` 에 저장 + 손으로 적용하는 법 |
+  | `create_branch_with_patch` | 위 저장 + 저장소 **옆** 새 작업 폴더(git worktree)·새 로컬 브랜치 `autonomy/<id>` 에 패치 적용·로컬 커밋. push 안 함, 지금 쓰는 checkout 은 그대로 |
+  | push · merge · 삭제 · 외부 전송 · 설정 적용 · 배포 · 모르는 행동 | **실행하지 않음** — 승인 기록만 남기고 사람이 직접 할 명령을 보여 줌 |
+
+  패치 요청의 모양은 `core/approvals.py` 의 `Proposal`(대상 파일 한 개·unified diff·근거·탐지·재검사 결과). 내용은 `data/autonomy/requests/<id>.json` 에 두고 sha256 을 로그에 적어, 요청 뒤 바뀐 내용은 실행하지 않는다.
+  CLI: `python scripts/run_autonomous.py --approvals` · `--approve <id> [--comment 메모]` · `--reject <id> [--comment 메모]`.
 - **켜는 법** (기본은 꺼짐, 실제 API 비용): `config/settings.yaml` 의 `autonomy.jobs` 주석 예시(주 1회 통제 점검·drift 점검)를 풀고 `enabled: true` →
   `python scripts/run_autonomous.py --dry-run` 으로 계획 확인 → 작업 스케줄러에 1시간마다 등록.
   설정을 바꾸지 않고 예시 계획만 보려면 `python scripts/run_autonomous.py --dry-run --jobs tests/fixtures/autonomy_governance.yaml`.
@@ -758,7 +769,7 @@ Agent_office/
 ├── concept_ui.py           개념 편집 팀 화면 조각 (카탈로그 사이드바·작성/삭제 입력·결과 탭·채택 후 반영 → 커밋 → 푸시)
 ├── design_ui.py            설계 팀 화면 조각 (도면 미리보기·3D 뷰어·내려받기·채택 시 저장 파일)
 ├── board_ui.py             📺 전체 화면 보드 (?view=board — 지수·환율 띠·뉴스 넘김·CLI 팁)
-├── autonomy_ui.py          🤖 자율 실행 상태 패널 (🏠 메인, 읽기 전용)
+├── autonomy_ui.py          🤖 자율 실행 상태 패널 (🏠 메인) + 👤 승인 대기열 카드(승인·기각, 커맨드 센터도 같이 씀)
 ├── office_ui.py            🏢 픽셀 사무실 보기 (조직도 ↔ 사무실 전환, 캐릭터 클릭 → 에이전트 패널)
 ├── office_component/       픽셀 사무실 캔버스 (index.html — 그림·걷기·✉️ 쪽지, 외부 파일 없음) + ASSETS.md(그림 출처)
 ├── command_center_ui.py    🖥️ 커맨드 센터 (팀장에게 한 줄 · 모니터·업무·결정 대기·자동 실행·기억·조직도·활동·명령어·팀원 탭)
@@ -790,6 +801,7 @@ Agent_office/
 │   ├── concept.py          개념 작성 요청·결과 나누기·형식 검사
 │   ├── governance.py       보안 거버넌스 팀 코드 계산 (통제 목록·통제 번호·인용 문구 검사·증적 묶음·설정 drift)
 │   ├── autonomy.py         자율 실행 (주기 판단·예산/횟수 상한·기본 거부 게이트·해시 체인 감사 로그, 기본 꺼짐)
+│   ├── approvals.py        사람 승인 처리 (대기열·승인/기각/만료·실행기 save_proposal·create_branch_with_patch·패치 스키마)
 │   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력), floorplan_input(첨부 도면), governance_evidence(증적)
 │   ├── search.py           웹 검색(검색어 생성 → 검색어들을 동시에 DuckDuckGo 웹+뉴스)
 │   ├── feeds.py            🏠 AI 뉴스·GitHub·HN(+키 있으면 Reddit·네이버·Threads) 수집 → 보조 모델 1회로 브리핑·아이디어 카드, 과장 표시, 캐시
@@ -815,7 +827,8 @@ Agent_office/
 ├── GIT_GUIDE.md            Git/GitHub 에 올리기 단계별 가이드
 ├── tests/                  모의 LLM 테스트 (API 키·비용 없이 실행)
 └── data/                   runs.db · checkpoints.db · evals/ · uploads/(첨부 파일) · feeds/(AI 브리핑·카드 상태) · market/(시세 캐시)
-                            · autonomy/(감사 로그·보고서) · member_models.json (git 제외, 자동 생성)
+                            · autonomy/(감사 로그·보고서·requests/ 승인 요청 내용·proposals/ 승인된 제안)
+                            · member_models.json (git 제외, 자동 생성)
 ```
 
 ## 10. 테스트
