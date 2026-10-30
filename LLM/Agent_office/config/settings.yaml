@@ -130,6 +130,20 @@ autonomy:
   #             baseline_dir: teams/security_governance/samples/sample_corp/previous/config}
   #    every_hours: 168
   #    level: observe
+  # 🏗️ 인프라 보안 팀: 주 1회 IaC 점검(보고서만)과 수정안 만들기(propose). 실제로 쓸 때는 iac_dir 을 내 IaC 폴더로 바꾼다.
+  # propose 는 재검사를 통과한 파일마다 브랜치 만들기(create_branch_with_patch)를 승인 대기열로만 보낸다 — 저장소는 바꾸지 않는다.
+  #  - id: weekly_iac_check
+  #    team: infra_security
+  #    task: iac_check
+  #    inputs: {framework: ISMS-P, iac_dir: teams/infra_security/samples/sample_corp}
+  #    every_hours: 168
+  #    level: observe
+  #  - id: weekly_iac_fix
+  #    team: infra_security
+  #    task: iac_fix
+  #    inputs: {framework: ISMS-P, focus: HIGH 이상, iac_dir: teams/infra_security/samples/sample_corp}
+  #    every_hours: 168
+  #    level: propose
 
 board:
   # 📺 전체 화면 보드 (주소 ?view=board, board_ui.py) · 🏠 메인 위쪽 '오늘의 한 줄' 띠

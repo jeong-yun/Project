@@ -1,0 +1,45 @@
+# 오탐 검사용 '괜찮은' 매니페스트
+apiVersion: v1
+kind: Pod
+metadata:
+  name: api
+spec:
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+  initContainers:
+    - name: migrate
+      image: registry.example.com/clean/migrate@sha256:0000000000000000000000000000000000000000000000000000000000000000
+      resources:
+        limits: {cpu: 200m, memory: 128Mi}
+  containers:
+    - name: api
+      image: registry.example.com/clean/api:2.3.1
+      securityContext:
+        allowPrivilegeEscalation: false
+        privileged: false
+      env:
+        - name: LOG_LEVEL
+          value: info
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: db, key: password}
+        - name: TOKEN_TTL_SECONDS
+          value: ""
+      resources:
+        limits:
+          cpu: "1"
+          memory: 512Mi
+  volumes:
+    - name: cache
+      emptyDir: {}
+    - name: config
+      configMap:
+        name: api-config
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: api-config
+data:
+  SECRET_NAME: not-a-workload

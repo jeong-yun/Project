@@ -481,6 +481,23 @@
 
 ---
 
+## 2026-10-30
+
+**🏗️ 인프라 보안 팀 — IaC 스캔 → 수정안 → 재검사 (자율 실행 계획 2단계)**
+- 배경: 설계 문서 4장 후보 ③. LLM 이 쓴 인프라 수정안을 사람이 믿으려면 '정말 고쳤는지'를 코드가 확인해야 한다
+- 작업
+  - `core/iac.py`: 내장 규칙 17개(Terraform 7 · 쿠버네티스 6 · Dockerfile 4) — 작은 HCL 파서(python-hcl2 없이), 줄 번호 YAML 로더, Dockerfile 파서. checkov·trivy·kube-linter·hadolint 가 있으면 120초 제한으로 함께 돌려 같은 모양으로 정리(참고용)
+  - `config/iac_rules.yaml`: 규칙마다 심각도·이유·고치는 법·ISMS-P/ISO 27001/CSF 2.0 통제 대응·출처
+  - `core/iac_patch.py` + 하네스 `iac_fix`: diff 를 원본 사본에 적용 → 재검사. 사라짐 · 같거나 높은 새 문제 없음 · 파일 읽힘 세 가지를 모두 만족해야 '고침'. 리소스 삭제·이름만 바꾸기는 불합격, 이유를 한국어로 돌려줘 다시 쓰게 함
+  - `teams/infra_security/`: 팀장·부장(변경 검토)·대리(수정안)·사원(분석), 업무 'IaC 점검'·'수정안 만들기', 웹 검색 없음. 가상 회사 샘플 IaC 7개 파일 + 정답지 17개
+  - 화면: 최종 결과 아래 🔁 수정안 재검사 표. 자율 실행: 재검사 통과 파일마다 `create_branch_with_patch` 승인 요청 — payload 는 승인 처리 세션의 `Proposal` 모양(그쪽 모델로 검증 통과)
+- 기술: 재귀 하강 파서, PyYAML 생성자 확장(줄 번호), unified diff 적용(내용 기준 위치 찾기)·difflib 재생성, 해시 체인 감사 로그·기본 거부 게이트 재사용
+- 테스트: `tests/test_infra_security.py` 18건 — 정답지 17/17·그 밖 0, '괜찮은' fixture 오탐 0, 재검사 합격/불합격 7가지, 검증기 피드백, 외부 스캐너 출력 읽기·시간 초과, 팀 설정, 가짜 모델 자율 실행(리소스 삭제 → 하네스 피드백 → 재작성 → 승인 요청 3건), dry-run
+- 실측 (저비용 모델, 'HIGH 이상' 수정안, 1회씩): 1회차 팀장 구조화 출력 실패로 제안 0건 $0.1473 / 2회차(대안 gpt-5.4-mini) 218.4초 · $0.0950, 시도 8건 중 재검사 통과 8건, 전체 발견 17 → 8, 승인 요청 5건
+- 한계: 외부 스캐너가 이 PC 에 없어 실행 대조는 못 함(출력 형식은 표본 JSON 으로만 시험). 내장 규칙은 샘플이 다루는 설정 위주. 제안 채택률은 승인 처리 병합 뒤
+
+---
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
@@ -506,6 +523,7 @@
   - API 키·네트워크 없이 도는 자동 테스트 480건 (모의 LLM·가짜 Lyria·가짜 비전 모델, 2026-10-29 — 2026-10-21 에는 270건)
   - Streamlit 화면 다시 그리기 cProfile 로 병목(YAML 파싱·git 서브프로세스·SQLite 연결) 특정 → 파일 지문 캐시로 화면별 450~3975ms → 99~150ms, 전환 중앙값 498 → 169ms, 도면·3D 모듈 지연 import 로 설계 화면 모듈 import 10.4 → 1.0초 (2026-10-22, AppTest 서버 쪽 측정)
   - 보안 거버넌스 자율 점검(가상 회사 증적, ISMS-P 101개 공개 목록 대조): 지어낸 통제 번호 0건 · 인용 불일치 0건, 실행당 $0.0953 · 154.5초 / 설정 drift 점검 0건·0건, $0.3437 · 290.9초 (2026-10-29, 각 1회 실측)
+  - 인프라 보안 IaC 점검(가상 회사 Terraform·쿠버네티스·Dockerfile): 내장 규칙이 정답지 17/17·오탐 0, LLM 수정안을 사본에 적용해 재검사 — 1회 실측 시도 8건 중 8건 통과, 218.4초 · $0.0950 (2026-10-30)
   - 직급별 모델 차등 적용에 따른 비용 절감률: - (측정 예정)
   - 검토 승인 단계 재작성 생략에 따른 출력 토큰 절감률: - (동일 질문 기준 측정 예정)
   - 검토 단계별 품질 점수 변화: - (측정 예정)

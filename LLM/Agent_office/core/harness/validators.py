@@ -11,6 +11,7 @@
   floorplan     : 설계 팀 레이아웃 JSON 을 코드로 완성·검증 (겹침·외곽·면적·동선·계단·최소 치수, core/floorplan.py)
   control_ids   : 통제 번호가 고른 프레임워크 공개 목록(config/controls)에 있는지 (core/governance.py)
   evidence_quotes: 인용한 증적 문구가 입력 증적에 글자 그대로 있는지 (core/governance.py)
+  iac_fix       : IaC 수정안 diff 를 원본 사본에 적용 → 내장 규칙 재검사로 정말 고쳤는지 (core/iac_patch.py)
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -281,3 +282,29 @@ class EvidenceQuotesValidator(Validator):
             return self.fail(" / ".join(problems) + " — evidence 에는 증적 원문을 한 글자도 바꾸지 말고 그대로 복사해 넣어라 "
                              "(요약·번역·고쳐 쓰기 금지, 떨어진 두 곳은 '…'로 잇는다). 인용할 증적이 없으면 status 를 '확인 불가'로 쓴다.")
         return self.ok(f"인용 {result.checked}건 모두 입력 증적에 있음")
+
+
+@register
+class IacFixValidator(Validator):
+    name = "iac_fix"
+    description = ("IaC 수정안 재검사 — 답변의 diff 를 원본 사본에 적용해 내장 규칙으로 다시 검사 "
+                   "(발견이 사라졌나 · 같거나 더 높은 새 문제가 없나 · 파일이 읽히나), 발견 번호(F01…)가 점검 결과에 있는지 (core/iac_patch.py)")
+
+    def check(self, answer: str, options: dict):
+        from core import iac_patch  # iac_patch 가 harness.base 를 쓰므로 늦게 불러온다
+
+        files = options.get("iac_files") or {}
+        if not files:
+            return self.ok("검사할 IaC 없음")
+        v = iac_patch.verify(files, answer, require_fix=bool(options.get("iac_require_fix")),
+                             cover_all=bool(options.get("iac_cover_all")))
+        problems = iac_patch.feedback(v)
+        if problems:
+            return self.fail("IaC 수정안 검증 실패: " + " / ".join(problems[:8])
+                             + " — diff 의 ' '(문맥)·'-'(지울) 줄은 근거 자료의 원본 파일을 글자 그대로 복사하고, 리소스를 지우지 말고 "
+                             "설정 값을 바꿔라. 고치지 못하는 발견은 fixes 에서 빼고 not_attempted 에 이유와 함께 적어라.")
+        fixed = [fid for fid, s in v.status.items() if s == "fixed"]
+        if v.diffs:
+            return self.ok(f"수정안 재검사 통과: 발견 {len(v.before.findings)}건 중 고침 {len(fixed)} · 시도 안 함 "
+                           f"{v.count('not_attempted')} ({', '.join(fixed)}) — 재검사 {len(v.before.findings)}건 → {len(v.after.findings)}건")
+        return self.ok(f"발견 번호 확인 통과: 점검 결과 {len(v.before.findings)}건 (수정안 diff 없음)")

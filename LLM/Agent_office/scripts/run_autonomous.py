@@ -8,6 +8,8 @@
 
 작업 스케줄러에 1시간마다 등록해 두면 작업마다 every_hours 가 지난 것만 실행된다.
 보고서는 data/autonomy/reports/<작업>/<시각>.md, 기록은 data/autonomy/audit.jsonl (해시 체인).
+인프라 보안 팀 수정안은 재검사를 통과한 파일마다 승인 요청(create_branch_with_patch, payload = 승인 대기열의 Proposal 모양)으로
+남기고, 통과한 diff 는 보고서에도 붙인다 — 저장소를 바꾸는 행동은 하지 않는다.
 사람 결정 단계(interrupt)는 쓰지 않으므로 교훈은 저장되지 않는다 — 사람이 보고서를 읽고 판단한다.
 하네스를 통과하지 못한 보고서는 맨 위에 '미검증'을 붙이고, 검증 결과·걸린 시간은 감사 로그 run_end 줄에 남긴다.
 """
@@ -24,7 +26,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from core import autonomy, governance, usage  # noqa: E402
+from core import autonomy, governance, iac_patch, usage  # noqa: E402
 from core.config import load_env, load_models, load_ranks, load_settings, load_team, load_verification, team_org  # noqa: E402
 from core.storage import Storage  # noqa: E402
 from core.tasks import build_request  # noqa: E402
@@ -67,14 +69,23 @@ def make_runner(data_dir: Path, models=None):
             for t in run_tools(["governance_evidence"], question, kwargs.get("tool_inputs") or {}, model_cfg):
                 options = {**t.harness_options, **options}
             audit_fields.update(governance.answer_metrics(content, options))
+        actions: list[dict] = []
         report = content
+        if "iac_scan" in team.tools:  # 수정안 재검사 표(코드) · propose 면 제안 저장 + 브랜치 만들기 승인 요청 (core/iac_patch.py)
+            tool_inputs = {**(kwargs.get("tool_inputs") or {}), "external": False}  # 원본만 다시 읽는다 (외부 스캐너는 재검사 때)
+            for t in run_tools(["iac_scan"], question, tool_inputs, model_cfg):
+                options = {**t.harness_options, **options}
+            iac_out = iac_patch.autonomy_outputs(content, options, job)  # 재검사 통과 파일마다 승인 요청
+            audit_fields.update(iac_out["audit"])
+            actions = iac_out["actions"]
+            report = f"{content}\n\n{iac_out['report']}" if iac_out["report"] else content
         if failed:  # 사람이 없으니 검증 실패를 보고서 맨 위에 드러낸다 (설계 문서 5.4)
             logs = " / ".join(r.log for r in final.harness if not r.passed)
-            report = f"> ⚠️ **미검증** — 하네스 검증 실패: {', '.join(failed)}\n> {logs[:600]}\n\n{content}"
+            report = f"> ⚠️ **미검증** — 하네스 검증 실패: {', '.join(failed)}\n> {logs[:600]}\n\n{report}"
         out = data_dir / "autonomy" / "reports" / job.id / f"{run_id}.md"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(report, encoding="utf-8")
-        return {"report": str(out), "actions": [{"action": "report", "summary": str(out)}], "audit": audit_fields}
+        return {"report": str(out), "actions": [{"action": "report", "summary": str(out)}, *actions], "audit": audit_fields}
 
     return run
 

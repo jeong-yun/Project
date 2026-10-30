@@ -1,0 +1,121 @@
+# 🏗️ 인프라 보안 팀 — Terraform·쿠버네티스 매니페스트·Dockerfile 을 정적 점검하고, 발견마다 설명과 수정안(unified diff)을 쓴다.
+# 수정안은 코드가 원본 사본에 적용해 다시 검사한다 — 그 발견이 사라지고, 같거나 더 높은 새 문제가 없고, 파일이 읽힐 때만 '고침'.
+#
+# 설계 문서: docs/AI_전용_업무_설계.md (2단계). 자율 실행(core/autonomy.py)으로 돌리면 점검은 observe(보고서만),
+# 수정안은 propose — 재검사를 통과한 파일마다 브랜치 만들기를 사람 승인 대기열로 보낸다 (core/iac_patch.py autonomy_outputs).
+#
+# 원칙
+#   - '무엇이 문제인가'는 코드가 정한다: iac_scan 툴의 내장 규칙(config/iac_rules.yaml, core/iac.py) + 설치돼 있으면 외부 스캐너
+#     LLM 은 발견 번호(F01…)로 가리켜 설명하고 고치는 diff 를 쓴다. 발견을 새로 지어내지 않는다
+#   - tools 에 web_search 를 넣지 않는다: 웹 검색어는 질문(내부 인프라 설정)으로 만들어 외부로 나가므로
+#   - 수정안 검증은 하네스 iac_fix 가 한다 (core/iac_patch.py) — 적용 안 됨·안 고쳐짐·새 문제면 한국어 피드백으로 다시 쓰게 한다
+#
+# 시험용 가상 회사 IaC: samples/sample_corp (실제 회사·계정·IP 아님). 정답지 samples/ground_truth.yaml 은 모델에게 주지 않는다.
+
+name: 🏗️ 인프라 보안 팀
+description: Terraform·쿠버네티스 매니페스트·Dockerfile 을 코드 규칙으로 점검하고, 발견마다 설명과 수정안(diff)을 쓴다. 수정안은 코드가 사본에 적용해 다시 검사한다. 웹 검색 없음.
+
+personas:
+  staff: 당신은 클라우드 보안 담당 신입입니다. 스캐너가 찾은 발견을 하나씩 읽고, 그 설정이 실제로 어떤 공격·사고로 이어지는지 쉬운 말로 설명합니다. 표에 없는 문제를 지어내지 않습니다.
+  assistant_manager: 당신은 Terraform·쿠버네티스를 직접 운영해 본 엔지니어입니다. 원본 파일을 글자 그대로 복사한 문맥으로 최소한의 unified diff 를 쓰고, 리소스를 지우지 않고 설정 값만 바꿉니다.
+  gm: 당신은 인프라 변경 검토자입니다. 수정안이 서비스를 깨뜨리지 않는지(포트·권한·이미지), diff 형식이 원본과 맞는지, 사람이 정해야 할 것을 수정안에 억지로 넣지 않았는지 봅니다.
+  team_lead: 당신은 인프라 보안 책임자입니다. 위험도 순으로 정리하고, 고친 것·못 고친 것·사람이 정할 것을 나눠 경영진과 운영팀이 바로 읽게 씁니다.
+
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장·인프라 보안
+  specialty: IaC 점검 총괄 — 위험도 순 정리, 최종 보고서·diff·JSON
+  children:
+    - id: gm_review
+      rank: gm
+      name: 부장·변경 검토
+      specialty: 수정안 검토 — 서비스 영향, diff 형식, 사람이 정할 항목 가르기
+      children:
+        - id: staff_analyst
+          rank: staff
+          name: 사원·IaC 분석
+          specialty: 발견(F01…)마다 위험 설명 — 어떤 설정이 왜 위험한지, 통제 대응
+        - id: am_fixer
+          rank: assistant_manager
+          name: 대리·수정안
+          specialty: 발견별 최소 수정 unified diff (원본 글자 그대로의 문맥, 리소스 삭제 금지)
+
+review_criteria:
+  - 발견 번호(F01…)·규칙이 근거 자료의 점검 표와 같은가 (표에 없는 문제를 지어내지 않았는가)
+  - diff 의 문맥·지울 줄이 원본과 글자 그대로 같은가, 리소스를 지우지 않고 설정 값을 바꿨는가
+  - 수정안이 서비스를 깨뜨리지 않는가 (닫은 포트·줄인 권한을 대신할 접속 방법·권한을 적었는가)
+
+output_format: markdown
+
+tools: [iac_scan]   # web_search 없음 — 내부 인프라 설정이 검색어로 나가지 않게
+
+harness:
+  validators: [json_keys, required_terms, control_ids, iac_fix]
+  final_only: [json_keys, required_terms, control_ids, iac_fix]   # 하위 실무자는 일부만 쓰므로 최종 답변에만
+  max_retries: 2
+
+tasks:
+  - id: iac_check
+    title: IaC 점검
+    description: Terraform·쿠버네티스 매니페스트·Dockerfile 을 코드 규칙으로 검사하고, 발견마다 위험과 고치는 방향을 정리합니다 (보고서만, 수정안 없음). 비밀 값은 지우고 붙여 넣으세요.
+    fields:
+      - {key: framework, label: 통제 대응 프레임워크, type: select, options: [ISMS-P, "ISO/IEC 27001:2022", NIST CSF 2.0], required: true}
+      - {key: use_sample, label: 🧪 가상 회사(샘플상사) 샘플 IaC 로 해 보기, type: checkbox}
+      - {key: iac_name, label: 파일 이름, placeholder: "예: main.tf · deploy.yaml · Dockerfile (비우면 내용으로 짐작)"}
+      - {key: iac, label: IaC (Terraform·쿠버네티스 YAML·Dockerfile), type: textarea, help: "샘플을 켜면 비워 둬도 됩니다"}
+    question: "IaC 를 점검해서 발견마다 위험과 고치는 방향을 정리해줘. 통제 대응은 {framework} 기준.\n샘플 IaC(근거 자료의 가상 회사 샘플상사 파일) 사용: {use_sample}\n[붙여 넣은 IaC: {iac_name}]\n{iac}"
+    goal: "코드 점검 표의 발견(F01…)마다 위험 설명·고치는 방향·{framework} 통제를 위험도 순으로 정리한 보고서와 JSON 요약"
+    success_criteria:
+      - "근거 자료의 점검 표에 있는 발견을 하나도 빼지 않고 다룬다 (ID 그대로)"
+      - "발견마다 ID / 심각도 / 파일:줄 / 무엇이 위험한가 / 고치는 방향 / 통제를 표로 쓴다"
+      - "CRITICAL → HIGH → MEDIUM → LOW 순으로 정렬한다"
+      - "답변 맨 끝에 지침의 ```json 블록을 정확히 1개 붙인다"
+    constraints:
+      - "발견은 근거 자료 표의 ID(F01…)·규칙 이름 그대로 쓴다. 표에 없는 문제를 새로 만들지 않는다 (덧붙일 의견은 '참고'로 따로)"
+      - "통제 번호는 근거 자료 표의 '{framework} 통제' 칸에 있는 것만 쓴다"
+    instructions: |
+      [순서] 1) 점검 표를 위험도 순으로 읽는다 2) 발견마다 '이 설정이 그대로면 무슨 일이 생기나'를 한두 문장으로 3) 고치는 방향(설정 값 수준)
+      [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"summary": {"framework": "{framework}", "findings": 2, "critical": 0, "high": 1, "medium": 1, "low": 0},
+       "findings": [{"id": "F01", "rule": "TF_SG_OPEN_ADMIN_PORT", "severity": "HIGH", "risk": "인터넷 어디서나 SSH 무차별 대입 가능", "fix_hint": "cidr_blocks 를 관리망 대역으로"}]}
+      위 id·rule 은 형식 예시일 뿐이다. 실제 값은 근거 자료 표에서 복사한다. 코드가 id·rule 이 표와 같은지, 빠진 발견이 없는지 확인한다.
+    harness_options:
+      required_keys: [summary, findings]
+      required_terms: ["위험", "고치|수정|조치"]
+      iac_cover_all: true
+
+  - id: iac_fix
+    title: 수정안 만들기
+    description: 같은 점검을 하고 발견마다 고치는 diff(unified diff)를 씁니다. 코드가 diff 를 원본 사본에 적용해 다시 검사합니다 — 그 발견이 사라지고 새 문제가 없을 때만 '고침'. 원본 파일은 바꾸지 않습니다.
+    fields:
+      - {key: framework, label: 통제 대응 프레임워크, type: select, options: [ISMS-P, "ISO/IEC 27001:2022", NIST CSF 2.0], required: true}
+      - {key: use_sample, label: 🧪 가상 회사(샘플상사) 샘플 IaC 로 해 보기, type: checkbox}
+      - {key: iac_name, label: 파일 이름, placeholder: "예: main.tf · deploy.yaml · Dockerfile (비우면 내용으로 짐작)"}
+      - {key: iac, label: IaC (Terraform·쿠버네티스 YAML·Dockerfile), type: textarea, help: "샘플을 켜면 비워 둬도 됩니다"}
+      - {key: focus, label: 먼저 고칠 범위, placeholder: "예: HIGH 이상만, 쿠버네티스만"}
+    question: "IaC 를 점검하고 고칠 수 있는 발견마다 수정안(unified diff)을 써줘. 통제 대응은 {framework} 기준.\n먼저 고칠 범위: {focus}\n샘플 IaC(근거 자료의 가상 회사 샘플상사 파일) 사용: {use_sample}\n[붙여 넣은 IaC: {iac_name}]\n{iac}"
+    goal: "발견(F01…)별 위험 설명과 수정 diff, 고치지 않은 발견의 이유, JSON 요약 — diff 는 코드 재검사를 통과해야 한다"
+    success_criteria:
+      - "고친 발견마다 ID / 무엇을 바꿨나 / 서비스 영향(닫은 포트를 대신할 접속 방법 등)을 쓴다"
+      - "파일마다 ```diff 블록(unified diff) 하나 — 근거 자료의 'diff 작성 규칙'을 따른다"
+      - "고치지 않은 발견은 이유와 함께 따로 적는다 (사람이 정할 것 / 범위 밖)"
+      - "답변 맨 끝에 지침의 ```json 블록을 정확히 1개 붙인다"
+    constraints:
+      - "발견은 근거 자료 표의 ID(F01…)·규칙 이름 그대로 쓴다. 표에 없는 문제를 만들지 않는다"
+      - "diff 의 ' '·'-' 줄은 원본 파일을 글자 그대로 복사한다. 리소스·컨테이너·파일을 지워서 고치지 않는다"
+      - "통제 번호는 근거 자료 표의 '{framework} 통제' 칸에 있는 것만 쓴다"
+    instructions: |
+      [순서] 1) 점검 표를 위험도 순으로 읽는다 2) 고칠 발견을 고른다 (먼저 고칠 범위가 있으면 그것부터) 3) 파일마다 최소 diff 4) 고치지 않은 것과 이유
+      [고치는 예] SSH 0.0.0.0/0 → 관리망 대역(예 198.51.100.0/24)으로 좁히기 / privileged: true 줄 지우기 + runAsNonRoot: true · runAsUser: 10001
+        / env value → valueFrom.secretKeyRef / image :latest → 버전 태그 / storage_encrypted = true / Dockerfile 마지막 USER 를 root 아닌 사용자로
+      [사람이 정할 것] IAM '*' 를 어떤 권한으로 줄일지, 실제 버전 태그 번호처럼 원본에 근거가 없는 값은 지어내지 말고 not_attempted 에 이유를 적어도 된다
+      [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"summary": {"framework": "{framework}", "findings": 3, "fixed_proposed": 2, "not_attempted": 1},
+       "fixes": [{"findings": ["F01", "F02"], "file": "terraform/network.tf", "change": "SSH·RDP 를 관리망 대역으로"}],
+       "not_attempted": [{"id": "F03", "reason": "필요한 IAM 권한 목록을 운영팀이 정해야 함"}]}
+      위 id·파일은 형식 예시일 뿐이다. fixes 에 적은 발견은 코드가 diff 를 적용해 다시 검사한다 — 그대로 남으면 불합격이니, 못 고친 것은 not_attempted 로 옮긴다.
+    harness_options:
+      required_keys: [summary, fixes]
+      required_terms: ["diff", "영향|서비스"]
+      iac_require_fix: true

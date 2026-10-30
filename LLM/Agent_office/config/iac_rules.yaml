@@ -1,0 +1,241 @@
+# 🏗️ 인프라 보안 팀 내장 IaC 규칙 (core/iac.py) — 규칙마다 심각도·설명·고치는 법·통제 대응·출처
+#
+# 규칙 판정은 core/iac.py 의 파이썬 코드가 한다 (외부 실행 파일·패키지 없음 → 테스트·CI 에서도 같은 결과).
+# 이 파일은 '무엇을 왜 잡는지'와 통제 대응만 적는다.
+#
+# 통제 대응(controls)
+#   - 번호는 config/controls/*.yaml 목록(ISMS-P 101 · ISO/IEC 27001:2022 부속서 A 93 · NIST CSF 2.0 하위 범주 106)에 있는 것만 쓴다.
+#     tests/test_infra_security.py 가 목록에 있는지 코드로 확인한다.
+#   - 대응은 이 저장소의 판단이다 (규칙의 주제 ↔ 통제 이름). 표준 기관이 낸 공식 매핑이 아니다.
+# 출처(refs): 규칙이 잡는 설정이 왜 위험한지 설명한 공개 문서 (2026-10-30 기준 주소)
+# 외부 스캐너 대응(equivalents): 같은 문제를 잡는 오픈소스 스캐너 규칙 번호 — 각 도구 공개 문서 기준.
+#   이 PC 에 도구가 없어 실행해 대조하지는 않았다. 외부 스캐너가 설치돼 있으면 결과에 '같은 문제' 표시에만 쓴다.
+#
+# 심각도: LOW < MEDIUM < HIGH < CRITICAL (수정안 재검사에서 '같거나 더 높은 새 문제'를 가를 때 이 순서를 쓴다)
+
+severity_order: [LOW, MEDIUM, HIGH, CRITICAL]
+
+rules:
+  # ─── Terraform (AWS 모양) ───
+  TF_S3_PUBLIC_ACL:
+    kind: terraform
+    severity: HIGH
+    title: S3 버킷 공개 ACL
+    why: 버킷 ACL 이 public-read·public-read-write·authenticated-read 라 인터넷 누구나 객체를 읽거나 쓸 수 있다
+    fix: acl 을 지우거나 "private" 로 바꾸고, 공개가 꼭 필요하면 CDN 앞단과 aws_s3_bucket_public_access_block 으로 범위를 좁힌다
+    controls:
+      ISMS-P: ["2.6.1", "2.10.2"]
+      ISO/IEC 27001:2022: ["5.15", "8.3"]
+      NIST CSF 2.0: [PR.AA-05, PR.DS-01]
+    refs: [https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html]
+    equivalents: {checkov: [CKV_AWS_20]}
+
+  TF_S3_NO_ENCRYPTION:
+    kind: terraform
+    severity: MEDIUM
+    title: S3 버킷 서버 쪽 암호화 설정 없음
+    why: 버킷에 server_side_encryption_configuration(인라인 블록 또는 별도 리소스)이 없다 — 저장 데이터 암호화 정책이 코드에 없다
+    fix: aws_s3_bucket_server_side_encryption_configuration 리소스를 추가해 sse_algorithm "aws:kms"(또는 "AES256")를 건다
+    controls:
+      ISMS-P: ["2.7.1"]
+      ISO/IEC 27001:2022: ["8.24"]
+      NIST CSF 2.0: [PR.DS-01]
+    refs: [https://docs.aws.amazon.com/AmazonS3/latest/userguide/serv-side-encryption.html]
+    equivalents: {checkov: [CKV_AWS_19]}
+
+  TF_S3_NO_LOGGING:
+    kind: terraform
+    severity: LOW
+    title: S3 버킷 접근 로그 없음
+    why: 버킷에 logging(인라인 블록 또는 aws_s3_bucket_logging 리소스)이 없다 — 누가 언제 객체에 접근했는지 남지 않는다
+    fix: aws_s3_bucket_logging 리소스를 추가해 로그 전용 버킷(target_bucket)과 target_prefix 를 지정한다
+    controls:
+      ISMS-P: ["2.9.4"]
+      ISO/IEC 27001:2022: ["8.15"]
+      NIST CSF 2.0: [PR.PS-04]
+    refs: [https://docs.aws.amazon.com/AmazonS3/latest/userguide/ServerLogs.html]
+    equivalents: {checkov: [CKV_AWS_18]}
+
+  TF_SG_OPEN_ADMIN_PORT:
+    kind: terraform
+    severity: HIGH
+    title: 원격 관리 포트(22·3389)를 인터넷 전체에 허용
+    why: 보안 그룹 인바운드가 0.0.0.0/0 또는 ::/0 에서 SSH(22)·RDP(3389)를 연다 (포트 범위·전체 프로토콜(-1)로 포함되는 경우도)
+    fix: cidr_blocks 를 관리망 대역으로 좁히거나(예 198.51.100.0/24) 규칙을 지우고 SSM Session Manager·VPN 으로 접속한다
+    controls:
+      ISMS-P: ["2.6.1", "2.6.6"]
+      ISO/IEC 27001:2022: ["8.20", "8.22"]
+      NIST CSF 2.0: [PR.IR-01, PR.AA-05]
+    refs: [https://www.cisecurity.org/benchmark/amazon_web_services, https://docs.aws.amazon.com/vpc/latest/userguide/security-group-rules.html]
+    equivalents: {checkov: [CKV_AWS_24, CKV_AWS_25]}
+
+  TF_IAM_WILDCARD:
+    kind: terraform
+    severity: CRITICAL
+    title: IAM 정책이 모든 행동(*)을 모든 리소스(*)에 허용
+    why: Effect Allow 문장에 Action "*"(또는 "*:*")와 Resource "*" 가 함께 있다 — 사실상 계정 관리자 권한
+    fix: 실제로 쓰는 서비스의 행동(예 "ec2:Describe*")과 리소스 ARN 만 남긴다. 관리자 권한이 필요하면 임시 역할 + MFA 로 분리한다
+    controls:
+      ISMS-P: ["2.5.5", "2.5.1"]
+      ISO/IEC 27001:2022: ["8.2", "5.15"]
+      NIST CSF 2.0: [PR.AA-05]
+    refs: [https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html]
+    equivalents: {checkov: [CKV_AWS_62]}
+
+  TF_RDS_UNENCRYPTED:
+    kind: terraform
+    severity: HIGH
+    title: RDS 저장소 암호화 꺼짐
+    why: aws_db_instance 에 storage_encrypted 가 없거나 false 다 (기본값 false)
+    fix: storage_encrypted = true (필요하면 kms_key_id). 이미 만든 DB 는 스냅샷 → 암호화 복사 → 복원으로 옮긴다
+    controls:
+      ISMS-P: ["2.7.1"]
+      ISO/IEC 27001:2022: ["8.24"]
+      NIST CSF 2.0: [PR.DS-01]
+    refs: [https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Overview.Encryption.html]
+    equivalents: {checkov: [CKV_AWS_16]}
+
+  TF_RDS_PUBLIC:
+    kind: terraform
+    severity: HIGH
+    title: RDS 인터넷 공개
+    why: aws_db_instance 의 publicly_accessible = true — DB 엔드포인트가 공인 IP 를 받는다
+    fix: publicly_accessible = false, 앱 서버 보안 그룹에서만 접속을 연다
+    controls:
+      ISMS-P: ["2.6.1", "2.10.2"]
+      ISO/IEC 27001:2022: ["8.20", "8.22"]
+      NIST CSF 2.0: [PR.IR-01]
+    refs: [https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_VPC.WorkingWithRDSInstanceinaVPC.html]
+    equivalents: {checkov: [CKV_AWS_17]}
+
+  # ─── 쿠버네티스 (Pod·Deployment·StatefulSet·DaemonSet·ReplicaSet·Job·CronJob) ───
+  K8S_PRIVILEGED:
+    kind: kubernetes
+    severity: HIGH
+    title: 특권(privileged) 컨테이너
+    why: securityContext.privileged = true — 컨테이너가 노드의 장치·커널 기능을 거의 다 쓴다 (Pod Security 'Baseline' 금지 항목)
+    fix: privileged 를 지우거나 false 로. 꼭 필요한 기능만 capabilities.add 로 준다
+    controls:
+      ISMS-P: ["2.5.5", "2.10.1"]
+      ISO/IEC 27001:2022: ["8.2", "8.9"]
+      NIST CSF 2.0: [PR.PS-01, PR.AA-05]
+    refs: [https://kubernetes.io/docs/concepts/security/pod-security-standards/]
+    equivalents: {checkov: [CKV_K8S_16], kube-linter: [privileged-container]}
+
+  K8S_RUN_AS_ROOT:
+    kind: kubernetes
+    severity: MEDIUM
+    title: 컨테이너가 root 로 실행될 수 있음
+    why: 컨테이너·파드 securityContext 어디에도 runAsNonRoot = true 가 없거나 runAsUser 가 0 이다 (Pod Security 'Restricted' 요구)
+    fix: securityContext 에 runAsNonRoot true 와 0 이 아닌 runAsUser(예 10001)를 둔다
+    controls:
+      ISMS-P: ["2.5.5"]
+      ISO/IEC 27001:2022: ["8.2", "8.9"]
+      NIST CSF 2.0: [PR.PS-01]
+    refs: [https://kubernetes.io/docs/concepts/security/pod-security-standards/]
+    equivalents: {kube-linter: [run-as-non-root]}
+
+  K8S_NO_LIMITS:
+    kind: kubernetes
+    severity: LOW
+    title: 컨테이너 자원 상한(limits) 없음
+    why: resources.limits 에 cpu·memory 중 하나라도 없다 — 한 컨테이너가 노드 자원을 다 써 다른 서비스를 멈출 수 있다
+    fix: resources.limits.cpu·memory (와 requests)를 실제 사용량에 맞춰 적는다
+    controls:
+      ISMS-P: ["2.9.2"]
+      ISO/IEC 27001:2022: ["8.6"]
+      NIST CSF 2.0: [PR.IR-04]
+    refs: [https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/]
+    equivalents: {kube-linter: [unset-cpu-requirements, unset-memory-requirements]}
+
+  K8S_HOSTPATH:
+    kind: kubernetes
+    severity: HIGH
+    title: hostPath 볼륨 (노드 파일 시스템 마운트)
+    why: 파드가 노드의 경로를 직접 마운트한다 — docker.sock·/etc 같은 경로면 노드 전체를 넘겨주는 것과 같다 (Pod Security 'Baseline' 금지 항목)
+    fix: hostPath 를 지우고 emptyDir·PVC·ConfigMap 으로 바꾼다. 로그 수집 등 꼭 필요하면 readOnly 와 좁은 경로로, 전용 네임스페이스에서만
+    controls:
+      ISMS-P: ["2.10.1", "2.8.3"]
+      ISO/IEC 27001:2022: ["8.9", "8.27"]
+      NIST CSF 2.0: [PR.PS-01, PR.IR-01]
+    refs: [https://kubernetes.io/docs/concepts/security/pod-security-standards/, https://kubernetes.io/docs/concepts/storage/volumes/#hostpath]
+    equivalents: {kube-linter: [sensitive-host-mounts]}
+
+  K8S_LATEST_TAG:
+    kind: kubernetes
+    severity: LOW
+    title: 이미지 태그가 latest 이거나 없음
+    why: image 가 ':latest' 이거나 태그·다이제스트가 없다 — 언제 무엇이 배포됐는지 고정되지 않아 되돌리기·취약점 추적이 어렵다
+    fix: 버전 태그(예 web:1.8.3)나 다이제스트(@sha256:…)로 고정한다
+    controls:
+      ISMS-P: ["2.9.1", "2.8.6"]
+      ISO/IEC 27001:2022: ["8.32", "8.9"]
+      NIST CSF 2.0: [PR.PS-01, PR.PS-02]
+    refs: [https://kubernetes.io/docs/concepts/containers/images/]
+    equivalents: {checkov: [CKV_K8S_14], kube-linter: [latest-tag]}
+
+  K8S_SECRET_IN_ENV:
+    kind: kubernetes
+    severity: HIGH
+    title: 비밀 값을 env 에 직접 씀
+    why: 이름이 PASSWORD·SECRET·TOKEN·API_KEY·ACCESS_KEY·PRIVATE_KEY·CREDENTIAL 같은 env 에 value 가 바로 적혀 있다 — 매니페스트·저장소에 비밀이 남는다
+    fix: value 를 지우고 valueFrom.secretKeyRef 로 Secret 에서 받는다 (Secret 은 저장소 밖에서 만든다)
+    controls:
+      ISMS-P: ["2.7.2", "2.5.4"]
+      ISO/IEC 27001:2022: ["5.17", "8.24"]
+      NIST CSF 2.0: [PR.AA-01, PR.DS-01]
+    refs: [https://kubernetes.io/docs/concepts/configuration/secret/]
+    equivalents: {kube-linter: [env-var-secret]}
+
+  # ─── Dockerfile ───
+  DOCKER_USER_ROOT:
+    kind: dockerfile
+    severity: MEDIUM
+    title: 컨테이너가 root 로 실행됨
+    why: 마지막 USER 가 root(또는 0)이거나 USER 가 아예 없다 — 앱이 컨테이너 안 root 권한으로 돈다
+    fix: 전용 사용자를 만들고(예 RUN useradd -u 10001 app) 마지막에 USER 10001 로 바꾼다
+    controls:
+      ISMS-P: ["2.5.5"]
+      ISO/IEC 27001:2022: ["8.2", "8.9"]
+      NIST CSF 2.0: [PR.PS-01]
+    refs: [https://docs.docker.com/build/building/best-practices/#user]
+    equivalents: {hadolint: [DL3002]}
+
+  DOCKER_ADD_URL:
+    kind: dockerfile
+    severity: MEDIUM
+    title: ADD 로 URL 에서 내려받기
+    why: ADD <URL> 은 받은 파일을 검증하지 않고 이미지에 넣는다 — 내려받기 서버가 바뀌면 이미지도 몰래 바뀐다
+    fix: 저장소에 받아 둔 파일을 COPY 하거나, RUN 에서 curl 로 받고 sha256sum -c 로 체크섬을 확인한다
+    controls:
+      ISMS-P: ["2.10.9", "2.8.6"]
+      ISO/IEC 27001:2022: ["8.19", "8.7"]
+      NIST CSF 2.0: [PR.PS-02, PR.PS-01]
+    refs: [https://docs.docker.com/build/building/best-practices/#add-or-copy]
+    equivalents: {}
+
+  DOCKER_SECRET_ENV:
+    kind: dockerfile
+    severity: HIGH
+    title: 비밀 값을 ENV·ARG 에 씀
+    why: 이름이 PASSWORD·SECRET·TOKEN·API_KEY 같은 ENV·ARG 에 값이 적혀 있다 — 이미지 레이어·docker history 에 남는다
+    fix: ENV·ARG 줄을 지우고 실행 때 Secret 으로 주거나, 빌드 때 필요하면 RUN --mount=type=secret 을 쓴다
+    controls:
+      ISMS-P: ["2.7.2", "2.5.4"]
+      ISO/IEC 27001:2022: ["5.17", "8.24"]
+      NIST CSF 2.0: [PR.AA-01, PR.DS-01]
+    refs: [https://docs.docker.com/build/building/secrets/]
+    equivalents: {}
+
+  DOCKER_LATEST_TAG:
+    kind: dockerfile
+    severity: LOW
+    title: 기반 이미지 태그가 latest 이거나 없음
+    why: FROM 이미지가 ':latest' 이거나 태그·다이제스트가 없다 — 빌드할 때마다 다른 기반 이미지가 들어갈 수 있다
+    fix: FROM 을 버전 태그(예 python:3.12-slim)나 다이제스트로 고정한다
+    controls:
+      ISMS-P: ["2.9.1"]
+      ISO/IEC 27001:2022: ["8.32"]
+      NIST CSF 2.0: [PR.PS-02]
+    refs: [https://docs.docker.com/build/building/best-practices/#pin-base-image-versions]
+    equivalents: {hadolint: [DL3007, DL3006]}

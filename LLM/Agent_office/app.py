@@ -44,7 +44,7 @@ import concept_ui
 import design_ui
 import home_ui
 import office_ui
-from core import audio_edit, concept, followup, llm_factory, member_models, music, stock_calc, usage, verification
+from core import audio_edit, concept, followup, iac_patch, llm_factory, member_models, music, stock_calc, usage, verification
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
@@ -1045,6 +1045,9 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
         names = {nid: name_of(nid) for nid in nodes}
         appendix = calc_report(run, decision.final_answer)  # 채택한(수정한) 내용 기준으로 다시 검산
         audio_path, title = None, "코드 검산 (점수·평균가·손익비)"
+        if not appendix:  # 인프라 보안 팀: 채택한(수정한) 답변의 diff 로 다시 재검사한 표
+            appendix = iac_patch.verification_report(decision.final_answer, check_options(run))
+            title = "수정안 재검사 (코드)" if appendix else title
         if MUSIC_TRACK in team.features and run.get("music"):
             # 음악 팀: 지금 고른 버전(편집본)의 MP3 를 .md 옆에 저장 — 곡은 다시 만들지 않는다 (유료·매번 다름)
             audio_path, appendix, title = run["music"]["history"].now.path, music_report(run), "음원 (Gemini Lyria)"
@@ -1093,6 +1096,11 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             # LLM 이 쓴 숫자를 코드로 다시 계산한 결과 — 판단 전에 꼭 확인할 값
             with st.expander("🧮 코드 검산 — 점수·평균 매수가·손익비·평단 (LLM 이 아닌 코드 계산)", expanded=True):
                 st.markdown(report)
+        iac_report = iac_patch.verification_report(final.content, check_options(run))
+        if iac_report:
+            # 인프라 보안 팀: LLM 이 쓴 diff 를 원본 사본에 적용해 코드가 다시 검사한 결과 — 채택 전에 꼭 확인할 값
+            with st.expander("🔁 수정안 재검사 — diff 를 원본 사본에 적용해 다시 검사 (LLM 이 아닌 코드)", expanded=True):
+                st.markdown(iac_report)
         if is_design:
             design_ui.preview(run, final.content)  # 📐 층별 평면도·검증·3D 뷰어·내려받기
         if team.disclaimer:

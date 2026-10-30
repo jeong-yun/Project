@@ -32,6 +32,7 @@
 | 🎵 음악 팀 | ① 🎤 노래 만들기(보컬·한국어 가사 가능) ② 🎼 반주 만들기 + **Gemini Lyria 로 MP3 생성 · ✂️ 편집(자르기·템포·키·페이드·리버브·음량, 버전 되돌리기)** | **하네스**(가사 섹션 태그·분량, 반주 문구, 아티스트 이름, 시간표 길이를 코드로 검사) + Gemini 가 곡을 듣고 채점 (7-4 참고, 유료) |
 | 📐 설계 팀 | ① 평면도 만들기(한국어 설명 → 2D 평면도, 선택 시 3D) ② 도면 수정·층 추가(JSON·DXF·그림·PDF 첨부) ③ 3D 만들기(GLB·OBJ·STL·IFC, 프린팅 축척) | **첨부 도면 → 레이아웃 JSON**(코드 변환·검증) + 방 최소 치수 기준표 + **코드 검증**(겹침·외곽·면적·동선·계단) — 7-5 참고 |
 | 🛡️ 보안 거버넌스 팀 | ① 통제 항목 점검(ISMS-P · ISO/IEC 27001:2022 · NIST CSF 2.0 항목별 충족·미흡·확인 불가 + 인용 증적·개선안) ② 설정 drift 점검(지난번·이번 설정 비교 → 통제 영향). 가상 회사 샘플 증적으로 바로 시험 가능 | **증적 묶음·코드 diff·공개 통제 목록**(웹 검색 없음 — 내부 증적이 검색어로 나가지 않게) + **하네스**(지어낸 통제 번호·증적에 없는 인용을 코드로 검사) — 7-6 참고 |
+| 🏗️ 인프라 보안 팀 | ① IaC 점검(Terraform·쿠버네티스 매니페스트·Dockerfile → 발견마다 위험·고치는 방향·통제 대응) ② 수정안 만들기(발견별 unified diff). 가상 회사 샘플 IaC 로 바로 시험 가능 | **IaC 점검 툴**(내장 규칙 17개를 코드로 — 외부 패키지 없음, checkov·trivy·kube-linter·hadolint 가 깔려 있으면 참고로 함께) + **하네스**(diff 를 원본 사본에 적용 → 다시 검사해 '정말 고쳤는지' 코드로 판정) + 🔁 수정안 재검사 표 — 7-7 참고 |
 
 > 진행 상황은 [today_worked.md](today_worked.md), 프로젝트 요약은 [PROJECTS.md](../../PROJECTS.md), 자율 실행 설계는 [docs/AI_전용_업무_설계.md](docs/AI_전용_업무_설계.md), 초기 계획은 [PLAN.md](PLAN.md) 참고.
 
@@ -721,6 +722,26 @@ A 는 하네스가 검증한 기본 배치, 처음에는 검증을 통과한 안
   `python scripts/run_autonomous.py --dry-run` 으로 계획 확인 → 작업 스케줄러에 1시간마다 등록.
   설정을 바꾸지 않고 예시 계획만 보려면 `python scripts/run_autonomous.py --dry-run --jobs tests/fixtures/autonomy_governance.yaml`.
 
+## 7-7. 🏗️ 인프라 보안 팀 — IaC 스캔 → 수정안 → 재검사
+
+설계: [docs/AI_전용_업무_설계.md](docs/AI_전용_업무_설계.md) (2단계). '무엇이 문제인가'와 '정말 고쳤는가'는 코드가 정하고, LLM 은 설명과 diff 를 쓴다.
+
+- **IaC 점검 툴** `iac_scan` (`core/iac.py`, `core/tools/iac_scan.py`) — 내장 규칙 17개 (Terraform 7 · 쿠버네티스 6 · Dockerfile 4).
+  규칙 이름·심각도·고치는 법·통제 대응(ISMS-P · ISO 27001:2022 · NIST CSF 2.0)·출처는 `config/iac_rules.yaml`.
+  Terraform 은 python-hcl2 없이 작은 HCL 파서로 읽는다 → **새 패키지 없음**, 테스트·CI 에서도 같은 결과.
+  checkov·trivy·kube-linter·hadolint 가 PATH 에 있으면 시간 제한(120초)을 두고 함께 돌려 '참고' 표로 붙인다 (재검사 판정은 내장 규칙).
+  발견 목록(F01…)·원본 파일(데이터 표시선)·diff 작성 규칙을 모든 팀원에게 근거 자료로 준다. 웹 검색 없음.
+- **수정안 재검사** (`core/iac_patch.py`, 하네스 `iac_fix`) — 답변의 ```diff 를 **원본의 메모리 사본**에 적용하고 전체를 다시 검사한다.
+  발견 하나가 '고침'이 되려면 ① 재검사에서 사라지고 ② 그 파일에 같거나 더 높은 심각도의 새 문제가 없고 ③ 파일이 여전히 읽혀야 한다.
+  리소스·컨테이너를 지워서 없앤 것, 파일 삭제, 비밀 env 이름만 바꾸기는 인정하지 않는다. 실패하면 한국어 이유(어느 줄이 원본과 다른지 등)를 돌려줘 다시 쓰게 한다.
+- **화면** — 최종 결과 아래 **🔁 수정안 재검사** 표: 발견마다 ✅ 고침 / ❌ 못 고침 / · 시도 안 함과 이유. 채택하면 결과 파일에도 붙는다. 원본 파일은 바꾸지 않는다.
+- **자율 실행** — `settings.yaml` 주석 예시: 주 1회 IaC 점검(observe) · 수정안 만들기(propose). 재검사를 통과한 **파일마다** 승인 요청 하나
+  (`create_branch_with_patch`, 저장소 밖 폴더·붙여 넣은 글이면 `save_proposal`)를 남기고 스스로는 저장소를 바꾸지 않는다.
+  payload 는 승인 대기열의 `Proposal` 모양(파일 하나 · 저장소 루트 기준 경로 · LF diff · `rescan`) — 설계 문서 7-2장.
+  통과한 diff 는 보고서에도 붙는다. 예시 계획만 보기: `python scripts/run_autonomous.py --dry-run --jobs tests/fixtures/autonomy_infra.yaml`.
+- **가상 회사 샘플 IaC** `teams/infra_security/samples/sample_corp/` — S3 공개 ACL·암호화·로그 없음, SSH·RDP 0.0.0.0/0, IAM `*`, 암호화 안 한 RDS,
+  privileged·root·limits 없음·hostPath·latest·env 비밀, Dockerfile USER root·ADD URL·ENV 비밀. 정답지 `samples/ground_truth.yaml`(17개)은 모델에게 주지 않는다.
+
 ## 8. 저장 정책
 
 | 결과 | 처리 |
@@ -789,8 +810,10 @@ Agent_office/
 │   ├── catalog.py          IT 개념 카탈로그(CS 저장소) 읽기·관련 항목 찾기·반영·git
 │   ├── concept.py          개념 작성 요청·결과 나누기·형식 검사
 │   ├── governance.py       보안 거버넌스 팀 코드 계산 (통제 목록·통제 번호·인용 문구 검사·증적 묶음·설정 drift)
+│   ├── iac.py              인프라 보안 팀 IaC 점검 (작은 HCL 파서·YAML 줄 번호·Dockerfile, 내장 규칙, 외부 스캐너 결과 읽기)
+│   ├── iac_patch.py        수정안 diff 적용 → 재검사 → 고침/못 고침/시도 안 함, 승인 요청 payload
 │   ├── autonomy.py         자율 실행 (주기 판단·예산/횟수 상한·기본 거부 게이트·해시 체인 감사 로그, 기본 꺼짐)
-│   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력), floorplan_input(첨부 도면), governance_evidence(증적)
+│   ├── tools/              데이터 툴: stock_data(주가), travel_calendar(여행 달력), floorplan_input(첨부 도면), governance_evidence(증적), iac_scan(IaC 점검)
 │   ├── search.py           웹 검색(검색어 생성 → 검색어들을 동시에 DuckDuckGo 웹+뉴스)
 │   ├── feeds.py            🏠 AI 뉴스·GitHub·HN(+키 있으면 Reddit·네이버·Threads) 수집 → 보조 모델 1회로 브리핑·아이디어 카드, 과장 표시, 캐시
 │   ├── market.py           📺 보드·🏠 메인의 지수·환율 띠 (yfinance, 10분 파일 캐시, 백그라운드 새로 받기, 실패 칸 '—')
@@ -802,10 +825,12 @@ Agent_office/
 │   ├── usage.py            모델 호출마다 토큰·추정 비용 기록 (LangChain 콜백·키 지문·팀/실행 태그·가격 계산)
 │   └── harness/            결정론적 검증기(validators) + 단계별 평가(evaluation)
 ├── config/                 ranks / models / settings / verification / pricing / cli_tips (.yaml)
-│   └── controls/           공개 통제 목록 (ISMS-P · ISO/IEC 27001:2022 · NIST CSF 2.0)
+│   ├── controls/           공개 통제 목록 (ISMS-P · ISO/IEC 27001:2022 · NIST CSF 2.0)
+│   └── iac_rules.yaml      인프라 보안 팀 내장 규칙 17개 — 심각도·고치는 법·통제 대응·출처
 ├── teams/                  팀별 team.yaml (조직도·업무 양식) + skills/ + avatars/
 │                           (general = 기본, stock = 주식, travel = 여행, concept = 개념 편집, music = 음악, design = 설계,
-│                            security_governance = 보안 거버넌스(+ samples/ 가상 회사 증적), _template = 템플릿)
+│                            security_governance = 보안 거버넌스(+ samples/ 가상 회사 증적),
+│                            infra_security = 인프라 보안(+ samples/ 가상 회사 IaC·정답지), _template = 템플릿)
 ├── evals/                  단계별 평가 실행기 + 케이스
 ├── results/                채택한 결과 파일 (git 제외 — 개인 정보 보호. 올리려면 .gitignore 에서 results/ 삭제)
 ├── assets/avatars/         공용 에이전트 이미지 (+ _working 이미지)

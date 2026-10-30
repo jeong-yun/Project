@@ -1,0 +1,26 @@
+# 샘플상사(가상 회사) IaC 에 일부러 넣은 잘못된 설정 — 정답지 (점검 팀이 찾아야 할 것)
+# 스캔 폴더(sample_corp/) 밖에 두어 근거 자료로 모델에게 들어가지 않는다.
+# tests/test_infra_security.py 가 내장 규칙이 이 목록을 빠짐없이, 그리고 이것만 찾는지 센다.
+# key = 규칙 · 파일(sample_corp 기준) · 리소스 · 부분(포트·컨테이너·변수 이름 등)
+company: 샘플상사 (가상)
+issues:
+  - {rule: TF_S3_PUBLIC_ACL,      file: terraform/storage.tf,  resource: aws_s3_bucket.public_assets,        item: "acl public-read", note: 버킷 전체 공개 읽기}
+  - {rule: TF_S3_NO_ENCRYPTION,   file: terraform/storage.tf,  resource: aws_s3_bucket.public_assets,        item: "",                note: 서버 쪽 암호화 설정 없음}
+  - {rule: TF_S3_NO_LOGGING,      file: terraform/storage.tf,  resource: aws_s3_bucket.public_assets,        item: "",                note: 접근 로그 없음}
+  - {rule: TF_SG_OPEN_ADMIN_PORT, file: terraform/network.tf,  resource: aws_security_group.bastion,         item: "ingress 22",      note: SSH 를 인터넷 전체(0.0.0.0/0)에 열어 둠}
+  - {rule: TF_SG_OPEN_ADMIN_PORT, file: terraform/network.tf,  resource: aws_security_group_rule.bastion_rdp, item: "ingress 3389",   note: RDP 를 인터넷 전체에 열어 둠}
+  - {rule: TF_IAM_WILDCARD,       file: terraform/iam.tf,      resource: aws_iam_policy.ops_admin,           item: "statement 1",     note: "Action * · Resource * 관리자 권한"}
+  - {rule: TF_RDS_UNENCRYPTED,    file: terraform/database.tf, resource: aws_db_instance.orders,             item: "",                note: storage_encrypted = false}
+  - {rule: K8S_LATEST_TAG,        file: k8s/web.yaml,          resource: Deployment/shop/web,                item: "container app",   note: "이미지 :latest"}
+  - {rule: K8S_PRIVILEGED,        file: k8s/web.yaml,          resource: Deployment/shop/web,                item: "container app",   note: privileged true}
+  - {rule: K8S_RUN_AS_ROOT,       file: k8s/web.yaml,          resource: Deployment/shop/web,                item: "container app",   note: runAsUser 0}
+  - {rule: K8S_NO_LIMITS,         file: k8s/web.yaml,          resource: Deployment/shop/web,                item: "container app",   note: resources.limits 없음}
+  - {rule: K8S_SECRET_IN_ENV,     file: k8s/web.yaml,          resource: Deployment/shop/web,                item: "container app env DB_PASSWORD", note: 비밀번호를 env 값으로 직접}
+  - {rule: K8S_HOSTPATH,          file: k8s/web.yaml,          resource: Deployment/shop/web,                item: "volume docker-sock", note: 노드의 docker.sock 을 hostPath 로 마운트}
+  - {rule: K8S_LATEST_TAG,        file: k8s/report-job.yaml,   resource: CronJob/shop/nightly-report,        item: "container report", note: 태그 없음 (= latest)}
+  - {rule: DOCKER_SECRET_ENV,     file: docker/Dockerfile,     resource: docker/Dockerfile,                  item: "ENV API_SECRET_KEY", note: 비밀 값을 이미지 ENV 에}
+  - {rule: DOCKER_ADD_URL,        file: docker/Dockerfile,     resource: docker/Dockerfile,                  item: "ADD https://downloads.example.com/agent/agent.tar.gz", note: 검증 없이 URL 에서 내려받기}
+  - {rule: DOCKER_USER_ROOT,      file: docker/Dockerfile,     resource: docker/Dockerfile,                  item: "",                note: 마지막 USER 가 root}
+# 일부러 넣은 '괜찮은' 설정 (찾으면 오탐): HTTPS 443 공개, 사내 대역(198.51.100.0/24)에서만 SSH,
+# 암호화·로그·공개 차단을 별도 리소스로 건 audit_logs 버킷, 좁은 권한의 app_read_logs, 비밀 값을 secretKeyRef 로 받는 배치,
+# runAsNonRoot·limits 를 건 log-agent 사이드카

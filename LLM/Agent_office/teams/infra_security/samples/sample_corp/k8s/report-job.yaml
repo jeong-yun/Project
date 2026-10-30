@@ -1,0 +1,29 @@
+# 샘플상사(가상 회사) 야간 보고서 배치 — 시험용.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nightly-report
+  namespace: shop
+spec:
+  schedule: "0 2 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+          containers:
+            - name: report
+              image: registry.example.com/samplecorp/report
+              env:
+                - name: REPORT_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: report-api
+                      key: token
+              resources:
+                limits:
+                  cpu: 500m
+                  memory: 256Mi

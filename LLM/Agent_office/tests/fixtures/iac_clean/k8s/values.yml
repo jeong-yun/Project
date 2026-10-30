@@ -1,0 +1,4 @@
+# 쿠버네티스 매니페스트가 아닌 YAML (Helm 값 파일 모양) — 검사 대상이 아니다
+replicaCount: 2
+image:
+  tag: latest
