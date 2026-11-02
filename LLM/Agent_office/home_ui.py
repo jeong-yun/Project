@@ -20,7 +20,7 @@ import streamlit as st
 import autonomy_ui
 import board_ui
 import building_ui
-from core import feeds, usage
+from core import feeds, model_catalog, usage
 from core.storage import Storage
 
 PERIODS = {"오늘": 1, "7일": 7, "30일": 30, "전체": None}  # 최근 며칠
@@ -109,7 +109,15 @@ def render(storage: Storage, models, open_runs: list[dict], team_names: dict, go
     _by_model(rows, keys, period, storage)
     _current_keys(storage, keys, now_keys, rows)
     _previous_keys(storage, keys, now_keys)
-    _pricing(storage, rows)
+    _pricing(storage, rows, _custom_paid_models(data_dir))
+
+
+def _custom_paid_models(data_dir: Path | None) -> set[str]:
+    """직접 입력한 유료 모델 — 쓰기 전에도 가격표에 줄을 만들어 가격을 미리 넣을 수 있게 (core/model_catalog.py)."""
+    if data_dir is None:
+        return set()
+    free = set(usage.load_pricing()["free_providers"])
+    return {m["model"] for m in model_catalog.CustomStore(data_dir).models() if m["provider"] not in free}
 
 
 # ─── 팀 바로가기 ──────────────────────────────────────────────────────────
@@ -199,7 +207,7 @@ def _feed_status(snap: dict | None, running: float | None, data_dir: Path, cfg: 
         return
     llm = snap.get("llm") or {}
     cost = llm.get("cost_usd")
-    cost_text = ("비용 미상 (가격표에 없는 모델)" if cost is None and llm.get("model")
+    cost_text = (f"{usage.UNPRICED} (가격표에 없는 모델)" if cost is None and llm.get("model")
                  else "요약 실패 (비용 없음)" if cost is None else money(cost))
     tokens = f", 입력 {llm.get('input_tokens') or 0:,}·출력 {llm.get('output_tokens') or 0:,} 토큰" if llm.get("model") else ""
     next_auto = (f" · 다음 자동 수집: {_ago(snap['collected_at'] + cfg['ttl_hours'] * 3600).split(' (')[0]} 이후"
@@ -329,7 +337,8 @@ def _totals(rows: list[dict]) -> None:
         st.caption(f"🎫 Claude 구독 호출 {sub_calls:,}건은 비용 0 (구독, 청구 없음) — API 로 했다면 약 {money(api_equivalent(rows))} (참고용). "
                    "구독 한도는 내가 쓰는 Claude 대화·Claude Code 와 함께 줄어듭니다.")
     if unpriced:
-        st.warning(f"가격표에 없는 모델 호출 {unpriced:,}건은 비용에 빠져 있습니다 — 아래 ⚙️ 가격표에서 가격을 넣으면 다시 계산합니다.")
+        st.warning(f"{usage.UNPRICED} 모델 호출 {unpriced:,}건은 비용에 빠져 있습니다 (0 으로 치지 않음) — "
+                   "아래 ⚙️ 가격표에서 가격을 넣으면 다시 계산합니다.")
 
 
 def _by_model(rows: list[dict], keys: dict, period: str, storage: Storage) -> None:
@@ -348,7 +357,8 @@ def _by_model(rows: list[dict], keys: dict, period: str, storage: Storage) -> No
     table = [
         {"모델": model, "회사": PROVIDER_NAMES.get(provider, provider), "요금": billing(provider), "호출": m["calls"],
          "입력 토큰": m["in"], "출력 토큰": m["out"],
-         "추정 비용($)": round(m["cost"], 4) if m["unpriced"] < m["calls"] else None}
+         "추정 비용($)": round(m["cost"], 4) if m["unpriced"] < m["calls"] else None,
+         "가격": usage.UNPRICED if m["unpriced"] else ""}
         for (provider, model), m in sorted(by_model.items(), key=lambda kv: -kv[1]["cost"])
     ]
     c1, c2 = st.columns([3, 2])
@@ -441,11 +451,11 @@ def _previous_keys(storage: Storage, keys: dict, now_keys: dict) -> None:
 # ─── 가격표 ──────────────────────────────────────────────────────────────
 
 
-def _pricing(storage: Storage, rows: list[dict]) -> None:
+def _pricing(storage: Storage, rows: list[dict], custom: set[str] = frozenset()) -> None:
     pricing = usage.load_pricing()
     overrides = storage.price_overrides()
     used = {r["model"] for r in rows if r["provider"] not in pricing["free_providers"]}
-    models = sorted(set(pricing["models"]) | used | set(overrides))
+    models = sorted(set(pricing["models"]) | used | set(overrides) | set(custom))
     missing = sorted(m for m in used if not usage.price_for(m) and m not in pricing["per_call"])
     with st.expander("⚙️ 가격표 (USD / 100만 토큰)" + (f" — 가격 없는 모델 {len(missing)}개" if missing else ""), expanded=bool(missing)):
         st.caption("기본값은 config/pricing.yaml (2026-10-22 확인, 출처: 공식/제3자). 여기서 고치면 그 값이 우선합니다. "
@@ -456,7 +466,8 @@ def _pricing(storage: Storage, rows: list[dict]) -> None:
             base = pricing["models"].get(m, {})
             table.append({
                 "모델": m, "입력": price.get("input"), "출력": price.get("output"), "캐시 입력": price.get("cached_input"),
-                "출처": "화면에서 고침" if m in overrides else {"official": "공식", "third_party": "제3자"}.get(base.get("source"), "-"),
+                "출처": "화면에서 고침" if m in overrides else {"official": "공식", "third_party": "제3자"}.get(base.get("source"))
+                or ("목록 API" if price else usage.UNPRICED),
             })
         edited = st.data_editor(
             table, hide_index=True, use_container_width=True, key="editor_pricing", disabled=["모델", "출처"],

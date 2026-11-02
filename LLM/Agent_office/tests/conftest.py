@@ -96,6 +96,22 @@ def no_network_market(monkeypatch):
     monkeypatch.setattr(market, "fetch_history", blocked)
 
 
+@pytest.fixture(autouse=True)
+def no_model_discovery(monkeypatch):
+    """모델 목록 자동 찾기(core/model_catalog.py)가 테스트 중 각 사 API 를 부르거나 백그라운드로 파일을 쓰지 않게 한다.
+    목록 테스트는 가짜 http_get·FETCHERS 를 직접 넣고, start_refresh 는 원래 함수(model_catalog.REAL_START)를 부른다.
+    start_refresh 호출은 반환 리스트에 기록된다."""
+    from core import model_catalog
+
+    def blocked(*args, **kwargs):
+        raise RuntimeError("테스트 중 네트워크 금지")
+
+    started: list[str] = []
+    monkeypatch.setattr(model_catalog, "http_get", blocked)
+    monkeypatch.setattr(model_catalog, "start_refresh", lambda models, data_dir, force=False: started.append(str(data_dir)))
+    return started
+
+
 @pytest.fixture
 def ranks():
     return load_ranks()

@@ -463,7 +463,36 @@ python -m evals.run_eval evals/cases/travel.yaml    # 🌏 해외 여행팀 (오
 
 ### 모델 바꾸기
 `config/models.yaml` 에서 직급별 `primary` / `fallback` 을 수정합니다. 특정 팀만 바꾸려면 team.yaml 의 `model_overrides`.
-새 모델을 넣으면 같은 파일의 `model_tiers`(모델 강도 순서, 위가 가장 강함)의 알맞은 줄에도 넣어야 합니다 — 빠지면 앱 시작 시 알려 줍니다.
+새 모델을 넣으면 같은 파일의 `model_tiers`(모델 강도 순서, 위가 가장 강함)의 알맞은 줄에도 넣는 것이 좋습니다.
+빠뜨려도 앱은 멈추지 않고 이름으로 강도를 추정해 넣습니다 (사이드바 ⚙️ 모델·검증 상태에 '이름으로 강도를 추정한 모델'로 표시).
+yaml 을 고치지 않고 새 모델을 쓰려면 아래 '새 모델 쓰기'를 보세요.
+
+### 새 모델 쓰기 — 자동으로 찾기 · 직접 입력 (yaml 안 고침)
+각 사가 새 모델을 자주 내놓으므로, `config/models.yaml` 에 없는 모델도 **🎛 팀원 모델 선택** 에서 고를 수 있습니다 (`core/model_catalog.py`, 화면 `models_ui.py`).
+
+- **자동으로 찾기 (목록 새로 고침)**
+  - 앱을 켤 때 저장된 목록이 하루(24시간)보다 오래됐으면 **백그라운드로** 각 사 공식 모델 목록 API 를 부릅니다. 화면은 기다리지 않고, 실패해도 앱은 그대로입니다.
+    - OpenAI `/v1/models` · Google Gemini `models.list` · Anthropic `/v1/models`(켜져 있을 때만) · Upstage `/v1/models` · FreeLLMAPI `/v1/models` · Claude 구독(`claude_cli`)은 목록 API 가 없어 CLI 가 받는 이름(`opus`·`sonnet`·`haiku` 별칭과 정식 이름).
+    - 키가 있고 `disabled_providers` 에 없는 provider 만 부릅니다. 한 provider 에 6초까지만 기다립니다.
+  - 대화 모델만 남깁니다 — 임베딩·음성(whisper·tts)·이미지(dall-e·imagen·nano-banana)·검열·파인튜닝(`ft:`)·실시간 모델은 뺍니다. Gemini 는 `generateContent` 를 지원하는 모델만.
+    OpenAI 의 Responses API 전용(`*-pro`·`codex`)·옛 Completions 전용(`*-instruct`) 모델도 뺍니다 (앱은 Chat Completions 로 부름 — 꼭 써 보려면 직접 입력 → 🧪 연결 시험). 날짜가 붙은 고정판은 날짜 없는 이름이 있으면 뺍니다.
+  - 결과는 데이터 폴더의 `model_catalog.json` 에 저장합니다. 네트워크·키가 없으면 → 저장된 목록 → 그것도 없으면 yaml 만 씁니다. 지금 다시 받으려면 **🔄 모델 목록 새로 고침** (사이드바 **🧩 모델 목록 · 직접 입력**, 또는 🎛 상자의 '➕ 직접 입력 · 🔄 모델 목록 새로 고침' 스위치).
+  - 표시: **🆕** = 처음 받은 뒤 새로 나타난 모델(7일), **✍️** = 직접 입력한 모델, **⚠️** = yaml 에 있는데 그 회사 목록에서 사라진 모델 (같은 계열의 새 모델을 대신 쓰라고 알려 줌 — **자동으로 바꾸지 않음**).
+  - 찾은 모델은 **고를 수 있게만** 됩니다. 직급의 기본(primary)·대안 모델은 절대 자동으로 바뀌지 않습니다.
+  - FreeLLMAPI 는 등록한 무료 키에 따라 수백 개라(2026-11-02 실측 259개) 선택지에 바로 넣지 않고, '직접 입력'의 **찾은 모델에서 고르기**로 하나씩 넣습니다. `settings.yaml` 의 `model_catalog.selector_providers` 로 바꿀 수 있고, `auto_refresh: false` 면 자동으로 받지 않습니다 (🔄 버튼은 됨).
+- **직접 입력** (사이드바 🧩 또는 🎛 상자 안 스위치)
+  1. 제공처(openai·google·upstage·freellm·claude_cli·anthropic)를 고르고 **모델 이름을 API 에 보내는 이름 그대로** 넣습니다 (예: `gpt-6-luna`). 표시 이름은 선택.
+  2. **🧪 연결 시험** — 아주 짧은 호출 1번 + 구조화 출력 1번으로 실제로 되는지 봅니다. 누르기 전에 예상 비용(가격을 모르면 '가격 미등록'), 누른 뒤 실제 토큰·비용·걸린 시간이 나옵니다. 꺼진 provider(비활성·키 없음·'🆓 무료 모델만')는 부르지 않습니다. 팀 업무에는 구조화 출력이 필요하므로 그것까지 ✅ 인지 보세요.
+  3. **💾 추가** → 데이터 폴더의 `custom_models.json` 에 저장되고 바로 선택지에 ✍️ 로 나옵니다. `config/*.yaml` 은 바꾸지 않습니다. 지우면 그 모델을 고른 팀원은 기본으로 돌아갑니다.
+- **강도(급)** — 상하 관계 규칙(부하는 상사보다 약한 모델)에 필요합니다.
+  - 정하는 순서: `models.yaml` 의 `model_tiers` > 사람이 고른 급 > 이름으로 추정.
+  - 이름 추정: 같은 계열(가능하면 같은 회사)의 비슷한 크기 모델을 기준으로, `nano`·`lite`·`haiku` 는 낮게, `mini`·`flash` 는 중간, `pro`·`opus`·`ultra` 는 높게, 버전 숫자가 높으면 위로(최대 두 줄) 옮깁니다. 새 줄을 만들지 않고 기존 줄에 '같은 급'으로 들어갑니다. 무료(freellm) 모델은 무료 줄 안에서만, 유료는 무료 줄 위에서만.
+    예) `gpt-6-luna` → Opus 5.5 와 같은 급, `gpt-6-nano` → `gemini-3.5-flash` 급, `claude_cli:haiku` → `gemini-3.5-flash-lite` 급.
+  - 추정이 틀리면 **📐 모델 강도(급)** 에서 '이 모델은 [gpt-5.5 와 같은 급 ▼]' 처럼 바꿉니다 (`custom_models.json` 에 저장).
+- **가격**
+  - 가격표(`pricing.yaml`·화면에서 고친 가격)에 없는 모델은 토큰은 기록하고 비용은 **'가격 미등록'** 으로 둡니다 (0 으로 치지 않음). 🏠 💰 사용량의 ⚙️ 가격표에 직접 입력한 유료 모델이 미리 줄로 나오므로 가격을 넣으면, 비어 있던 기록도 다시 계산됩니다.
+  - 목록 API 가 가격을 알려 주는 경우(OpenRouter 형식 `pricing`)에만 그 값을 씁니다 (가격표에 없을 때). 2026-11-02 기준 OpenAI·Google·Anthropic·Upstage 목록 API 는 가격을 주지 않습니다 — 다른 사이트를 긁어 오지 않습니다.
+- 무료 모델 규칙(무료 모델을 고른 팀원은 유료로 넘어가지 않음)·`disabled_providers`·쿨다운·`llm_concurrency` 는 새 모델에도 그대로 적용됩니다.
 
 ### 팀원별 모델 고르기 (화면 — 🎛 팀원 모델 선택)
 특정 API 를 너무 많이 쓰지 않도록, 팀 화면의 조직도 아래 **🎛 팀원 모델 선택** 에서 에이전트마다 모델을 고를 수 있습니다.
@@ -839,6 +868,7 @@ A 는 하네스가 검증한 기본 배치, 처음에는 검증을 통과한 안
 ```
 Agent_office/
 ├── app.py                  ⑥ 화면 (클릭형 조직도·에이전트 패널·탭·결정·업무 양식) — Streamlit
+├── models_ui.py            🧩 모델 목록 화면 — 🔄 목록 새로 고침 · ➕ 직접 입력(🧪 연결 시험) · 📐 강도(급) 고르기
 ├── home_ui.py              🏠 메인 화면 (AI 브리핑·주목 저장소·아이디어 카드, 모델별 토큰·추정 비용, 지금/이전 API 키 이름 붙이기, 가격표)
 ├── concept_ui.py           개념 편집 팀 화면 조각 (카탈로그 사이드바·작성/삭제 입력·결과 탭·채택 후 반영 → 커밋 → 푸시)
 ├── design_ui.py            설계 팀 화면 조각 (도면 미리보기·3D 뷰어·내려받기·채택 시 저장 파일)
@@ -855,6 +885,7 @@ Agent_office/
 │   ├── llm_factory.py      ③ provider/model → ChatModel, 대안 모델 전환, provider 별 동시 호출 제한
 │   ├── claude_cli.py       Claude 구독 provider (`claude -p` 를 ChatModel 로 감쌈, 안전 필터 거부 구분)
 │   ├── member_models.py    팀원별 모델 선택 — 강도 순서·상하 관계 규칙·자동 낮춤·대안 상한, member_models.json 저장
+│   ├── model_catalog.py    모델 목록 — 각 사 목록 API 로 새 모델 찾기(하루 캐시·🆕·⚠️), 직접 입력(custom_models.json), 강도 추정, 🧪 연결 시험
 │   ├── agent.py            ④ 에이전트 한 명: 분배(plan)·초안(draft)·검토(review) 프롬프트
 │   ├── workflow.py         ⑤ LangGraph: brief → research → work(형제 서브트리 동시 진행) → human_decision → feedback
 │   ├── brief.py            요청 정리(최종 상태 정의) + 질문 예시
