@@ -532,6 +532,31 @@
 
 ---
 
+## 2026-11-02
+
+**🧩 새 모델 쓰기 — 각 사 모델 목록 자동으로 찾기 · 직접 입력 (yaml 안 고침)**
+- 작업: `config/models.yaml` 에 적힌 모델만 고를 수 있던 것을, 새 모델(예: `gpt-6-luna`)도 화면에서 고를 수 있게 했다.
+  - `core/model_catalog.py`: 각 사 공식 목록 API(OpenAI·Gemini `models.list`·Anthropic·Upstage·FreeLLMAPI)와 Claude CLI 별칭을 읽어 대화 모델만 남기고, 데이터 폴더 `model_catalog.json` 에 하루 동안 저장. 앱을 켤 때 오래됐으면 백그라운드 스레드로 새로 받음(6초 제한, 실패해도 저장된 목록 → yaml).
+  - 🆕 새로 나온 모델, ⚠️ yaml 에 있는데 목록에서 사라진 모델 + 대신 쓸 모델 제안 (자동으로 바꾸지 않음). 직급의 기본·대안 모델은 그대로.
+  - 직접 입력(`custom_models.json`) + 🧪 연결 시험(짧은 호출 1번 + 구조화 출력 1번, 예상 비용 → 실제 토큰·비용).
+  - 강도: yaml `model_tiers` > 사람이 고른 급 > 이름 추정(계열·크기 단어·버전). 새 줄을 만들지 않고 기존 줄에 '같은 급'으로 넣어 상하 관계 규칙이 그대로 동작. `model_tiers` 에 빠진 모델이 있어도 앱이 멈추지 않음.
+  - 가격표에 없는 모델은 '가격 미등록'(0 으로 치지 않음), 가격표 편집기에 직접 입력한 모델 줄을 미리 만듦. 목록 API 가 가격을 줄 때만 그 값을 씀.
+  - 화면(`models_ui.py`): 사이드바 '🧩 모델 목록 · 직접 입력', 🎛 팀원 모델 선택 상자 안 스위치, 🔄 모델 목록 새로 고침, 📐 '이 모델은 [○○ 와 같은 급 ▼]'.
+- 기술: httpx(짧은 시간 제한)·ThreadPoolExecutor 동시 조회, 백그라운드 스레드 + 파일 지문 캐시, 원자적 JSON 쓰기, 이름 규칙 기반 강도 추정, Streamlit 콜백, AppTest
+- 성과:
+  - 실제 목록 조회(2026-11-02, 이 PC 의 키): OpenAI 35개(거르기 전 142) — `gpt-6-luna`·`gpt-6-sol`·`gpt-6.1-sol` 등 새 모델 확인, Google 24개(`gemini-4-argon` 등), Upstage 9개, FreeLLMAPI 259개, Claude CLI 6개. Anthropic 은 꺼져 있어 부르지 않음.
+  - `gpt-6-luna` 연결 시험 1회: 텍스트 ✅ · 구조화 출력 ✅, 입력 120·출력 19 토큰, 24.7초, 비용 '가격 미등록'(가격표에 없음).
+  - yaml 의 `upstage:solar-pro2`·`solar-mini` 가 Upstage 목록에서 사라진 것을 찾음 → `solar-pro4`·`solar-mini4` 제안 (자동으로 바꾸지 않음).
+  - 실측 목록을 보고 거르기를 고침: Gemini 이미지 모델(nano-banana), OpenAI Responses 전용(`*-pro`·`codex`)·Completions 전용(`*-instruct`), Upstage 날짜 고정판(`-260806`), FreeLLMAPI 라우터(`auto`·`router`).
+  - 자동 테스트 21건 추가(목록 읽기·거르기, TTL·오프라인, 🆕·⚠️, 직접 입력 저장, 강도 추정·사람이 고른 급, 상하 관계 규칙, 무료 모델 규칙, 가격 미등록, 연결 시험, 화면 2개). 전체 자동 테스트 592건 통과 (API 키·네트워크 없이).
+  - 브라우저(임시 데이터 폴더, 포트 8517)에서 선택지의 찾은 모델, 직접 입력 → 추가 → 부장 선택지에 ✍️ 로 나옴, 급 고르기를 확인.
+- 한계·다음 할 일:
+  - 이름 추정은 어림값이다. 예: `gpt-6-luna`·`gemini-4-argon` 을 Opus 급으로 넣는다 — 실제로 써 보고 📐 에서 고치거나 `model_tiers` 에 넣는다.
+  - `gpt-6-luna` 는 가격표에 없다 — 🏠 ⚙️ 가격표에 공식 가격을 넣어야 비용이 잡힌다.
+  - ⚠️ 로 나온 Upstage `solar-pro2`·`solar-mini` 를 `models.yaml` 에서 바꿀지 사람이 정해야 한다.
+
+---
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

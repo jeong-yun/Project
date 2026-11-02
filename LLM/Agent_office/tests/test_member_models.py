@@ -34,26 +34,24 @@ def test_shipped_tiers_cover_every_model(ranks, models):
     assert max(paid) < min(free)  # 무료 모델은 모두 맨 아래
 
 
-def test_tier_validation_catches_missing_duplicate_and_bad_format(models):
+def test_tier_validation_catches_duplicate_and_bad_format_but_not_missing(models):
+    # 빠진 모델은 앱이 멈추지 않고 목록으로 돌려준다 → core/model_catalog.merge 가 이름으로 강도를 추정해 넣는다
     missing = models.model_copy(update={"model_tiers": [t for t in models.model_tiers if "openai:gpt-5.5" not in t]})
-    with pytest.raises(ConfigError, match="gpt-5.5"):
-        validate_model_tiers(missing)
+    assert validate_model_tiers(missing) == ["openai:gpt-5.5"]
     dup = models.model_copy(update={"model_tiers": [*models.model_tiers, ["openai:gpt-5.5"]]})
     with pytest.raises(ConfigError, match="두 번"):
         validate_model_tiers(dup)
     bad = models.model_copy(update={"model_tiers": [*models.model_tiers, ["nowhere:x"]]})
     with pytest.raises(ConfigError, match="형식"):
         validate_model_tiers(bad)
-    with pytest.raises(ConfigError, match="model_tiers"):
-        validate_model_tiers(models.model_copy(update={"model_tiers": []}))
+    assert validate_model_tiers(models) == []  # 지금 설정은 빠진 모델 없음
 
 
-def test_team_override_models_must_be_in_tiers(models, team):
+def test_team_override_model_missing_from_tiers_is_reported_not_fatal(models, team):
     from core.schemas import ModelSpec, RankModels
 
     odd = team.model_copy(update={"model_overrides": {"staff": RankModels(primary=ModelSpec(provider="openai", model="gpt-9"))}})
-    with pytest.raises(ConfigError, match="gpt-9"):
-        validate_model_tiers(models, [odd])
+    assert validate_model_tiers(models, [odd]) == ["openai:gpt-9"]
 
 
 # ─── 기본 = 지금과 같음 ────────────────────────────────────────────────

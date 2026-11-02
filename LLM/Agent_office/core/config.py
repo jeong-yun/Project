@@ -214,8 +214,12 @@ def used_model_keys(models: ModelsConfig, teams: list[Team] = ()) -> set[str]:
     return {f"{s.provider}:{s.model}" for chain in chains for s in chain.candidates}
 
 
-def validate_model_tiers(models: ModelsConfig, teams: list[Team] = ()) -> None:
-    """models.yaml 의 model_tiers(모델 강도 순서)가 올바른가 — 형식, 중복, 쓰인 모델이 모두 들어 있는지."""
+def validate_model_tiers(models: ModelsConfig, teams: list[Team] = ()) -> list[str]:
+    """models.yaml 의 model_tiers(모델 강도 순서)가 올바른가 — 형식, 중복. 형식·중복은 ConfigError.
+
+    쓰였는데 model_tiers 에 없는 모델은 오류로 멈추지 않고 목록으로 돌려준다 — 앱이 이름으로 강도를 추정해 넣는다
+    (core/model_catalog.py merge). 화면 사이드바에 '강도 추정으로 넣은 모델'로 알린다.
+    """
     listed = [key for tier in models.model_tiers for key in tier]
     bad = [k for k in listed if k.partition(":")[0] not in models.providers or not k.partition(":")[2]]
     if bad:
@@ -225,9 +229,7 @@ def validate_model_tiers(models: ModelsConfig, teams: list[Team] = ()) -> None:
         raise ConfigError(f"models.yaml model_tiers 에 두 번 나온 모델: {dup}")
     if any(not tier for tier in models.model_tiers):
         raise ConfigError("models.yaml model_tiers 에 빈 줄([])이 있습니다.")
-    missing = used_model_keys(models, teams) - set(listed)
-    if missing:
-        raise ConfigError(f"models.yaml model_tiers(모델 강도 순서)에 없는 모델: {sorted(missing)} — 알맞은 줄에 넣어 주세요.")
+    return sorted(used_model_keys(models, teams) - set(listed))
 
 
 def rank_models(rank_id: str, models: ModelsConfig, team: Team | None = None) -> RankModels:

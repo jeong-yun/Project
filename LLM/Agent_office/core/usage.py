@@ -28,6 +28,7 @@ from langchain_core.callbacks import BaseCallbackHandler
 from core.config import CONFIG_DIR, load_yaml
 
 PRICING_FILE = CONFIG_DIR / "pricing.yaml"
+UNPRICED = "가격 미등록"  # 가격표에 없는 모델 — 비용을 0 으로 치지 않고 비워 둔다 (화면 표시)
 
 
 @dataclass
@@ -80,8 +81,18 @@ def set_price_overrides(getter: Callable[[], dict] | None) -> None:
     _overrides = getter
 
 
+_catalog_prices: Callable[[], dict] | None = None
+
+
+def set_catalog_prices(getter: Callable[[], dict] | None) -> None:
+    """모델 목록 API 가 알려 준 가격 (core/model_catalog.py) — 가격표에 없는 모델에만 쓴다. {모델: {input, output}}"""
+    global _catalog_prices
+    _catalog_prices = getter
+
+
 def price_for(model: str, pricing: dict | None = None, day: str | None = None) -> dict | None:
-    """모델의 100만 토큰당 가격 {input, output, cached_input?} — 덮어쓰기 > 날짜별 변경(changes) > 기본."""
+    """모델의 100만 토큰당 가격 {input, output, cached_input?} — 덮어쓰기 > 날짜별 변경(changes) > 기본 > 목록 API 가격.
+    어디에도 없으면 None = '가격 미등록' (비용을 0 으로 치지 않고 비워 둔다 → 🏠 가격표에서 넣으면 다시 계산)."""
     pricing = pricing or load_pricing()
     if _overrides is not None:
         try:
@@ -91,6 +102,11 @@ def price_for(model: str, pricing: dict | None = None, day: str | None = None) -
         if over:
             return over
     price = pricing["models"].get(model)
+    if not price and _catalog_prices is not None:
+        try:
+            price = _catalog_prices().get(model)
+        except Exception:  # noqa: BLE001
+            price = None
     if not price:
         return None
     day = day or time.strftime("%Y-%m-%d")

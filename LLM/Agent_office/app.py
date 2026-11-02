@@ -44,8 +44,11 @@ import command_center_ui
 import concept_ui
 import design_ui
 import home_ui
+import models_ui
 import office_ui
-from core import audio_edit, concept, followup, iac_patch, llm_factory, member_models, music, stock_calc, usage, verification
+from core import (
+    audio_edit, concept, followup, iac_patch, llm_factory, member_models, model_catalog, music, stock_calc, usage, verification,
+)
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core.brief import EXAMPLES, DesiredState
@@ -112,6 +115,21 @@ MUSIC_TRACK = "music_track"  # team.yaml features 에 있으면 끝난 뒤 Lyria
 MUSIC_CFG = music.music_settings(settings)  # settings.yaml 의 music: (모델·가격·채점·자동 재생성)
 # 화면에서 고른 팀원별 모델 — 데이터 폴더의 member_models.json (config/*.yaml 은 바꾸지 않는다)
 member_store = member_models.MemberModelStore(DATA_DIR)
+
+# 고를 수 있는 모델 = yaml + 각 사 목록 API 로 찾은 모델 + 직접 입력한 모델 (core/model_catalog.py)
+# 목록은 데이터 폴더 model_catalog.json 에 저장하고, 하루가 지났으면 백그라운드로 새로 받는다 (화면은 기다리지 않음).
+# 찾은 모델은 '고를 수 있게'만 된다 — 직급의 기본·대안 모델은 yaml 그대로.
+yaml_models = models
+CATALOG_CFG = settings.get("model_catalog") or {}
+if CATALOG_CFG.get("auto_refresh", True):
+    try:
+        model_catalog.start_refresh(yaml_models, DATA_DIR)
+    except Exception:  # noqa: BLE001 — 목록을 못 받아도 앱은 저장된 목록·yaml 로 그대로
+        pass
+catalog = model_catalog.merge(yaml_models, DATA_DIR, teams, selector_providers=tuple(
+    CATALOG_CFG.get("selector_providers") or model_catalog.SELECTOR_PROVIDERS))
+models = catalog.models
+usage.set_catalog_prices(lambda: model_catalog.catalog_prices(DATA_DIR))
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -314,6 +332,14 @@ with st.sidebar:
         )
         skill_files = sorted(p.stem for d in skill_dirs(team_id) for p in d.glob("*.md"))
         st.caption("📚 팀 스킬: " + (", ".join(skill_files) if skill_files else "없음"))
+        if catalog.yaml_missing:
+            st.caption("📐 model_tiers 에 없어 이름으로 강도를 추정한 모델: " + ", ".join(catalog.yaml_missing)
+                       + " — config/models.yaml 의 알맞은 줄에 넣으면 그 값을 씁니다.")
+
+    # 모델 목록 — 각 사 목록에서 찾은 새 모델(🆕)·사라진 모델(⚠️), 직접 입력(🧪 연결 시험), 강도(급) 고르기
+    models_ctx = models_ui.Ctx(models=models, yaml_models=yaml_models, merged=catalog, data_dir=DATA_DIR)
+    with st.expander("🧩 모델 목록 · 직접 입력"):
+        models_ui.render(models_ctx, "side")
 
 org = team_org(team, ranks)
 nodes = {n.id: n for n in org.walk()}
@@ -1446,15 +1472,12 @@ def live_area() -> None:
 # 본문 ③-1 팀원 모델 선택 — 에이전트마다 모델을 고른다 (상하 관계 규칙: core/member_models.py)
 # ════════════════════════════════════════════════════════════════════
 MEMBER_NOTE_KEY = "member_model_note"
-PROVIDER_NAMES = {"claude_cli": "Claude CLI", "anthropic": "Anthropic", "openai": "OpenAI", "google": "Google",
-                  "upstage": "Upstage", "freellm": "FreeLLM"}
 USAGE_DAYS = 7
 
 
 def model_option_label(key: str, states: dict[str, str]) -> str:
-    provider, model = member_models.split_key(key)
-    icon = "" if states.get(provider) == "ok" else f" {PROVIDER_STATUS.get(states.get(provider), ('⚪', ''))[0]}"
-    return f"{model} · {PROVIDER_NAMES.get(provider, provider)} · {member_models.cost_label(provider)}{icon}"
+    """'모델 · 제공처 · 비용' + 🆕(새 모델) ✍️(직접 입력) ⚠️(목록에서 사라짐) + 꺼진 provider 아이콘 (models_ui.py)."""
+    return models_ui.option_label(key, states, PROVIDER_STATUS, catalog)
 
 
 def member_widget_key(node_id: str) -> str:
@@ -1540,6 +1563,10 @@ def render_member_models() -> None:
                 c_use.markdown(f":red[⛔ **고른 모델 꺼짐**] — {off[1]}")  # 무료 서버면 'Docker Desktop 실행 후 FreeLLMAPI 켜기'까지
         if chosen:
             st.button("↩️ 모두 기본으로", key=f"member_reset_{team_id}", on_click=reset_member_models)
+        st.caption("🆕 = 최근 각 사 목록에 새로 나온 모델 · ✍️ = 직접 입력한 모델 · ⚠️ = 목록에서 사라진 모델. "
+                   "목록에 없는 모델은 아래 '직접 입력'으로 넣습니다.")
+        if st.toggle("➕ 직접 입력 · 🔄 모델 목록 새로 고침", key=f"member_catalog_{team_id}"):
+            models_ui.render(models_ctx, "member")
 
 
 # ════════════════════════════════════════════════════════════════════

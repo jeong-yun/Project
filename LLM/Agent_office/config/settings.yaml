@@ -23,6 +23,13 @@ avatar:
   allowed_ext: [png, jpg, jpeg, webp]
   size: 256                # 업로드 시 정사각형으로 리사이즈
 
+model_catalog:
+  # 모델 목록 자동 찾기 (core/model_catalog.py) — 각 사 목록 API 로 새 모델을 찾아 '🎛 팀원 모델 선택'에서 고를 수 있게 한다.
+  # 하루에 한 번 앱을 켤 때 백그라운드로 새로 받는다 (데이터 폴더 model_catalog.json). 직급의 기본 모델은 바꾸지 않는다.
+  auto_refresh: true
+  # 찾은 모델을 선택지에 바로 넣는 provider. freellm 은 수백 개라 빼 두고 '직접 입력 → 찾은 모델에서 고르기'로 하나씩 넣는다.
+  selector_providers: [openai, google, anthropic, upstage, claude_cli]
+
 llm_concurrency:
   # 형제 에이전트(서로 독립인 하위 업무)와 자료 조사가 동시에 진행되므로 provider 별 '동시 LLM 호출 수'를 제한한다.
   # 무료 티어의 분당 토큰·요청 한도(Groq 8천 TPM, Gemini 429)가 한꺼번에 터지지 않게 낮게 둔다. 0 이하면 제한 없음.
