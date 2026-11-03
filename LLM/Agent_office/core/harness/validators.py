@@ -12,6 +12,10 @@
   control_ids   : 통제 번호가 고른 프레임워크 공개 목록(config/controls)에 있는지 (core/governance.py)
   evidence_quotes: 인용한 증적 문구가 입력 증적에 글자 그대로 있는지 (core/governance.py)
   iac_fix       : IaC 수정안 diff 를 원본 사본에 적용 → 내장 규칙 재검사로 정말 고쳤는지 (core/iac_patch.py)
+  career_facts  : 자소서·포트폴리오의 인용이 올린 문서에 글자 그대로 있는지 + 본문 숫자가 문서·JD·문항에 있는지 (core/career.py)
+  char_limits   : 자소서 문항마다 답변이 있고 글자 수 제한(공백 포함/제외)을 지키는지 (코드가 센다)
+  jd_coverage   : JD 요구사항(R1…)을 하나도 빼지 않고 근거 있음/부분/공백으로 판정했는지
+  portfolio_format: 포트폴리오 절(요약·역량 표·프로젝트)과 프로젝트 카드 다섯 항목(문제·역할·기술·결과·배운 점)
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -308,3 +312,79 @@ class IacFixValidator(Validator):
             return self.ok(f"수정안 재검사 통과: 발견 {len(v.before.findings)}건 중 고침 {len(fixed)} · 시도 안 함 "
                            f"{v.count('not_attempted')} ({', '.join(fixed)}) — 재검사 {len(v.before.findings)}건 → {len(v.after.findings)}건")
         return self.ok(f"발견 번호 확인 통과: 점검 결과 {len(v.before.findings)}건 (수정안 diff 없음)")
+
+
+@register
+class CareerFactsValidator(Validator):
+    name = "career_facts"
+    description = ("지어낸 사실 검사 — JSON 의 인용(quote)이 올린 문서에 글자 그대로 있는지, 본문 숫자가 문서·JD·문항에 있는지 "
+                   "([확인 필요] 문장은 제외, core/career.py)")
+
+    def check(self, answer: str, options: dict):
+        from core import career  # career 가 harness.base 를 쓰므로 늦게 불러온다
+
+        if "career_source" not in options:
+            return self.ok("비교할 문서 정보 없음")
+        result = career.check_facts(answer, str(options.get("career_source") or ""), str(options.get("career_reference") or ""))
+        problems = []
+        if result.missing_quotes:
+            problems.append(f"올린 문서에 없는 인용 {len(result.missing_quotes)}건: " + " / ".join(result.missing_quotes[:6]))
+        if result.unsourced_numbers:
+            problems.append(f"문서·JD·문항에 없는 숫자 {len(result.unsourced_numbers)}개: " + " / ".join(result.unsourced_numbers[:8]))
+        if result.no_evidence:
+            problems.append("JSON evidence(본문 주장마다 문서 원문 인용)가 없다")
+        if problems:
+            return self.fail(" / ".join(problems) + " — quote 에는 근거 자료 '올린 문서 원문'을 한 글자도 바꾸지 말고 복사하고, 숫자는 문서에 "
+                             "적힌 값·단위 그대로 쓴다. 문서에 없는 경험·숫자는 지우거나 그 문장 끝에 [확인 필요]를 붙이고 needs_check 에 적는다.")
+        return self.ok(f"인용 {result.quotes_checked}건 모두 문서에 있음 · 본문 숫자 모두 문서·JD·문항에 있음")
+
+
+@register
+class CharLimitsValidator(Validator):
+    name = "char_limits"
+    description = "자소서 글자 수 — 문항마다 '## 문항 N.' 답변이 있고, 제한(공백 포함/제외)을 넘지 않고 너무 짧지 않은지 (코드가 셈)"
+
+    def check(self, answer: str, options: dict):
+        from core import career
+
+        questions = [career.Question(**q) for q in options.get("career_questions") or []]
+        if not questions:
+            return self.ok("검사할 자소서 문항 없음")
+        problems = career.check_char_limits(answer, questions, float(options.get("min_fill_ratio", 0.5)))
+        if problems:
+            return self.fail("자소서 글자 수·문항 오류: " + " / ".join(problems))
+        rows = career.limit_rows(answer, questions)
+        return self.ok("문항별 글자 수 통과: " + ", ".join(
+            f"{r.no}번 {r.counted:,}/{r.limit:,}자" if r.limit else f"{r.no}번 {r.with_spaces:,}자" for r in rows))
+
+
+@register
+class JdCoverageValidator(Validator):
+    name = "jd_coverage"
+    description = "JD 대응 — 코드가 뽑은 JD 요구사항(R1…)을 JSON jd_coverage 에서 모두 근거 있음/부분/공백으로 판정했는지"
+
+    def check(self, answer: str, options: dict):
+        from core import career
+
+        ids = list(options.get("career_requirements") or [])
+        if not ids:
+            return self.ok("검사할 JD 요구사항 없음")
+        problems = career.check_coverage_ids(answer, ids)
+        if problems:
+            return self.fail("JD 대응표 오류: " + " / ".join(problems) + " — 키워드를 본문에 끼워 넣지 말고, 요구사항마다 문서 근거를 판정해 "
+                             "jd_coverage 에 적는다 (근거가 없으면 '공백').")
+        return self.ok(f"JD 요구사항 {len(ids)}개 모두 판정")
+
+
+@register
+class PortfolioFormatValidator(Validator):
+    name = "portfolio_format"
+    description = "포트폴리오 형식 — 요약·핵심 역량(표)·프로젝트 절, 프로젝트 카드마다 문제·역할·기술·결과·배운 점"
+
+    def check(self, answer: str, options: dict):
+        from core import career
+
+        problems = career.check_portfolio(answer)
+        if problems:
+            return self.fail("포트폴리오 형식 오류: " + " / ".join(problems) + " — 팀 업무 지침의 포트폴리오 형식대로 다시 써라.")
+        return self.ok(f"포트폴리오 형식 통과 (프로젝트 카드 {len(career.project_cards(answer))}개)")

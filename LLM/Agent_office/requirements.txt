@@ -36,8 +36,12 @@ trimesh>=4.4,<6          # 3D 벽 세우기, GLB·OBJ·STL
 mapbox_earcut>=1.0       # trimesh 다각형 삼각분할
 manifold3d>=3.0          # STL 조각 합치기 (watertight)
 plotly>=5.20,<8          # 화면 3D 뷰어
-pypdfium2>=4.0           # PDF 첨부 → 그림 (비전 모델 입력)
+pypdfium2>=4.0           # PDF 첨부 → 그림 (비전 모델 입력) · 포트폴리오·자소서 팀의 PDF 글자 읽기
 ifcopenshell>=0.8        # (선택) IFC 내보내기 — 설치가 안 되면 IFC 만 건너뛴다
+
+# 포트폴리오·자소서 팀 (teams/career) — Word 읽기·쓰기, 한글 5.x(.hwp) 읽기. 한글 .hwpx 는 표준 라이브러리(zip·XML)로 직접 읽고 쓴다
+python-docx>=1.1,<2     # MIT — .docx 읽기·쓰기 (1.2 에서 검증)
+olefile>=0.46           # BSD — .hwp(OLE 복합 문서) 본문 읽기 (0.47 에서 검증). AGPL 인 pyhwp 는 쓰지 않는다
 
 # 주가 데이터 (Yahoo Finance, API 키 불필요) — 주식 팀 stock_data 툴
 yfinance>=1.7,<2

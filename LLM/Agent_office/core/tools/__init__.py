@@ -8,6 +8,7 @@
   floorplan_input : 첨부 도면(JSON·DXF·그림·PDF) → 레이아웃 JSON + 면적표·검증 결과, 방 최소 치수 기준표 (설계 팀)
   governance_evidence : 증적 묶음 · 설정 drift(코드 diff) · 통제 번호 목록 (보안 거버넌스 팀, 외부 호출 없음)
   iac_scan        : Terraform·쿠버네티스·Dockerfile 내장 규칙 점검 + 원본·diff 규칙 (인프라 보안 팀, 외부 스캐너는 설치돼 있으면)
+  career_docs     : 올린 요약 문서(docx·pdf·hwp·hwpx·md·txt)·JD·자소서 문항 읽기 + JD 요구사항 1차 대응 (포트폴리오·자소서 팀, 외부 호출 없음)
 
 새 툴 추가 방법
   1) 이 폴더에 run(question, inputs, models) -> ToolResult | None 함수를 만든다 (쓸 자료가 없으면 None)
@@ -18,7 +19,7 @@
 from collections.abc import Callable
 
 from core.schemas import ModelsConfig, ToolResult
-from core.tools import floorplan_input, governance_evidence, iac_scan, stock_data, travel_calendar
+from core.tools import career_docs, floorplan_input, governance_evidence, iac_scan, stock_data, travel_calendar
 
 ToolFn = Callable[[str, dict, ModelsConfig], ToolResult | None]
 
@@ -28,6 +29,7 @@ TOOLS: dict[str, ToolFn] = {
     "floorplan_input": floorplan_input.run,
     "governance_evidence": governance_evidence.run,
     "iac_scan": iac_scan.run,
+    "career_docs": career_docs.run,
 }
 
 

@@ -1,4 +1,5 @@
-"""채택한 결과를 파일로 저장 — results/<팀>/<날짜-시각>_<질문>.md (+ 여행 지도 .html, 음악 팀은 .mp3, 설계 도면·3D 파일).
+"""채택한 결과를 파일로 저장 — results/<팀>/<날짜-시각>_<질문>.md (+ 여행 지도 .html, 음악 팀은 .mp3, 설계 도면·3D 파일,
+포트폴리오·자소서 팀은 .docx · .hwpx · 문서용 .md).
 
 사람이 '채택'한 내용만 저장한다 (반려·버리기는 저장하지 않음).
 파일에는 나중에 봐도 맥락을 알 수 있도록 질문·업무 브리프·최종 답변·사람의 결정·근거 자료 목록을 함께 적는다.
@@ -13,8 +14,9 @@ from pathlib import Path
 
 from core.schemas import HumanDecision
 
-RESULT_SUFFIXES = (".md", ".html", ".mp3")
-MIME = {".md": "text/markdown", ".html": "text/html", ".mp3": "audio/mpeg"}
+RESULT_SUFFIXES = (".md", ".html", ".mp3", ".docx", ".hwpx")
+MIME = {".md": "text/markdown", ".html": "text/html", ".mp3": "audio/mpeg",
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".hwpx": "application/hwp+zip"}
 
 
 def slugify(text: str, limit: int = 40) -> str:

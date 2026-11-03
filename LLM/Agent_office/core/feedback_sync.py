@@ -8,7 +8,8 @@ data/runs.db 는 .gitignore 라 GitHub 에 올라가지 않는다. 그중 '다�
   교훈.md          : 사람이 GitHub 에서 읽기 좋게 팀·에이전트별로 묶은 교훈
 올리지 않는 것 (공개 저장소)
   질문·최종 답변·코멘트 원문 (보유 종목·매수가·여행 일정 같은 개인 정보 — 교훈 끝에 붙은 '사람 코멘트'도 뗀다),
-  사용량·API 키 정보
+  사용량·API 키 정보,
+  private: true 인 팀(예: 👔 포트폴리오·자소서 팀 — 이력·경력 문서)의 교훈·결정 요약 전부 (교훈 문장에도 경력 내용이 들어갈 수 있다)
 
 언제
   - 결정·교훈이 바뀔 때마다 자동으로 다시 쓴다 — 환경변수 AGENT_OFFICE_KNOWLEDGE_DIR 가 있을 때만
@@ -29,6 +30,13 @@ LESSONS, DECISIONS, READABLE = "lessons.jsonl", "decisions.jsonl", "교훈.md"
 DECIDED = ("adopted", "rejected")
 # core/feedback.py 가 교훈 끝에 붙이는 사람 코멘트 원문 — '(사람 코멘트: …)' 또는 ' 사람 코멘트: …' (결정 전 문의 기록 포함)
 COMMENT = re.compile(r"\s*\(?사람 코멘트:", re.S)
+
+
+def private_teams() -> set[str]:
+    """team.yaml 에 private: true 인 팀 id — 이 팀들의 교훈·결정은 knowledge/ 로 내보내지도, 가져오지도 않는다."""
+    from core.config import TEAMS_DIR, _team_yaml  # 앱 시작 순서와 무관하게 늦게 불러온다
+
+    return {p.parent.name for p in TEAMS_DIR.glob("*/team.yaml") if _team_yaml(p.parent.name).get("private")}
 
 
 def public_lesson(text: str) -> str:
@@ -54,10 +62,11 @@ def _write_if_changed(path: Path, text: str) -> bool:
 
 def lesson_rows(storage) -> list[dict]:
     rows = storage._run_sql("SELECT * FROM lessons ORDER BY created_at, id", ())
+    hidden = private_teams()
     return [
         {"team_id": r["team_id"], "agent_id": r["agent_id"], "kind": r["kind"], "lesson": public_lesson(r["lesson"]),
          "active": bool(r["active"]), "created_at": r["created_at"], "run_id": r["run_id"] or ""}
-        for r in rows
+        for r in rows if r["team_id"] not in hidden
     ]
 
 
@@ -68,8 +77,10 @@ def decision_rows(storage) -> list[dict]:
         f"SELECT id, team_id, root_id, status, decision, created_at, decided_at FROM runs "
         f"WHERE status IN ({placeholders}) ORDER BY created_at, id", DECIDED,
     )
-    out = []
+    out, hidden = [], private_teams()
     for r in rows:
+        if r["team_id"] in hidden:
+            continue
         decision = json.loads(r["decision"]) if r["decision"] else {}
         out.append({
             "run_id": r["id"], "team_id": r["team_id"], "root_id": r["root_id"], "status": r["status"],
@@ -128,13 +139,13 @@ def import_lessons(storage, src: Path) -> int:
     if not path.exists():
         return 0
     have = {(r["team_id"], r["agent_id"], r["lesson"], r["created_at"]) for r in lesson_rows(storage)}  # 코멘트 뗀 문장끼리 비교
-    new = []
+    new, hidden = [], private_teams()
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         item = json.loads(line)
         key = (item["team_id"], item["agent_id"], item["lesson"], item["created_at"])
-        if key not in have:
+        if key not in have and item["team_id"] not in hidden:
             have.add(key)
             new.append(item)
     if new:

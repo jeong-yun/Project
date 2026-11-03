@@ -557,6 +557,31 @@
 
 ---
 
+## 2026-11-03
+
+**👔 포트폴리오·자소서 팀 (커리어부) — 내가 올린 문서만 근거로 자소서·포트폴리오**
+- 작업: 새 팀 `teams/career` 와 빌딩의 👔 커리어부(4층).
+  - 업무 ① ✍️ 자소서 작성: 요약 문서(여러 개) + JD(붙여 넣기·파일) + 문항(한 줄에 하나, `(700자)`·`(1,000자, 공백 제외)`) → 문항별 답변. ② 📁 포트폴리오 작성: 요약 문서 + 목표 직무(보안 관리자·인프라 관리자·데이터 개발자·AI 엔지니어·직접 입력) → 요약·기술 매트릭스·프로젝트 카드(문제 → 역할 → 기술 → 결과 → 배운 점)·직무 강점.
+  - 조직도: 사원·사실 추출 → 대리·작성 → 부장·직무 검토(보안 관리자(CISO)·인프라 관리자·데이터 개발 리드·AI 엔지니어 관점) → 팀장·인사(30년 차 인사 팀장). 지침은 `skills/` 4개 (사실 규칙·인용·문체 / 자소서 STAR·CAR·글자 수 / 포트폴리오 카드 / 직무별 관점).
+  - 문서 읽기 `core/doc_text.py`: docx(python-docx) · pdf(pypdfium2) · hwpx(zip·XML) · hwp(olefile + zlib 로 본문 레코드, 암호·배포용은 안내) · md·txt. 회사 문서보안(DRM, 머리 `SCDSA`) 파일은 읽을 수 없다고 안내.
+  - 툴 `career_docs`: 올린 문서 원문(데이터 표시선)·읽은 범위 표·JD 요구사항 R1…(코드 추출 + 키워드 1차 대응)·문항 글자 수 제한을 모든 팀원에게 근거 자료로. 웹 검색 없음.
+  - 하네스 4개: `career_facts`(인용이 문서에 글자 그대로 + 본문 숫자가 값·단위까지 문서·JD·문항에 있는지, `[확인 필요]` 문장 제외, 같은 문장 두 숫자로 계산되는 % 인정) · `char_limits` · `jd_coverage` · `portfolio_format`. 비평가 규칙 5개(근거 없는 사실·문항 이탈·키워드 끼워 넣기·용어 오류·상투 표현).
+  - 내려받기 `core/doc_export.py` + `career_ui.py`: 결과 아래 📄 문서 상자(문항별 글자 수·사실 검사·미리보기) → `.md` · `.docx`(제목·표·글머리표, 작성자 속성 비움) · `.hwpx`(OWPML 직접 작성). 채택하면 `results/career/` 에 함께 저장, 사이드바 📂 에 .docx·.hwpx 도 보임. 서버를 다시 켜 되살린 업무도 질문 글에서 문항을 다시 읽어 글자 수를 셈.
+  - 공용: 업무 양식 `file` 칸 `multiple: true`(여러 파일), team.yaml `private: true` → `knowledge/` 교훈·결정 요약 내보내기·가져오기에서 제외. requirements 에 python-docx(MIT)·olefile(BSD) 명시 (AGPL 인 pyhwp 는 쓰지 않음).
+- 기술: python-docx, pypdfium2, OLE 복합 문서·HWP 5.0 레코드 구조, OWPML(KS X 6101) 패키지, 정규식 기반 문항·숫자·단위 대조, LangGraph 하네스 재작성, Streamlit
+- 성과:
+  - 한글 2022(COM 자동화)로 이 앱이 만든 .hwpx 를 열어 확인 — 실제 결과 3쪽·4,578자, 표·글머리표 포함. 한글이 설치 폴더에 둔 실제 .hwp·.hwt(서식 파일 8개)를 읽어 표 안 글까지 꺼냄.
+  - 실제 실행 1회(가상 인물 샘플·가상 JD, Claude 구독 — 사원·대리·부장 Sonnet 5.5 / 팀장 Opus 5.5, 324초): 사원이 '현재'를 2026 으로 바꿔 경력 기간을 계산한 것을 `career_facts` 가 잡아 1회 다시 쓰게 함 → 이후 모든 단계 하네스 통과, 최종 사실 검사 통과(문서에 없는 숫자 0), 글자 수 562/600자(공백 포함)·663/800자(공백 제외), 근거 없는 역할은 `[확인 필요]`, JD 요구사항 7개 중 공백 1개(침해사고 대응)를 지어내지 않고 '공백'으로.
+  - 자동 테스트 31건 추가 (문서 5형식 읽기·hwp 암호/배포용/DRM, 문항·글자 수, 지어낸 숫자 실패·출처 숫자 통과, JD 대응, docx·hwpx·md 만들기, 팀 설정, 가짜 모델 두 업무 끝까지, knowledge 제외, git 제외 확인, 화면 양식).
+  - 브라우저(임시 데이터 폴더, 포트 8517): 빌딩 4층 커리어부 방, 두 업무 양식, 결과의 글자 수 표·⬇ .md/.docx/.hwpx, 사이드바 저장 파일 확인.
+- 발견: 문서보안 DRM 이 깔린 PC 에서는 한글이 저장·연 파일이 암호화된다 → 이런 파일은 내용을 읽을 수 없어 안내 문구를 넣음.
+- 한계·다음 할 일:
+  - .hwp 는 본문 문단 글자만 (그림·수식·글상자 안 글은 빠질 수 있음). 바이너리 .hwp 쓰기는 하지 않음 — .hwpx 를 한글에서 열어 저장.
+  - 숫자 검사는 '값+단위' 대조라 문서와 다른 표기(예: '1천 건', '3억')는 실패로 본다 — 의도한 엄격함. 회사·프로젝트 이름 같은 낱말 사실은 인용 대조와 비평가가 본다 (코드 검사 아님).
+  - 이 worktree 에는 API 키가 없어 실제 실행은 시험용으로 메모리에서 직급 모델을 Claude 구독으로 바꿔 돌렸다. 평소 설정(팀원 모델 선택)으로 한 번 더 돌려 볼 것.
+
+---
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
