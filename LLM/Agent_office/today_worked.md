@@ -595,6 +595,37 @@
 - 성과: 이 PC 에서 `find_executable()` → `Packages\…\LocalCache\…\claude.exe`, `auth login` 뒤 `cli_status()` = `ok`. claude_cli·llm_factory 테스트 27건 통과.
 - 발견: 데스크톱 앱 안(Code 탭)에서 확인한 경로는 앱 밖과 다를 수 있다 — 스토어 앱의 AppData 가상화. 경로 확인은 앱 밖 PowerShell 기준으로 할 것.
 
+**👔 포트폴리오 실행이 30분 넘게 걸린 원인 분석 (코드 수정 전 — 다음 할 일로 남김)**
+- 배경: 실제 기술경력서.docx + JD(AI 비전 서비스 개발)로 포트폴리오 업무 1회 (00:19 시작). '🧪 오류 수정 중'·'비평 받는 중'이 각각 10~20분씩 이어짐.
+- 실측 (usage 표 · Streamlit 프로세스의 Google 연결 시각):
+
+  | 시각 | 단계 | 모델 | 비고 |
+  |---|---|---|---|
+  | 00:20 → 00:21 | 사원·사실 추출 | gemini-3.5-flash-lite | 하네스 실패 2회 → 3번째 통과 |
+  | 00:22 → 00:33 | 대리·작성 | gemini-3.5-flash | 하네스 실패 1회 → 재작성 호출이 **약 10분 무응답** 뒤 재연결, 30초 만에 완료 (9점) |
+  | 00:33 → 00:36 | 부장·직무 검토 | claude_cli Opus 5.5 | |
+  | 00:36 → 00:41 | 팀장 통합 | claude_cli Opus 5.5 | 입력 14.8만 · 출력 4만 토큰 |
+  | 00:41 → (7분+ 무응답) | ⚖️ 비평가 | gemini-3.5-flash (utility) | 같은 무응답 |
+
+- 원인 ① **career_facts 오탐 — 표의 행 번호**: 사원이 쓴 `| 13 | IPS… |`, `| 14 | LLM… |` 의 13·14(번호 열)를 '문서에 없는 숫자'로 잡음.
+  `core/career.py` `unsourced_numbers()` 는 10 이하만 문장 표현으로 넘기고 표 줄 번호를 구분하지 않는다 → 프로젝트를 11개 넘게 번호 매긴 표면 매번 재작성.
+- 원인 ② **Gemini 호출에 시간 제한 없음**: `core/llm_factory.py` `create_chat_model()` 의 google 분기는 timeout 을 주지 않음
+  (freellm 180초 · claude_cli 600초와 다름). 응답이 멈추면 라이브러리 기본값(실측 약 10분)까지 기다린 뒤에야 재시도·대안 모델로 넘어간다.
+- 원인 ③ **비평가 모델이 utility 고정 (모든 팀 공통)**: `core/verification.py:123` 이 `models.utility`(gemini-3.5-flash)로 비평가를 부른다. 비평가 전용 모델 설정이 없고,
+  팀 `model_overrides` 는 직급만 바꿀 수 있어 팀별로도 못 바꾼다. 비평 범위만 팀마다 다름 — 주식 `scope: all`(검토 단계마다), 나머지는 `final`(최종 1회).
+  - 문제: 쓰는 쪽(팀장 Opus)보다 약한 Flash 가 채점 · 입력이 커서(팀장 출력 4만 토큰 + 근거 자료) 느리고 멈춤 · 구조화 출력 빈 값 이력(10-28 기록) ·
+    팀원을 Claude 로 골라도 이력서 내용이 비평가로 Google 에 전송됨.
+  - 같은 utility 를 쓰는 곳: 요청 정리(brief) · 교훈(feedback) · 부서장 팀 고르기(building) · 뉴스 요약(feeds) · 음원 편집 계획(audio_edit) · 도면 읽기 대안(floorplan_import).
+- 다음 할 일 (순서대로):
+  1. **비평가 전용 모델**: `config/models.yaml` 에 선택 항목 `critic:`(primary + fallback, 예: openai gpt-5.5 → claude_cli → gemini-3.5-flash) 추가 →
+     `core/schemas.py` ModelsConfig 에 `critic: RankModels | None`, `core/verification.py:123` 을 `models.critic or models.utility` 로.
+     `config.py` validate 의 체인 목록(213행)에도 넣기. 없으면 지금과 동작이 같게 (다른 팀 영향 없음). claude_cli 를 넣으면 구독 한도를 함께 쓴다는 점 README 에 적기.
+     '🆓 무료 모델만 사용'(`free_only`)에서도 critic 이 무료 모델로 내려가는지 확인.
+  2. **Gemini timeout**: google 분기에 `timeout`(예: 180초, settings.yaml 로 조절) — 큰 입력(4만 토큰 비평)도 정상이면 끝나는 값인지 실측 후 결정.
+     시간 초과가 `is_transient` 로 분류돼 같은 모델 재시도 → 대안 모델로 넘어가는지 테스트.
+  3. **career_facts 표 번호**: 마크다운 표의 첫 열이 숫자만인 줄(`| 13 |`)과 `13.`/`13)` 로 시작하는 목록 번호는 숫자 검사에서 제외. 표 안의 다른 칸 숫자는 그대로 검사. 테스트 추가.
+  4. 고친 뒤 같은 문서·JD 로 다시 실행해 전체 시간·재작성 횟수·비평 점수 비교 (이번 실행이 기준).
+
 ---
 
 ## 누적 요약
