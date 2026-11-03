@@ -25,6 +25,7 @@
     python 3_1_prepare_requests.py --dry-run       # 파일을 쓰지 않고 건수·마스킹 수만 로그에
     python 3_1_prepare_requests.py --rules et:1:2033312,talos:1:39925 --dry-run
     python 3_1_prepare_requests.py --rules @목록.txt  # 지정 룰만 (한 줄에 id 하나, # 뒤는 설명)
+    python 3_1_prepare_requests.py --rules @목록.txt --per-request 1 --dry-run   # 룰 하나씩 요청 (2026-11-03~)
 
 [지정 룰 다시 만들기] (--rules, 2026-10-30) 생성까지 끝난(완료) 룰도 새 요청 pick_b0000_<지문>_cK.jsonl 로 만든다.
   - 공격 샘플이 모자란 룰을 바뀐 지시문·코드 검사로 다시 만들 때. 생성은 3_2 --set pick (또는 3_0 --set pick --rules …).
@@ -54,6 +55,8 @@ def main(argv=None):
     ap.add_argument("--set", choices=["delta", "all", "pick"], default="delta",
                     help="배치 종류 (기본 delta = 변경분, pick = --rules 로 지정한 룰)")
     ap.add_argument("--rules", help="지정 룰만 (완료 상태여도) 새 요청으로: 'id,id,…' 또는 '@파일' (한 줄에 id 하나)")
+    ap.add_argument("--per-request", type=int, metavar="N",
+                    help="요청 하나에 넣을 룰 수 (기본: LLM_설정.md '호출당 룰 수'). 예: --rules 와 1 = 룰 하나씩 (한 룰이 끊겨도 다른 룰은 남음)")
     ap.add_argument("--date", help="05_llm_input 날짜 폴더 (기본: 가장 최근)")
     ap.add_argument("--force", action="store_true", help="아직 생성 안 된 요청 파일을 모두 다시 만든다")
     ap.add_argument("--dry-run", action="store_true", help="파일을 쓰거나 지우지 않고 건수·마스킹 수만 로그에")
@@ -86,7 +89,7 @@ def main(argv=None):
 
     skip = {t.strip() for t in run.get("생성 제외 attack_type", "").split(",") if t.strip() not in ("", "-")}
     sides = {s.strip() for s in run.get("생성 대상 side", "request").split(",") if s.strip()}
-    n = C.run_int(run, "호출당 룰 수", 3)
+    n = args.per_request if args.per_request and args.per_request > 0 else C.run_int(run, "호출당 룰 수", 3)
     hi = C.run_int(run, "기존 데이터 충분 기준", 1000)
     lo = C.run_int(run, "기존 데이터 참고 기준", 50)
     n_ex = C.run_int(run, "참고 예시 수", 3)

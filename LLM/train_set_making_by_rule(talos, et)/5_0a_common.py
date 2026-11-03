@@ -204,22 +204,55 @@ def verify_codes(date, dev, stat):
 RECHECK = Path(os.environ.get("RULEDATA_RECHECK_DIR") or BASE / "07_llm_output" / "_recheck") / "results.jsonl"
 
 
-def llm_ok_keys():
-    """4. 화면 'LLM 재확인'(3_6)에서 가장 최근 판정이 'label 맞음'인 샘플 내용 지문(ck) - 6. 선별의 'LLM 이 맞다고 한
-    불일치는 남기기' 옵션에 쓴다 (5.5 가 비교 표의 lk 로 남김). 결과 파일이 없으면 빈 집합."""
-    latest = {}
+def _jsonl(path):
     try:
-        with open(RECHECK, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 try:
-                    r = json.loads(line)
+                    yield json.loads(line)
                 except ValueError:
                     continue
-                if r.get("ck"):
-                    latest[r["ck"]] = r.get("verdict")
     except OSError:
-        pass
-    return {k for k, v in latest.items() if v == "ok"}
+        return
+
+
+def _base_model(mid):
+    """3_6 base_model 과 같음: 추론 강도(@…)를 떼고, Claude 는 claude_cli·anthropic 을 같은 모델로."""
+    m = str(mid or "").split("@")[0]
+    p, _, name = m.partition(":")
+    return f"claude:{name}" if p in ("claude_cli", "anthropic") else m
+
+
+def llm_ok_keys():
+    """4. 화면 'LLM 재확인'(3_6)의 '불일치' 합의가 확인됨(유지)인 샘플 내용 지문(ck) - 6. 선별의 '불일치' 중 남기기 옵션에 쓴다
+    (5.5 가 비교 표의 lk 로 남김). 결과 파일이 없으면 빈 집합.
+    합의 (2026-11-02~, 3_6 consensus_state 와 같은 규칙 - 바꾸면 함께): 화면의 사람 판단·유지 표시(decisions.jsonl)가 있으면 그것,
+    없으면 하나라도 반대·부적합 → 삭제, 두 모델 이상 모두 맞음 → 확인됨, 그 밖 → 추가 분석. 한 모델만 맞음이면 남기지 않는다
+    (예전에는 가장 최근 판정 하나가 맞음이면 남김)."""
+    votes, ck = {}, {}
+    for r in _jsonl(RECHECK):
+        if (r.get("target") or "bad") == "bad" and r.get("k"):
+            votes.setdefault(r["k"], {})[_base_model(r.get("model"))] = r.get("verdict")
+            if r.get("ck"):
+                ck[r["k"]] = r["ck"]
+    dec = {}
+    for d in _jsonl(RECHECK.with_name("decisions.jsonl")):
+        if (d.get("target") or "bad") != "bad":
+            continue
+        if d.get("decision") == "reset":
+            dec = {}
+        elif d.get("decision") in ("keep", "delete", "flip") and d.get("k"):
+            dec[d["k"]] = d["decision"]
+            if d.get("ck"):
+                ck.setdefault(d["k"], d["ck"])
+    out = set()
+    for k in set(votes) | set(dec):
+        vs = list(votes.get(k, {}).values())
+        state = dec.get(k) or ("delete" if any(v in ("flip", "unfit") for v in vs) else
+                               "keep" if len(vs) >= 2 and all(v == "ok" for v in vs) else "review")
+        if state == "keep" and ck.get(k):
+            out.add(ck[k])
+    return out
 
 
 def sample_key(label, rule_id, payload):

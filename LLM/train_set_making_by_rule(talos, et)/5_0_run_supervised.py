@@ -1,12 +1,16 @@
 """[5.0 지도학습 실행기] 화면 6 의 '비교'·'확정'을 별도 프로세스로 실행한다 (잠금 supervised: 한 번에 하나).
 
     python 5_0_run_supervised.py compare --base "26 상반기" --dev ips --dev waf [--mode new|all] [--include-compared]
-    python 5_0_run_supervised.py finalize --version "26 하반기"
+    python 5_0_run_supervised.py export --version "26 하반기"
+    python 5_0_run_supervised.py approve --version "26 하반기" --rev 2 [--reason "…"] [--exp E0]
 
   compare   5.5 신규 학습데이터(08_dataset)를 기준 버전과 비교 → 샘플별 등급·요약·엑셀 (11_supervised/compared/)
             --mode new  새로 생긴 샘플의 피처만 계산 (기본) / all  피처·기준 모델을 모두 다시 계산
             --include-compared  확정된 버전에서 이미 비교한 샘플도 다시 비교 (기본은 뺌)
-  finalize  5.7 버전 확정 → 기준 버전 + 선별한 샘플의 학습 파일(CSV)·로그 내보내기 (11_supervised/versions/<이름>/)
+  export    5.7 1차 확정 (후보, rev) → 기준 버전 + 선별한 샘플(+ 데이터 추가)의 학습 파일(CSV)·로그 내보내기
+            (11_supervised/versions/<이름>/, 초안 → rev 1, 후보 → rev+1). 예전 이름 finalize 도 같다 (2026-10-30~)
+  approve   5.7 최종 승인 (확정): 최신 rev 의 피처 테스트(5.4 eval-version)가 목표를 넘을 때. 못 넘으면 --reason 이 있어야 함
+            (빠르게 끝나서 진행 상태 파일은 쓰지 않음, 잠금만 잡음)
 
 진행 상태는 .run/supervised.json (전체 %·남은 시간·끝날 시각·실행 계획, 지금 단계·처리 수, 결과),
 중지 요청은 .run/supervised.stop (화면의 '중지').
@@ -334,14 +338,34 @@ def main():
     c.add_argument("--mode", choices=["new", "all"], default="new")
     c.add_argument("--include-compared", action="store_true")
     c.add_argument("--workers", type=int, default=0)
-    f = sub.add_parser("finalize", help="버전 확정·내보내기")
-    f.add_argument("--version", required=True)
+    for cmd, what in (("export", "1차 확정 (후보, rev) 내보내기"), ("finalize", "(예전 이름) = export")):
+        f = sub.add_parser(cmd, help=what)
+        f.add_argument("--version", required=True)
+    a = sub.add_parser("approve", help="최종 승인 (확정): 최신 rev 의 피처 테스트가 목표를 넘을 때")
+    a.add_argument("--version", required=True)
+    a.add_argument("--rev", type=int, required=True)
+    a.add_argument("--reason", default="", help="목표에 못 미쳐도 승인할 때의 사유 (manifest 에 남음)")
+    a.add_argument("--exp", help="판단에 쓰는 실험 (기본: 저장한 목표의 실험, 없으면 E0)")
     args = ap.parse_args()
     if sys.stdout is not None:
         sys.stdout.reconfigure(errors="replace")
 
     RT = _load("runtime", "0_0a_runtime.py")
     C = _load("sup_common", "5_0a_common.py")
+    if args.cmd == "approve":                           # 빠르게 끝남: 잠금만 (내보내기와 겹치지 않게), 진행 상태는 그대로
+        holder = RT.acquire_lock(JOB, by="5_0", cmd="approve", version=args.version)
+        if holder:
+            print(f"이미 실행 중입니다 (PID {holder.get('pid')}, {holder.get('cmd')})")
+            return 2
+        try:
+            rec = _load("sup_versions", "5_7_versions.py").approve(args.version, args.rev, args.reason, args.exp)
+            print(json.dumps(rec, ensure_ascii=False, indent=1))
+            return 0
+        except ValueError as e:
+            print(f"승인하지 않음: {e}")
+            return 1
+        finally:
+            RT.release_lock(JOB)
     info = {"cmd": args.cmd, "base": getattr(args, "base", None), "version": getattr(args, "version", None),
             "devs": getattr(args, "dev", None) or list(C.DEVICES), "mode": getattr(args, "mode", None)}
     holder = RT.acquire_lock(JOB, by="5_0", **info)
@@ -380,7 +404,7 @@ def main():
         else:
             V = _load("sup_versions", "5_7_versions.py")
             ctx.set_plan("finalize", lambda est: V.finalize_plan(args.version, timing, est), {}, timing)
-            out = V.finalize(args.version, ctx)
+            out = V.export(args.version, ctx)
             ctx.finish(state="done", result=out)
         C.write_json(C.CACHE / "timing.json", ctx.save_timing(C.read_json(C.CACHE / "timing.json", {})))   # 다음 실행의 예상
     except C.Stopped as e:

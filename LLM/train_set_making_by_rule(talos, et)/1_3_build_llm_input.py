@@ -165,8 +165,10 @@ def conditions(r):
       {"type": "regex", "in": "uri", "pattern": "service\\x3d...", "flags": "U"}  ← 정규식 (Snort pcre)
       {"type": "regex", "in": "payload", "pattern": "^(UNION SELECT|...)", "flags": "Ri",
        "after": {"in": "uri", "value": "id="}}   ← R(상대): 기준 content 'id=' 가 끝난 자리부터 검사 (^ 도 그 자리)
+      {"type": "content", "in": "payload", "value": "\\x0a", "negated": true, "position": {"within": 100},
+       "after": {"in": "payload", "value": "ICount="}}   ← 'ICount=' 뒤 100바이트 안에 줄바꿈이 없어야 함 (2026-11-03)
     """
-    out = []
+    out, last = [], None
     for c in r["contents"]:
         item = {"type": "content", "in": buf_name(c["buffer"], r), "value": c["value"]}
         if c.get("nocase"):
@@ -176,6 +178,11 @@ def conditions(r):
         pos = {k: c[k] for k in ("offset", "depth", "distance", "within") if k in c}
         if pos:
             item["position"] = pos
+        # 상대 위치가 있는 부정 content 의 기준 = 바로 앞의 부정 아닌 content (같은 버퍼일 때만, 3_0a_common.neg_anchors 와 같음)
+        if c.get("negated") and ("distance" in pos or "within" in pos) and last and last["in"] == item["in"]:
+            item["after"] = last
+        if not c.get("negated"):
+            last = {"in": item["in"], "value": item["value"], **({"nocase": True} if item.get("nocase") else {})}
         out.append(item)
     for p, a in zip(r["pcres"], regex_anchors(r)):
         item = {"type": "regex", "in": buf_name(p["buffer"], r),

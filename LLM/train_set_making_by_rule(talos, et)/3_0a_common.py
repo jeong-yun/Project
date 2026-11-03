@@ -169,6 +169,11 @@ def role_config(roles, role, override):
     cfg = dict(roles.get(role) or {"temperature": None, "max_tokens": 8000, "model": ""})
     if override:
         provider, _, model = override.partition(":")
+        # 다른 역할 줄이 같은 provider:model 이면 그 줄의 temperature·max_tokens 를 쓴다 (2026-11-03:
+        # --generator openai:gpt-6-luna 에 생성 줄의 temperature 0.9 가 가면 HTTP 400 - gpt-6-luna 는 1 만 받음)
+        same = next((r for n, r in roles.items() if n != role and model and (r.get("provider"), r.get("model")) == (provider, model)), None)
+        if same and (provider, model) != (cfg.get("provider"), cfg.get("model")):
+            cfg["temperature"], cfg["max_tokens"] = same.get("temperature"), same.get("max_tokens") or cfg.get("max_tokens")
         cfg["provider"] = provider
         if model:
             cfg["model"] = model
@@ -731,6 +736,28 @@ def expand_repeats(text):
     return REPEAT_RE.sub(rep, text)
 
 
+# base64 표기 (LLM_프롬프트.md 생성 규칙 12, 2026-11-03): 생성 모델은 base64 를 바르게 계산하지 못한다 (base64_data 룰 3개에서
+# 'System.Diagnostics' 가 'System.Directories' 로 바뀌거나 인코딩을 아예 안 해 공격 10개씩이 모두 코드 검사에서 떨어짐, 진행보고 11-03 3절).
+# 디코딩한 값을 {{B64:원문}} 으로 쓰게 하고 코드가 인코딩한다. 원문 안의 \xNN 은 그 바이트, 나머지 글자는 UTF-8.
+B64_RE = re.compile(r"\{\{B64:(.*?)\}\}", re.S)
+
+
+def expand_codes(text):
+    """생성·검토 응답의 표기를 펼친다: {{REPEAT:A:3}} → 'AAA' 를 먼저, 그다음 {{B64:abc}} → 'YWJj'."""
+    text = expand_repeats(text)
+    if not isinstance(text, str) or "{{B64:" not in text:
+        return text
+    def enc(m):
+        s, out, pos = m.group(1), bytearray(), 0
+        for h in _ESC_HEX.finditer(s):
+            out += s[pos:h.start()].encode("utf-8")
+            out.append(int(h.group(1), 16))
+            pos = h.end()
+        out += s[pos:].encode("utf-8")
+        return base64.b64encode(bytes(out)).decode("ascii")
+    return B64_RE.sub(enc, text)
+
+
 def repeat_tail(text, span=240, max_unit=8):
     """응답이 짧은 문자열의 반복으로 끝났는지 (반복 루프로 출력 한도까지 간 경우). 반복 단위 또는 None."""
     t = (text or "").rstrip()
@@ -744,6 +771,34 @@ def repeat_tail(text, span=240, max_unit=8):
                 start -= 1
             return t[start:start + k]
     return None
+
+
+REPEAT_CUT_MIN = 5          # 응답 끝에서 같은 단위가 이만큼 이어지면 '반복 중 끊김' (repeat_cut). 6자 이상 단위는 3번
+
+
+def repeat_cut(text, min_rep=REPEAT_CUT_MIN, max_unit=12):
+    """응답이 짧은 단위의 반복 중에 끝났는지 → (단위, 이어진 수) 또는 None. solar-pro4 는 같은 무늬가 약 23토큰 이어지면
+    출력을 멈춘다 ('..%2f' 6번째, '%2e%2e%2f' 4번째, '\\x00' 8~9번째, 같은 글자 23토큰, 진행보고 11-03 1절). 출력 한도·반복
+    루프(repeat_tail)보다 훨씬 짧아 예전에는 '잘림' 으로 보지 않았다. 같은 단위 min_rep 번 이상 (6자 이상 긴 단위는 3번 이상)이고
+    8자 이상. 단위는 반복이 시작된 순서대로 ('f..%2' 가 아니라 '..%2f')."""
+    t = (text or "").rstrip()
+    best = None
+    for k in range(1, max_unit + 1):
+        need = min_rep if k < 6 else min(min_rep, 3)
+        if len(t) < k * need:
+            break
+        unit = t[-k:]
+        if unit.isspace() or (k > 1 and len(set(unit)) == 1):
+            continue                                # 한 글자 반복은 k=1 로만 센다
+        n = 1
+        while len(t) - (n + 1) * k >= 0 and t[len(t) - (n + 1) * k:len(t) - n * k] == unit:
+            n += 1
+        if n >= need and n * k >= 8 and (best is None or n * k > best[2]):
+            start = len(t) - n * k                  # 반복이 시작된 곳을 찾아 그 순서대로
+            while start > 0 and t[start - 1] == t[start - 1 + k]:
+                start -= 1
+            best = (t[start:start + k], (len(t) - start) // k, n * k)
+    return best[:2] if best else None
 
 
 def parallel_settings(run):
@@ -910,6 +965,14 @@ RELATIVE_MAX_TRIES = 50        # 기준 content 가 여러 번 나오면 앞에�
 #   - URI: 겹친 / 를 하나로 본 것도 함께 (Snort multi_slash 정규화)
 #   - 바이너리: 글자 \xNN (기존 장비 로그 표기)·%XX(80 이상)를 바이트로 본 것도 함께
 CHECK_FIXES = True
+# 코드 검사 고침 2 (2026-11-03, 진행보고 11-03 1·2절): '샘플 없음' 69룰 중 36룰이 아래 두 가지로 떨어졌다 (False = 고치기 전, 비교·시험용).
+#   - 위치(within·distance·depth·offset)가 있는 부정 content 는 그 창 안에서만 찾는다. 예전에는 위치를 보지 않아 버퍼 전체에서 찾았고,
+#     'isdataat:100,relative; content:!"|0A|"; within:100;'(앞 content 뒤 100바이트 안에 줄바꿈 없음) 같은 룰은 헤더 줄바꿈 때문에
+#     모든 공격 샘플이 떨어졌다. 상대 위치의 기준(after)은 바로 앞의 부정 아닌 content 이고 같은 버퍼일 때만 쓴다 (neg_anchors,
+#     아니면 예전처럼 버퍼 전체). isdataat(최소 길이)는 지금처럼 보지 않는다.
+#   - 파이썬 re 가 읽지 못하는 PCRE 문법((?-i)…(?i) 처럼 중간에서 대소문자 구분을 켜고 끄기, \h)은 regex 모듈 V1 로 읽는다.
+NEG_WINDOW = True
+REGEX_V1 = True
 _ESC_HEX = re.compile(r"\\x([0-9a-fA-F]{2})")
 _PCT_HIGH = re.compile(r"%[89a-fA-F][0-9a-fA-F]")
 _B64_RUN = re.compile(r"[A-Za-z0-9+/_-]{8,}={0,2}")
@@ -969,6 +1032,86 @@ def _after_pieces(text, after):
     return out
 
 
+@functools.lru_cache(maxsize=None)
+def _compile_v1(pattern, flags):
+    """re 가 읽지 못하는 정규식을 regex 모듈 V1 로 (REGEX_V1 주석). 그래도 안 되거나 regex 모듈이 없으면 None."""
+    if _regex is None:
+        return None
+    fl = _regex.V1
+    for a, b in ((re.I, _regex.I), (re.S, _regex.S), (re.M, _regex.M), (re.X, _regex.X)):
+        if flags & a:
+            fl |= b
+    try:
+        return _regex.compile(pattern, fl)
+    except Exception:
+        return None
+
+
+def _v1_search(rx, pattern, text):
+    """regex 모듈 V1 검사 한 번 (시간 제한 REGEX_TIMEOUT) → True / False / None(시간 초과)."""
+    try:
+        return rx.search(text, timeout=REGEX_TIMEOUT) is not None
+    except TimeoutError:
+        REGEX_TIMEOUTS[pattern] += 1
+        return None
+
+
+def _pos_int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def neg_anchors(conds):
+    """상대 위치(within·distance)가 있는 부정 content 에 기준 content(after)를 넣은 사본 (NEG_WINDOW 주석).
+    기준 = 룰 순서에서 바로 앞의 부정 아닌 content, 같은 버퍼일 때만. 넣을 것이 없으면 conds 그대로."""
+    out, last, changed = [], None, False
+    for c in conds:
+        if c.get("type") != "content":
+            out.append(c)
+            continue
+        pos = c.get("position") or {}
+        if c.get("negated") and "after" not in c and ("within" in pos or "distance" in pos) \
+                and last and last["in"] == c.get("in", "payload"):
+            c = dict(c, after=last)
+            changed = True
+        if not c.get("negated"):
+            last = {"in": c.get("in", "payload"), "value": c.get("value", "")}
+            if c.get("nocase"):
+                last["nocase"] = True
+        out.append(c)
+    return out if changed else conds
+
+
+def _neg_window_found(c, v, texts):
+    """위치가 있는 부정 content 의 값이 창 안에 나오는지 → True / False, 창을 정할 수 없으면 None (그때는 예전처럼 버퍼 전체).
+    상대 위치: 기준 content 가 나온 자리(앞에서부터 RELATIVE_MAX_TRIES 곳)마다 [끝 + distance, + within) 창. 기준이 있는 텍스트에서
+    모든 자리의 창에 값이 있어야 '나옴' (한 자리라도 창에 없으면 Snort 가 그 자리로 맞춘다). 절대 위치: [offset, offset + depth)."""
+    pos = c["position"]
+    rel = "within" in pos or "distance" in pos
+    a = c.get("after")
+    if rel and not (a and a.get("in", "payload") == c.get("in", "payload")):
+        return None
+    keys = ("distance", "within") if rel else ("offset", "depth")
+    nums = {k: _pos_int(pos[k]) for k in keys if k in pos}
+    if any(x is None for x in nums.values()):             # byte_extract 변수 등 (예: within:protocol_len)
+        return None
+    lo, span = nums.get(keys[0], 0), nums.get(keys[1])
+    for t in texts:
+        tt, vv = (t.lower(), v.lower()) if c.get("nocase") else (t, v)
+        if rel:
+            av = unescape_value(a.get("value", ""))
+            starts = [m.end() for m in _anchor_rx(av, bool(a.get("nocase"))).finditer(t)][:RELATIVE_MAX_TRIES] if av else [0]
+            if not starts:
+                continue                                    # 기준이 없으면 그 조건(기준 content)이 이미 어긋남
+        else:
+            starts = [0]
+        if all(vv in tt[max(0, s + lo):(max(0, s + lo) + span) if span is not None else None] for s in starts):
+            return True
+    return False
+
+
 def check_condition(c, parts):
     """조건 하나를 만족하면 True, 아니면 False, 판단 불가(정규식 오류·검사 시간 초과)면 None."""
     where = c.get("in", "payload")
@@ -982,19 +1125,22 @@ def check_condition(c, parts):
     texts = _variants(parts.get(where, parts["payload"]), where)
     if c["type"] == "content":
         v = unescape_value(c.get("value", ""))
-        found = any((v.lower() in t.lower()) if c.get("nocase") else (v in t) for t in texts)
+        found = (_neg_window_found(c, v, texts) if NEG_WINDOW and c.get("negated") and c.get("position") else None)
+        if found is None:
+            found = any((v.lower() in t.lower()) if c.get("nocase") else (v in t) for t in texts)
     else:
         flags = 0
         for ch, fl in (("i", re.I), ("s", re.S), ("m", re.M), ("x", re.X)):
             if ch in c.get("flags", ""):
                 flags |= fl
         rx = _compile(c["pattern"], flags)
-        if rx is None:
+        v1 = _compile_v1(c["pattern"], flags) if rx is None and REGEX_V1 else None
+        if rx is None and v1 is None:
             return None
         found, unknown = False, False
         for t in texts:
             for piece in (_after_pieces(t, after) if after else (t,)):
-                r = regex_search(rx, c["pattern"], flags, piece)
+                r = _v1_search(v1, c["pattern"], piece) if v1 is not None else regex_search(rx, c["pattern"], flags, piece)
                 if r:
                     found = True
                     break
@@ -1029,7 +1175,8 @@ def _rule_anchors(text):
 def with_anchors(rule):
     """룰의 조건 목록 (검사용). 예전 입력·요청 파일이면 룰 원문을 보고 고친 사본:
     - R 정규식에 기준 content(after)가 없으면(2026-10-30 전) 룰 원문에서 찾아 채운다.
-    - 요청 방향 룰의 file_data 조건이 응답 본문(response_body)이면(2026-10-30 오후 전) 요청 본문(body)으로."""
+    - 요청 방향 룰의 file_data 조건이 응답 본문(response_body)이면(2026-10-30 오후 전) 요청 본문(body)으로.
+    - 상대 위치가 있는 부정 content 에 기준 content(after)가 없으면(2026-11-03 전) 조건 순서에서 채운다 (neg_anchors, 원문 불필요)."""
     conds = rule.get("conditions", [])
     raw = rule.get("rule") or ""
     need_r = RELATIVE_REGEX and any(c.get("type") == "regex" and "R" in c.get("flags", "") and "after" not in c for c in conds)
@@ -1037,7 +1184,7 @@ def with_anchors(rule):
         c.get("in") == "response_body" or (c.get("after") or {}).get("in") == "response_body" for c in conds)
     # 원문이 없으면(예: 1.4 의 {"conditions": …}) 채울 수 없으니 그대로 - 원문 없는 룰끼리 캐시 키가 같아 섞이지 않게
     if not raw or not (need_r or need_fd):
-        return conds
+        return neg_anchors(conds) if NEG_WINDOW else conds
     key = (rule.get("id"), rule_hash(rule), need_r, need_fd)
     hit = _ANCHORS["cache"].get(key)
     if hit is None:
@@ -1052,14 +1199,14 @@ def with_anchors(rule):
         if need_fd:
             hit = [_fd_body(c) for c in hit]
         _ANCHORS["cache"][key] = hit
-    return hit
+    return neg_anchors(hit) if NEG_WINDOW else hit
 
 
 def local_check(sample, rule):
     """샘플 검사 → {"result": "ok"|"fail"|"unknown", "reasons": [...]}
 
     anomalies: 모든 조건을 만족해야 ok. normal: 조건을 하나라도 어겨야 ok (모두 만족하면 탐지될 수 있으므로 fail).
-    위치(depth·distance 등)는 보지 않는 근사 검사.
+    위치(depth·distance 등)는 부정 content 의 창(NEG_WINDOW)만 보고 나머지는 보지 않는 근사 검사.
     """
     http = sample.get("http", "")
     if "|||" in http:
@@ -1083,6 +1230,22 @@ def local_check(sample, rule):
     if not failed and unknown:   # 어긴 조건이 확인되지 않음 → 룰이 정상이라고 하는지 알 수 없음
         return {"result": "unknown", "reasons": ["정규식 해석 불가"]}
     return {"result": "ok", "reasons": []}
+
+
+def fix2_touch(rule):
+    """코드 검사 고침 2(NEG_WINDOW·REGEX_V1)가 결과를 바꿀 수 있는 룰: 위치가 있는 부정 content, 또는 re 로 못 읽는 정규식
+    (화면 4 검증 판 5 가 다시 확인할 줄)."""
+    for c in (rule or {}).get("conditions", []):
+        if c.get("type") == "content" and c.get("negated") and c.get("position"):
+            return True
+        if c.get("type") == "regex":
+            fl = 0
+            for ch, f in (("i", re.I), ("s", re.S), ("m", re.M), ("x", re.X)):
+                if ch in c.get("flags", ""):
+                    fl |= f
+            if _compile(c.get("pattern", ""), fl) is None:
+                return True
+    return False
 
 
 def valid_sample(s):

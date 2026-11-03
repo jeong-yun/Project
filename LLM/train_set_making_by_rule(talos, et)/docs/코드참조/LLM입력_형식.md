@@ -46,7 +46,7 @@
 | `negated` | 이 값이 없어야 함 (true일 때만 있음) |
 | `position` | `depth`, `offset`, `distance`, `within` 중 있는 것만 |
 | `pattern`, `flags` | 정규식과 플래그 (U=uri, H=header, P=body, i=대소문자 무시 등). `type: "regex"`에만 있음 |
-| `after` | R(상대) 정규식의 기준 content `{"in", "value"[, "nocase"]}` - 룰 원문에서 바로 앞 content. 정규식은 이 값이 끝난 바로 뒤부터 검사 (`^` 도 그 자리). 정규식 `in` 이 `payload`(버퍼 표시 없음)면 `after.in` 버퍼에서만 이어서 검사. R 정규식에만 있음 (2026-10-30~) |
+| `after` | R(상대) 정규식의 기준 content `{"in", "value"[, "nocase"]}` - 룰 원문에서 바로 앞 content. 정규식은 이 값이 끝난 바로 뒤부터 검사 (`^` 도 그 자리). 정규식 `in` 이 `payload`(버퍼 표시 없음)면 `after.in` 버퍼에서만 이어서 검사. R 정규식에만 있음 (2026-10-30~). 상대 위치(`within`·`distance`)가 있는 **부정 content** 에도 있다 (2026-11-03~): 바로 앞의 부정 아닌 content 가 같은 버퍼일 때 그 값. 코드 검사는 그 값이 나온 자리 뒤 `[distance, distance + within)` 창에서만 부정 값을 찾는다 (예: `ICount=` 뒤 100바이트 안에 줄바꿈 없음). 예전 입력·요청 파일은 `with_anchors` 가 조건 순서에서 채운다 |
 
 ## attack_type 값
 

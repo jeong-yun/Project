@@ -6,6 +6,9 @@
      룰마다 정규식 조건에 실제로 맞는 짧은 예시(regex_examples, 코드가 만들고 확인)를 붙인다 (LLM_설정.md '정규식 예시')
   2. 응답에서 룰별 JSON 을 꺼낸다. JSON 이 없거나, 응답이 출력 한도에서 잘려(반복 루프) 빠진 룰이 있으면
      **그 룰만** '재시도 횟수' 안에서 다시 요청한다 (반복을 {{REPEAT:문자열:횟수}} 로 쓰라는 주의를 붙여서)
+     응답이 짧은 단위의 반복 중에 끝났으면(끝에서 같은 단위 5번 이상, solar-pro4 가 같은 무늬 약 23토큰에서 출력을 멈춤)
+     그것도 '잘림' 으로 보고, 그 단위를 짚은 주의를 붙이고 끊긴 룰을 요청 맨 뒤로 보낸다 (2026-11-03~)
+     한 룰이 객체 여러 개로 오면(공격 객체 + 정상 객체) 샘플을 합친다 (2026-11-03~, 전에는 마지막 객체만 남음)
      재시도까지 끝나도 끝까지 읽힌 룰이 하나도 없으면(요청 실패), 응답이 룰 객체 중간에서 끊긴 룰 중 끝까지 온
      공격 샘플이 요청 수의 절반 이상인 룰은 그 샘플만 쓴다 (meta 의 rules_salvaged. 2026-10-30~)
   3. 긴 반복 표기를 펼치고, 샘플마다 코드 검사(local_check) 결과를 붙인다 → 다음 단계 검토 모델이 참고
@@ -31,6 +34,7 @@ import datetime as dt
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 import threading
 import time
@@ -59,8 +63,9 @@ def user_message(rules, n_a, n_n, hint="", examples=True):
             f"- anomalies {n_a}개는 서로 다른 공격 변형이어야 한다 (인코딩·파라미터·경로·값을 바꿔서).\n"
             f"- 교과서 예제처럼 짧고 공격만 눈에 띄는 요청은 쓰지 않는다. 실제 공격 트래픽처럼 정상 파라미터·헤더 사이에 공격을 넣고, "
             f"User-Agent 는 잘리지 않은 실제 문자열을 쓴다 (지시문 생성 규칙 3·8번).\n"
-            f"- 같은 문자열을 20번 넘게 이어 써야 하면(버퍼 오버플로의 AAAA…, 긴 ../ 나열, %00 반복) 직접 쓰지 말고 "
-            f"{{{{REPEAT:문자열:횟수}}}} 로 쓴다 (지시문 생성 규칙 11번).\n"
+            f"- 같은 단위를 5번 이상 이어 써야 하면(버퍼 오버플로의 AAAA…, ../ 나 ..%2f 나열, \\x00·%00 반복, 0000…) 직접 쓰지 말고 "
+            f"{{{{REPEAT:단위:횟수}}}} 로 쓴다 (예: {{{{REPEAT:..%2f:8}}}}, {{{{REPEAT:A:300}}}}, 지시문 생성 규칙 11번). "
+            f"직접 이어 쓰면 응답이 그 자리에서 끊긴다.\n"
             + (f"- regex_examples 는 코드가 만든, 그 정규식에 실제로 맞는 최소 형태다. 흔한 형태가 정규식에 안 맞는 경우가 많으니"
                f"(예: `<.+\\/script` 는 보통의 `</script>` 와 불일치) anomalies 의 정규식 부분은 이 예시의 구조를 끝 글자까지 따르고 "
                f"(note 가 있으면 따른다), 그대로 복사하지 말고 실제 공격 안에 넣는다.\n" if examples else "") +
@@ -77,11 +82,24 @@ def provenance(cfg, prompt, prompt_file):
 
 
 def parse_rules(text, todo, got):
-    """응답 하나에서 아직 없는 룰(todo)의 객체를 got 에 더한다 → 남은 룰."""
+    """응답 하나에서 아직 없는 룰(todo)의 객체를 got 에 더한다 → 남은 룰.
+    한 룰이 객체 여러 개로 오면(solar-pro4: 공격 10개 객체 + 정상 5개 객체) 샘플을 합친다. 2026-11-03 전에는 마지막 객체만 남아
+    공격 샘플을 잃었다 (47요청 · 99룰, 진행보고 11-03)."""
     want = {r["id"] for r in todo}
-    got.update({o["id"]: o for o in C.parse_json_lines(text)
-                if isinstance(o, dict) and o.get("id") in want and isinstance(o.get("samples"), list)})
+    new = {}
+    for o in C.parse_json_lines(text):
+        if isinstance(o, dict) and o.get("id") in want and isinstance(o.get("samples"), list):
+            new[o["id"]] = dict(new[o["id"]], samples=new[o["id"]]["samples"] + o["samples"]) if o["id"] in new else o
+    got.update(new)
     return [r for r in todo if r["id"] not in got]
+
+
+def cut_rule_last(todo, text):
+    """응답이 끊긴 룰(원문에서 마지막으로 시작한 룰 객체)을 남은 룰 맨 뒤로 - 다시 요청할 때 나머지 룰이 먼저 나오게."""
+    ids = re.findall(r'\{\s*"id"\s*:\s*"([^"]+)"', text)
+    if not ids:
+        return todo
+    return [r for r in todo if r["id"] != ids[-1]] + [r for r in todo if r["id"] == ids[-1]]
 
 
 def salvage(rules, got, texts, run):
@@ -118,16 +136,24 @@ def generate(name, rules, cfg, providers, run, prompt, gen_dir, log):
         if not todo:
             break
         unit = C.repeat_tail(text)               # 반복 루프로 출력 한도까지 간 응답이면 반복 단위
-        cut = unit is not None or u.get("finish_reason") == "length"
+        rc = None if unit else C.repeat_cut(text)          # 짧은 단위 반복 중에 멈춘 응답이면 (단위, 수) - solar-pro4
+        cut = unit is not None or rc is not None or u.get("finish_reason") == "length"
         if got and not cut:
             break      # 응답은 끝까지 왔는데 몇 룰만 빠뜨림 → 빠진 룰은 다음 실행 때 새 요청으로 (3.1 이 rules_missing 을 다시 넣음)
         if cut:
             cuts += 1
-            hint = ((f"[주의] 직전 응답이 '{unit}' 를 출력 한도까지 반복하다 잘렸다. " if unit else
-                     "[주의] 직전 응답이 출력 한도에서 잘렸다. ") +
-                    "같은 문자열을 20번 넘게 이어 써야 하면 {{REPEAT:문자열:횟수}} 로 쓰고, 직접 길게 반복하지 않는다.")
+            if rc:       # 끊긴 룰은 맨 뒤로, 그 단위를 짚어 주의 (예전에는 '잘림' 으로 보지 않아 같은 자리에서 3번 끊겼다)
+                todo = cut_rule_last(todo, text)
+                hint = (f"[주의] 직전 응답이 '{rc[0]}' 를 {rc[1]}번 이어 쓰다 끊겼다 (같은 무늬가 길게 이어지면 출력이 멈춘다). "
+                        f"같은 단위를 5번 이상 이어 써야 하면 직접 쓰지 말고 {{{{REPEAT:{rc[0]}:{max(8, rc[1] + 2)}}}}} 처럼 쓴다. "
+                        "../·..%2f 나열, \\x00·%00 같은 바이트 표기, AAAA·0000 같은 같은 글자도 같다 (지시문 생성 규칙 11).")
+            else:
+                hint = ((f"[주의] 직전 응답이 '{unit}' 를 출력 한도까지 반복하다 잘렸다. " if unit else
+                         "[주의] 직전 응답이 출력 한도에서 잘렸다. ") +
+                        "같은 단위를 5번 이상 이어 써야 하면 {{REPEAT:단위:횟수}} 로 쓰고, 직접 길게 반복하지 않는다.")
         if attempt < tries:
-            why = f" - '{unit}' 반복 루프" if unit else (" - 출력 한도에서 잘림" if cut else "")
+            why = (f" - '{unit}' 반복 루프" if unit else f" - '{rc[0]}' {rc[1]}번 반복 중 끊김" if rc
+                   else (" - 출력 한도에서 잘림" if cut else ""))
             if not got:
                 log.warning("  %s: 응답에서 JSON 을 찾지 못함 (%d번째)%s - 다시 요청", name, attempt, why)
             else:
@@ -156,7 +182,7 @@ def write_result(name, rules, got, texts, run, gen_dir, log, info):
         samples = []
         for s in g["samples"]:
             if isinstance(s, dict) and isinstance(s.get("http"), str):
-                s = dict(s, http=C.expand_repeats(s["http"]))      # {{REPEAT:A:2000}} → 실제 반복
+                s = dict(s, http=C.expand_codes(s["http"]))      # {{REPEAT:A:2000}} → 실제 반복, {{B64:…}} → base64
             if C.valid_sample(s):
                 s = C.repair_sample(s, r)           # URI 의 공백 등으로 깨진 요청 줄 → %20
                 if realistic:                     # 잘린 UA·빠진 기본 헤더·틀린 Content-Length → 실제 값
@@ -195,13 +221,19 @@ def write_result(name, rules, got, texts, run, gen_dir, log, info):
 
 def reparse(names, req_dir, gen_dir, cfg, run, dry_run, log):
     """--reparse: LLM 을 부르지 않고 저장된 응답 원문(raw/<이름>.try*.txt)을 지금 해석기로 다시 읽어 결과를 만든다
-    (해석 실패한 요청용, 토큰 0). 시도 순서대로 룰마다 처음 읽힌 객체 (생성 때와 같음), 그 뒤 끊긴 룰의 샘플 꺼내기.
-    이미 결과가 있는 요청은 건너뛴다. meta 의 generator·provenance 는 지금 설정 값 (원문을 만든 모델과 같은지 확인)."""
+    (해석 실패한 요청, 해석기를 고친 뒤의 요청용, 토큰 0). 시도 순서대로 룰마다 처음 읽힌 객체 (생성 때와 같음), 그 뒤 끊긴 룰의
+    샘플 꺼내기. 앞 시도보다 오래된 try 파일(예전 실행에 남은 것)은 쓰지 않는다. 이미 결과가 있는 요청은 건너뛴다 (먼저 _replaced 로).
+    예전 결과의 meta 가 _2_generated/_replaced 아래에 있으면 generator·provenance·usage·seconds 를 이어받고(같은 호출의 원문이므로),
+    없으면 지금 설정 값을 쓴다 (원문을 만든 모델과 같은지 확인, --generator 로 바꿀 수 있음)."""
     prompt = C.fill_prompt(C.GEN_PROMPT_FILE.read_text(encoding="utf-8"), run)
     code = 0
     for name in names:
         req = req_dir / f"{name}.jsonl"
-        raws = sorted((gen_dir / "raw").glob(f"{name}.try*.txt"), key=lambda p: int(p.name.rsplit(".try", 1)[1][:-4]))
+        raws = []
+        for p in sorted((gen_dir / "raw").glob(f"{name}.try*.txt"), key=lambda p: int(p.name.rsplit(".try", 1)[1][:-4])):
+            if raws and p.stat().st_mtime < raws[-1].stat().st_mtime:
+                break
+            raws.append(p)
         if not req.exists() or not raws:
             log.error("  %s: 요청 파일 또는 응답 원문(raw/%s.try*.txt)이 없음", name, name)
             code = 1
@@ -219,16 +251,23 @@ def reparse(names, req_dir, gen_dir, cfg, run, dry_run, log):
             log.info("  %s: 원문 %d개 → 룰 %d/%d개 읽힘%s (dry-run: 쓰지 않음)", name, len(texts), len(got), len(rules),
                      f", 끊긴 룰에서 샘플 꺼냄 {len(cut)}개" if cut else "")
             continue
+        rep = gen_dir / "_replaced"
+        prev = sorted(rep.rglob(f"{name}.meta.json"), key=lambda p: p.stat().st_mtime) if rep.is_dir() else []
+        old = json.loads(prev[-1].read_text(encoding="utf-8")) if prev else {}
         try:
             write_result(name, rules, got, texts, run, gen_dir, log,
-                         {"seconds": None, "generator": f"{cfg['provider']}:{cfg['model']}",      # 시간·토큰 평균에서 빠지게
-                          "cut_responses": sum(C.repeat_tail(t) is not None for t in texts),
-                          "regex_examples": C.run_yes(run, "정규식 예시"), "usage": {},
-                          "provenance": provenance(cfg, prompt, C.GEN_PROMPT_FILE),
+                         {"seconds": old.get("seconds"),          # 예전 meta 가 없으면 None - 시간·토큰 평균에서 빠지게
+                          "generator": old.get("generator") or f"{cfg['provider']}:{cfg['model']}",
+                          "cut_responses": old.get("cut_responses", sum(C.repeat_tail(t) is not None for t in texts)),
+                          "regex_examples": old.get("regex_examples", C.run_yes(run, "정규식 예시")), "usage": old.get("usage") or {},
+                          "provenance": old.get("provenance") or provenance(cfg, prompt, C.GEN_PROMPT_FILE),
                           "reparsed": {"at": dt.datetime.now().isoformat(timespec="seconds"), "raw": [p.name for p in raws],
                                        "raw_saved_at": dt.datetime.fromtimestamp(max(p.stat().st_mtime for p in raws))
                                        .isoformat(timespec="seconds"),
-                                       "note": "저장된 응답 원문을 다시 해석 (LLM 호출 없음, 원래 호출 토큰은 기록 없음)"}})
+                                       "prev_meta": prev[-1].relative_to(gen_dir).as_posix() if prev else None,
+                                       "note": "저장된 응답 원문을 다시 해석 (LLM 호출 없음). " +
+                                               ("generator·provenance·usage 는 예전 결과 meta 에서" if old
+                                                else "원래 호출 토큰은 기록 없음")}})
         except C.LLMError as e:
             log.error("  %s: %s", name, e)
             code = 1
@@ -281,7 +320,8 @@ def main(argv=None):
     ap.add_argument("--force", action="store_true", help="이미 생성한 요청·실패가 반복된 요청도 다시")
     ap.add_argument("--reparse", metavar="NAMES",
                     help="LLM 을 부르지 않고 저장된 응답 원문(raw/<이름>.try*.txt)을 지금 해석기로 다시 읽어 결과를 만든다 "
-                         "(쉼표 구분 요청 이름, 응답 해석에 실패한 요청용, 이미 결과가 있으면 건너뜀)")
+                         "(쉼표 구분 요청 이름, 응답 해석에 실패한 요청·해석기를 고친 뒤의 요청용, 이미 결과가 있으면 건너뜀 - "
+                         "다시 하려면 예전 결과를 _replaced 로 옮긴다)")
     ap.add_argument("--dry-run", action="store_true", help="호출하지 않고 무엇을 할지만 출력")
     args = ap.parse_args(argv)
     log = C.setup_logging("3_2_generate")

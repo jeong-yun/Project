@@ -106,7 +106,7 @@ def merge(rule, gen, review, policy, rejected, unknown_policy="drop", realistic=
             rejected.append(dict(ref, stage="검토", reason=v.get("reason", "drop"))); continue
         s = dict(s)
         if verdict == "fix" and isinstance(v.get("http"), str) and v["http"].strip():
-            s["http"], s["note"] = C.expand_repeats(v["http"]), v.get("note", s.get("note", ""))
+            s["http"], s["note"] = C.expand_codes(v["http"]), v.get("note", s.get("note", ""))
             s = C.repair_sample(s, rule)
         if realistic:
             s = C.realistic_sample(s, rule)

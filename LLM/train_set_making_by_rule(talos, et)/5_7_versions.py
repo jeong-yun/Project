@@ -18,28 +18,43 @@ IPS·WAF 공통 선별 (2026-10-26~): 두 장비에 **같은 신규 샘플**을 
   - 상한은 등급·label·패턴마다 적용하고, 넘치면 룰을 돌아가며 고른다 (같은 패턴 안에서도 여러 룰, 룰 안에서는 LLM 샘플 먼저).
   - '불일치'(4. 화면 검증) 빼기: 기본 켬.  보류 옵션(담당관 회신 전, 기본 끔): '정합 (룰 기준)' 공격 빼기, python-requests UA 정상 빼기.
   - 룰·공격 유형 조정: 빼기(그 샘플 모두 뺌) / 넣기(상한 없이 제거 외 모두 넣음, 룰만).
-  - '불일치' 중 LLM 재확인이 label 맞다고 한 것은 남기기 (2026-10-29~, 기본 끔): 4. 화면 'LLM 재확인'(3.6) 결과를 5.5 가 비교 표의
+  - '불일치' 중 LLM 재확인 합의가 확인됨인 것은 남기기 (2026-10-29~, 기본 끔): 4. 화면 'LLM 재확인'(3.6) 결과를 5.5 가 비교 표의
     lk 로 남기고(샘플 내용 지문 ck), 이 옵션을 켜면 '불일치' 빼기에서 그 샘플은 빼지 않는다. 담은 뒤 lk 가 바뀌면 확정하지 않음.
+    2026-11-02~: lk = '불일치' 합의가 확인됨(두 모델 이상 모두 맞음 또는 화면의 유지 표시·사람 판단) - 한 모델만 맞음이면 남기지 않음.
   - 목표 합계 (2026-10-29~, 비우면 안 씀): B 의 패턴당 상한 대신, 다른 선택(A·C·룰 '넣기')을 먼저 넣고 모자란 수를 B 에서
     정확히 채운다. B 패턴당 상한을 1, 2, 3 … 으로 올리며 목표를 넘지 않는 가장 큰 k 까지 넣고, 남은 수는 k+1 번째 샘플을
     패턴을 돌아가며 1개씩 (_fill). C 로는 채우지 않는다.
-버전
+버전 (2026-10-30~: 초안 → 1차 확정(후보, rev) → 피처 테스트 → 데이터 추가 → 최종 승인(확정))
   초안   이름, 기준 버전, 조건(날짜·출처), 선별 옵션, 룰·유형 조정 + 저장할 때의 비교 스냅숏(장비별), mode = combined
-         (예전 장비별 초안은 '새 방식으로 다시 담기' 를 해야 확정된다 - 옵션·조정은 그대로)
-  확정   두 장비의 비교 스냅숏이 지금 비교 결과와 같고 그 뒤 학습데이터가 바뀌지 않았을 때만 내보낸다 (사람이 확인한 그대로).
-         고른 샘플 하나의 목록을 IPS·WAF 각각의 로그 줄·피처 코드로 내보낸다 (두 장비의 추가 샘플·비교한 샘플이 같음)
-         11_supervised/versions/<이름>/
+         (예전 장비별 초안은 '새 방식으로 다시 담기' 를 해야 내보낸다 - 옵션·조정은 그대로)
+  1차 확정 (후보, status candidate, rev 1·2·…)  export
+         두 장비의 비교 스냅숏이 지금 비교 결과와 같고 그 뒤 학습데이터가 바뀌지 않았을 때만 내보낸다 (사람이 확인한 그대로).
+         고른 샘플 하나의 목록(+ '데이터 추가')을 IPS·WAF 각각의 로그 줄·피처 코드로 내보낸다 (두 장비의 추가 샘플이 같음)
+         11_supervised/versions/<이름>/        ← 늘 최신 rev 의 파일 (지난 rev 는 revs/rev<n>/ 에 작은 파일만)
            <장비>_train.csv       기준 학습 파일 + 추가 샘플 (method, payload, label, 표준모델 피처 = 표준모델 학습 형식)
+                                  = 기준 base_rows 행 + <장비>_added.csv 순서의 추가 행 (manifest dev.<장비>.base_rows)
            <장비>_raw.log         기준 원본 로그 + 추가 샘플 로그 줄 (|||, 8필드)   ← 로그 형식 파일은 여기서만 만든다
-           <장비>_added.csv       추가한 샘플 (날짜·줄·sk·룰·합친 등급 grade·이 장비 등급 grade_dev·근거·payload)
-           <장비>_considered.txt  이번 버전에서 비교한 샘플 지문 (다음 비교에서 뺌)
-           manifest.json          기준·조건·옵션·mode·수·파일 크기·sha256 + samples(추가·비교한 수, 추가 샘플 지문 목록의 sha1)
-         확정한 버전은 다음 버전(예: 27 상반기)의 기준이 된다.
+           <장비>_added.csv       추가한 샘플 (날짜·줄·sk·룰·합친 등급 grade·이 장비 등급 grade_dev·근거·origin·added_by·payload)
+                                  origin = new (신규 학습데이터) / manual (외부 파일) - 5.4 eval-version 이 by_origin 으로 나눔,
+                                  gen_origin = llm·augmented, added_by = 선별·넣기:룰·넣기:공격 유형·넣기:샘플·manual:<파일>
+           <장비>_considered.txt  이번 버전에서 비교한 샘플 지문 (확정 뒤 다음 비교에서 뺌)
+           manifest.json          기준·조건·옵션·mode·rev·데이터 추가·수·파일 크기·sha256 + samples + approval (최종 승인 기록)
+           manual/                외부 파일 원본 (데이터 추가), eval/rev<n>/<장비>_<실험>.json 피처 테스트 결과 (5.4 eval-version)
+         후보는 아직 다음 버전의 기준이 될 수 없다. 승인 전에만 '데이터 추가'(룰·공격 유형·샘플 강제로 넣기, 외부 파일) →
+         다시 내보내면 rev+1. 버리기(discard) = 폴더를 _보관/ 로 옮기고 이름을 다시 쓸 수 있게.
+  최종 승인 (확정, status final)  approve
+         최신 rev 의 피처 테스트(장비별, 기본 실험 E0 = 표준 피처만)가 목표(precision·recall·F1 최소값, '기준 버전보다 낮지
+         않음')를 넘을 때. 못 넘으면 사유를 적어야 승인되고 manifest·versions.json 에 남는다. 승인한 버전은 잠기고
+         다음 버전(예: 27 상반기)의 기준이 된다.
 """
 
+import csv
 import hashlib
 import importlib.util
+import io
 import json
+import os
+import re
 import shutil
 import threading
 import time
@@ -60,13 +75,20 @@ def _load(name, file):
 C = _load("sup_common_v", "5_0a_common.py")
 DEFAULT_OPTIONS = {"A": "all", "B": 20, "C": 20,          # "all" = 전부, 0 = 빼기, n = 패턴당 n개까지
                    "exclude_bad": True, "exclude_rule_based": False, "exclude_python_ua_normal": False,
-                   "keep_llm_ok": False,                  # '불일치' 빼기에서 LLM 재확인(4. 화면, 3.6)이 label 맞다고 한 것은 남김
+                   "keep_llm_ok": False,                  # '불일치' 빼기에서 LLM 재확인(4. 화면, 3.6) 합의가 확인됨인 것은 남김
                    "target": None}                        # 목표 합계 (None = 안 씀, 있으면 B 는 이 합계까지 채움)
 OPTION_TEXT = {"exclude_bad": "'불일치' 빼기", "exclude_rule_based": "'정합 (룰 기준)' 공격 빼기 (보류)",
                "exclude_python_ua_normal": "python-requests UA 정상 빼기 (보류)",
-               "keep_llm_ok": "'불일치' 중 LLM 재확인이 label 맞다고 한 것은 남기기"}
+               "keep_llm_ok": "'불일치' 중 LLM 재확인 합의가 확인됨인 것은 남기기"}
 HOLD = {"rule": "'정합 (룰 기준)' 공격", "pyua": "python-requests UA 정상"}   # 보류 옵션의 대상 (화면에서 따로 봄)
 PY_UA = 1                                                  # 5.5 FLAG_BITS
+STEPS = ("초안", "1차 확정", "피처 테스트", "데이터 추가", "최종 승인")
+DEFAULT_EXP = "E0"                                         # 피처 테스트 기본 실험 = 표준 피처만 (최종 승인 판단에 씀)
+METRICS = ("precision", "recall", "f1")
+ADD_KINDS = {"rules": "룰", "types": "공격 유형", "samples": "샘플"}   # 데이터 추가: 강제로 넣기 단위
+SK_RE = re.compile(r"^[0-9a-f]{16}$")
+MANUAL_MAX = 50000                                         # 외부 파일 하나의 최대 줄 수
+ARCHIVE = BASE / "_보관"                                   # 버린 후보를 옮기는 곳
 
 
 # ── 선별 ────────────────────────────────────────────────────────────────
@@ -450,6 +472,8 @@ def save_draft(name, base_name, conditions, options, overrides, tables):
     cur = next((x for x in v["versions"] if x["name"] == name), None)
     if cur and cur.get("status") == "final":
         raise ValueError(f"'{name}' 은 이미 확정된 버전입니다 - 다른 이름을 쓰세요")
+    if cur and cur.get("status") == "candidate" and cur.get("base") != base_name:
+        raise ValueError(f"'{name}' 은 기준 '{cur.get('base')}' 의 후보입니다 - 같은 기준으로만 선별을 다시 담습니다")
     if not tables or any(d not in tables for d in C.DEVICES):
         raise ValueError("IPS·WAF 비교 결과가 둘 다 있어야 합니다 - 먼저 두 장비 모두 비교하세요")
     for t in tables.values():
@@ -466,6 +490,10 @@ def save_draft(name, base_name, conditions, options, overrides, tables):
             "draft_counts": counts, "created_at": (cur or {}).get("created_at") or C.now_iso(), "updated_at": C.now_iso()}
     if item["options"]["keep_llm_ok"]:                  # 비교 표의 LLM 재확인 표시가 담은 뒤 바뀌면 확정하지 않는다
         item["lk_sig"] = lk_sig(tc)
+    if cur and cur.get("status") == "candidate":        # 후보: 선별만 바꾸고 rev·데이터 추가·목표는 그대로 (다음 내보내기 = rev+1)
+        keep = {k: cur[k] for k in ("status", "rev", "revs", "additions", "targets", "counts", "files", "exported_at")
+                if k in cur}
+        item.update(keep, spec_changed_at=C.now_iso())
     if cur:
         cur.clear()
         cur.update(item)
@@ -516,7 +544,11 @@ def version_rows():
              "mode": x.get("mode", ""),                 # combined = IPS·WAF 공통 선별 ('' = 예전 장비별 초안·확정)
              "kind": x.get("kind", ""), "created_at": x.get("created_at", ""), "finalized_at": x.get("finalized_at", ""),
              "updated_at": x.get("updated_at", ""), "conditions": x.get("conditions"), "options": x.get("options"),
-             "overrides": x.get("overrides"), "snapshot": x.get("snapshot"), "note": x.get("note", ""), "dev": {}}
+             "overrides": x.get("overrides"), "snapshot": x.get("snapshot"), "note": x.get("note", ""), "dev": {},
+             # 1차 확정(후보)·최종 승인 (2026-10-30~): 최신 rev, rev 별 내보낸 수, 데이터 추가, 목표, 승인 기록
+             "rev": x.get("rev"), "exported_at": x.get("exported_at", ""), "spec_changed_at": x.get("spec_changed_at", ""),
+             "revs": [{k: r.get(k) for k in ("rev", "exported_at", "counts", "forced", "manual_rows")} for r in x.get("revs") or []],
+             "additions": x.get("additions") or {}, "targets": x.get("targets") or {}, "approval": x.get("approval")}
         for dev in C.DEVICES:
             cnt = (x.get("counts") or {}).get(dev) or {}
             d = {"rows": cnt.get("rows"), "label": cnt.get("label"), "added": cnt.get("added"),
@@ -524,7 +556,7 @@ def version_rows():
             dc = (x.get("draft_counts") or {}).get(dev)
             if dc:
                 d["draft"] = dc
-            if x.get("status") == "final" and x.get("kind") != "external":
+            if x.get("status") in ("final", "candidate") and x.get("kind") != "external":
                 d["files"] = {k: str(Path(p).name) for k, p in ((x.get("files") or {}).get(dev) or {}).items()}
             r["dev"][dev] = d
         rows.append(r)
@@ -647,14 +679,374 @@ def _check_ready(v, ver):
                 raise ValueError(f"{dev.upper()} {date} 학습데이터가 비교한 뒤 바뀌었습니다 (새 생성·수정 반영) - 다시 비교하세요")
 
 
-def finalize(name, ctx):
-    """초안 → 확정: 기준 버전 + 선별한 샘플의 학습 파일·로그를 내보내고 다음 버전의 기준으로 쓸 수 있게 한다."""
+def _forced(tc, cand, ver):
+    """'데이터 추가'로 강제로 넣는 샘플 (공통 표의 줄 번호). 룰·공격 유형 단위는 조건(날짜·출처) 안에서, 샘플 단위(sk)는
+    조건과 상관없이. 둘 다 제거(기준·신규 내부 중복)는 넣지 않는다 → (줄 번호 목록, 줄 번호 → 넣은 까닭, 중복이라 못 넣은 수)."""
+    add = ver.get("additions") or {}
+    rules, types, sks = set(add.get("rules") or []), set(add.get("types") or []), set(add.get("samples") or [])
+    if not (rules or types or sks):
+        return [], {}, 0
+    R, T, G, SK, rname, tname = tc["rule"], tc["type"], tc["g"], tc["sk"], tc["rules"], tc["types"]
+    in_cond, out, why, dup = set(cand), [], {}, 0
+    for k in range(tc["n"]):
+        hit = ("samples" if SK[k] in sks else "rules" if k in in_cond and rname[R[k]] in rules
+               else "types" if k in in_cond and tname[T[k]] in types else None)
+        if hit is None:
+            continue
+        if G[k] == 0:
+            dup += 1
+            continue
+        out.append(k)
+        why[k] = hit
+    return out, why, dup
+
+
+# ── 데이터 추가 (최종 승인 전 후보만): 강제로 넣기·외부 파일 ─────────────────────
+
+def _candidate(v, name):
+    ver = C.get_version(v, name)
+    if ver.get("status") != "candidate":
+        raise ValueError(f"'{name}' 은 1차 확정(후보) 버전이 아닙니다 - 데이터 추가·목표·승인·버리기는 후보에서만 합니다")
+    return ver
+
+
+def set_additions(name, kind, values, action="add"):
+    """강제로 넣기 목록 바꾸기: kind = rules(룰 id) | types(공격 유형) | samples(샘플 지문 sk), action = add | remove | set.
+    다음 내보내기(rev+1)부터 들어간다."""
+    if kind not in ADD_KINDS or action not in ("add", "remove", "set"):
+        raise ValueError("kind/action")
+    vals = list(dict.fromkeys(str(x).strip() for x in (values or []) if str(x).strip()))
+    if any(len(x) > 200 for x in vals):
+        raise ValueError("값이 너무 깁니다")
+    if kind == "samples" and any(not SK_RE.match(x) for x in vals):
+        raise ValueError("샘플 지문(sk)은 16자리 16진수입니다 (4. 화면 줄의 sk)")
+    v = C.load_versions()
+    ver = _candidate(v, name)
+    add = ver.setdefault("additions", {})
+    cur = list(add.get(kind) or [])
+    if action == "add":
+        cur += [x for x in vals if x not in cur]
+    elif action == "remove":
+        drop = set(vals)
+        cur = [x for x in cur if x not in drop]
+    else:
+        cur = vals
+    add[kind] = cur
+    ver["updated_at"] = C.now_iso()
+    C.save_versions(v)
+    return add
+
+
+def _train_form(raw):
+    """학습 로그 payload → 학습 파일 payload (5.0b raw_to_payload 와 같은 규칙: 요청 줄 끝 뒤의 '\\n' 만 줄바꿈으로)."""
+    m = re.search(r" HTTP/\d(\.\d)?(?=\\n|$)", raw)
+    if not m:
+        return raw
+    return raw[:m.end()] + raw[m.end():].replace("\\r\\n", "\n").replace("\\n", "\n")
+
+
+def _h(s):
+    return hashlib.sha1(s.encode("utf-8", "replace")).hexdigest()
+
+
+_M14 = {}
+
+
+def _one_line(http):
+    """HTTP 원문 → 학습 로그 한 줄 payload (1.4 one_line 과 같은 규칙, 매핑 md 의 'payload 줄바꿈')."""
+    if "M" not in _M14:
+        M = _load("dataset_v", "1_4_build_dataset.py")
+        _M14.update(M=M, st=M.load_mapping()[0])
+    return _M14["M"].one_line(_M14["M"].normalize_http(http.replace("\r\n", "\n")), _M14["st"])
+
+
+def parse_manual(text):
+    """외부 파일 → ([{method, raw(학습 로그 payload), label, attack_type, line(로그 줄이면 그 줄)}], [오류]).
+    CSV: 머리줄에 method·payload·label (attack_type 은 있으면). payload 는 HTTP 원문(줄바꿈 그대로) 또는 학습 로그처럼 '\\n' 표기.
+    로그: '|||' 로 나눈 8필드 줄 (시각|||출발IP|||포트|||목적IP|||포트|||method|||payload|||label)."""
+    rows, errors = [], []
+    lines = [x for x in text.replace("\r\n", "\n").split("\n") if x.strip()]
+    if not lines:
+        return rows, ["빈 파일"]
+    if "|||" in lines[0]:
+        for i, line in enumerate(lines, 1):
+            f = C.split_log_line(line)
+            if len(f) != 8:
+                errors.append(f"{i}번째 줄: '|||' 로 나눈 칸이 {len(f)}개 (8개여야 함)")
+            elif f[7] not in ("anomalies", "normal"):
+                errors.append(f"{i}번째 줄: label '{f[7][:20]}' (anomalies·normal 만)")
+            elif not f[6].strip():
+                errors.append(f"{i}번째 줄: payload 가 비었음")
+            else:
+                rows.append({"method": f[5], "raw": f[6], "label": f[7], "attack_type": "", "line": line})
+    else:
+        rd = csv.DictReader(io.StringIO(text.lstrip("﻿")))
+        cols = [c.strip().lower() for c in (rd.fieldnames or [])]
+        miss = [c for c in ("method", "payload", "label") if c not in cols]
+        if miss:
+            return [], [f"CSV 머리줄에 {', '.join(miss)} 열이 없습니다 (method, payload, label[, attack_type])"]
+        for i, r in enumerate(rd, 2):
+            r = {(k or "").strip().lower(): (val or "") for k, val in r.items()}
+            label, payload = r.get("label", "").strip(), r.get("payload", "")
+            if label not in ("anomalies", "normal"):
+                errors.append(f"{i}번째 줄: label '{label[:20]}' (anomalies·normal 만)")
+            elif not payload.strip():
+                errors.append(f"{i}번째 줄: payload 가 비었음")
+            elif "|||" in payload or "|||" in r.get("method", ""):
+                errors.append(f"{i}번째 줄: 로그 구분자 '|||' 가 있음")
+            else:
+                raw = _one_line(payload) if "\n" in payload.replace("\r\n", "\n") else payload
+                rows.append({"method": r.get("method", "").strip(), "raw": raw, "label": label,
+                             "attack_type": r.get("attack_type", "").strip(), "line": None})
+    if len(rows) > MANUAL_MAX:
+        errors.append(f"줄이 {len(rows):,}개 - 파일 하나에 {MANUAL_MAX:,}줄까지")
+    return rows, errors
+
+
+_BASE_PAY = {}                                          # 기준 학습 파일 → (수정 시각, payload 지문 집합)
+
+
+def _base_payloads(path):
+    """기준 학습 파일의 payload 지문 (중복 검사, 파일이 그대로면 지난 결과)."""
+    import pandas as pd
+    p = Path(path)
+    mt = p.stat().st_mtime
+    hit = _BASE_PAY.get(str(p))
+    if hit and hit[0] == mt:
+        return hit[1]
+    s = pd.read_csv(p, usecols=["payload"], dtype=str, keep_default_na=False)["payload"]
+    keys = {_h(x) for x in s}
+    _BASE_PAY[str(p)] = (mt, keys)
+    return keys
+
+
+def manual_dups(v, ver, rows):
+    """외부 파일 줄의 중복: 기준(두 장비 학습 파일 중 하나라도), 신규(이 후보 최신 rev 의 추가 샘플), 파일 안 → 줄마다 까닭(없으면 '')."""
+    base = C.get_version(v, ver["base"])
+    bkeys = set()
+    for dev in C.DEVICES:
+        csv_p, _ = C.version_files(v, base, dev)
+        bkeys |= _base_payloads(csv_p)
+    new = set()
+    added = C.VERDIR / ver["name"] / f"{C.DEVICES[0]}_added.csv"
+    if added.is_file():
+        with open(added, encoding="utf-8-sig", newline="") as f:
+            for r in csv.DictReader(f):
+                if r.get("origin") != "manual":
+                    new.add(_h(r.get("payload", "")))
+    seen, out = set(), []
+    for r in rows:
+        k = _h(r["raw"])
+        out.append("기준" if _h(_train_form(r["raw"])) in bkeys else "신규" if k in new else "파일 안" if k in seen else "")
+        seen.add(k)
+    return out
+
+
+def add_manual(name, filename, data):
+    """외부 파일 넣기: 형식·label 을 검사하고(오류가 있으면 넣지 않음), 중복 수를 세어 manual/ 에 원본을 둔다.
+    다음 내보내기(rev+1)부터 들어간다 (중복 줄은 빼고, added.csv 에 origin = manual)."""
+    v = C.load_versions()
+    ver = _candidate(v, name)
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise ValueError("UTF-8 텍스트 파일이 아닙니다 (CSV 또는 '|||' 로그)")
+    rows, errors = parse_manual(text)
+    if errors:
+        raise ValueError(f"형식 오류 {len(errors)}건 - 고친 뒤 다시 넣으세요: " + "; ".join(errors[:5]))
+    dup = manual_dups(v, ver, rows)
+    d = C.VERDIR / name / "manual"
+    d.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", Path(filename or "manual.csv").name)[-80:] or "manual.csv"
+    fn = f"{time.strftime('%Y%m%d-%H%M%S')}_{safe}"
+    (d / fn).write_bytes(data)
+    lab = Counter(r["label"] for r, x in zip(rows, dup) if not x)
+    entry = {"file": fn, "orig": Path(filename or "").name, "format": "log" if rows[0]["line"] else "csv", "rows": len(rows),
+             "use": sum(1 for x in dup if not x), "label": {k: lab.get(k, 0) for k in ("anomalies", "normal")},
+             "dup": {k: dup.count(k) for k in ("기준", "신규", "파일 안")}, "sha256": hashlib.sha256(data).hexdigest(),
+             "added_at": C.now_iso()}
+    v = C.load_versions()
+    ver = _candidate(v, name)
+    ver.setdefault("additions", {}).setdefault("manual", []).append(entry)
+    ver["updated_at"] = C.now_iso()
+    C.save_versions(v)
+    return entry
+
+
+def remove_manual(name, fn):
+    """넣은 외부 파일 빼기 (원본은 manual/_빠짐/ 으로 옮김)."""
+    v = C.load_versions()
+    ver = _candidate(v, name)
+    add = ver.setdefault("additions", {})
+    before = add.get("manual") or []
+    add["manual"] = [m for m in before if m["file"] != fn]
+    if len(add["manual"]) == len(before):
+        raise ValueError("그 파일이 없습니다")
+    src = C.VERDIR / name / "manual" / fn
+    if src.is_file():
+        (src.parent / "_빠짐").mkdir(exist_ok=True)
+        os.replace(src, src.parent / "_빠짐" / fn)
+    ver["updated_at"] = C.now_iso()
+    C.save_versions(v)
+    return add
+
+
+def set_targets(name, targets):
+    """최종 승인 목표: {장비: {precision, recall, f1 (0~1, 비우면 안 봄), not_below_base}, exp: 판단에 쓰는 실험}."""
+    v = C.load_versions()
+    ver = _candidate(v, name)
+    out = {"exp": str((targets or {}).get("exp") or DEFAULT_EXP)}
+    for dev in C.DEVICES:
+        t = (targets or {}).get(dev) or {}
+        d = {"not_below_base": bool(t.get("not_below_base"))}
+        for m in METRICS:
+            x = t.get(m)
+            if x in (None, ""):
+                d[m] = None
+                continue
+            try:
+                x = float(x)
+            except (TypeError, ValueError):
+                raise ValueError(f"{dev.upper()} {m} 목표는 0~1 사이 수")
+            if not 0 <= x <= 1:
+                raise ValueError(f"{dev.upper()} {m} 목표는 0~1 사이 수")
+            d[m] = round(x, 4)
+        out[dev] = d
+    ver["targets"] = out
+    ver["updated_at"] = C.now_iso()
+    C.save_versions(v)
+    return out
+
+
+def eval_results(name):
+    """피처 테스트 결과 {rev: {장비: {실험: 결과}}} - 5.4 eval-version 이 versions/<이름>/eval/rev<n>/<장비>_<실험>.json 에 쓴다."""
+    out = {}
+    d = C.VERDIR / name / "eval"
+    for rd in sorted(d.glob("rev*")) if d.is_dir() else []:
+        m = re.match(r"rev(\d+)$", rd.name)
+        if not m:
+            continue
+        for p in sorted(rd.glob("*.json")):
+            mm = re.match(r"(ips|waf)_(.+)\.json$", p.name)
+            r = C.read_json(p, None) if mm else None
+            if isinstance(r, dict):
+                out.setdefault(int(m.group(1)), {}).setdefault(mm.group(1), {})[mm.group(2)] = r
+    return out
+
+
+def check_targets(targets, res, exp=None):
+    """승인 판단: 장비마다 실험 exp 결과가 목표(precision·recall·F1 최소값)와 '기준 버전보다 낮지 않음'을 넘는지.
+    res = {장비: {실험: 결과}} (한 rev). → {complete, met, exp, dev: {장비: {has, met, fails, metrics, base}}}"""
+    exp = exp or (targets or {}).get("exp") or DEFAULT_EXP
+    out, complete, met = {}, True, True
+    for dev in C.DEVICES:
+        r = ((res or {}).get(dev) or {}).get(exp)
+        t = (targets or {}).get(dev) or {}
+        if not r:
+            complete = False
+            out[dev] = {"has": False, "met": False, "fails": ["테스트 결과 없음"]}
+            continue
+        b, fails = r.get("base") or {}, []
+        if r.get("quick"):                              # 표본(빠른 확인) 결과만으로는 승인하지 않음 - 그래도 승인하려면 사유
+            fails.append("빠른 확인(표본) 결과 - 전체 테스트 필요")
+        for m in METRICS:
+            x, want = r.get(m), t.get(m)
+            if want is not None and (x is None or x < want):
+                fails.append(f"{m} {x if x is None else round(x, 4)} < 목표 {want}")
+            if t.get("not_below_base") and x is not None and b.get(m) is not None and round(x, 4) < round(b[m], 4):
+                fails.append(f"{m} {round(x, 4)} < 기준 버전 {round(b[m], 4)}")
+        out[dev] = {"has": True, "met": not fails, "fails": fails, "metrics": {m: r.get(m) for m in METRICS + ("miss", "fp")},
+                    "base": {m: b.get(m) for m in METRICS + ("miss", "fp")}}
+        met = met and not fails
+    return {"complete": complete, "met": complete and met, "exp": exp, "dev": out}
+
+
+def approve(name, rev, reason="", exp=None):
+    """최종 승인 → 확정 (잠금, 다음 버전의 기준). 최신 rev 의 두 장비 테스트가 목표를 넘어야 하고, 못 넘으면 사유가 있어야 한다.
+    승인 기록(시각·rev·실험·지표·기준 지표·목표·사유)을 manifest.json 과 versions.json 에 남긴다."""
+    v = C.load_versions()
+    ver = _candidate(v, name)
+    if int(rev) != ver.get("rev"):
+        raise ValueError(f"최신 rev {ver.get('rev')} 만 승인합니다 (그 rev 로 테스트한 결과로)")
+    targets = ver.get("targets") or {}
+    chk = check_targets(targets, eval_results(name).get(int(rev)), exp)
+    if not chk["complete"]:
+        raise ValueError(f"rev {rev} 의 IPS·WAF 테스트 결과(실험 {chk['exp']})가 둘 다 있어야 승인합니다")
+    reason = str(reason or "").strip()
+    if not chk["met"] and not reason:
+        raise ValueError("목표에 못 미칩니다 - 그래도 승인하려면 사유를 적으세요: " +
+                         "; ".join(f"{d.upper()} {', '.join(x['fails'])}" for d, x in chk["dev"].items() if x["fails"]))
+    if ver.get("spec_changed_at") and ver["spec_changed_at"] > (ver.get("exported_at") or ""):
+        raise ValueError("선별을 다시 담은 뒤 내보내지 않았습니다 - 다시 내보내기(rev+1)·테스트 뒤 승인하세요")
+    now = C.now_iso()
+    rec = {"at": now, "rev": int(rev), "exp": chk["exp"], "targets": targets, "met": chk["met"], "reason": reason[:1000],
+           "metrics": {d: x.get("metrics") for d, x in chk["dev"].items()}, "base": {d: x.get("base") for d, x in chk["dev"].items()},
+           "fails": {d: x["fails"] for d, x in chk["dev"].items()}}
+    mp = C.VERDIR / name / "manifest.json"
+    m = C.read_json(mp, None)
+    if not m or m.get("rev") != int(rev):
+        raise ValueError(f"{mp} 이 rev {rev} 의 것이 아닙니다 - 다시 내보내세요")
+    m.update(status="final", finalized_at=now, approval=rec)
+    C.write_json(mp, m)
+    ver.update(status="final", finalized_at=now, approval=rec)
+    C.save_versions(v)
+    return rec
+
+
+class _NoCtx:
+    def progress(self, *a, **k):
+        pass
+
+    def log(self, msg):
+        pass
+
+
+def discard(name):
+    """승인 전 후보 버리기: 폴더를 _보관/버린후보_<시각>_<이름>/ 으로 옮기고 목록에서 빼서 이름을 다시 쓸 수 있게 한다."""
+    v = C.load_versions()
+    _candidate(v, name)
+    src, dst = C.VERDIR / name, None
+    if src.exists():
+        ARCHIVE.mkdir(exist_ok=True)
+        dst = ARCHIVE / f"버린후보_{time.strftime('%Y%m%d-%H%M%S')}_{name}"
+        _rename_dir(src, dst, _NoCtx(), wait_s=20.0)
+    v = C.load_versions()
+    v["versions"] = [x for x in v["versions"] if x["name"] != name]
+    C.save_versions(v)
+    return {"moved_to": str(dst) if dst else ""}
+
+
+def _commit_rev(tmp, out, prev_rev, ctx):
+    """rev 2 부터: 지난 rev 의 작은 파일(manifest·added·considered)은 revs/rev<n>/ 에 남기고, 새 파일로 바꾼다
+    (큰 학습 파일·로그는 같은 이름으로 바로 바꿔 쓴다 - 지난 rev 것은 남기지 않음, manifest 의 sha256 으로 확인)."""
+    keep = out / "revs" / f"rev{prev_rev}"
+    keep.mkdir(parents=True, exist_ok=True)
+    for p in out.glob("*"):
+        if p.is_file() and not p.name.endswith(("_train.csv", "_raw.log")):
+            shutil.copy2(p, keep / p.name)
+    for p in sorted(tmp.iterdir()):
+        for k in range(40):
+            try:
+                os.replace(p, out / p.name)
+                break
+            except PermissionError:
+                if k == 39:
+                    raise PermissionError(f"{out / p.name} 을 바꾸지 못했습니다 - 그 파일을 연 프로그램을 닫고 다시 내보내세요")
+                ctx.progress(0, 0, text=f"{p.name} 가 잠겨 있어 기다렸다 다시 ({k + 1}번째)")
+                time.sleep(0.5)
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def export(name, ctx):
+    """1차 확정 (후보): 초안 → rev 1, 후보 → rev+1 (데이터 추가 반영). 기준 버전 + 선별한 샘플(+ 강제로 넣은 샘플·외부 파일)의
+    학습 파일·로그를 내보낸다. 후보는 피처 테스트·최종 승인 전이라 다음 버전의 기준이 될 수 없다."""
     import pandas as pd
     F = _load("sup_features_v", "5_0b_features.py")
     v = C.load_versions()
     ver = C.get_version(v, name)
-    if ver.get("status") != "draft":
-        raise ValueError(f"'{name}' 은 초안이 아닙니다")
+    if ver.get("status") not in ("draft", "candidate"):
+        raise ValueError(f"'{name}' 은 이미 최종 승인(확정)된 버전입니다 - 고칠 수 없습니다")
+    rev = int(ver.get("rev") or 0) + 1 if ver.get("status") == "candidate" else 1
     base = C.get_version(v, ver["base"])
     devs = [d for d in C.DEVICES if d in (ver.get("snapshot") or {})]
     if not devs:
@@ -673,15 +1065,19 @@ def finalize(name, ctx):
         raise ValueError(f"디스크 여유 {free:.1f}GB 가 모자랍니다 (내보내기 약 {need / 2 ** 30:.1f}GB + 여유 1GB 필요)")
     out = C.VERDIR / name
     tmp = C.VERDIR / f"_{name}.tmp"
-    if out.exists():
+    if rev == 1 and out.exists():
         raise ValueError(f"{out} 가 이미 있습니다")
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
+    adds = ver.get("additions") or {}
     manifest = {"name": name, "base": base["name"], "mode": "combined", "conditions": ver["conditions"],
                 "options": ver["options"], "overrides": ver["overrides"], "snapshot": ver["snapshot"],
-                "created_at": ver.get("created_at"), "finalized_at": None, "dev": {}}
-    counts, files, tc, picked = {}, {}, None, {}
+                "created_at": ver.get("created_at"), "status": "candidate", "rev": rev, "exported_at": None,
+                "finalized_at": None, "approval": None,
+                "additions": {k: adds.get(k) or [] for k in ADD_KINDS} | {"manual": [m["file"] for m in adds.get("manual") or []]},
+                "dev": {}}
+    counts, files, tc, picked, manual, mrows = {}, {}, None, {}, [], []
     try:
         for dev in devs:
             ctx.check()
@@ -693,6 +1089,15 @@ def finalize(name, ctx):
                     raise ValueError("담은 뒤 비교 결과의 LLM 재확인 표시가 바뀌었습니다 - 지금 결과로 확인하고 '버전 후보에 담기'를 다시 하세요")
                 ctx.sub(1, 3, f"공통 선별 ({tc['n']:,}개)")
                 sel, cand, why = select(tc, ver["conditions"], ver["options"], ver["overrides"])
+                forced, fwhy, fdup = _forced(tc, cand, ver)  # 데이터 추가: 강제로 넣기 (선별에 이미 든 것은 그대로)
+                sset = set(sel)
+                extra = [k for k in forced if k not in sset]
+                added_by = ["선별"] * len(sel) + ["넣기:" + ADD_KINDS[fwhy[k]] for k in extra]
+                sel = list(sel) + extra
+                manifest["forced"] = {"rules": sum(1 for k in extra if fwhy[k] == "rules"),
+                                      "types": sum(1 for k in extra if fwhy[k] == "types"),
+                                      "samples": sum(1 for k in extra if fwhy[k] == "samples"),
+                                      "already_selected": len(forced) - len(extra), "dup": fdup}
             ctx.sub(2, 3, "샘플별 등급 읽기 (rows.parquet)")
             R = pd.read_parquet(C.compared_files(base["name"], dev)["rows"])
             t_n = (C.read_json(C.compared_files(base["name"], dev)["summary"], {}) or {}).get("rows")
@@ -705,6 +1110,7 @@ def finalize(name, ctx):
                 raise ValueError("IPS·WAF 추가 샘플이 서로 다릅니다 - 비교 결과를 다시 만드세요")
             A["grade_dev"] = A["grade"]                     # 이 장비의 등급 (목록에 남김)
             A["grade"] = [C.GRADES[tc["g"][k]] for k in sel]   # 공통 등급 (선별 기준)
+            A["added_by"] = added_by
             # 고른 줄의 로그 (날짜별로 한 번 읽음) - 내용 지문이 비교 때와 같은지 확인
             ctx.step(f"{dev}:lines", final_step_text(dev, "lines", len(A)))
             lines = {}
@@ -722,9 +1128,31 @@ def finalize(name, ctx):
             bad = sum(C.sample_key(lb, r, p) != ck for lb, r, p, ck in zip(A["label"], A["rule_id"], payload, A["ck"]))
             if bad:
                 raise ValueError(f"{dev.upper()} 로그 줄 {bad}개가 비교할 때와 다릅니다 - 다시 비교하세요")
-            # 원본 로그 = 기준 원본 로그 + 추가 줄
             csv_p, log_p = C.version_files(v, base, dev)
-            ctx.step(f"{dev}:log", final_step_text(dev, "log", len(raw), log_name=log_p.name))
+            if dev == devs[0] and adds.get("manual"):       # 외부 파일: 두 장비 모두 같은 줄 (기준 중 하나·신규·파일 안 중복은 뺌)
+                ctx.sub(0, 1, "외부 파일 읽기·중복 검사")
+                bkeys = set()
+                for d2 in devs:
+                    bkeys |= _base_payloads(C.version_files(v, base, d2)[0])
+                seen = {_h(p) for p in payload}
+                for m in adds["manual"]:
+                    p = out / "manual" / m["file"]
+                    rows, errors = parse_manual(p.read_text(encoding="utf-8-sig"))
+                    if errors:
+                        raise ValueError(f"외부 파일 {m['orig'] or m['file']}: {errors[0]}")
+                    use = 0
+                    for r in rows:
+                        k = _h(r["raw"])
+                        if k in seen or _h(_train_form(r["raw"])) in bkeys:
+                            continue
+                        seen.add(k)
+                        manual.append(dict(r, file=m["file"]))
+                        use += 1
+                    mrows.append({"file": m["file"], "rows": len(rows), "use": use})
+                manifest["manual"] = mrows
+            # 원본 로그 = 기준 원본 로그 + 추가 줄 (+ 외부 파일 줄)
+            ctx.step(f"{dev}:log", final_step_text(dev, "log", len(raw) + len(manual), log_name=log_p.name))
+            mlines = [_manual_line(r, dev) for r in manual]
             lp = tmp / f"{dev}_raw.log"
             _copy(log_p, lp, ctx, "기준 로그 복사")
             with open(lp, "rb+") as f:
@@ -735,9 +1163,9 @@ def finalize(name, ctx):
                     f.seek(0, 2)
                     if end != b"\n":
                         f.write(b"\n")
-                f.write(("\n".join(raw) + "\n").encode("utf-8") if raw else b"")
+                f.write(("\n".join(raw + mlines) + "\n").encode("utf-8") if raw or mlines else b"")
             # 학습 파일 = 기준 학습 파일(표준 열만) + 추가 샘플 (payload 는 학습 파일 형식, 표준모델 피처는 원본 코드와 같은 값)
-            ctx.step(f"{dev}:csv", final_step_text(dev, "csv", len(A), csv_name=csv_p.name))
+            ctx.step(f"{dev}:csv", final_step_text(dev, "csv", len(A) + len(manual), csv_name=csv_p.name))
             ns = F.load_legacy(C.feature_code(v, dev))
             names = F.legacy_names(ns)
             head = list(pd.read_csv(csv_p, nrows=0).columns)
@@ -746,11 +1174,12 @@ def finalize(name, ctx):
                 raise ValueError(f"{dev.upper()} 기준 학습 파일의 피처 열이 표준모델 피처 파일과 다릅니다")
             cp = tmp / f"{dev}_train.csv"
             what = "기준 학습 파일 복사" if head == std else "기준 학습 파일 (표준 열만) 쓰기"
-            w = [csv_p.stat().st_size / 2 ** 20 / (150 if head == std else 15), 8, 1 + len(A) * 3e-4]   # 하위 단계 예상 비율
-            if len(A):
+            n_add = len(A) + len(manual)
+            w = [csv_p.stat().st_size / 2 ** 20 / (150 if head == std else 15), 8, 1 + n_add * 3e-4]   # 하위 단계 예상 비율
+            if n_add:
                 ctx.sub(0, 3, what, w)
             if head == std:                                 # 표준 학습 형식이면 그대로 복사
-                _copy(csv_p, cp, ctx, "" if len(A) else what)
+                _copy(csv_p, cp, ctx, "" if n_add else what)
             else:                                           # 다른 열(proba 등)이 있으면 표준 열만
                 first, done = True, 0
                 total = ((base.get("counts") or {}).get(dev) or {}).get("rows") or 0
@@ -758,7 +1187,9 @@ def finalize(name, ctx):
                     ch[std].to_csv(cp, mode="w" if first else "a", header=first, index=False, lineterminator="\n")
                     first = False
                     done += len(ch)
-                    ctx.progress(done, max(done, total), what="" if len(A) else what)
+                    ctx.progress(done, max(done, total), what="" if n_add else what)
+            ints = set(ns["regex_dict_comb"]) | set(ns["regex_dict_count"])
+            parts = []
             if len(A):
                 ctx.sub(1, 3, "피처 캐시 읽기", w)
                 fd = C.CACHE / "features" / dev / F.code_hash(C.feature_code(v, dev))
@@ -767,40 +1198,57 @@ def finalize(name, ctx):
                 miss = [pk for pk in A["pk"] if pk not in fc.index]
                 if miss:                                    # 캐시가 지워졌으면 다시 계산
                     todo = {pk: p for pk, p in zip(A["pk"], payload) if pk in set(miss)}
-                    extra = F.compute_chunk(dev, str(C.feature_code(v, dev)), list(todo.values()))[names]
-                    extra.index = list(todo.keys())
-                    fc = pd.concat([fc, extra])
-                ctx.sub(2, 3, f"추가 샘플 {len(A):,}행 쓰기", w)
+                    extra_f = F.compute_chunk(dev, str(C.feature_code(v, dev)), list(todo.values()))[names]
+                    extra_f.index = list(todo.keys())
+                    fc = pd.concat([fc, extra_f])
                 X = fc.loc[A["pk"].to_numpy(), names].reset_index(drop=True)
-                ints = set(ns["regex_dict_comb"]) | set(ns["regex_dict_count"])
+                parts.append(pd.concat([pd.DataFrame({"method": A["method"], "payload": [F.raw_to_payload(p) for p in payload],
+                                                      "label": A["label"]}), X], axis=1))
+            if manual:                                      # 외부 파일 줄: 표준모델 피처를 지금 계산
+                ctx.sub(1, 3, f"외부 파일 {len(manual):,}줄 피처 계산", w)
+                Xm = F.compute_chunk(dev, str(C.feature_code(v, dev)), [r["raw"] for r in manual])[names].reset_index(drop=True)
+                parts.append(pd.concat([pd.DataFrame({"method": [r["method"] for r in manual],
+                                                      "payload": [F.raw_to_payload(r["raw"]) for r in manual],
+                                                      "label": [r["label"] for r in manual]}), Xm], axis=1))
+            if parts:
+                ctx.sub(2, 3, f"추가 샘플 {n_add:,}행 쓰기", w)
+                new = pd.concat(parts, ignore_index=True)[std]
                 for c in names:
                     if c in ints:
-                        X[c] = X[c].round().astype("int64")
-                new = pd.DataFrame({"method": A["method"], "payload": [F.raw_to_payload(p) for p in payload],
-                                    "label": A["label"]})
-                new = pd.concat([new, X], axis=1)[std]
+                        new[c] = new[c].round().astype("int64")
                 with open(cp, "rb+") as f:
                     f.seek(-1, 2)
                     if f.read(1) != b"\n":
                         f.write(b"\n")
                 new.to_csv(cp, mode="a", header=False, index=False, lineterminator="\n")
-            # 추가한 샘플 목록·이번에 비교한 샘플 지문
+            # 추가한 샘플 목록 (학습 파일의 추가 행과 같은 순서)·이번에 비교한 샘플 지문
             ctx.step(f"{dev}:list", final_step_text(dev, "list"))
             ctx.sub(0, 2, f"추가 샘플 목록 ({dev}_added.csv)")
-            add = A[["date", "line", "sk", "ck", "rule_id", "source", "method", "label", "attack_type", "origin", "cons",
-                     "grade", "grade_dev", "holdout", "new_pat", "wrong_rf", "wrong_lg"]].copy()
+            cols = ["date", "line", "sk", "ck", "rule_id", "source", "method", "label", "attack_type", "origin", "cons",
+                    "grade", "grade_dev", "holdout", "new_pat", "wrong_rf", "wrong_lg", "added_by"]
+            add = A[cols].copy()
+            add["gen_origin"] = add["origin"]               # 생성 출처 llm·augmented (origin 은 5.4 eval-version 규격: new·manual)
+            add["origin"] = "new"
             add["payload"] = payload
+            if manual:
+                add = pd.concat([add, pd.DataFrame([{
+                    "date": "", "line": "", "sk": "m" + _h(r["raw"])[:15], "ck": C.sample_key(r["label"], "manual", r["raw"]),
+                    "rule_id": "", "source": "manual", "method": r["method"], "label": r["label"],
+                    "attack_type": r["attack_type"], "origin": "manual", "cons": "", "grade": "manual", "grade_dev": "",
+                    "holdout": "", "new_pat": "", "wrong_rf": "", "wrong_lg": "", "added_by": "manual:" + r["file"],
+                    "gen_origin": "", "payload": r["raw"]} for r in manual])], ignore_index=True)
             add.to_csv(tmp / f"{dev}_added.csv", index=False, encoding="utf-8-sig")
             ctx.sub(1, 2, f"비교한 샘플 지문 ({dev}_considered.txt)")
             ck_all = R["ck"].to_numpy()
             (tmp / f"{dev}_considered.txt").write_text("\n".join(ck_all[ix[k]] for k in cand) + "\n", encoding="utf-8")
             base_cnt = (base.get("counts") or {}).get(dev) or {}
-            lab = A["label"].value_counts()
+            lab = Counter(A["label"].tolist() + [r["label"] for r in manual])
             gl = A.groupby(["grade", "label"]).size()
             counts[dev] = {
-                "rows": int((base_cnt.get("rows") or 0) + len(A)),
+                "rows": int((base_cnt.get("rows") or 0) + n_add),
                 "label": {k: int((base_cnt.get("label") or {}).get(k, 0)) + int(lab.get(k, 0)) for k in ("anomalies", "normal")},
-                "added": int(len(A)), "added_label": {k: int(lab.get(k, 0)) for k in ("anomalies", "normal")},
+                "added": int(n_add), "added_label": {k: int(lab.get(k, 0)) for k in ("anomalies", "normal")},
+                "by_origin": {"new": int(len(A)), "manual": len(manual)},
                 "by_grade": [[g, lb, int(gl.get((g, lb), 0))] for g in C.GRADES[1:] for lb in ("anomalies", "normal")],
                 "by_type": {str(k): int(n) for k, n in A["attack_type"].value_counts().items()},
                 "by_source": {str(k): int(n) for k, n in A["source"].value_counts().items()},
@@ -815,21 +1263,47 @@ def finalize(name, ctx):
                 ctx.sub(k, len(fl), f"{p.name} ({k + 1}/{len(fl)})", w)
                 hashed[p.name] = {"bytes": p.stat().st_size, "sha256": _sha256(p, ctx)}
             manifest["dev"][dev] = {"counts": counts[dev], "base_files": {"train_csv": str(csv_p), "raw_log": str(log_p)},
-                                    "files": hashed}
+                                    "base_rows": int(base_cnt.get("rows") or 0), "added_rows": int(n_add), "files": hashed}
         ctx.step("move", MOVE_TEXT)
-        manifest["finalized_at"] = C.now_iso()
+        manifest["exported_at"] = C.now_iso()
         sks = sorted(picked[devs[0]])                       # 두 장비에 같은 샘플 (지문 목록의 sha1 로 남김)
-        manifest["samples"] = {"added": len(sks), "considered": len(cand), "one_side": tc["one_side"],
-                               "sk_sha1": hashlib.sha1("\n".join(sks).encode()).hexdigest()}
+        manifest["samples"] = {"added": len(sks) + len(manual), "new": len(sks), "manual": len(manual), "considered": len(cand),
+                               "one_side": tc["one_side"], "sk_sha1": hashlib.sha1("\n".join(sks).encode()).hexdigest()}
         C.write_json(tmp / "manifest.json", manifest)
-        _rename_dir(tmp, out, ctx)
+        if rev == 1:
+            _rename_dir(tmp, out, ctx)
+        else:
+            _commit_rev(tmp, out, rev - 1, ctx)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     v = C.load_versions()
     ver = C.get_version(v, name)
-    ver.update(status="final", finalized_at=manifest["finalized_at"], counts=counts,
-               files={dev: {"train_csv": str(out / f"{dev}_train.csv"), "raw_log": str(out / f"{dev}_raw.log")}
-                      for dev in devs})
+    info = {"rev": rev, "exported_at": manifest["exported_at"],
+            "counts": {d: {k: counts[d][k] for k in ("rows", "added", "added_label", "by_origin")} for d in devs},
+            "forced": manifest.get("forced"), "manual_rows": len(manual), "additions": manifest["additions"]}
+    ver.update(status="candidate", rev=rev, exported_at=manifest["exported_at"], counts=counts,
+               files={dev: {"train_csv": str(out / f"{dev}_train.csv"), "raw_log": str(out / f"{dev}_raw.log")} for dev in devs},
+               revs=(ver.get("revs") or []) + [info])
     C.save_versions(v)
-    return {dev: {"added": counts[dev]["added"], "rows": counts[dev]["rows"]} for dev in devs}
+    return {"rev": rev, **{dev: {"added": counts[dev]["added"], "rows": counts[dev]["rows"]} for dev in devs}}
+
+
+finalize = export                                       # 예전 이름 (5_0 finalize = export)
+
+
+def _manual_line(r, dev):
+    """외부 파일 줄 → 학습 로그 한 줄. 로그 줄로 넣었으면 그대로, CSV 면 1.4 와 같은 규칙으로 시각·주소·포트를 채운다
+    (시각 = 내보낸 시각, 출발 IP·포트 = payload 지문, 목적지 = Host 헤더 또는 매핑 md 기본값)."""
+    if r.get("line"):
+        return r["line"]
+    if "M" not in _M14:
+        _one_line("x")
+    M, st = _M14["M"], _M14["st"]
+    seed = int(_h(r["raw"]), 16)
+    http = _train_form(r["raw"])
+    d_ip, hport = M.dst_of(http, st["기본 목적지 IP"])
+    port = int(hport or st["IPS 포트" if dev == "ips" else "WAF 포트"])
+    fields = [time.strftime("%Y-%m-%d %H:%M:%S"), M.src_ip(seed), str(1024 + seed % 64511), d_ip, str(port),
+              r["method"] or "manual", r["raw"], r["label"]]
+    return "|||".join(fields)

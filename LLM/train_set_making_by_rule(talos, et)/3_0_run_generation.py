@@ -35,6 +35,7 @@
     python 3_0_run_generation.py --set all --max-requests 70 --custom-first   # 사용자 룰이 든 요청부터
     python 3_0_run_generation.py --set all --max-requests 0 # 남은 요청 전부 (비용 주의)
     python 3_0_run_generation.py --set pick --rules @목록.txt --max-requests 0 --dry-run   # 지정 룰만 다시 (완료 상태여도)
+    python 3_0_run_generation.py --set pick --rules @목록.txt --per-request 1 --max-requests 0   # 룰 하나씩 요청 (2026-11-03~)
     (화면) python 0_0_run_ui.py                             # 위 작업을 화면에서
 """
 
@@ -116,7 +117,8 @@ def run(args):
 
     if run_step("3_1a_existing_coverage.py", date) != 0:
         log.warning("기존 데이터 확인 실패 - 기존 데이터 기준 없이 진행합니다")
-    if run_step("3_1_prepare_requests.py", date + ["--set", args.set] + (["--rules", args.rules] if args.rules else [])) != 0:
+    if run_step("3_1_prepare_requests.py", date + ["--set", args.set] + (["--rules", args.rules] if args.rules else [])
+                + (["--per-request", str(args.per_request)] if args.per_request else [])) != 0:
         return 1
     codes = []
     if overlap:      # 생성과 검토를 함께: 생성된 요청부터 바로 검토 (LLM_설정.md '생성·검토 동시 진행')
@@ -149,6 +151,8 @@ def main():
     ap.add_argument("--set", choices=["delta", "all", "pick"], default="delta",
                     help="배치 종류 (기본 delta = 변경분, pick = --rules 로 지정한 룰만 다시)")
     ap.add_argument("--rules", help="--set pick: 다시 만들 룰 'id,id,…' 또는 '@파일' (생성까지 끝난 룰도 새 요청으로)")
+    ap.add_argument("--per-request", type=int, metavar="N",
+                    help="3.1 의 요청 하나에 넣을 룰 수 (기본: LLM_설정.md '호출당 룰 수'). 예: --rules 와 1 = 룰 하나씩")
     ap.add_argument("--date", help="05_llm_input 날짜 폴더 (기본: 가장 최근)")
     ap.add_argument("--max-requests", type=int, default=1, help="이번에 생성할 요청 수 (기본 1, 0 = 남은 것 전부)")
     ap.add_argument("--generator", help="생성 모델 'provider:model'")
