@@ -580,6 +580,21 @@
   - 숫자 검사는 '값+단위' 대조라 문서와 다른 표기(예: '1천 건', '3억')는 실패로 본다 — 의도한 엄격함. 회사·프로젝트 이름 같은 낱말 사실은 인용 대조와 비평가가 본다 (코드 검사 아님).
   - 이 worktree 에는 API 키가 없어 실제 실행은 시험용으로 메모리에서 직급 모델을 Claude 구독으로 바꿔 돌렸다. 평소 설정(팀원 모델 선택)으로 한 번 더 돌려 볼 것.
 
+## 2026-11-04
+
+**Claude 구독(claude_cli) '연결 안 됨' — 스토어(MSIX) 데스크톱 앱 PC 에서 CLI 를 못 찾던 문제**
+- 배경: 다른 PC 에서 Agent_office 폴더로 Claude Code(데스크톱 앱 Code 탭)를 쓰고 있는데도 화면은 claude_cli 연결 안 됨.
+- 원인 (두 가지가 겹침):
+  - `find_executable()` 이 `claude.exe` 를 못 찾음 → `not_installed`. PATH·`~/.local/bin` 에 없고, 데스크톱 앱 CLI 는 `%LOCALAPPDATA%\Claude-Data\…` 만 보고 있었는데
+    스토어(MSIX) 앱은 `%APPDATA%\Claude\claude-code\<버전>\<해시>\claude.exe` 에 둔다. 게다가 이 경로는 **앱 안에서만 보이는 가상 경로**라
+    일반 PowerShell·Streamlit 에서는 '없음' — 실제 파일은 `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude-code\…`.
+  - CLI 로그인이 없음 → `logged_out`. Code 탭은 데스크톱 앱 로그인을 넘겨받아 쓸 뿐 `~/.claude/.credentials.json` 에 구독 로그인(`claudeAiOauth`)을 남기지 않는다 (파일에는 `mcpOAuth` 만).
+- 작업: `core/claude_cli.py` `find_executable()` 이 `Packages\Claude_*\LocalCache\Roaming\Claude\claude-code\*\*\claude.exe`(앱 밖)와 `%APPDATA%\Claude\claude-code\*\*\claude.exe`(앱 안)도 찾고,
+  여러 개면 가장 최근 파일을 고름(업데이트 뒤 옛 버전 폴더가 남아도 경로를 다시 적지 않게). 테스트 1건 추가(세 위치·앱 밖·없음).
+  README 2-2 '준비'를 새 PC 용 순서(exe 찾기 → 일반 PowerShell 에서 `auth login` → `auth status` 확인 → Streamlit 재시작)와 상태별 원인 표로 다시 씀.
+- 성과: 이 PC 에서 `find_executable()` → `Packages\…\LocalCache\…\claude.exe`, `auth login` 뒤 `cli_status()` = `ok`. claude_cli·llm_factory 테스트 27건 통과.
+- 발견: 데스크톱 앱 안(Code 탭)에서 확인한 경로는 앱 밖과 다를 수 있다 — 스토어 앱의 AppData 가상화. 경로 확인은 앱 밖 PowerShell 기준으로 할 것.
+
 ---
 
 ## 누적 요약

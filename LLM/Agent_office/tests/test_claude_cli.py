@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from core.schemas import ModelSpec, RankModels
 from tests.fakes import FakeOfficeModel, Script
 
 USAGE = {"input_tokens": 10, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 1000, "output_tokens": 20}
+REAL_FIND = claude_cli.find_executable  # conftest 가 테스트마다 '설치 안 됨'으로 바꾸기 전의 원래 함수
 
 
 def result_event(text="답", **extra) -> dict:
@@ -273,6 +275,34 @@ def test_cli_status_reads_auth_status(monkeypatch):
 
     monkeypatch.setattr(claude_cli, "find_executable", lambda: None)
     assert claude_cli.cli_status() == "not_installed"
+
+
+def test_find_executable_desktop_app_cli(monkeypatch, tmp_path):
+    """PATH 에 없으면 데스크톱 앱이 함께 설치한 CLI 중 가장 최근 것.
+    스토어(MSIX) 앱의 %APPDATA%\\Claude 는 앱 밖(Streamlit 을 켠 터미널)에서는 Packages\\…\\LocalCache 로만 보인다."""
+    local, roaming = tmp_path / "local", tmp_path / "roaming"
+    data_dir, store, store_inside = (
+        local / "Claude-Data" / "x" / "claude-code" / "2.1.300" / "aaa" / "claude.exe",
+        local / "Packages" / "Claude_abc" / "LocalCache" / "Roaming" / "Claude" / "claude-code" / "2.1.309" / "bbb" / "claude.exe",
+        roaming / "Claude" / "claude-code" / "2.1.310" / "ccc" / "claude.exe",
+    )
+    for i, exe in enumerate((data_dir, store, store_inside)):
+        exe.parent.mkdir(parents=True)
+        exe.write_bytes(b"")
+        os.utime(exe, (1000 + i, 1000 + i))
+    monkeypatch.delenv("CLAUDE_CLI_PATH", raising=False)
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(claude_cli.Path, "home", lambda: tmp_path / "home")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(roaming))
+    assert REAL_FIND() == str(store_inside)
+
+    monkeypatch.setenv("APPDATA", str(tmp_path / "없음"))  # 앱 밖
+    assert REAL_FIND() == str(store)
+    store.unlink()
+    assert REAL_FIND() == str(data_dir)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "없음"))
+    assert REAL_FIND() is None
 
 
 # ─── 공급자 연결 ────────────────────────────────────────────────────

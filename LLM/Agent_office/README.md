@@ -135,12 +135,70 @@ Anthropic API 키는 크레딧이 없어 꺼 두었지만, 이 PC 에 **Claude �
   — 사용량 표에 `claude_cli` 줄이 하나도 없으면 '구독이 한 번도 성공하지 못했다'는 뜻이니 단계의 '⚠️ 대안 모델' 이유를 보세요.
 - 팀장 순서: **claude_cli Opus 5.5 → OpenAI gpt-5.5 → gpt-5.4 → (Anthropic API, 비활성) → 무료 모델**. 다른 직급은 그대로입니다.
 
-**준비**
-1. 터미널에서 `claude auth login` → 브라우저에서 구독 계정으로 승인 (`claude auth status` 에 `"loggedIn": true`).
-   데스크톱 앱(UI)의 로그인과는 별개입니다 — 앱이 띄우는 `claude -p` 는 CLI 쪽 로그인(`~/.claude/.credentials.json`)만 봅니다.
-   회사 PC 에서 '브라우저를 확인할 수 없습니다'가 나오면 터미널에 나온 로그인 주소를 휴대폰(회사망 밖)에서 열어 승인하고 코드를 붙여 넣으세요.
-2. `claude` 가 PATH 에 없으면 `.env` 에 `CLAUDE_CLI_PATH=C:\경로\claude.exe` (없으면 `~/.local/bin`, Claude 데스크톱 앱이 함께 설치한 CLI 순으로 찾음).
-3. 사이드바 ⚙️ 모델 상태에 `✅ claude_cli` 가 보이면 준비 완료 (`🔑 로그인 필요` / `⚪ Claude CLI 없음` 이면 1·2번 확인).
+**준비 (새 PC 에서 이 순서대로)**
+
+> **데스크톱 앱(또는 그 안의 Code 탭)에 로그인돼 있어도 이 앱에서는 '연결 안 됨'으로 나옵니다.**
+> Code 탭의 Claude Code 는 데스크톱 앱의 로그인을 그때그때 넘겨받아 쓸 뿐 CLI 로그인 파일을 만들지 않고,
+> 이 앱이 띄우는 `claude -p` 는 **CLI 쪽 로그인(`~/.claude/.credentials.json` 의 `claudeAiOauth`)만** 봅니다.
+> 그래서 아래 2번(`auth login`)을 PC 마다 한 번 해야 합니다.
+
+1. **claude.exe 위치 확인** — 앱(`core/claude_cli.py` 의 `find_executable()`)은 아래 순서로 찾고, 먼저 찾은 것을 씁니다.
+
+   | 순서 | 위치 | 언제 |
+   |---|---|---|
+   | ① | `.env` 의 `CLAUDE_CLI_PATH` | 직접 지정 (아래 위치에 없을 때만 넣기 — 데스크톱 앱 경로는 업데이트마다 바뀌므로 넣지 않는 것이 좋음) |
+   | ② | PATH 의 `claude` | `npm i -g @anthropic-ai/claude-code` 등으로 설치 |
+   | ③ | `~/.local/bin/claude.exe` | 공식 설치 스크립트(native) 로 설치 |
+   | ④ | 데스크톱 앱이 함께 설치한 CLI (여러 버전이면 가장 최근 것) | 데스크톱 앱만 설치한 PC |
+
+   ④ 의 실제 위치는 데스크톱 앱 설치 방식마다 다릅니다.
+   - 일반 설치: `%LOCALAPPDATA%\Claude-Data\…\claude-code\<버전>\<해시>\claude.exe`
+   - **Microsoft Store(MSIX) 설치**: `%LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\claude-code\<버전>\<해시>\claude.exe`
+     — 데스크톱 앱 안(Code 탭)에서는 `%APPDATA%\Claude\claude-code\…` 로 보이지만 **그 경로는 일반 PowerShell 에서는 없다고 나옵니다**
+     (스토어 앱의 AppData 가상화). 앱 밖에서는 반드시 `Packages\…\LocalCache` 경로를 쓰세요.
+
+   PowerShell 에서 이 PC 의 claude.exe 찾기 (②·③ 이 없을 때):
+   ```powershell
+   $claude = (Get-ChildItem "$env:LOCALAPPDATA\Packages\Claude_*\LocalCache\Roaming\Claude\claude-code\*\*\claude.exe",
+                            "$env:LOCALAPPDATA\Claude-Data\*\claude-code\*\*\claude.exe" -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime | Select-Object -Last 1).FullName
+   $claude
+   ```
+   (PATH 에 `claude` 가 있으면 아래 `& $claude` 대신 `claude` 로 쓰면 됩니다.)
+
+2. **CLI 로그인** — **일반 PowerShell 창**에서 (Code 탭 안의 터미널이 아니라 시작 메뉴의 PowerShell):
+   ```powershell
+   & $claude auth login
+   ```
+   - 기본이 구독(`--claudeai`) 로그인입니다. `--console` 은 API 과금이라 쓰지 않습니다. 회사 계정이 SSO 면 `--sso` 를 붙입니다.
+   - 브라우저에서 구독 계정으로 로그인 → **Authorize**.
+   - 브라우저가 안 열리거나 회사 PC 에서 '브라우저를 확인할 수 없습니다'가 나오면: 터미널에 나온 주소를 휴대폰(회사망 밖)에서 열어 승인 →
+     화면의 **코드를 터미널에 붙여 넣고 Enter** (이걸 빠뜨리면 로그인이 저장되지 않음).
+
+3. **확인**
+   ```powershell
+   & $claude auth status
+   ```
+   `"loggedIn": true`, `"authMethod": "claude.ai"` 면 성공. `false` / `"none"` 이면 2번이 끝나지 않은 것입니다.
+
+4. **Streamlit 재시작** — 켜 둔 터미널에서 Ctrl+C → `streamlit run app.py`.
+   (`.env` 는 시작할 때만 읽고, 로그인 상태는 5분 동안 캐시하므로 로그인·`.env` 를 바꾼 뒤에는 다시 켜는 것이 빠릅니다.)
+
+5. 사이드바 ⚙️ 모델 상태에 `✅ claude_cli` 가 보이면 준비 완료.
+
+**연결 안 됨 — 상태별 원인**
+
+| 화면 표시 | 뜻 | 확인할 것 |
+|---|---|---|
+| `⚪ Claude CLI 없음` (`not_installed`) | 1번 표의 어디에서도 claude.exe 를 못 찾음 | 1번 찾기 명령 결과가 비었는지. 비었으면 데스크톱 앱 설치 또는 CLI 설치, 다른 위치면 `.env` 에 `CLAUDE_CLI_PATH` |
+| `🔑 로그인 필요` (`logged_out`) | exe 는 찾았지만 `auth status` 가 `loggedIn: false` | 2·3번. 데스크톱 앱 로그인만으로는 안 됨 |
+| `⛔ 비활성` (`disabled`) | `config/models.yaml` 의 `disabled_providers` 에 `claude_cli` 가 있거나 '🆓 무료 모델만 사용' 이 켜짐 | 설정 |
+| 로그인했는데도 그대로 | 앱이 예전 상태를 기억 중 | 4번(재시작) |
+
+앱이 실제로 찾는 exe 와 상태를 바로 보려면 (Agent_office 폴더, 가상환경에서):
+```powershell
+python -c "from core import claude_cli as c; print(c.find_executable()); print(c.cli_status())"
+```
 
 **주의**
 - **구독 한도는 내가 직접 쓰는 Claude 대화·Claude Code 와 함께 줄어듭니다.** 그래서 호출 수가 적은 팀장(실행당 분배·검토·통합 몇 번)에만 배정했고,

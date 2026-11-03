@@ -116,11 +116,18 @@ def find_executable() -> str | None:
     for path in (home / ".local" / "bin" / "claude.exe", home / ".local" / "bin" / "claude"):
         if path.is_file():
             return str(path)
-    local = os.getenv("LOCALAPPDATA")
-    if local:
-        bundled = sorted(Path(local).glob("Claude-Data/*/claude-code/*/*/claude.exe"), key=lambda p: p.stat().st_mtime)
-        if bundled:
-            return str(bundled[-1])
+    # 데스크톱 앱이 함께 설치한 CLI — 설치 방식마다 위치가 다르다.
+    # 스토어(MSIX) 앱은 %APPDATA%\Claude\claude-code\<버전>\<해시> 에 두지만 그 경로는 앱 안에서만 보이고,
+    # 앱 밖(Streamlit 을 켠 터미널)에서는 %LOCALAPPDATA%\Packages\Claude_<id>\LocalCache\Roaming\Claude\… 에 있다
+    bundled: list[Path] = []
+    for env, pattern in (("LOCALAPPDATA", "Claude-Data/*/claude-code/*/*/claude.exe"),
+                         ("LOCALAPPDATA", "Packages/Claude_*/LocalCache/Roaming/Claude/claude-code/*/*/claude.exe"),
+                         ("APPDATA", "Claude/claude-code/*/*/claude.exe")):
+        root = os.getenv(env)
+        if root:
+            bundled += Path(root).glob(pattern)
+    if bundled:
+        return str(max(bundled, key=lambda p: p.stat().st_mtime))  # 앱이 업데이트되면 옛 버전 폴더가 남을 수 있다
     return None
 
 
