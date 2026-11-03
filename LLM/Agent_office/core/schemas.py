@@ -123,6 +123,7 @@ class TaskField(BaseModel):
     type: Literal["text", "textarea", "number", "date", "select", "file", "checkbox"] = "text"
     required: bool = False
     options: list[str] = Field(default_factory=list)  # select 일 때 선택지 / file 일 때 받을 확장자
+    multiple: bool = False  # file 일 때 여러 파일 받기 — 값은 경로 목록, {key}_name 은 이름을 쉼표로 이은 글
     default: bool | str | float | int | None = None  # checkbox 는 true/false
     placeholder: str = ""
     help: str = ""
@@ -185,6 +186,8 @@ class Team(BaseModel):
     review_mode: Literal["rewrite", "edit"] = "rewrite"
     skills_from: list[str] = Field(default_factory=list)  # 함께 쓰는 스킬 폴더 (teams/ 기준, 예: _shared/travel)
     legacy: LegacyLink | None = None  # 나뉘기 전 옛 팀의 지난 업무·교훈·팀원 모델 선택·저장 파일을 이어 받기
+    # 개인 문서(이력·경력)를 다루는 팀 — 교훈·결정 요약도 knowledge/(공개 저장소)로 내보내지 않는다 (core/feedback_sync.py)
+    private: bool = False
 
 
 # ════════════════════════════════════════════════════════════════════

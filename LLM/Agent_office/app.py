@@ -40,6 +40,7 @@ from st_click_detector import click_detector
 
 import board_ui
 import building_ui
+import career_ui
 import command_center_ui
 import concept_ui
 import design_ui
@@ -286,6 +287,7 @@ with st.sidebar:
     is_concept = concept_ui.CONCEPT_FEATURE in team.features
     concept_ctx = concept_ui.sidebar(settings) if is_concept else None
     is_design = design_ui.FEATURE in team.features  # 설계 팀: 최종 JSON → 도면(+3D) (design_ui.py)
+    is_career = career_ui.FEATURE in team.features  # 포트폴리오·자소서 팀: 최종 답변 → .md · .docx · .hwpx (career_ui.py)
 
     # 지난 업무 (사람이 채택·반려한 것) — 누르면 내용·결정·교훈을 창으로 본다
     history = [r for r in storage.list_runs(team_id, limit=30) if r["status"] in DECIDED][:10]
@@ -306,8 +308,11 @@ with st.sidebar:
     with st.expander(f"📂 저장된 결과 파일 ({len(saved)})"):
         st.caption(f"채택한 결과는 `{RESULTS_DIR.name}/{team_id}/` 폴더에 저장됩니다.")
         for path in saved:
+            # 긴 이름은 앞(날짜·질문)과 끝(_지도·_자기소개서 같은 종류)을 함께 보이게
+            stem = path.stem if len(path.stem) <= 34 else f"{path.stem[:16]}…{path.stem[-14:]}"
             st.download_button(
-                {".html": "🗺 ", ".mp3": "🎵 "}.get(path.suffix, "📄 ") + path.stem[:34], data=path.read_bytes(), file_name=path.name,
+                {".html": "🗺 ", ".mp3": "🎵 ", ".docx": "📝 ", ".hwpx": "📝 "}.get(path.suffix, "📄 ") + stem + path.suffix,
+                data=path.read_bytes(), file_name=path.name,
                 mime=MIME.get(path.suffix, "text/markdown"), key=f"dl_{path.name}", use_container_width=True,
             )
 
@@ -1092,6 +1097,8 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
             # 음악 팀: 지금 고른 버전(편집본)의 MP3 를 .md 옆에 저장 — 곡은 다시 만들지 않는다 (유료·매번 다름)
             audio_path, appendix, title = run["music"]["history"].now.path, music_report(run), "음원 (Gemini Lyria)"
         extra = design_ui.adopted_files(run, decision) if is_design else None  # 레이아웃 JSON·DXF·PNG·3D
+        if is_career:  # 자소서·포트폴리오 문서 (.md · .docx · .hwpx) — 채택한(고친) 내용으로 다시 만든다
+            extra = career_ui.adopted_files(run, decision)
         paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text, appendix,
                                audio_path=audio_path, appendix_title=title, extra_files=extra)
         return [str(p) for p in paths]
@@ -1143,6 +1150,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
                 st.markdown(iac_report)
         if is_design:
             design_ui.preview(run, final.content)  # 📐 층별 평면도·검증·3D 뷰어·내려받기
+        if is_career:
+            career_ui.preview(run, final.content)  # 📄 문항별 글자 수·사실 검사·.md/.docx/.hwpx 내려받기
         if team.disclaimer:
             st.caption(f"ℹ️ {team.disclaimer}")
 
@@ -1594,8 +1603,9 @@ def render_field(field: TaskField, key: str):
     if field.type == "checkbox":
         return st.checkbox(field.label, value=bool(field.default), key=key, help=field.help or None)
     if field.type == "file":
-        # 값 = 업로드한 파일 객체 → '맡기기'를 누르면 store_uploads 가 data/uploads/ 에 저장하고 경로로 바꾼다
-        return st.file_uploader(label, type=field.options or None, key=key, help=field.help or None)
+        # 값 = 업로드한 파일 객체(multiple 이면 목록) → '맡기기'를 누르면 store_uploads 가 data/uploads/ 에 저장하고 경로로 바꾼다
+        return st.file_uploader(label, type=field.options or None, key=key, help=field.help or None,
+                                accept_multiple_files=field.multiple)
     return st.text_input(label, value=str(field.default or ""), key=key, placeholder=field.placeholder, help=field.help or None)
 
 
@@ -1785,6 +1795,7 @@ if request:
         design = design_ui.FEATURE in features
         run["post_busy"] = ROUTE_MAP in features or design or (MUSIC_TRACK in features and MUSIC_CFG["auto_generate"])
         run["design_opts"] = design_ui.options_from_inputs(request["tool_inputs"]) if design else None
+        run["career_inputs"] = request["tool_inputs"] if career_ui.FEATURE in features else None  # 받을 형식·업무 종류
         runs[run_key] = run
         st.session_state[PENDING_FOCUS_KEY] = NO_FOCUS  # 새 업무는 조직도·질문만 보이는 상태로 시작 (에이전트를 누르면 펼침)
         storage.create_run(run["run_id"], team_id, target, run["question"])

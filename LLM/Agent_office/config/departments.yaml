@@ -48,6 +48,13 @@ departments:
     description: 보안 통제 항목 증적을 점검하고, 인프라 코드(IaC)의 위험을 찾아 수정안을 낸다.
     teams: [security_governance, infra_security]
 
+  - id: career
+    name: 커리어부
+    emoji: 👔
+    color: "#0EA5E9"
+    description: 내가 올린 경력 요약 문서만 근거로 JD 에 맞춘 자기소개서와 직무별 포트폴리오를 쓴다.
+    teams: [career]
+
 # 부서에 적지 않은 팀이 들어가는 곳
 other:
   id: etc

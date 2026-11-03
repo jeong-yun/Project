@@ -1,0 +1,187 @@
+# 👔 포트폴리오·자소서 팀 — 내가 올린 요약 문서(경력·프로젝트 정리)만 근거로 JD 에 맞춘 자기소개서 답변과 직무별 포트폴리오를 쓴다.
+#
+# 흐름 (아래에서 위로 올라가는 사슬 — 하위가 한 명이라 업무 분배 LLM 호출이 없다)
+#   사원·사실 추출 : 올린 문서에서 경험·숫자·기술을 '사실 카드'로 뽑는다 (원문 인용 + JSON evidence) — 지어내지 않는다
+#   대리·작성      : 사실 카드로 자소서 답변 / 포트폴리오 초안을 쓴다 (이 단계부터 최종 형식 — harness.also_at)
+#   부장·직무 검토 : 목표 직무의 눈으로 내용·용어가 맞는지 본다 (보안 관리자 · 인프라 관리자 · 데이터 개발 리드 · AI 엔지니어)
+#   팀장·인사      : 30년 차 인사 팀장 — 채용 담당자가 읽는 눈으로 JD 적합도·구성·설득력, 최종본
+#
+# 근거 자료: career_docs 툴이 올린 문서(docx·pdf·hwp·hwpx·md·txt)·JD·문항을 코드로 읽어 준다 (외부 호출 없음).
+# 하네스 (코드가 검사)
+#   career_facts     : JSON 인용이 올린 문서에 글자 그대로 있는지 + 본문 숫자가 문서·JD·문항에 있는지 ([확인 필요] 문장 제외)
+#   char_limits      : 자소서 문항별 글자 수 (공백 포함/제외) — 넘거나 절반에 못 미치면 다시 쓰기
+#   jd_coverage      : JD 요구사항 R1… 을 모두 근거 있음/부분/공백으로 판정했는지 (키워드 끼워 넣기 대신 대응표)
+#   portfolio_format : 포트폴리오 절·프로젝트 카드 다섯 항목
+# 추가 기능: career_docs — 결과 아래 문서 미리보기·글자 수 표·내려받기(.md · .docx · .hwpx), 채택하면 results/career/ 에 함께 저장
+#
+# 개인 정보: private: true → 교훈·결정 요약도 knowledge/(공개 GitHub) 로 내보내지 않는다. 올린 파일은 data/uploads/,
+#           결과는 results/career/ (둘 다 .gitignore). tools 에 web_search 를 넣지 않는다 (경력 내용이 검색어로 나가지 않게).
+# 시험용 가상 인물: samples/ (실제 사람·회사 아님). 업무 양식의 '샘플로 해 보기'를 켜면 쓴다.
+
+name: 👔 포트폴리오·자소서 팀
+description: 내가 올린 요약 문서(Word·PDF·한글·md)만 근거로 JD 에 맞춘 자기소개서 답변과 직무별 포트폴리오를 쓴다. 문서에 없는 경험·숫자는 지어내지 않고 [확인 필요]로 표시한다.
+private: true
+features: [career_docs]
+
+personas:
+  staff: 당신은 채용 서류 준비를 돕는 꼼꼼한 자료 정리 담당입니다. 올린 문서에서 경험·역할·기술·숫자를 원문 그대로 옮겨 적고, 문서에 없는 것은 없다고 씁니다. 그럴듯하게 채워 넣지 않습니다.
+  assistant_manager: 당신은 채용 서류 작성 10년 차 에디터입니다. 사실 카드만 재료로, 문항이 묻는 것에 정확히 답하는 짧고 구체적인 문장을 씁니다. 상투적인 표현 대신 사례와 숫자로 보여 줍니다.
+  gm: 당신은 지원 직무의 현업 책임자입니다. 목표 직무가 보안이면 정보보호 관리자(CISO 관점), 인프라면 인프라 운영 관리자, 데이터면 데이터 엔지니어링 리드, AI 면 ML 엔지니어링 리드의 눈으로 봅니다. 기술 용어·표준 이름이 맞는지, 경험이 그 직무의 실제 업무로 읽히는지, 과장이 없는지 확인합니다.
+  team_lead: 당신은 30년 차 인사 팀장입니다. 수천 건의 서류를 읽어 본 채용 담당자의 눈으로 첫 두 문장에서 핵심이 보이는지, JD 의 요구와 이어지는지, 읽는 사람이 믿을 만한 근거가 있는지를 봅니다. 문서에 없는 경험을 더하지 않고, 있는 경험을 가장 설득력 있게 배치합니다.
+
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장·인사 (30년 차)
+  specialty: 채용 담당자 관점 — JD 적합도·구성·설득력·첫인상, 최종본과 JSON 확정
+  children:
+    - id: gm_role
+      rank: gm
+      name: 부장·직무 검토
+      specialty: 목표 직무 관점 검토 — 보안 관리자(ISMS-P·ISO 27001·NIST CSF·침해 대응) / 인프라 관리자(클라우드·IaC·운영) / 데이터 개발 리드(파이프라인·ML·지표)
+      children:
+        - id: am_writer
+          rank: assistant_manager
+          name: 대리·작성
+          specialty: 사실 카드 → 자소서 답변(문항별 글자 수) / 포트폴리오 초안(프로젝트 카드) — 최종 형식으로 쓴다
+          children:
+            - id: staff_facts
+              rank: staff
+              name: 사원·사실 추출
+              specialty: 올린 문서 → 사실 카드 (경험·역할·기술·숫자·기간을 원문 인용과 함께), JD 요구사항별 근거 1차 정리
+              skill_sections: ["[공통", "[사실 추출"]
+              output_scope: >-
+                '사실 카드'만 쓴다. ## 사실 카드 아래 표 | # | 경험·프로젝트 | 역할 | 기술 | 숫자·결과 | 기간 | 원문 인용 | 를
+                올린 문서에 있는 것만으로 채운다 (숫자는 문서에 적힌 값·단위 그대로). 이어서 ## JD 요구사항별 근거 —
+                R1… 마다 근거 있음/부분/공백 과 원문 인용. 마지막에 ```json 블록 하나: {"evidence": [{"claim": "카드 요약",
+                "quote": "문서 원문 그대로"}], "jd_coverage": [...], "needs_check": [...]}. 자소서 답변·포트폴리오 본문은 쓰지 않는다.
+
+review_criteria:
+  - 모든 경험·회사·프로젝트·자격·숫자가 올린 문서에 있는가 (없는 것은 [확인 필요] 표시 + needs_check)
+  - 자소서는 문항이 묻는 것에 답하는가, 두괄식인가, 사례가 상황·행동·결과(STAR/CAR)로 구체적인가
+  - JD 요구사항과 근거의 연결이 대응표(jd_coverage)로 정리되어 있고, 근거 없는 요구사항을 '공백'으로 솔직하게 표시했는가
+  - 목표 직무의 용어·표준·기술 이름이 정확한가 (ISMS-P, ISO/IEC 27001:2022, NIST CSF 2.0, 클라우드·IaC·데이터 파이프라인 용어)
+  - 상투 표현·과장(최고의, 완벽한, 열정, 어릴 때부터)이 없고 쉬운 말로 쓰였는가
+  - 포트폴리오 프로젝트 카드마다 문제 → 역할 → 기술 → 결과(숫자) → 배운 점이 있는가
+
+output_format: markdown
+
+tools: [career_docs]   # web_search 없음 — 개인 경력 내용이 검색어로 나가지 않게
+
+harness:
+  validators: [career_facts, char_limits, jd_coverage]
+  final_only: [char_limits, jd_coverage, portfolio_format]   # portfolio_format 은 포트폴리오 업무에서만 (tasks.validators)
+  also_at:   # 대리(작성) 단계부터 최종 형식 — 사원(사실 추출)은 사실 카드만 쓴다 (career_facts 는 사원부터 모두)
+    char_limits: [am_writer, gm_role]
+    jd_coverage: [am_writer, gm_role]
+    portfolio_format: [am_writer, gm_role]
+  max_retries: 2
+
+verification:
+  critic:
+    scope: final
+    max_self_corrections: 1
+    rules:
+      - "근거 자료의 '올린 문서 원문'에 없는 경험·회사·프로젝트·자격증·수상·숫자를 [확인 필요] 표시 없이 쓰면 '근거 없는 사실' 위반이다"
+      - "문항이 묻는 것(예: 지원 동기, 실패 경험, 협업)과 다른 이야기를 하면 '문항 이탈' 위반이다"
+      - "JD 키워드를 근거 경험 없이 본문에 나열하면 '키워드 끼워 넣기' 위반이다 (근거가 없는 요구사항은 대응표에서 '공백')"
+      - "기술·표준 이름을 틀리게 쓰면(예: ISMS-P 를 ISO 표준이라고 함) '용어 오류' 위반이다"
+      - "'최고의', '완벽한', '열정', '어릴 때부터' 같은 상투 표현으로만 된 문장이 있으면 '상투 표현' 위반이다"
+
+tasks:
+  - id: cover_letter
+    title: ✍️ 자소서 작성
+    description: >-
+      내 경력을 정리한 요약 문서를 올리고 JD·문항을 넣으면, 문서에 있는 사실만으로 문항별 답변을 씁니다. 글자 수(공백 포함/제외)는
+      코드가 세고, 문서에 없는 경험·숫자는 [확인 필요]로 표시합니다. 결과는 .md · .docx(· .hwpx)로 받습니다.
+      🔒 올린 내용은 고른 LLM 회사로 전송됩니다 — 'Claude 구독'이나 '🎛 팀원 모델 선택'에서 믿을 수 있는 모델을 고르세요.
+    # 칸 순서: 짧은 칸은 맨 위 두 줄(왼쪽 = 글 칸, 오른쪽 = 체크)에, 파일·긴 글 칸은 그 아래 전체 너비로 그려진다
+    fields:
+      - {key: company, label: 지원 회사·직무, placeholder: "예: ○○은행 정보보호부 보안 관리"}
+      - {key: use_sample, label: 🧪 가상 인물 샘플 문서·JD로 해 보기, type: checkbox}
+      - {key: tone, label: 말투·강조하고 싶은 점 (선택), placeholder: "예: 차분하고 담백하게, 데이터 분석 경험을 앞에"}
+      - {key: fmt_docx, label: Word(.docx) 로도 받기, type: checkbox, default: true}
+      - {key: docs, label: 요약 문서 (경력·프로젝트 정리), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt],
+         help: "여러 개 올릴 수 있습니다. 한글은 .hwpx 가 가장 정확합니다 (.hwp 는 암호·배포용·문서보안(DRM) 문서를 읽지 못합니다)"}
+      - {key: fmt_hwpx, label: 한글(.hwpx) 로도 받기, type: checkbox}
+      - {key: questions, label: "자소서 문항 (한 줄에 하나)", type: textarea, required: true,
+         placeholder: "1. 지원 동기와 입사 후 포부를 작성해 주세요 (700자)\n2. 직무 관련 경험과 성과 (1,000자, 공백 제외)"}
+      - {key: jd, label: JD (채용 공고 붙여 넣기), type: textarea, placeholder: "주요 업무·자격 요건·우대 사항을 그대로 붙여 넣으세요"}
+      - {key: jd_file, label: 또는 JD 파일, type: file, options: [docx, pdf, hwp, hwpx, md, txt]}
+    fixed: {career_kind: cover_letter, fmt_md: "예"}
+    question: |
+      올린 요약 문서만 근거로 아래 자기소개서 문항에 JD 에 맞춘 답변을 써줘.
+      지원 회사·직무: {company}
+      올린 문서: {docs_name}
+      가상 인물 샘플 사용: {use_sample}
+      JD 파일: {jd_file_name}
+      [JD 붙여 넣기] {jd}
+      [문항] {questions}
+      말투·강조점: {tone}
+    goal: "문항별 자기소개서 답변(글자 수 제한 준수) + JD 요구사항 대응표 + [확인 필요] 목록 — 모든 사실은 올린 문서에서"
+    success_criteria:
+      - "문항마다 '## 문항 N. 질문' 제목 아래 답변을 쓴다 (근거 자료의 문항 표 순서·번호 그대로)"
+      - "답변이 글자 수 제한(공백 포함/제외)을 넘지 않고, 제한의 절반 이상을 채운다 — 글자 수는 코드가 센다"
+      - "답변 첫 문장에 문항에 대한 답(두괄식)이 있고, 사례는 상황·행동·결과로 쓴다"
+      - "답변 맨 끝에 지침의 ```json 블록(evidence · jd_coverage · needs_check)을 정확히 1개 붙인다"
+    constraints:
+      - "경험·회사·프로젝트·숫자는 근거 자료의 '올린 문서 원문'에 있는 것만 쓴다. 없으면 [확인 필요]를 붙이고 needs_check 에 적는다"
+      - "JD 키워드를 근거 없이 끼워 넣지 않는다 — 근거가 없는 요구사항은 jd_coverage 에서 '공백'"
+    output_format: "## 문항 1. … 답변 → ## 문항 2. … 답변 → … → ```json 요약 1개 (대응표·확인 필요 목록은 코드가 JSON 으로 표를 만든다)"
+    instructions: |
+      [답변 형식] 문항마다 아래처럼 쓴다. 글자 수 줄은 쓰지 않는다 (코드가 세어 붙인다).
+        ## 문항 1. 지원 동기와 입사 후 포부
+        (답변 본문 — 문단 2~4개, 소제목을 쓰려면 첫 줄에 [핵심 한 문장] 형식)
+      [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"evidence": [{"claim": "본문의 주장 한 줄", "quote": "올린 문서 원문을 글자 그대로"}],
+       "jd_coverage": [{"id": "R1", "requirement": "요구사항", "status": "근거 있음", "quote": "올린 문서 원문 그대로"}],
+       "needs_check": ["문서에 없어 [확인 필요]로 표시한 내용"]}
+      status 는 "근거 있음" / "부분" / "공백" 중 하나. 공백이면 quote 는 빈 문자열. 위 값은 형식 예시일 뿐이다.
+
+  - id: portfolio
+    title: 📁 포트폴리오 작성
+    description: >-
+      요약 문서를 올리고 목표 직무(보안 관리자·인프라 관리자·데이터 개발자 등)를 고르면 그 직무에 맞춘 포트폴리오(요약 · 기술 매트릭스 ·
+      프로젝트 카드 · 직무 강점)를 씁니다. Word(.docx) · 한글(.hwpx) · Markdown(.md)으로 받습니다.
+      🔒 올린 내용은 고른 LLM 회사로 전송됩니다 — 'Claude 구독'이나 '🎛 팀원 모델 선택'에서 믿을 수 있는 모델을 고르세요.
+    fields:
+      - {key: role, label: 목표 직무, type: select, options: [보안 관리자, 인프라 관리자, 데이터 개발자, AI 엔지니어, 기타 (아래에 직접 입력)]}
+      - {key: use_sample, label: 🧪 가상 인물 샘플 문서로 해 보기, type: checkbox}
+      - {key: role_custom, label: 기타 직무 (직접 입력), placeholder: "예: 보안 데이터 분석가, 클라우드 보안 엔지니어"}
+      - {key: fmt_docx, label: Word(.docx), type: checkbox, default: true}
+      - {key: length, label: 분량, type: select, options: ["보통 (A4 3~5쪽)", "간단 (A4 1~2쪽)", "상세 (A4 6쪽 이상)"]}
+      - {key: fmt_hwpx, label: 한글(.hwpx), type: checkbox, default: true}
+      - {key: docs, label: 요약 문서 (경력·프로젝트 정리), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt],
+         help: "여러 개 올릴 수 있습니다. 한글은 .hwpx 가 가장 정확합니다 (.hwp 는 암호·배포용·문서보안(DRM) 문서를 읽지 못합니다)"}
+      - {key: fmt_md, label: Markdown(.md), type: checkbox, default: true}
+      - {key: jd, label: JD (선택 — 붙여 넣으면 대응표도 만듭니다), type: textarea}
+      - {key: jd_file, label: 또는 JD 파일 (선택), type: file, options: [docx, pdf, hwp, hwpx, md, txt]}
+    fixed: {career_kind: portfolio}
+    question: |
+      올린 요약 문서만 근거로 아래 직무에 맞춘 포트폴리오를 써줘.
+      목표 직무: {role}
+      직접 입력한 직무: {role_custom}
+      분량: {length}
+      올린 문서: {docs_name}
+      가상 인물 샘플 사용: {use_sample}
+      JD 파일: {jd_file_name}
+      [JD 붙여 넣기] {jd}
+    goal: "목표 직무에 맞춘 포트폴리오 — 요약 · 기술 매트릭스 · 프로젝트 카드(문제·역할·기술·결과·배운 점) · 직무 강점, 모든 사실은 올린 문서에서"
+    success_criteria:
+      - "'## 요약' · '## 핵심 역량' (기술 매트릭스 표) · '## 프로젝트' (### 카드들) · '## 직무 강점' 절을 쓴다"
+      - "프로젝트 카드마다 '- **문제**: / - **역할**: / - **기술**: / - **결과**: / - **배운 점**:' 다섯 줄을 쓰고, 결과에는 문서에 있는 숫자를 쓴다"
+      - "목표 직무가 중요하게 보는 프로젝트를 앞에 두고, 직무 강점 절에 그 직무 관점의 강점을 3~5개 쓴다"
+      - "답변 맨 끝에 지침의 ```json 블록(evidence · jd_coverage · needs_check)을 정확히 1개 붙인다 (JD 가 없으면 jd_coverage 는 빈 목록)"
+    constraints:
+      - "경험·회사·프로젝트·숫자는 근거 자료의 '올린 문서 원문'에 있는 것만 쓴다. 없으면 [확인 필요]를 붙이고 needs_check 에 적는다"
+      - "분량: {length}"
+    output_format: "# 제목 → ## 요약 → ## 핵심 역량 (표) → ## 프로젝트 (### 카드) → ## 직무 강점 → ```json 요약 1개"
+    instructions: |
+      [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"evidence": [{"claim": "본문의 주장 한 줄", "quote": "올린 문서 원문을 글자 그대로"}],
+       "jd_coverage": [{"id": "R1", "requirement": "요구사항", "status": "부분", "quote": "올린 문서 원문 그대로"}],
+       "needs_check": ["문서에 없어 [확인 필요]로 표시한 내용"]}
+      status 는 "근거 있음" / "부분" / "공백" 중 하나. 위 값은 형식 예시일 뿐이다.
+    validators: [portfolio_format]
+
+disclaimer: "올린 문서에 있는 사실만으로 쓴 초안입니다. 제출 전에 [확인 필요] 표시와 숫자·기간·회사 이름을 직접 확인하세요."

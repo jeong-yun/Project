@@ -33,7 +33,7 @@ def cfg_with(*depts: tuple[str, list[str]], per: int = 4) -> dict:
 def test_real_config_puts_every_team_in_a_department():
     teams = list_teams()
     depts = building.departments([t.id for t in teams], building.load_config())
-    assert [d.name for d in depts] == ["리서치·지식부", "투자부", "여행부", "크리에이티브부", "보안부"]  # '기타' 없음
+    assert [d.name for d in depts] == ["리서치·지식부", "투자부", "여행부", "크리에이티브부", "보안부", "커리어부"]  # '기타' 없음
     assert next(d for d in depts if d.id == "travel").teams == ["travel_domestic", "travel_abroad"]
     assert sorted(t for d in depts for t in d.teams) == sorted(t.id for t in teams)
 

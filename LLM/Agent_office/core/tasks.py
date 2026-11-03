@@ -38,7 +38,7 @@ class TaskRequest:
 
 def _is_empty(value) -> bool:
     # 꺼진 체크박스(False)도 '비어 있음' — 그 값이 들어간 줄은 빠진다
-    return value is None or value is False or (isinstance(value, str) and not value.strip())
+    return value is None or value is False or (isinstance(value, str) and not value.strip()) or value == []
 
 
 def _fmt(value) -> str:
@@ -72,16 +72,25 @@ def store_uploads(values: dict, folder: Path) -> dict:
 
     값은 저장한 경로(문자열), {key}_name 에는 원래 파일 이름이 들어간다 → 질문 템플릿에 {key}_name 으로 쓸 수 있고,
     데이터 툴은 경로로 파일을 읽는다 (워크플로우 상태·체크포인트에는 파일 내용이 아니라 경로만 들어간다).
+    여러 파일 칸(multiple)은 값이 경로 목록, {key}_name 은 이름을 쉼표로 이은 글, {key}_names 는 이름 목록이 된다.
     """
     out = dict(values)
+
+    def save(file) -> str:
+        folder.mkdir(parents=True, exist_ok=True)
+        safe = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", Path(file.name).name)[-80:]
+        path = folder / f"{uuid.uuid4().hex[:8]}_{safe}"
+        path.write_bytes(file.getvalue())
+        return str(path)
+
     for key, value in values.items():
         if hasattr(value, "getvalue") and hasattr(value, "name"):
-            folder.mkdir(parents=True, exist_ok=True)
-            safe = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", Path(value.name).name)[-80:]
-            path = folder / f"{uuid.uuid4().hex[:8]}_{safe}"
-            path.write_bytes(value.getvalue())
-            out[key] = str(path)
+            out[key] = save(value)
             out[f"{key}_name"] = value.name
+        elif isinstance(value, list) and value and all(hasattr(v, "getvalue") and hasattr(v, "name") for v in value):
+            out[key] = [save(v) for v in value]
+            out[f"{key}_names"] = [v.name for v in value]
+            out[f"{key}_name"] = ", ".join(v.name for v in value)
     return out
 
 
