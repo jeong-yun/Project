@@ -354,7 +354,7 @@ def test_team_config_is_valid_and_private(ranks, models):
     gm = team.personas["gm"]
     assert all(word in gm for word in ("정보보호 관리자", "인프라", "데이터 엔지니어링"))
     docs_field = next(f for f in team.tasks[0].fields if f.key == "docs")
-    assert docs_field.type == "file" and docs_field.multiple and set(docs_field.options) == {"docx", "pdf", "hwp", "hwpx", "md", "txt"}
+    assert docs_field.type == "file" and docs_field.multiple and set(docs_field.options) == {"docx", "pdf", "hwp", "hwpx", "md", "txt", "png", "jpg", "jpeg", "webp"}
     import yaml
 
     from core.config import BASE_DIR

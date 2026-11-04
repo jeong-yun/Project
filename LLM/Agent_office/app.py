@@ -1679,6 +1679,9 @@ def render_task_input() -> dict:
                         "use_web": bool(use_web and web_available), "tool_inputs": built.tool_inputs,
                         "extra_validators": built.validators, "harness_options": built.harness_options,
                     }
+            if is_career:  # 그림·스캔 PDF → 비전 모델로 글자를 옮기고 사람이 확인한 뒤에 시작 (career_ui.py)
+                request = career_ui.confirm_step(request, team_id, task.id, models,
+                                                 [member_chains[n.id] for n in reversed(list(subtree(org, target).walk()))])
         else:
             # ── 자유 질문 ──
             def apply_example() -> None:
