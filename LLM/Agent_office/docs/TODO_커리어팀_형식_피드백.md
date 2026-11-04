@@ -106,7 +106,7 @@
    '원본 문서의 절 제목·표 머리글이 결과에 그대로 있는지' 검사. (`core/harness/validators.py` 383행 `portfolio_format`, `core/career.py` `check_portfolio()`)
 4. **양식에 '형식 참고 파일' 칸** — `teams/career/team.yaml` `portfolio_update`(와 `portfolio`) fields 에 `file`, `multiple: true`, 선택. `career_docs` 툴이 근거 자료에 '형식 참고(사실 근거 아님)'로 따로 넣기.
 5. **형식별 출력 두 개 (구조 변경)** — 답변에 형식 구간 표시 → `render_document()`·`doc_export` 가 .docx 는 Word 형식 구간, .md 는 md 형식 구간을 씀. 원본 docx 를 틀로 쓰는 방식 검토.
-6. **그림 자리 표시 (doc_text)** — docx 추출 때 그림 위치에 `[그림]` 표시.
+6. **그림 자리 표시 (doc_text)** — 원인·설계·단계를 따로 정리함 → **[TODO_커리어팀_그림_mermaid.md](TODO_커리어팀_그림_mermaid.md)** (원본 그림을 Word 에 그대로 옮기기 · mermaid 유지).
 7. **질문 먼저 (공통 흐름)** — brief 단계 질문 → 사람 답 → 시작. 다른 팀 영향 큼 → 따로 설계 후 진행.
 8. 같은 입력(개인 문서 — 이 저장소 밖)으로 다시 실행해 비교: 형식 유지 여부·재작성 횟수·전체 시간.
 
