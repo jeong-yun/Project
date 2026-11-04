@@ -1,15 +1,52 @@
-# FreeLLMAPI(무료 모델 서버) 설치 안내 — 새 Windows 11 PC 에서 처음부터
+# FreeLLMAPI(무료 모델 서버) 설치 안내 — 새 Windows PC 에서 처음부터
 
-Agent Office 의 `freellm` provider 는 **FreeLLMAPI** 라는 프로그램을 내 PC 의 Docker 안에서 돌려서 씁니다.
-이 문서는 아무것도 없는 Windows 11 PC 에서 그것을 켜고 Agent Office 와 연결하기까지를 순서대로 적은 것입니다.
+Agent Office 의 `freellm` provider 는 **FreeLLMAPI** 라는 프로그램을 내 PC 에서 돌려서 씁니다.
+돌리는 방법은 **두 가지** — **A. 데스크톱 앱(.exe, Docker 없이)** 과 **B. Docker** — 이고, 프로그램·대시보드·무료 키 등록은 같습니다.
+이 문서는 아무것도 없는 Windows PC 에서 그것을 켜고 Agent Office 와 연결하기까지를 순서대로 적은 것입니다.
 
 - FreeLLMAPI 저장소: <https://github.com/tashfeenahmed/freellmapi> (MIT 라이선스)
 - FreeLLMAPI 공식 설치 문서(영어): <https://github.com/tashfeenahmed/freellmapi/blob/main/docs/en/install/01-install.md>
-- 이 문서는 2026-11-04 기준, 저장소의 `docker-compose.yml`·`.env.example`·설치 문서를 읽고 정리했습니다.
+- 이 문서는 2026-11-04 기준, 저장소의 `docker-compose.yml`·`.env.example`·설치 문서와 두 PC 의 실제 설치(Windows 11 + Docker / Windows 10 + 데스크톱 앱)로 정리했습니다.
 
-## 필요 사양 (PC 최소 사항)
+## 0. 어느 방식으로 설치할까 (먼저 고르기)
 
-FreeLLMAPI 는 Docker 안에서 돌기 때문에 **Docker Desktop for Windows 의 공식 최소 사양**이 곧 이 PC 의 최소 사양입니다 (WSL 2 방식 기준).
+| 이런 PC 라면 | 고를 방식 |
+|---|---|
+| 회사 업무용 PC 인데 회사에 Docker 구독이 없음 (직원 250명 이상 **또는** 연 매출 1천만 달러 이상 회사는 Docker Desktop 유료) | **A. 데스크톱 앱** |
+| RAM 8GB 이하 (Docker·WSL2 가 2GB 이상을 늘 차지) | **A. 데스크톱 앱** |
+| 관리자 권한·재부팅이 어렵거나, 10분 안에 빨리 쓰고 싶음 | **A. 데스크톱 앱** |
+| 개인 PC 이거나 Docker 구독(개인 Personal 무료 포함 조건 충족)이 있음, RAM 16GB 이상, 늘 켜 두는 서버로 쓰고 싶음 | **B. Docker** |
+| Docker 를 이미 쓰고 있음 | **B. Docker** |
+
+- **둘 중 하나만 켜서 씁니다.** 둘 다 깔아 둘 수는 있지만 Agent Office `.env` 는 한 곳(포트 하나)만 가리킵니다.
+- 데스크톱 앱은 FreeLLMAPI 개발자가 'Windows 판은 거의 시험되지 않음(largely untested)'이라고 적었습니다. 이상하면 Docker 로 바꾸세요.
+
+**방식별로 달라지는 값 — 이번에 실제로 헷갈린 부분 (401 의 대부분이 여기서 남)**
+
+| | A. 데스크톱 앱 | B. Docker |
+|---|---|---|
+| Agent Office `.env` 의 `FREELLMAPI_BASE_URL` | `http://127.0.0.1:31415/v1` (비어 있지 않으면 31416… — 트레이 팝업 URL 확인) | `http://127.0.0.1:3001/v1` (기본값) |
+| 통합 키(`FREELLMAPI_API_KEY`) 복사하는 곳 | 트레이 아이콘 → **Copy Key** (또는 대시보드 Keys 페이지 위쪽) | 대시보드 **Keys** 페이지 위쪽 |
+| 대시보드 로그인 | 없음 | 처음에 계정 만들기 |
+| 데이터(등록한 키) 위치 | `%APPDATA%\FreeLLMAPI\` (`freeapi.db`, `.encryption-key`) | Docker 볼륨 `freellmapi_freellmapi-data` + `freellmapi\.env` |
+| 켜기 | 시작 메뉴 FreeLLMAPI (트레이로 들어감) | Docker Desktop 켜기 → 컨테이너 자동 시작 |
+| 자동 시작 | 트레이 팝업 **Start at login** | Docker Desktop 설정 'Start when you sign in' |
+| 끄면 | 트레이에서 Quit 하면 무료 모델도 꺼짐 | `docker compose stop` |
+
+> ⚠️ **통합 키는 PC(서버)마다 다릅니다.** 다른 PC 의 `LLM/Agent_office/.env` 를 복사해 오면 `FREELLMAPI_API_KEY` 가 그 PC 의 키라서 **401** 이 납니다.
+> 새 PC 에서는 주소(포트)와 통합 키 **둘 다** 이 PC 값으로 바꾸고 **저장(Ctrl+S)** → Streamlit 을 다시 켜세요.
+
+**빠른 순서 — A. 데스크톱 앱** (자세한 설명은 [A절](#a-데스크톱-앱-방식-docker-없이))
+
+1. 저장소 Releases 에서 `FreeLLMAPI-Setup-<버전>.exe` 받기 → 설치 → 실행 (트레이 아이콘)
+2. 트레이 → **Open Dashboard** → Keys 페이지에 Google AI Studio·Groq 무료 키 등록 → [4절](#4-공급자-무료-키-등록-대시보드)
+3. 트레이 → **Copy Key** → `LLM/Agent_office/.env` 에 주소 `…:31415/v1` 와 함께 넣고 저장 → [5절](#5-통합-키를-agent-office-에-넣기)
+4. `python scripts/check_freellm.py` → Streamlit 다시 켜기 → 사이드바 `✅ freellm` → [6절](#6-agent-office-에서-확인)
+
+## B 방식 필요 사양 (Docker — PC 최소 사항)
+
+B 방식은 FreeLLMAPI 가 Docker 안에서 돌기 때문에 **Docker Desktop for Windows 의 공식 최소 사양**이 곧 이 PC 의 최소 사양입니다 (WSL 2 방식 기준).
+A 방식(데스크톱 앱)은 Windows 10 이상 x64 면 되고 WSL·가상화·관리자 권한이 필요 없습니다.
 
 | 항목 | 최소 사항 | 확인 방법 |
 |---|---|---|
@@ -30,7 +67,7 @@ FreeLLMAPI 는 Docker 안에서 돌기 때문에 **Docker Desktop for Windows �
 - 출처: Docker 공식 문서 [Install Docker Desktop on Windows — System requirements](https://docs.docker.com/desktop/setup/install/windows-install/),
   라이선스 [Docker Desktop license agreement](https://docs.docker.com/subscription/desktop-license/) (2026-11-04 확인).
 
-**빠른 순서 (자세한 설명은 아래 각 절)**
+**빠른 순서 — B. Docker (자세한 설명은 아래 각 절)**
 
 1. 위 필요 사양 확인 (윈도우10 이면 [2-4](#2-4-윈도우10에서-설치할-때)) → Docker Desktop 설치·실행 (WSL2 필요) → [2절](#2-준비물)
 2. FreeLLMAPI 저장소를 `C:\Users\<사용자>\freellmapi` 에 받기 → [3-1](#3-1-저장소-받기)
@@ -63,12 +100,33 @@ Agent Office 에서 쓰는 곳:
 | 무료 모델을 고른 팀원 | **유료로 넘어가지 않고** '무료 서버 꺼짐 — Docker Desktop 실행 후 FreeLLMAPI 켜기' 로 실패합니다 (실무자는 '작성 실패'로 남고 나머지는 계속, 관리자면 업무가 멈춤). |
 | 🆓 무료 모델만 사용 을 켠 경우 | 쓸 모델이 없어 업무가 시작되지 않습니다. 사이드바에 'FreeLLMAPI 가 꺼져 있거나 키가 없습니다' 경고가 나옵니다. |
 
-> 참고: FreeLLMAPI 는 Windows 용 **데스크톱 앱(.exe)** 도 있습니다 (저장소 Releases). 이 문서는 지금 쓰는 PC 와 같은 **Docker 방식**을 기준으로 하고,
-> Docker 를 못 쓰는 PC 용 데스크톱 앱 연결 방법은 [2-4 끝부분](#2-4-윈도우10에서-설치할-때)에 짧게 적었습니다 (기본 포트 31415).
+---
+
+## A. 데스크톱 앱 방식 (Docker 없이)
+
+2026-11-04 Windows 10 Pro 22H2 · RAM 8GB · 0.16.18 로 실제 설치해 확인한 순서입니다.
+
+1. **설치 파일 받기** — 저장소 [Releases](https://github.com/tashfeenahmed/freellmapi/releases/latest) 에서 **`FreeLLMAPI-Setup-<버전>.exe`** (Windows **x64 전용**, 약 115MB).
+   - 같은 페이지의 파일 옆 `sha256:` 값과 비교하면 받은 파일이 맞는지 확인할 수 있습니다: `Get-FileHash .\FreeLLMAPI-Setup-<버전>.exe`
+   - 디지털 서명이 없는 설치 파일이라 Windows SmartScreen 이 '알 수 없는 게시자'로 막을 수 있습니다 → **추가 정보 → 실행**.
+2. **설치** — 더블클릭 (또는 PowerShell 에서 `& .\FreeLLMAPI-Setup-<버전>.exe /S` 로 조용히 설치). 관리자 권한 없이 사용자 폴더에 깔립니다:
+   `%LOCALAPPDATA%\Programs\freellmapi-desktop\FreeLLMAPI.exe`
+3. **실행** — 시작 메뉴 FreeLLMAPI. 창 대신 **작업 표시줄 오른쪽 아래 트레이 아이콘**으로 들어갑니다.
+   처음 실행하면 데이터베이스·암호화 키·통합 키를 스스로 만듭니다 (`%APPDATA%\FreeLLMAPI\`). 계정·비밀번호 만들기는 없습니다.
+4. **켜졌는지 확인** — `curl.exe http://127.0.0.1:31415/api/ping` 에 응답이 오면 정상. 포트가 이미 쓰이고 있으면 31416… 으로 바뀌므로 트레이 팝업의 URL 을 봅니다.
+   로그: `%APPDATA%\FreeLLMAPI\logs\freeapi.log`
+5. **트레이 → Open Dashboard** → [4절](#4-공급자-무료-키-등록-대시보드)처럼 Keys 페이지에 Google·Groq 키 등록.
+6. **트레이 → Copy Key** → [5절](#5-통합-키를-agent-office-에-넣기) (주소는 `http://127.0.0.1:31415/v1`).
+7. **자동 시작**: 트레이 팝업 **Start at login**. 업데이트: **⋯ → Settings → Check for updates** (업데이트 전에 DB 백업을 자동으로 만듦).
+
+- **백업·다른 PC 로 옮기기**: `%APPDATA%\FreeLLMAPI\` 폴더째 (그 안의 `.encryption-key` 와 `freeapi.db` 가 함께 있어야 등록한 키를 읽음). Docker 볼륨과 서로 옮길 수는 없습니다.
+- **지우기**: 설정 → 앱 → FreeLLMAPI 제거 (또는 `%LOCALAPPDATA%\Programs\freellmapi-desktop\Uninstall FreeLLMAPI.exe`) → 키까지 지우려면 `%APPDATA%\FreeLLMAPI\` 삭제.
+- **Claude 데스크톱 앱(Code 탭) 안에서 설치를 맡길 때**: 스토어(MSIX) 판 Claude 앱 안에서 띄운 프로그램은 AppData 쓰기가 가상화될 수 있습니다.
+  설치·실행은 **일반 PowerShell**(또는 Code 탭의 Terminal 패널)에서 하세요.
 
 ---
 
-## 2. 준비물
+## 2. 준비물 (B. Docker 방식)
 
 ### 2-1. Docker Desktop for Windows
 
@@ -202,29 +260,7 @@ wsl --set-default-version 2
 | Home 판 | 공식 사양 목록에는 Home 이 없습니다. 같은 페이지에 'Home·Education 은 Linux 컨테이너만 가능'이라는 문구는 있어 설치가 될 수는 있지만 공식 지원 밖입니다. Home 에는 Hyper-V 가 없으므로 **WSL 2 방식만** 쓸 수 있습니다 (설치 화면의 WSL 2 체크 유지) |
 | 회사가 관리하는 PC 라 `dism`·BIOS·Store 가 막힘 | IT 담당자에게 'WSL2 + Virtual Machine Platform 사용, BIOS 가상화' 를 요청 |
 
-**Docker 를 못 쓰는 윈도우10 PC 라면: FreeLLMAPI 데스크톱 앱 (Docker 없이)**
-
-- 저장소 [Releases](https://github.com/tashfeenahmed/freellmapi/releases/latest) 에서 **`FreeLLMAPI-Setup-<버전>.exe`** (Windows **x64 전용**) 를 받아 설치합니다.
-  Electron 38 기반이라 Windows 10 이상에서 돕니다.
-- ⚠️ FreeLLMAPI 의 `desktop/README.md` 에는 **'Windows build is config-complete but largely untested'** (Windows 판은 거의 시험되지 않음)라고 적혀 있습니다.
-  Docker 방식이 안 될 때만 쓰세요.
-- **다른 점**
-  - 계정·비밀번호가 없습니다.
-  - 트레이(작업 표시줄 오른쪽 아래) 아이콘 → **Open Dashboard** 로 같은 대시보드가 열리고, Keys 페이지에서 Google·Groq 키를 등록합니다.
-  - 통합 키는 트레이 팝업의 **Copy Key** 로 복사합니다.
-  - 데이터는 `%APPDATA%\FreeLLMAPI\` 에 있습니다.
-- **포트가 31415** 입니다. 비어 있지 않으면 다음 번호를 고르고 기억합니다. 실제 주소는 트레이 팝업의 URL 로 확인합니다.
-  Agent Office `.env` 는 이렇게 맞춥니다:
-
-  ```dotenv
-  FREELLMAPI_BASE_URL=http://127.0.0.1:31415/v1
-  FREELLMAPI_API_KEY=트레이에서-복사한-통합-키
-  ```
-
-  그 뒤 `python scripts/check_freellm.py` 로 점검하는 방법은 같습니다.
-- 자동 시작은 트레이 팝업의 **Start at login** 으로 켭니다.
-- 업데이트는 **⋯ → Settings → Check for updates** 입니다. 업데이트 전에 DB 백업을 자동으로 만듭니다.
-- Docker 방식과 동시에 둘 다 켤 필요는 없습니다 — 하나만 쓰세요.
+**Docker 를 못 쓰는 윈도우10 PC 라면** → [A. 데스크톱 앱 방식](#a-데스크톱-앱-방식-docker-없이) 으로 설치하세요 (WSL·가상화·관리자 권한 불필요, 포트 31415).
 
 ---
 
@@ -352,16 +388,21 @@ curl.exe http://127.0.0.1:3001/api/ping
 
 ## 5. 통합 키를 Agent Office 에 넣기
 
-1. 대시보드 **Keys** 페이지 **위쪽(헤더)** 에 있는 **unified API key**(`freellmapi-…` 로 시작)를 복사합니다.
+1. 통합 키(`freellmapi-…` 로 시작)를 복사합니다 — **A. 데스크톱 앱**: 트레이 → **Copy Key** / **B. Docker**: 대시보드 **Keys** 페이지 **위쪽(헤더)** 의 **unified API key**.
    이 키는 그 PC 의 FreeLLMAPI 서버에서만 통합니다 — 다른 PC 의 통합 키를 그대로 쓰면 401 이 납니다.
-2. `LLM/Agent_office/.env` 를 엽니다 (없으면 같은 폴더의 `.env.example` 을 복사해 `.env` 로 이름을 바꿈). 아래 두 줄을 넣습니다:
+   Google(`AIza…`)·Groq(`gsk_…`) 키가 아닙니다 (그건 대시보드에만 넣음).
+2. `LLM/Agent_office/.env` 를 엽니다 (없으면 같은 폴더의 `.env.example` 을 복사해 `.env` 로 이름을 바꿈). 아래 두 줄을 넣습니다 — **이미 있는 줄은 값만 고쳐 줄이 두 개가 되지 않게**:
 
    ```dotenv
-   FREELLMAPI_BASE_URL=http://127.0.0.1:3001/v1
+   # A. 데스크톱 앱
+   FREELLMAPI_BASE_URL=http://127.0.0.1:31415/v1
+   # B. Docker
+   # FREELLMAPI_BASE_URL=http://127.0.0.1:3001/v1
    FREELLMAPI_API_KEY=freellmapi-여기에-복사한-통합-키
    ```
 
-   - `FREELLMAPI_BASE_URL` 은 기본값과 같으면 생략해도 됩니다. 포트를 바꿨다면 그 포트로 적습니다. `localhost` 보다 `127.0.0.1` 이 Windows 에서 빠릅니다.
+   - 키 앞뒤에 따옴표·공백을 넣지 않습니다. 고친 뒤 **저장(Ctrl+S)** — 저장 안 된 편집기 창이 401 의 흔한 원인입니다.
+   - `FREELLMAPI_BASE_URL` 을 비우면 Docker 기본값(3001)입니다. 포트를 바꿨다면 그 포트로 적습니다. `localhost` 보다 `127.0.0.1` 이 Windows 에서 빠릅니다.
    - Agent Office 는 `LLM/Agent_office/.env` 를 먼저 읽고, 없는 값은 `LLM/.env` 에서 채웁니다.
 3. **`.env` 는 깃에 절대 올라가지 않습니다** (`LLM/Agent_office/.gitignore` 에 있음). 커밋 전에 `git status` 에 `.env` 가 보이지 않는지 한 번 더 봅니다.
 4. 이미 Streamlit 앱이 켜져 있었다면 **앱을 껐다 다시 켭니다** (`.env` 는 시작할 때 읽음).

@@ -626,6 +626,15 @@
   3. **career_facts 표 번호**: 마크다운 표의 첫 열이 숫자만인 줄(`| 13 |`)과 `13.`/`13)` 로 시작하는 목록 번호는 숫자 검사에서 제외. 표 안의 다른 칸 숫자는 그대로 검사. 테스트 추가.
   4. 고친 뒤 같은 문서·JD 로 다시 실행해 전체 시간·재작성 횟수·비평 점수 비교 (이번 실행이 기준).
 
+**FreeLLMAPI 설치 — 두 번째 PC (Windows 10, 데스크톱 앱 방식) · 설치 문서를 두 방식으로 다시 구성**
+- PC: Windows 10 Pro 22H2(19045.6456) · i7-7500U(가상화 켜짐·SLAT) · RAM 7.9GB · C 83GB 여유 · WSL 없음(inbox wsl.exe 만) · Docker 없음.
+- 작업: FreeLLMAPI 데스크톱 앱 0.16.18(`FreeLLMAPI-Setup-0.16.18.exe`, sha256 확인, 서명 없음) 설치 → `%LOCALAPPDATA%\Programs\freellmapi-desktop`, 서버 `127.0.0.1:31415` 켜짐 확인.
+  Agent Office `.env` 의 `FREELLMAPI_BASE_URL` 을 3001 → 31415 로.
+- 발견: 예전 PC 에서 가져온 `.env` 의 통합 키로 `check_freellm.py` 가 **401** — 통합 키는 서버(PC)마다 다르다. 문서가 Docker 를 기본으로, 데스크톱 앱을 2-4 끝 '안 될 때만'으로 적어 두어 새 PC 에서 고르는 기준·포트 차이가 안 보였음.
+- 문서: `docs/FREELLM_설치.md` 맨 앞에 **0. 어느 방식으로 설치할까**(회사 PC·RAM·관리자 권한 기준) + 방식별로 달라지는 값 표(주소 31415/3001·통합 키 위치·로그인·데이터 위치·자동 시작),
+  **A. 데스크톱 앱 방식** 절 신설(실제 설치 순서), Docker 는 'B 방식'으로. 5절에 방식별 주소·키, 저장(Ctrl+S)·줄 중복 주의. README 2-1 을 두 방식 표로.
+- 다음: 이 PC 에 Docker Desktop(개인 라이선스)도 설치 진행 중 — WSL 2 설치·재부팅 뒤 B 방식으로 3001 에 띄워 보고, 둘 중 하나만 켜서 쓸 것.
+
 **FreeLLMAPI(무료 모델 서버) 설치 안내서 — 다른 PC 에서 Docker 설치 내용이 없어 진행 못 하던 문제**
 - 배경: README 에는 'Docker Desktop 실행 후 `docker compose … up -d`' 한 줄뿐이라 새 PC 에서 Docker·`.env`·키 등록을 할 수 없었음.
 - 작업: `docs/FREELLM_설치.md` 새로 씀 (Windows 11 기준) — 무엇·왜(꺼지면 무료 모델 팀원은 실패, 기본 팀원은 유료로) → Docker Desktop·WSL2·가상화·라이선스 →
