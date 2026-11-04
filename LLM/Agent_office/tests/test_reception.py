@@ -254,7 +254,8 @@ def test_home_is_a_floor_guide_with_info_desk_and_full_rooms(app_env, teams):
     assert at.text_area(key="dept_head_text") is not None
 
 
-def test_dept_desk_assigns_and_starts_the_team(app_env):
+def test_dept_desk_assigns_and_starts_the_team(app_env, use_script):
+    use_script(Script())  # 모델 답 없음 → 낱말 비교 (.env 의 실제 키로 진짜 호출하지 않게)
     at = home()
     at = at.radio(key="desk_pick").set_value("travel").run()
     assert any("🎛 부서장 모델:" in c.value for c in at.caption)
