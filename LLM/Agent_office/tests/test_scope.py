@@ -175,8 +175,8 @@ def open_team(team_id: str, free: bool = True) -> AppTest:
     at.query_params["team"] = team_id
     at.run()
     assert not at.exception, at.exception
-    if free and any(s.key == f"task_pick_{team_id}" for s in at.selectbox):
-        at.selectbox(key=f"task_pick_{team_id}").set_value("free").run()
+    if free:  # 🏢 부서 업무 목록에서 이 팀의 '💬 자유 질문'을 직접 고른다
+        at.selectbox(key=f"dept_task_{at.session_state['dept_pick']}").set_value(f"{team_id}:free").run()
         assert not at.exception, at.exception
     return at
 
@@ -209,8 +209,8 @@ def test_off_topic_question_is_blocked_and_button_goes_to_right_team(app_env):
     assert not any(b.label.startswith("그래도") for b in at.button)  # '그래도 실행'은 없다
     at = at.button(key="scope_go_stock").click().run()
     assert not at.exception, at.exception
-    assert at.session_state["view"] == "team" and at.session_state["team_pick"] == "travel_abroad"
-    assert at.session_state["task_pick_travel_abroad"] == "free"
+    assert at.session_state["view"] == "dept" and at.session_state["team_pick"] == "travel_abroad"
+    assert at.session_state["dept_pick"] == "travel" and at.session_state["dept_task_travel"] == "travel_abroad:free"
     assert at.text_area(key="q_text").value == TRAVEL_Q
 
 
@@ -230,7 +230,7 @@ def test_in_scope_question_runs(app_env):
 
 def test_structured_task_form_is_not_scope_checked(app_env):
     at = open_team("stock", free=False)
-    at = at.selectbox(key="task_pick_stock").set_value("judge").run()
+    at = at.selectbox(key="dept_task_invest").set_value("stock:judge").run()
     at.text_input(key="tf_stock_judge_stock").input("삼성전자")
     at = submit(at)
     assert not at.exception, at.exception

@@ -13,6 +13,8 @@
   '다들 뭐 해?' 같은 상태 질문은 LLM 없이 run 상태로 바로 한 줄씩 답한다 (rundown).
 """
 
+from dataclasses import dataclass, field
+
 from core.live import KIND_LABELS, RETRY_LABELS, STAGES, WORKING_LABELS, stage_of
 from core.schemas import OrgNode
 
@@ -138,6 +140,281 @@ def build_layout(org: OrgNode) -> dict:
     return {
         "key": f"{org.id}:{W}x{H}:{len(seats)}", "w": W, "h": H, "rooms": rooms, "walls": walls, "furniture": furniture,
         "seats": seats, "spots": {"meeting": meeting, "library": library}, "door": [door_x, H - 1],
+    }
+
+
+# ─── 🏢 부서 사무실 (부서 하나 = 사무실 하나) ────────────────────────────────
+#   위쪽 줄 : 👔 부서장실 · 회의실(부서 공용) · 자료실(부서 공용) · (남으면) 휴게실
+#   아래    : 팀 구역 — 팀마다 이름표 바닥(팀 색) 위에 팀장 책상, 그 아래 '책상 묶음'(관리자 + 하위 팀원)
+#   빈 곳   : 서류함·복사기·화분·정수기로 채워 사무실이 비어 보이지 않게
+#   에이전트 id 는 '팀 id/팀원 id' (팀마다 팀원 id 가 겹친다 — lead, gm_review …), 부서장은 HEAD
+HEAD = "__head__"
+DEPT_MIN_W = 36  # 위쪽 방 셋이 들어가는 최소 너비
+ZONE_GAP = 2  # 팀 구역 사이 통로 (타일)
+DEPT_MAX_W = 64
+SMALL_DEPT = 6  # 이 인원 이하면 위쪽 방을 좁힌다
+
+
+def agent_key(team_id: str, node_id: str) -> str:
+    return f"{team_id}/{node_id}"
+
+
+def split_key(key: str) -> tuple[str, str]:
+    """'travel_domestic/gm_itinerary' → ('travel_domestic', 'gm_itinerary'). 부서장(HEAD)은 ('', HEAD)."""
+    team_id, _, node_id = key.partition("/")
+    return (team_id, node_id) if node_id else ("", key)
+
+
+def _zone(org: OrgNode) -> tuple[int, int, list[tuple[list[OrgNode], int, int, int, int]]]:
+    """팀 구역 하나 — (너비, 높이, [(묶음, 구역 안 x, 구역 안 y, 칸 수, 묶음 너비)]). 구역 안 0번 줄은 이름표."""
+    pods, x = [], 1
+    for group in _groups(org):
+        staff = group[1:]
+        cols = max(1, min(MAX_COLS, len(staff)))
+        rows = -(-len(staff) // cols) if staff else 0
+        w = cols * CELL_W
+        pods.append((group, x, 1 + CELL_H, cols, w, (1 + rows) * CELL_H))
+        x += w + 1
+    inner = max(CELL_W, x - 2) if pods else CELL_W
+    zone_w = inner + 2
+    zone_h = 1 + CELL_H + max((p[5] for p in pods), default=0) + 1
+    shift = (inner - (x - 2 if pods else 0)) // 2
+    return zone_w, zone_h, [(g, px + shift, py, cols, w) for g, px, py, cols, w, _ in pods]
+
+
+def build_dept_layout(dept_id: str, dept_label: str, teams: list[tuple[str, str, str, OrgNode]]) -> dict:
+    """부서 하나의 사무실 배치. teams = [(팀 id, 팀 이름, 구역 색 #RRGGBB, 조직도)] — 부서에 적힌 순서.
+
+    같은 입력이면 늘 같은 결과 (화면은 key 가 바뀔 때만 배경을 다시 그린다)."""
+    seats: dict[str, list[int]] = {}
+    furniture: list[dict] = []
+    zones = [(tid, name, color, org, *_zone(org)) for tid, name, color, org in teams]
+
+    # 팀 구역을 왼쪽부터 — 너무 넓으면 다음 줄. 한 줄의 구역은 높이를 맞춘다
+    rows: list[list] = [[]]
+    x = 0
+    for z in zones:
+        zw = z[4]
+        if rows[-1] and x + zw > DEPT_MAX_W - 4:
+            rows.append([])
+            x = 0
+        rows[-1].append(z)
+        x += zw + ZONE_GAP
+    row_w = [sum(z[4] for z in r) + ZONE_GAP * (len(r) - 1) for r in rows]
+    floor_w = max(row_w, default=0)
+    # 사람이 적은 부서는 위쪽 방을 좁혀 사무실 전체를 작게 — 화면에서는 같은 너비로 늘어나 사람이 더 크게 보인다
+    people = sum(len(org.walk()) for *_, org in teams)
+    head_w, meet_w, lib_w = (7, 9, 7) if people <= SMALL_DEPT else (LEAD_W, MEET_W, LIB_W)
+    W = max(1 + head_w + 1 + meet_w + 1 + lib_w + 1, floor_w + 4)
+    floor_top = TOP_BOTTOM + 3  # 복도(위쪽 방 아래 벽) 다음 줄은 '업무 공간' 이름표 자리
+    y, placed = floor_top, []
+    for r, rw in zip(rows, row_w):
+        h = max(z[5] for z in r)
+        zx = (W - rw) // 2
+        for tid, name, color, org, zw, _zh, pods in r:
+            placed.append({"kind": "zone", "label": name, "team": tid, "color": color, "x": zx, "y": y, "w": zw, "h": h})
+            # 팀장 — 구역 맨 위 가운데 (금색 넥타이). 팀장 자리에는 팀 이름표가 붙는다
+            seat, desk = _desk(zx + (zw - CELL_W) // 2, y + 1)
+            seats[agent_key(tid, org.id)] = seat
+            furniture.append({**desk, "lead": True})
+            for group, px, py, cols, pw in pods:
+                seat, desk = _desk(zx + px + (pw - CELL_W) // 2, y + py)
+                seats[agent_key(tid, group[0].id)] = seat
+                furniture.append(desk)
+                for i, node in enumerate(group[1:]):
+                    seat, desk = _desk(zx + px + (i % cols) * CELL_W, y + py + (1 + i // cols) * CELL_H)
+                    seats[agent_key(tid, node.id)] = seat
+                    furniture.append(desk)
+            zx += zw + ZONE_GAP
+        y += h + 1
+    H = max(y, floor_top + CELL_H + 2) + 1
+
+    # 위쪽 방 — 부서장실 · 회의실 · 자료실 (+ 휴게실). 사람이 많으면 회의실을 넓힌다
+    if people > 10 and W >= DEPT_MIN_W + 6:
+        meet_w += 4
+    head_x, meet_x = 1, 1 + head_w + 1
+    lib_x = meet_x + meet_w + 1
+    top_h = TOP_BOTTOM - TOP_Y + 1
+    rooms = [
+        {"kind": "lead", "label": "👔 부서장실", "x": head_x, "y": TOP_Y, "w": head_w, "h": top_h},
+        {"kind": "meeting", "label": "회의실 (부서 공용)", "x": meet_x, "y": TOP_Y, "w": meet_w, "h": top_h},
+        {"kind": "library", "label": "자료실", "x": lib_x, "y": TOP_Y, "w": lib_w, "h": top_h},
+    ]
+    extra_x = lib_x + lib_w + 1
+    if W - 1 - extra_x >= 5:
+        rooms.append({"kind": "lounge", "label": "휴게실", "x": extra_x, "y": TOP_Y, "w": W - 1 - extra_x, "h": top_h})
+    else:
+        rooms[2]["w"] = W - 1 - lib_x
+    # 업무 공간 이름표는 두지 않는다 — 바로 아래 팀 구역 이름표와 겹친다 (부서 이름은 화면 제목에 있다)
+    rooms.append({"kind": "floor", "label": "", "dept": dept_label, "x": 1, "y": TOP_BOTTOM + 2, "w": W - 2,
+                  "h": H - TOP_BOTTOM - 4})
+    rooms += placed  # 팀 구역은 바닥 위에 덧칠 (그리는 순서상 업무 공간 다음)
+
+    walls = [[0, 0, W, TOP_Y], [0, 0, 1, H], [W - 1, 0, 1, H]]
+    door_x = W // 2 - 1
+    walls += [[0, H - 1, door_x, 1], [door_x + 2, H - 1, W - door_x - 2, 1]]
+    for room in rooms:
+        if room["kind"] in ("floor", "zone"):
+            continue
+        right = room["x"] + room["w"]
+        if right < W - 1:
+            walls.append([right, TOP_Y, 1, room["h"]])
+        door = room["x"] + room["w"] // 2 - 1
+        walls += [[room["x"] - 1, TOP_BOTTOM + 1, door - room["x"] + 1, 1],
+                  [door + 2, TOP_BOTTOM + 1, right - door - 2 + 1, 1]]
+
+    head_room, meet, lib = rooms[0], rooms[1], rooms[2]
+    hx = head_room["x"] + (head_w - 3) // 2  # 부서장 책상 (방 가운데)
+    seats[HEAD] = [hx + 1, TOP_Y + 2]
+    furniture.append({"type": "desk", "x": hx, "y": TOP_Y + 3, "w": 3, "h": 1, "lead": True})
+    furniture += [
+        {"type": "rug", "x": hx - 1, "y": TOP_Y + 1, "w": 5, "h": 4},
+        {"type": "plant", "x": head_room["x"], "y": TOP_Y, "w": 1, "h": 1},
+        {"type": "shelf", "x": head_room["x"] + head_w - 2, "y": TOP_Y, "w": 2, "h": 1},
+        {"type": "cabinet", "x": head_room["x"], "y": TOP_BOTTOM - 1, "w": 1, "h": 1},
+        {"type": "table", "x": meet["x"] + 3, "y": TOP_Y + 2, "w": meet_w - 6, "h": 2},
+        {"type": "board", "x": meet["x"] + 4, "y": TOP_Y - 1, "w": 5, "h": 1},
+        {"type": "plant", "x": meet["x"] + meet_w - 1, "y": TOP_Y, "w": 1, "h": 1},
+        {"type": "plant", "x": meet["x"], "y": TOP_BOTTOM - 1, "w": 1, "h": 1},
+        {"type": "shelf", "x": lib["x"], "y": TOP_Y, "w": lib["w"], "h": 1},
+        {"type": "cabinet", "x": lib["x"] + lib["w"] - 1, "y": TOP_BOTTOM - 1, "w": 1, "h": 1},
+        {"type": "plant", "x": W - 2, "y": H - 2, "w": 1, "h": 1},
+        {"type": "plant", "x": 1, "y": H - 2, "w": 1, "h": 1},
+    ]
+    if rooms[3]["kind"] == "lounge":
+        lounge = rooms[3]
+        furniture += [{"type": "cooler", "x": lounge["x"], "y": TOP_Y, "w": 1, "h": 1},
+                      {"type": "sofa", "x": lounge["x"] + 1, "y": TOP_BOTTOM - 1, "w": min(3, lounge["w"] - 2), "h": 1},
+                      {"type": "plant", "x": lounge["x"] + lounge["w"] - 1, "y": TOP_Y, "w": 1, "h": 1}]
+    furniture += _fill_sides(placed, W, floor_top, H)
+
+    t = next(f for f in furniture if f["type"] == "table")
+    spread = [i for i in range(0, t["w"], 3)] + [i for i in range(t["w"]) if i % 3]
+    meeting = [[t["x"] + i, yy, face] for i in spread for yy, face in ((t["y"] - 1, "down"), (t["y"] + t["h"], "up"))]
+    lib_cols = [i for i in range(0, lib["w"], 3)] + [i for i in range(lib["w"]) if i % 3]
+    library = [[lib["x"] + i, TOP_Y + r, "up"] for i in lib_cols for r in (2, 4)]
+    return {
+        "key": f"dept:{dept_id}:{W}x{H}:{len(seats)}", "w": W, "h": H, "rooms": rooms, "walls": walls,
+        "furniture": furniture, "seats": seats, "spots": {"meeting": meeting, "library": library}, "door": [door_x, H - 1],
+        "dept": dept_id,
+    }
+
+
+def _fill_sides(zones: list[dict], W: int, top: int, H: int) -> list[dict]:
+    """팀 구역 왼쪽·오른쪽에 남는 바닥 — 서류함·복사기·정수기·화분으로 채운다 (사람 없는 빈 바닥이 넓지 않게)."""
+    if not zones:
+        return []
+    left = min(z["x"] for z in zones)
+    right = max(z["x"] + z["w"] for z in zones)
+    out = []
+    bottom = H - 3
+    if left - 1 >= 3:  # 왼쪽 벽을 따라 서류함, 사이사이 화분
+        for i, yy in enumerate(range(top + 1, bottom, 2)):
+            out.append({"type": "plant" if i % 3 == 2 else "cabinet", "x": 1, "y": yy, "w": 1, "h": 1})
+        if left - 1 >= 6:
+            out.append({"type": "printer", "x": 3, "y": top + 1, "w": 2, "h": 1})
+    if W - 1 - right >= 3:  # 오른쪽 벽: 복사기 · 정수기 · 서류함
+        x = W - 2
+        out += [{"type": "printer", "x": x - 1, "y": top + 1, "w": 2, "h": 1},
+                {"type": "cooler", "x": x, "y": top + 3, "w": 1, "h": 1}]
+        for i, yy in enumerate(range(top + 5, bottom, 2)):
+            out.append({"type": "plant" if i % 3 == 1 else "cabinet", "x": x, "y": yy, "w": 1, "h": 1})
+    return out
+
+
+@dataclass
+class TeamView:
+    """부서 사무실 스냅샷에 넣을 팀 하나 — 조직도·이름·지금 업무(run)."""
+
+    team_id: str
+    team_name: str
+    org: OrgNode
+    names: dict[str, str]
+    ranks: dict[str, tuple[str, str]]
+    specialties: dict[str, str]
+    parents: dict[str, str]
+    run: dict | None = None
+    active_ids: set[str] | None = None
+    blocked: dict[str, str] = field(default_factory=dict)
+
+
+def head_state(views: list[TeamView]) -> dict:
+    """부서장의 말풍선 — 비평 중이면 ⚖️, 일하는 팀이 있으면 👀, 결정 대기면 📨, 아니면 대기."""
+    critic = {WORKING_LABELS["critic"], RETRY_LABELS["critic"]}
+    for v in views:
+        r = v.run
+        if r and not r["done"] and r["activity"].get(r["root_id"]) in critic:
+            return {"tone": "working", "bubble": f"⚖️ {v.team_name} 비평", "kind": "critic"}
+    busy = [v for v in views if v.run and not v.run["done"]]
+    if busy:
+        return {"tone": "wait", "bubble": f"👀 {len(busy)}팀 지켜보는 중" if len(busy) > 1 else f"👀 {busy[0].team_name}", "kind": ""}
+    if any(v.run and v.run["status"] == "awaiting_human" for v in views):
+        return {"tone": "done", "bubble": "📨 결정 기다리는 중", "kind": ""}
+    return {"tone": "idle", "bubble": "대기", "kind": ""}
+
+
+def dept_events(views: list[TeamView], limit: int = 24) -> list[dict]:
+    """✉️ 쪽지 — 사용자 → 부서장 → 팀장(문의 대상) → 팀원 … → 팀장 → 부서장 → 사용자. 팀마다 run_id 로 id 를 나눈다."""
+    out = []
+    for v in views:
+        r = v.run
+        if not r:
+            continue
+        rid, root = r["run_id"][:8], agent_key(v.team_id, r["root_id"])
+        out += [{"id": f"{rid}:q", "from": USER, "to": HEAD, "kind": "ask"},
+                {"id": f"{rid}:qh", "from": HEAD, "to": root, "kind": "delegate"}]
+        for i, s in enumerate(r["steps"]):
+            if s.kind == "plan":
+                for a in s.delegation.assignments if s.delegation else []:
+                    if v.parents.get(a.child_id) == s.node_id:
+                        out.append({"id": f"{rid}:{i}:{a.child_id}", "from": agent_key(v.team_id, s.node_id),
+                                    "to": agent_key(v.team_id, a.child_id), "kind": "delegate"})
+            elif s.node_id == r["root_id"]:
+                out.append({"id": f"{rid}:{i}:up", "from": root, "to": HEAD, "kind": "report"})
+                if r["done"]:
+                    out.append({"id": f"{rid}:{i}:out", "from": HEAD, "to": USER, "kind": "report"})
+            elif v.parents.get(s.node_id):
+                out.append({"id": f"{rid}:{i}:up", "from": agent_key(v.team_id, s.node_id),
+                            "to": agent_key(v.team_id, v.parents[s.node_id]), "kind": "report"})
+    return out[-limit:]
+
+
+def dept_snapshot(layout: dict, views: list[TeamView], *, head_name: str, head_about: str, focus: str | None,
+                  active_team: str = "") -> dict:
+    """부서 사무실 화면 상태 — 부서장 + 모든 팀의 팀원 (일하는 팀은 회의실·자료실로 움직이고, 쉬는 팀은 자리에)."""
+    seats, spots = layout["seats"], layout["spots"]
+    hs = head_state(views)
+    agents = [{
+        "id": HEAD, "name": head_name, "rank": "부서장", "lead": False, "head": True, "team": "",
+        "color": "#4B3B8F", "desk": seats[HEAD], "target": list(seats[HEAD]), "face": "down", "place": "desk",
+        "tone": hs["tone"], "bubble": hs["bubble"], "about": head_about, "dim": False, "note": "",
+    }]
+    k = 0  # 회의실·자료실 자리를 부서 전체에서 차례로 나눠 겹치지 않게
+    for v in views:
+        for node in v.org.walk():
+            key = agent_key(v.team_id, node.id)
+            st = agent_state(node.id, v.run, v.active_ids, v.blocked)
+            place = KIND_PLACE.get(st["kind"], "desk")
+            if place == "desk":
+                target, face = seats[key], "down"
+            else:
+                spot = spots[place][k % len(spots[place])]
+                k += 1
+                target, face = spot[:2], spot[2]
+            rank_id, rank_name = v.ranks[node.id]
+            agents.append({
+                "id": key, "name": v.names[node.id], "rank": rank_name, "lead": node.id == v.org.id, "head": False,
+                "team": v.team_name, "color": RANK_COLORS.get(rank_id, DEFAULT_COLOR), "desk": seats[key],
+                "target": list(target), "face": face, "place": place, "tone": st["tone"], "bubble": st["bubble"],
+                "about": v.specialties.get(node.id, ""),
+                "dim": v.active_ids is not None and node.id not in v.active_ids, "note": v.blocked.get(node.id, ""),
+            })
+    stages = [f"{v.team_name} {STAGES[min(stage_of(v.run), len(STAGES) - 1)]}" for v in views
+              if v.run and v.run["status"] not in ("adopted", "rejected")]
+    return {
+        "layout": layout, "agents": agents, "events": dept_events(views), "focus": focus or "",
+        "running": any(v.run and not v.run["done"] for v in views), "stage": " · ".join(stages),
+        "activeTeam": active_team,
     }
 
 

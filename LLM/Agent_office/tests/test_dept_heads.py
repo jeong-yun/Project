@@ -340,17 +340,15 @@ def _ranks():
     return load_ranks()
 
 
-def test_home_department_band_opens_department_models(app_env):
+def test_home_department_models_and_band_opens_department_screen(app_env):
     at = _app()
     at.run()
     assert not at.exception, at.exception
     box = "🎛 부서별 모델 선택 — 👔 부장(비평가) · 팀원"
     assert any(e.label == box for e in at.expander)
     assert not any(s.key and s.key.startswith("member_model_") for s in at.selectbox)  # 팀을 고르기 전에는 팀원 표 없음
-    at.session_state["building_nav"] = {"kind": "dept", "id": "security"}  # 빌딩의 부서 띠를 누름
-    at.run()
+    at = at.selectbox(key="dept_models_pick").set_value("security").run()  # 메인 '🎛 부서별 모델 선택'에서 부서 고르기
     assert not at.exception, at.exception
-    assert at.selectbox(key="dept_models_pick").value == "security"
     head = at.selectbox(key="dept_head_model_home_security")
     at = head.set_value(OPUS).run()
     assert not at.exception, at.exception
@@ -359,3 +357,10 @@ def test_home_department_band_opens_department_models(app_env):
     at = at.radio(key="dept_team_pick_home_security").set_value("infra_security").run()
     assert not at.exception, at.exception
     assert any(s.key and s.key.startswith("member_model_infra_security_") for s in at.selectbox)
+    # 빌딩의 부서 띠를 누르면 → 🏢 보안부 업무 화면 (부서장 창구 · 부서 사무실 · 같은 '🎛 부서별 모델 선택')
+    at.session_state["building_nav"] = {"kind": "dept", "id": "security"}
+    at.run()
+    assert not at.exception, at.exception
+    assert at.session_state["view"] == "dept" and at.session_state["dept_pick"] == "security"
+    assert any(e.label == "🎛 부서별 모델 선택 — 🛡️ 보안부" for e in at.expander)
+    assert at.selectbox(key="dept_head_model_team_security").value == OPUS

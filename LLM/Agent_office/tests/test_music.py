@@ -357,11 +357,13 @@ def test_app_renders_music_team(tmp_path, monkeypatch):
     at.run()
     assert not at.exception
     assert at.query_params["team"] == ["music"] or at.query_params["team"] == "music"
-    pick = next(s for s in at.selectbox if s.label == "📋 업무 선택")
-    assert pick.value == "song"
+    assert at.session_state["dept_pick"] == "creative"  # 음악 팀 → 🎨 크리에이티브부 업무 화면
+    at = at.selectbox(key="dept_task_creative").set_value("music:song").run()  # 부서 업무 목록에서 음악 팀 업무
+    pick = at.selectbox(key="dept_task_creative")
+    assert pick.value == "music:song"
     labels = {w.label for w in at.text_input} | {w.label for w in at.text_area} | {w.label for w in at.selectbox}
     assert {"주제·용도 *", "가사 언어", "길이", "다듬을 가사 (선택)"} <= labels
-    pick.select("instrumental").run()
+    pick.set_value("music:instrumental").run()
     assert not at.exception
     assert "원하는 악기 (선택)" in {w.label for w in at.text_input}
 
@@ -497,8 +499,10 @@ def test_app_music_button_generates_in_background(tmp_path, monkeypatch):
         deadline = time.time() + 60
         while not list((data / "music" / "m2").glob("gen1/take1.mp3")) and time.time() < deadline:
             time.sleep(0.2)
-        time.sleep(0.5)  # 스레드가 post_busy 를 내릴 시간
-        at.run()
+        at.run()  # 파일이 생긴 뒤에도 채점·측정이 남아 있다 → '곡 만드는 중' 안내가 사라질 때까지 (부하가 크면 몇 초)
+        while any("곡 만드는 중" in i.value for i in at.info) and time.time() < deadline + 30:
+            time.sleep(0.5)
+            at.run()
         assert not at.exception
         assert ("lyria", "lyria-3.5") in log
         assert not [w for w in at.warning if "만들지 못했습니다" in w.value]

@@ -130,7 +130,7 @@ def _proposal_card(p: dict) -> None:
 
 
 def _handoff(dept_id: str, question: str) -> None:
-    """부서장 창구로 넘기기 (콜백 — 창구 라디오를 그리기 전에 바꾼다). 창구가 열리면 곧바로 팀 배정."""
+    """그 부서 업무 화면의 부서장 창구로 넘기기 (콜백). 화면이 열리면 부서장이 곧바로 팀을 배정한다."""
     st.session_state.pop(RESULT_KEY, None)
     building_ui.open_desk(dept_id, question, auto=True)
 

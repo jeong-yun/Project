@@ -51,7 +51,7 @@ import office_ui
 import run_control_ui
 from core import (
     audio_edit, building, call_monitor, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_caps,
-    model_catalog, music, stock_calc, usage, verification,
+    model_catalog, music, office, stock_calc, usage, verification,
 )
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -217,27 +217,67 @@ def discard_run(run: dict) -> None:
 # 사이드바: 팀 / 모델 상태 / 검증 설정
 # ════════════════════════════════════════════════════════════════════
 team_names = {t.id: t.name for t in teams}
-TEAM_KEY, HISTORY_KEY = "team_pick", "history_open"
+teams_by_id = {t.id: t for t in teams}
+# 부서 → 팀 (config/departments.yaml) — 🏢 부서 업무 화면은 부서 하나를 고르고, 그 안의 '지금 보는 팀'(TEAM_KEY)이 일을 맡는다
+DEPT_CFG = building.load_config()
+depts = building.departments([t.id for t in teams], DEPT_CFG)
+dept_by_id = {d.id: d for d in depts}
+dept_of_team = {tid: d.id for d in depts for tid in d.teams}
+# TEAM_KEY = 지금 보는 팀 (위젯 아님 — 부서장 배정·업무 선택·사무실 클릭이 바꾼다), DEPT_KEY = 고른 부서 (사이드바)
+TEAM_KEY, DEPT_KEY, HISTORY_KEY = "team_pick", "dept_pick", "history_open"
 
 
-VIEW_KEY, HOME, TEAM_VIEW = "view", "home", "team"
+VIEW_KEY, HOME, DEPT_VIEW = "view", "home", "dept"
+OLD_TEAM_VIEW = "team"  # 예전 '🏢 팀 업무' 주소(?view=team) — 부서 업무 화면으로 연다
 FREE_FORM = "free"  # 업무 선택의 '💬 자유 질문'
+HEAD_TASK = "head"  # 부서 업무 목록의 '👔 부서장에게 맡기기' (기본)
+
+
+def task_key(dept_id: str) -> str:
+    """부서 업무 목록 선택 — 값은 HEAD_TASK 또는 '팀 id:업무 id' ('팀 id:free' = 그 팀 자유 질문)."""
+    return f"dept_task_{dept_id}"
+
+
+def first_task(team_id: str) -> str:
+    t = teams_by_id[team_id]
+    return f"{team_id}:{t.tasks[0].id if t.tasks else FREE_FORM}"
+
+
+def set_team(team_id: str) -> None:
+    """지금 보는 팀을 바꾼다 (콜백·화면 이동 전용). 부서도 그 팀의 부서로."""
+    st.session_state[TEAM_KEY] = team_id
+    st.session_state[DEPT_KEY] = dept_of_team[team_id]
 
 
 def go_to_run(run: dict) -> None:
-    """사이드바 '진행 중인 업무'를 누르면 그 업무의 팀·문의 대상으로 이동 (위젯이 그려지기 전에 실행되는 콜백)."""
-    st.session_state[VIEW_KEY] = TEAM_VIEW
-    st.session_state[TEAM_KEY] = run["team_id"]
+    """사이드바 '진행 중인 업무'를 누르면 그 업무의 부서·팀·문의 대상으로 이동 (위젯이 그려지기 전에 실행되는 콜백)."""
+    st.session_state[VIEW_KEY] = DEPT_VIEW
+    set_team(run["team_id"])
     st.session_state[f"target_{run['team_id']}"] = run["root_id"]
 
 
-def go_to_team(team: str, question: str = "") -> None:
-    """메인 화면의 팀 방·버튼 — 그 팀 업무 화면으로. question 이 있으면(🧭 부서장) 자유 질문 칸에 채워 둔다."""
-    st.session_state[VIEW_KEY] = TEAM_VIEW
-    st.session_state[TEAM_KEY] = team
-    if question:
-        st.session_state[f"task_pick_{team}"] = FREE_FORM
+def go_to_team(team: str, question: str = "", start: bool = False) -> None:
+    """메인의 팀 줄·범위 밖 안내·부서장 배정 — 그 팀이 있는 부서 업무 화면으로.
+
+    start (부서장 '▶ 바로 맡기기')면 업무 목록은 '👔 부서장에게 맡기기' 그대로 (요청은 부서장 입력칸에 남아 있다),
+    question 만 있으면 그 팀 '💬 자유 질문'에 채워 두고, 둘 다 없으면 그 팀의 첫 업무를 골라 둔다."""
+    st.session_state[VIEW_KEY] = DEPT_VIEW
+    set_team(team)
+    if start:
+        st.session_state[task_key(dept_of_team[team])] = HEAD_TASK
+    elif question:
+        st.session_state[task_key(dept_of_team[team])] = f"{team}:{FREE_FORM}"
         st.session_state["q_text"] = question
+    else:
+        st.session_state[task_key(dept_of_team[team])] = first_task(team)
+
+
+def go_to_dept(dept_id: str, question: str = "", auto: bool = False) -> None:
+    """부서 업무 화면 열기 (콜백·apply_nav) — 업무 목록은 '👔 부서장에게 맡기기'. question 이 있으면 부서장 입력칸에, auto 면 곧바로 배정."""
+    st.session_state[VIEW_KEY] = DEPT_VIEW
+    st.session_state[DEPT_KEY] = dept_id
+    st.session_state[task_key(dept_id)] = HEAD_TASK
+    building_ui.prepare_desk(dept_id, question, auto)
 
 
 def short(text: str, n: int = 38) -> str:
@@ -257,39 +297,67 @@ if st.query_params.get("view") == board_ui.BOARD_VIEW:
     # 📺 전체 화면 보드 (TV·키오스크) — 사이드바·메뉴 없이 보드만 (board_ui.py)
     board_ui.render_board_page(models, settings, DATA_DIR)
     st.stop()
-building_ui.apply_nav(go_to_team)  # 🏙 빌딩에서 누른 팀 방·부서·로비 (위젯을 그리기 전에 처리해야 함)
-if VIEW_KEY not in st.session_state:  # 주소창의 ?view= 를 먼저 본다 (기본은 메인)
-    st.session_state[VIEW_KEY] = TEAM_VIEW if st.query_params.get("view") == TEAM_VIEW else HOME
+building_ui.apply_nav(go_to_team, go_to_dept)  # 🏙 빌딩에서 누른 팀 방·부서·로비 (위젯을 그리기 전에 처리해야 함)
+if VIEW_KEY not in st.session_state:  # 주소창의 ?view= 를 먼저 본다 (기본은 메인, 예전 ?view=team 도 부서 화면)
+    st.session_state[VIEW_KEY] = DEPT_VIEW if st.query_params.get("view") in (DEPT_VIEW, OLD_TEAM_VIEW) else HOME
+elif st.session_state[VIEW_KEY] == OLD_TEAM_VIEW:  # 예전 값이 남은 세션 → 부서 업무 화면
+    st.session_state[VIEW_KEY] = DEPT_VIEW
 with st.sidebar:
-    view = st.radio("화면", [HOME, TEAM_VIEW], format_func={HOME: "🏠 메인", TEAM_VIEW: "🏢 팀 업무"}.get,
+    view = st.radio("화면", [HOME, DEPT_VIEW], format_func={HOME: "🏠 메인", DEPT_VIEW: "🏢 부서 업무"}.get,
                     horizontal=True, key=VIEW_KEY)
 st.query_params["view"] = view
 if view == HOME:
     home_open = [r for r in runs.values() if r["status"] not in DECIDED and r["team_id"] in team_names]
     home_ui.render(storage, models, home_open, team_names, go_to_team, settings=settings, data_dir=DATA_DIR,
-                   teams=teams, ranks=ranks, dept_models=dept_ctx)
+                   teams=teams, ranks=ranks, dept_models=dept_ctx, go_to_dept=go_to_dept)
     st.stop()
 
-with st.sidebar:
-    st.markdown("### 팀 선택")
-    team_ids = [t.id for t in teams]
-    if TEAM_KEY not in st.session_state:
-        # 주소창의 ?team= 을 먼저 본다 — 새로 고침해도 보던 팀이 그대로 열린다
-        wanted, default_team = st.query_params.get("team"), settings.get("default_team")
-        st.session_state[TEAM_KEY] = next(t for t in (wanted, default_team, team_ids[0]) if t in team_ids)
-    team_id = st.selectbox("팀", team_ids, format_func=team_names.get, label_visibility="collapsed", key=TEAM_KEY)
-    st.query_params["team"] = team_id
-    team = next(t for t in teams if t.id == team_id)
-    st.caption(team.description)
 
-    # 모든 팀의 진행 중·결정 대기 업무 — 다른 팀을 보고 있어도 여기서 확인하고 바로 이동
+def open_run_of(tid: str) -> dict | None:
+    """이 팀의 지금 업무 (진행 중 → 결정 대기 → 결정까지 끝났지만 아직 닫지 않은 것 순, 같은 순위면 최근)."""
+    mine = [r for (t, _), r in runs.items() if t == tid]
+    return max(mine, key=lambda r: (not r["done"], r["status"] not in DECIDED, r["started_at"]), default=None)
+
+
+with st.sidebar:
+    st.markdown("### 부서 선택")
+    if DEPT_KEY not in st.session_state:
+        # 주소창의 ?dept= · ?team= (예전 팀 주소) 을 먼저 본다 — 새로 고침해도 보던 부서·팀이 그대로 열린다
+        wanted_team = next((t for t in (st.session_state.get(TEAM_KEY), st.query_params.get("team"),
+                                        settings.get("default_team")) if t in dept_of_team), None)
+        wanted_dept = st.query_params.get("dept")
+        st.session_state[DEPT_KEY] = (wanted_dept if wanted_dept in dept_by_id
+                                      else dept_of_team[wanted_team] if wanted_team else depts[0].id)
+        if wanted_team and dept_of_team[wanted_team] == st.session_state[DEPT_KEY]:
+            st.session_state[TEAM_KEY] = wanted_team
+    dept_id = st.selectbox("부서", [d.id for d in depts], key=DEPT_KEY, label_visibility="collapsed",
+                           format_func=lambda d: f"{dept_by_id[d].emoji} {dept_by_id[d].name}")
+    dept = dept_by_id[dept_id]
+    if st.session_state.get(TEAM_KEY) not in dept.teams:
+        # 부서를 바꿨으면 그 부서에서 일하는 중인 팀부터 (없으면 부서에 먼저 적힌 팀)
+        busy = [t for t in dept.teams if (r := open_run_of(t)) and r["status"] not in DECIDED]
+        st.session_state[TEAM_KEY] = (busy or dept.teams)[0]
+    team_id = st.session_state[TEAM_KEY]
+    TASK_KEY = task_key(dept_id)
+    TEAM_PICKS = [f"{team_id}:{x.id}" for x in teams_by_id[team_id].tasks] + [f"{team_id}:{FREE_FORM}"]
+    if st.session_state.get(TASK_KEY, HEAD_TASK) not in (HEAD_TASK, *TEAM_PICKS):
+        st.session_state[TASK_KEY] = HEAD_TASK  # 다른 팀 업무가 골라져 있으면(사무실에서 다른 팀을 누름 등) 부서장 창구로
+    st.query_params["dept"] = dept_id
+    st.query_params["team"] = team_id
+    team = teams_by_id[team_id]
+    dept_head_info = dept_heads.head_of(dept)
+    st.caption(f"{dept.description}  \n👔 {dept_head_info.name} · 팀 {len(dept.teams)}개: "
+               + " · ".join(team_names[t] for t in dept.teams))
+
+    # 모든 부서의 진행 중·결정 대기 업무 — 다른 부서를 보고 있어도 여기서 확인하고 바로 이동
     open_runs = [r for r in runs.values() if r["status"] not in DECIDED and r["team_id"] in team_names]
     if open_runs:
         st.markdown("### 🔔 진행 중인 업무")
         for r in sorted(open_runs, key=lambda r: r["started_at"], reverse=True):
             state = "⏳ 진행 중" if not r["done"] else ("⚠️ 오류" if r["error"] else
                                                        "🔀 확인 대기" if r["status"] == "step_check" else "👤 결정 대기")
-            st.button(f"{state} · {team_names[r['team_id']]}\n\n{short(run_title(r))}", key=f"go_{r['run_id']}",
+            where = dept_by_id[dept_of_team[r["team_id"]]]
+            st.button(f"{state} · {where.emoji} {team_names[r['team_id']]}\n\n{short(run_title(r))}", key=f"go_{r['run_id']}",
                       on_click=go_to_run, args=(r,), use_container_width=True)
 
     # 유료 키를 아끼거나 키가 없을 때: 유료 provider 를 모두 끄고 FreeLLMAPI 무료 모델만 쓴다
@@ -306,24 +374,33 @@ with st.sidebar:
     is_design = design_ui.FEATURE in team.features  # 설계 팀: 최종 JSON → 도면(+3D) (design_ui.py)
     is_career = career_ui.FEATURE in team.features  # 포트폴리오·자소서 팀: 최종 답변 → .md · .docx · .hwpx (career_ui.py)
 
+    # 결과 기록은 부서 단위로 모아 본다 — 팀 필터는 선택 (팀이 둘 이상인 부서만)
+    HIST_FILTER_KEY = f"hist_team_{dept_id}"
+    rec_teams = dept.teams
+    if len(dept.teams) > 1:
+        only = st.selectbox("🗂 기록 팀 필터", ["", *dept.teams], key=HIST_FILTER_KEY,
+                            format_func=lambda t: "부서 전체" if not t else team_names[t])
+        rec_teams = [only] if only else dept.teams
+
     # 지난 업무 (사람이 채택·반려한 것) — 누르면 내용·결정·교훈을 창으로 본다
-    history = [r for r in storage.list_runs(team_id, limit=30) if r["status"] in DECIDED][:10]
+    hist_rows = {r["id"]: r for tid in rec_teams for r in storage.list_runs(tid, limit=30) if r["status"] in DECIDED}
+    history = sorted(hist_rows.values(), key=lambda r: r["created_at"], reverse=True)[:12]
     with st.expander(f"🕘 지난 업무 ({len(history)})"):
         for r in history:
             mark = "✅" if r["status"] == "adopted" else "❌"
-            if st.button(f"{mark} {r['created_at'][5:16].replace('T', ' ')} · {short(r['question'], 30)}",
+            tag = f"{team_names.get(storage.team_for(r['team_id'], r['question']), r['team_id'])} · " if len(rec_teams) > 1 else ""
+            if st.button(f"{mark} {r['created_at'][5:16].replace('T', ' ')} · {tag}{short(r['question'], 30)}",
                          key=f"hist_{r['id']}", use_container_width=True):
                 st.session_state[HISTORY_KEY] = r["id"]
         if not history:
             st.caption("아직 결정한 업무가 없습니다.")
 
-    # 채택해서 저장한 결과 파일 — 내려받기
-    saved = list_results(RESULTS_DIR, team_id, limit=10)
-    if team.legacy:  # 나뉘기 전 옛 팀 폴더에 저장된 결과도 함께 (파일은 옮기지 않음)
-        saved = sorted([*saved, *list_results(RESULTS_DIR, team.legacy.team, limit=10)],
-                       key=lambda p: p.stat().st_mtime, reverse=True)[:10]
+    # 채택해서 저장한 결과 파일 — 내려받기 (부서의 팀 폴더 + 나뉘기 전 옛 팀 폴더, 파일은 옮기지 않음)
+    folders = list(dict.fromkeys([*rec_teams, *(teams_by_id[t].legacy.team for t in rec_teams if teams_by_id[t].legacy)]))
+    saved = sorted({p for f in folders for p in list_results(RESULTS_DIR, f, limit=10)},
+                   key=lambda p: p.stat().st_mtime, reverse=True)[:10]
     with st.expander(f"📂 저장된 결과 파일 ({len(saved)})"):
-        st.caption(f"채택한 결과는 `{RESULTS_DIR.name}/{team_id}/` 폴더에 저장됩니다.")
+        st.caption("채택한 결과는 " + " · ".join(f"`{RESULTS_DIR.name}/{t}/`" for t in rec_teams) + " 폴더에 저장됩니다.")
         for path in saved:
             # 긴 이름은 앞(날짜·질문)과 끝(_지도·_자기소개서 같은 종류)을 함께 보이게
             stem = path.stem if len(path.stem) <= 34 else f"{path.stem[:16]}…{path.stem[-14:]}"
@@ -377,8 +454,7 @@ choice_issue_of = {i.node_id: i for i in choice_issues}
 member_plans = member_models.plan(org, models, team, member_choices)
 member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
 # 이 팀이 속한 부서와 부장 — 부장이 이 팀의 ⚖️ 비평가 (core/dept_heads.py)
-dept = building.dept_of(team_id, building.departments([t.id for t in teams], building.load_config()))
-dept_head = dept_heads.head_of(dept)
+dept_head = dept_head_info
 runtime_states = llm_factory.provider_status(models)
 
 
@@ -395,6 +471,54 @@ def chosen_off(node_id: str) -> tuple[str, str] | None:
 def name_of(node_id: str) -> str:
     node = nodes[node_id]
     return node.name or ranks_by_id[node.rank].name
+
+
+class TeamInfo:
+    """부서의 팀 하나 — 🏢 부서 사무실·🗂 부서 조직도에 그 팀 팀원 전원을 그릴 때 쓴다 (지금 보는 팀이 아니어도)."""
+
+    def __init__(self, t):
+        self.team, self.id = t, t.id
+        self.org = org if t.id == team_id else team_org(t, ranks)
+        self.nodes = {n.id: n for n in self.org.walk()}
+        self.parents = parent_map(self.org)
+        if t.id == team_id:
+            self.plans, self.chains = member_plans, member_chains
+        else:
+            choices = model_caps.check_choices(member_store.load(t.id, t.legacy.team if t.legacy else None), model_caps.TEAM_WORK)[0]
+            self.plans = member_models.plan(self.org, models, t, choices)
+            self.chains = {nid: member_models.member_rank_models(p, models, t) for nid, p in self.plans.items()}
+
+    def name(self, node_id: str) -> str:
+        node = self.nodes[node_id]
+        return node.name or ranks_by_id[node.rank].name
+
+    def off(self, node_id: str) -> tuple[str, str] | None:
+        """chosen_off 와 같은 판단 — 이 팀 팀원 기준."""
+        p = self.plans[node_id]
+        if not (p.choice or p.limited):
+            return None
+        provider, model = member_models.split_key(p.effective)
+        reason = llm_factory.STATUS_REASONS.get(runtime_states.get(provider, "no_key"), "")
+        return (model, reason) if reason else None
+
+    def view(self, run: dict | None, active: set[str] | None) -> office.TeamView:
+        return office.TeamView(
+            team_id=self.id, team_name=self.team.name, org=self.org, names={n: self.name(n) for n in self.nodes},
+            ranks={nid: (n.rank, ranks_by_id[n.rank].name) for nid, n in self.nodes.items()},
+            specialties={nid: n.specialty for nid, n in self.nodes.items()}, parents=self.parents, run=run, active_ids=active,
+            blocked={nid: f"{o[0]} — {o[1]}" for nid in self.nodes if (o := self.off(nid))},
+        )
+
+
+dept_infos = {tid: TeamInfo(teams_by_id[tid]) for tid in dept.teams}
+
+
+def dept_run_of(tid: str) -> tuple[dict | None, set[str] | None]:
+    """부서 사무실·조직도에 보일 팀의 업무와 참여자 — 지금 보는 팀은 고른 문의 대상의 업무, 다른 팀은 그 팀의 지금 업무."""
+    run = runs.get(run_key) if tid == team_id else open_run_of(tid)
+    if tid == team_id:
+        return run, active_ids
+    return run, ({n.id for n in subtree(dept_infos[tid].org, run["root_id"]).walk()} if run else None)
 
 
 # 🏢 픽셀 사무실·🖥️ 커맨드 센터가 쓰는 팀 정보 (office_ui.py · command_center_ui.py)
@@ -502,6 +626,8 @@ a.ao-link{text-decoration:none;color:inherit}
            animation:ao-blink 1.4s infinite both}
 .ao-dots i:nth-child(2){animation-delay:.2s}.ao-dots i:nth-child(3){animation-delay:.4s}
 .ao-hint{font-size:.75rem;color:#8993A4;margin:4px 0 0 4px}
+.ao-team{display:table;margin:0 auto 3px;padding:1px 8px;border-radius:6px;font-size:.72rem;font-weight:700;background:#E9F2FF;color:#0C66E4}
+.ao-node.ao-head{border-color:#8270DB;background:#F3F0FF}
 @keyframes ao-pulse{0%,100%{box-shadow:0 0 0 0 rgba(255,171,0,.5)}50%{box-shadow:0 0 0 6px rgba(255,171,0,0)}}
 @keyframes ao-blink{0%,80%,100%{opacity:.2}40%{opacity:1}}
 </style>
@@ -510,26 +636,29 @@ DOTS = "<span class='ao-dots'><i></i><i></i><i></i></span>"
 NODE_LINK = "node:"  # 조직도 칸 링크 id 접두어
 
 
-def node_html(node: OrgNode, statuses: dict, focus: str, active_ids: set | None, lessons: dict) -> str:
+def node_html(info: TeamInfo, node: OrgNode, statuses: dict, focus: str, active_ids: set | None, lessons: dict) -> str:
+    """조직도 칸 하나 — 링크 id 는 'node:팀 id/팀원 id' (부서 조직도라 팀마다 팀원 id 가 겹친다)."""
     state, label = statuses.get(node.id, (None, ""))
-    path = avatar_path(node.id, working=state == "working")
+    path = resolve_avatar(info.id, ranks_by_id[node.rank], state == "working", node)
     img = (
         f"<img src='{image_data_uri(str(path), path.stat().st_mtime)}'/>"
         if path
         else f"<div class='ao-emoji'>{ranks_by_id[node.rank].emoji}</div>"
     )
+    key = office.agent_key(info.id, node.id)
     classes = ["ao-node"]
-    if node.id == focus:
+    if key == focus:
         classes.append("ao-focus")
     if active_ids is not None and node.id not in active_ids:
         classes.append("ao-dim")  # 이번 질문에 참여하지 않는 칸은 흐리게
     if state == "working":
         classes.append("ao-st-working")
-    candidates = llm_factory.available_candidates(member_chains[node.id], models, team_id)
+    chain = info.chains[node.id]
+    candidates = llm_factory.available_candidates(chain, models, info.id)
     model = candidates[0][0].model if candidates else "모델 없음"
-    off = chosen_off(node.id)
-    primary = member_chains[node.id].primary
-    resting = llm_factory.skip_reason(primary, team_id)
+    off = info.off(node.id)
+    primary = chain.primary
+    resting = llm_factory.skip_reason(primary, info.id)
     if off:  # 고른 모델이 꺼져 있으면 대안 모델을 슬쩍 보여 주지 않고 그대로 알린다
         model = f"⛔ {off[0]} 꺼짐" + (f" → {candidates[0][0].model}" if candidates else " · 실패 예정")
     elif resting and candidates and candidates[0][0] != primary:  # 거부·한도로 잠시 건너뛰는 중
@@ -539,27 +668,44 @@ def node_html(node: OrgNode, statuses: dict, focus: str, active_ids: set | None,
         if state
         else ""
     )
+    team_tag = f"<div class='ao-team'>{html.escape(info.team.name)}</div>" if node.id == info.org.id else ""
     return (
-        f"<a class='ao-link' href='#' id='{NODE_LINK}{node.id}'>"
+        f"<a class='ao-link' href='#' id='{NODE_LINK}{key}'>{team_tag}"
         f"<div class='{' '.join(classes)}' title='{html.escape(node.specialty)}'>{img}"
-        f"<div class='ao-name'>{html.escape(name_of(node.id))}</div>"
+        f"<div class='ao-name'>{html.escape(info.name(node.id))}</div>"
         f"<div class='ao-meta'>{html.escape(model)} · 📚{lessons.get(node.id, 0)}</div>{badge}</div></a>"
     )
 
 
-def tree_html(node: OrgNode, *args) -> str:
-    children = "".join(tree_html(c, *args) for c in node.children)
-    return f"<li>{node_html(node, *args)}{f'<ul>{children}</ul>' if children else ''}</li>"
+def tree_html(info: TeamInfo, node: OrgNode, *args) -> str:
+    children = "".join(tree_html(info, c, *args) for c in node.children)
+    return f"<li>{node_html(info, node, *args)}{f'<ul>{children}</ul>' if children else ''}</li>"
 
 
-def chart_html(statuses: dict, focus: str, active_ids: set | None) -> str:
-    lessons = storage.lesson_counts(team_id)
+def head_html(focus: str) -> str:
+    """👔 부서장 칸 — 부서 조직도 맨 위 (팀장들의 위)."""
+    model, _ = building_ui.head_model(models, dept_store, dept.id)
+    busy = [t for t in dept.teams if (r := dept_run_of(t)[0]) and not r["done"]]
+    badge = (f"<div><span class='ao-badge ao-b-wait'>👀 {len(busy)}팀 일하는 중</span></div>" if busy else "")
+    return (f"<a class='ao-link' href='#' id='{NODE_LINK}{office.HEAD}'>"
+            f"<div class='ao-node ao-head{' ao-focus' if focus == office.HEAD else ''}' title='{html.escape(dept_head.persona)}'>"
+            f"<div class='ao-emoji'>👔</div><div class='ao-name'>{html.escape(dept_head.name)}</div>"
+            f"<div class='ao-meta'>부서장 · 🧭 배정 · ⚖️ 비평 · {html.escape(model)}</div>{badge}</div></a>")
+
+
+def chart_html(focus: str) -> str:
+    """🗂 부서 조직도 — 👤 사용자 ⟷ 👔 부서장 → 팀장들 → 팀원. focus = '팀 id/팀원 id' 또는 office.HEAD."""
+    trees = []
+    for tid in dept.teams:
+        info = dept_infos[tid]
+        run, active = dept_run_of(tid)
+        trees.append(tree_html(info, info.org, run["statuses"] if run else {}, focus, active, storage.lesson_counts(tid)))
     return (
         CHART_CSS
         + "<div class='ao-org'><div class='ao-user'><div class='ao-face'>👤</div><b>사용자</b></div>"
         + "<div class='ao-arrow'>⟷</div>"
-        + f"<div class='ao-tree'><ul>{tree_html(org, statuses, focus, active_ids, lessons)}</ul></div></div>"
-        + "<div class='ao-hint'>👆 칸을 누르면 그 에이전트가 한 일을 아래에서 볼 수 있습니다</div>"
+        + f"<div class='ao-tree'><ul><li>{head_html(focus)}<ul>{''.join(trees)}</ul></li></ul></div></div>"
+        + "<div class='ao-hint'>👆 칸을 누르면 그 에이전트가 한 일을 아래에서 볼 수 있습니다 (다른 팀 칸을 누르면 그 팀 업무로 바뀝니다)</div>"
     )
 
 
@@ -1330,9 +1476,10 @@ def render_stages(run: dict) -> None:
                 unsafe_allow_html=True)
 
 
-def node_label(node_id: str) -> str:
-    """지금 조직도에 없는 에이전트(지난 기록)도 이름을 보여 준다."""
-    return name_of(node_id) if node_id in nodes else node_id
+def node_label(node_id: str, tid: str | None = None) -> str:
+    """지금 조직도에 없는 에이전트(지난 기록)도 이름을 보여 준다. tid = 그 기록의 팀 (부서의 다른 팀일 수 있다)."""
+    info = dept_infos.get(tid or team_id)
+    return info.name(node_id) if info and node_id in info.nodes else node_id
 
 
 @st.dialog("🕘 지난 업무", width="large")
@@ -1342,25 +1489,28 @@ def history_dialog(run_id: str) -> None:
         st.warning("기록을 찾지 못했습니다 (삭제됨).")
         return
     decision: HumanDecision | None = row["decision"]
-    st.caption(f"{row['created_at'].replace('T', ' ')} · 문의 대상 {node_label(row['root_id'])} · 단계 {len(row['steps'])}개")
+    tid = storage.team_for(row["team_id"], row["question"])  # 옛 팀 id → 지금 팀
+    st.caption(f"{row['created_at'].replace('T', ' ')} · {team_names.get(tid, tid)} · 문의 대상 {node_label(row['root_id'], tid)} · "
+               f"단계 {len(row['steps'])}개")
     st.markdown(f"**Q.** {row['question'] if len(row['question']) <= 600 else row['question'][:600] + '…'}")
     if decision and decision.action == "adopt":
-        st.success(f"✅ {node_label(decision.adopted_node_id)} 안 채택" + (" · ✍️ 직접 수정" if decision.edited else "")
+        st.success(f"✅ {node_label(decision.adopted_node_id, tid)} 안 채택" + (" · ✍️ 직접 수정" if decision.edited else "")
                    + f" · 만족도 {decision.score}/5")
         with st.container(height=380, border=True):
             st.markdown(decision.final_answer)
-        st.download_button("⬇ 이 결과 받기 (.md)", data=decision.final_answer, file_name=f"{team_id}_{run_id[:8]}.md",
+        st.download_button("⬇ 이 결과 받기 (.md)", data=decision.final_answer, file_name=f"{tid}_{run_id[:8]}.md",
                            mime="text/markdown", key=f"hist_dl_{run_id}")
     elif decision:
         st.warning(f"❌ 전체 반려 · 만족도 {decision.score}/5")
     if decision and decision.comment:
         st.caption(f"코멘트: {decision.comment}")
-    run_control_ui.render_history(storage.get_monitor(run_id), {nid: name_of(nid) for nid in nodes})  # ⏱ 호출 기록
+    names_here = {nid: dept_infos[tid].name(nid) for nid in dept_infos[tid].nodes} if tid in dept_infos else {}
+    run_control_ui.render_history(storage.get_monitor(run_id), names_here)  # ⏱ 호출 기록
     lessons = [l for l in storage.list_lessons(row["team_id"]) if l["run_id"] == run_id]
     if lessons:
         st.markdown("##### 📚 이 업무에서 생긴 교훈")
         for l in lessons:
-            st.markdown(f"- **{node_label(l['agent_id'])}** {'👍' if l['kind'] == 'praise' else '🔧'} {l['lesson']}")
+            st.markdown(f"- **{node_label(l['agent_id'], tid)}** {'👍' if l['kind'] == 'praise' else '🔧'} {l['lesson']}")
 
 
 def set_tab_title() -> None:
@@ -1380,19 +1530,41 @@ def set_tab_title() -> None:
 # ════════════════════════════════════════════════════════════════════
 # 본문 ① 문의 대상
 # ════════════════════════════════════════════════════════════════════
-st.title("🏢 Agent Office")
-st.caption(f"현재 팀: **{team.name}** · 사용자는 맨 위 에이전트(supervisor)에게 일을 맡기고, supervisor 가 전문가들에게 나눠 줍니다.")
+st.title(f"🏢 {dept.emoji} {dept.name}")
+headcounts = {tid: len(dept_infos[tid].nodes) for tid in dept.teams}
+st.caption(f"👔 **{dept_head.name}**에게 맡기면 알맞은 팀을 골라 넘기고, 그 팀의 팀장이 팀원에게 나눠 일합니다 · "
+           f"부서원 {sum(headcounts.values()) + 1}명 (부서장 1 · " + " · ".join(f"{team_names[t]} {n}" for t, n in headcounts.items())
+           + ") · 회의실·자료실은 부서 공용")
+
+
+def see_team(tid: str) -> None:
+    """부서 안에서 '지금 보는 팀' 바꾸기 (콜백) — 그 팀의 업무·결과·결정·호출 모니터를 아래에서 본다."""
+    st.session_state[TEAM_KEY] = tid
+
+
+if len(dept.teams) > 1:
+    # 부서의 팀마다 지금 상태 — 누르면 그 팀 업무를 본다 (사무실 그림에서 다른 팀 사람을 눌러도 된다)
+    team_cols = st.columns(len(dept.teams))
+    for col, tid in zip(team_cols, dept.teams):
+        r = open_run_of(tid)
+        state = ("○ 쉬는 중" if not r else "⏳ 진행 중" if not r["done"] else "⚠️ 오류" if r["error"]
+                 else "🔀 확인 대기" if r["status"] == "step_check" else "👤 결정 대기" if r["status"] == "awaiting_human"
+                 else "✅ 결정함")
+        col.button(f"{'👁 ' if tid == team_id else ''}{team_names[tid]} · {state}", key=f"see_team_{tid}",
+                   type="primary" if tid == team_id else "secondary", on_click=see_team, args=(tid,), use_container_width=True,
+                   help="이 팀의 업무 진행·결과·결정을 아래에서 봅니다")
 
 TARGET_KEY = f"target_{team_id}"
 if st.session_state.get(TARGET_KEY) not in nodes:
     st.session_state[TARGET_KEY] = org.id  # 기본은 조직도 맨 위(supervisor)
-target = st.radio(
-    "문의 대상 (고른 에이전트가 supervisor 가 되어 그 아래 팀이 일합니다)",
-    options=[n.id for n in org.walk()],
-    format_func=name_of,
-    horizontal=True,
-    key=TARGET_KEY,
-)
+with st.expander(f"🎯 {team.name} 문의 대상 — 기본은 팀장 (팀장이 팀원에게 나눠 줍니다)"):
+    target = st.radio(
+        "문의 대상 (고른 에이전트가 supervisor 가 되어 그 아래 팀이 일합니다)",
+        options=[n.id for n in org.walk()],
+        format_func=name_of,
+        horizontal=True,
+        key=TARGET_KEY,
+    )
 active_ids = {n.id for n in subtree(org, target).walk()}
 run_key = (team_id, target)
 FOCUS_KEY, CLICK_KEY, PENDING_FOCUS_KEY = f"focus_{team_id}", f"last_click_{team_id}", f"pending_focus_{team_id}"
@@ -1424,29 +1596,71 @@ st.markdown(
 # ════════════════════════════════════════════════════════════════════
 # 본문 ② 실시간 영역 — 작업 중에는 1초마다 이 부분만 다시 그린다 (st.fragment)
 # ════════════════════════════════════════════════════════════════════
+HEAD_PANEL_KEY = f"head_panel_{dept_id}"
+
+
+def pick_agent(key: str) -> None:
+    """사무실·조직도에서 누른 사람 ('팀 id/팀원 id' 또는 부서장) — 같은 팀이면 그 사람 패널, 다른 팀이면 그 팀 업무로 바꿔서."""
+    tid, nid = office.split_key(key)
+    if nid == office.HEAD:
+        st.session_state[HEAD_PANEL_KEY] = True
+        st.session_state[FOCUS_KEY] = NO_FOCUS
+        st.rerun(scope="fragment")
+    st.session_state.pop(HEAD_PANEL_KEY, None)
+    if tid == team_id:
+        st.session_state[FOCUS_KEY] = nid
+        st.rerun(scope="fragment")
+    if tid in dept.teams:
+        st.session_state[TEAM_KEY] = tid
+        st.session_state[f"pending_focus_{tid}"] = nid
+        st.rerun()  # 지금 보는 팀이 바뀌면 화면 전체(업무 입력·결과·모델)를 그 팀으로
+
+
+def render_head_panel() -> None:
+    """👔 부서장을 누르면 — 하는 일·관점·모델·부서 팀 상태."""
+    model, source = building_ui.head_model(models, dept_store, dept.id)
+    with st.container(border=True):
+        st.markdown(f"#### 👔 {dept_head.name} · {dept.emoji} {dept.name} 부서장")
+        st.caption(f"🧭 요청을 읽고 맡을 팀을 고릅니다 · ⚖️ 이 부서 모든 팀의 최종 답변을 비평합니다 · 모델 {model} — {source}")
+        st.markdown(f"**관점** — {dept_head.persona}")
+        for tid in dept.teams:
+            r = open_run_of(tid)
+            st.markdown(f"- **{team_names[tid]}** — " + (short(run_title(r), 50) + (" · ⏳ 진행 중" if not r["done"] else " · 끝남")
+                                                         if r else "쉬는 중"))
+
+
 def render_live() -> None:
     run = runs.get(run_key)
 
     if office_ui.view_picker() == office_ui.OFFICE:
-        # 🏢 픽셀 사무실 + 🖥️ 커맨드 센터 — 캐릭터를 누르면 조직도 클릭과 똑같이 그 에이전트로 포커스 이동
-        c_office, c_cc = st.columns([3, 2])
+        # 🏢 부서 사무실 (부서원 전원) + 🖥️ 커맨드 센터 — 캐릭터를 누르면 그 에이전트로 (다른 팀이면 그 팀 업무로)
+        c_office, c_cc = st.columns([5, 2])  # 사무실을 넓게 — 부서원이 많아도 이름표·말풍선이 읽히게
         with c_office:
-            picked = office_ui.render_office(office_ctx, run, active_ids, st.session_state[FOCUS_KEY])
+            views = [dept_infos[tid].view(*dept_run_of(tid)) for tid in dept.teams]
+            focus_now = st.session_state[FOCUS_KEY]
+            picked = office_ui.render_dept_office(
+                dept, views, head_name=dept_head.name, head_about=f"부서장 — 🧭 팀 배정 · ⚖️ 비평. {dept_head.persona}",
+                focus=office.HEAD if st.session_state.get(HEAD_PANEL_KEY) else
+                office.agent_key(team_id, focus_now) if focus_now != NO_FOCUS else "", active_team=team_id)
         with c_cc:
+            st.caption(f"🖥️ 커맨드 센터 — 지금 보는 팀: **{team.name}**")
             command_center_ui.render(office_ctx, run, target, active_ids)
         if picked:
-            st.session_state[FOCUS_KEY] = picked
-            st.rerun(scope="fragment")
+            pick_agent(picked)
     else:
-        # 조직도 — 칸을 누르면 그 에이전트로 포커스 이동
-        clicked = click_detector(chart_html(run["statuses"] if run else {}, st.session_state[FOCUS_KEY], active_ids),
-                                 key=f"chart_{team_id}")
-        if clicked and clicked.startswith(NODE_LINK) and clicked != st.session_state.get(CLICK_KEY):
-            st.session_state[CLICK_KEY] = clicked
-            st.session_state[FOCUS_KEY] = clicked[len(NODE_LINK):]
-            st.rerun(scope="fragment")  # 조직도의 파란 테두리(선택 표시)도 바로 옮기도록 이 영역만 다시 그림
+        # 🗂 부서 조직도 (부서장 → 팀장 → 팀원) — 칸을 누르면 그 에이전트로 (다른 팀이면 그 팀 업무로)
+        focus_now = st.session_state[FOCUS_KEY]
+        clicked = click_detector(chart_html(office.HEAD if st.session_state.get(HEAD_PANEL_KEY) else
+                                            office.agent_key(team_id, focus_now) if focus_now != NO_FOCUS else ""),
+                                 key=f"chart_{dept_id}")
+        chart_click_key = f"last_click_{dept_id}"
+        if clicked and clicked.startswith(NODE_LINK) and clicked != st.session_state.get(chart_click_key):
+            st.session_state[chart_click_key] = clicked
+            pick_agent(clicked[len(NODE_LINK):])
         if st.toggle("🖥️ 커맨드 센터", key=f"cc_open_{team_id}"):
             command_center_ui.render(office_ctx, run, target, active_ids)
+    if st.session_state.get(HEAD_PANEL_KEY):
+        render_head_panel()
 
     # 선택지 이름은 고정(에이전트 이름)으로 둔다 — 진행 상태를 이름에 넣으면 1초마다 선택지가 바뀌어 선택이 풀릴 수 있다
     focus = st.selectbox("🔎 에이전트 보기 (조직도의 칸을 눌러도 됩니다)", [NO_FOCUS, *[n.id for n in org.walk()]],
@@ -1477,6 +1691,7 @@ def render_live() -> None:
         run_control_ui.render_monitor(rc_ctx, run)  # ⏱ 호출 모니터 (진행 중·조작 / 시간표 / 요약 / 개입 기록)
 
     if focus != NO_FOCUS:
+        st.session_state.pop(HEAD_PANEL_KEY, None)
         render_agent_panel(focus, run)
 
     if run:
@@ -1658,25 +1873,45 @@ def render_scope_block(block_key: str) -> None:
     b2.button("✏️ 질문 고치기", key=f"scope_edit_{team_id}", on_click=lambda: st.session_state.pop(block_key, None))
 
 
+DEPT_STEP = f"dept_{dept_id}"  # 👔 부서장에게 맡길 때의 '🔀 단계마다 확인' (run_control_ui.step_key)
+
+
+def on_task_pick() -> None:
+    """부서 업무 목록에서 팀 업무를 고르면 그 팀이 '지금 보는 팀'이 된다 (콜백 — 위젯을 그리기 전에 실행)."""
+    pick = st.session_state.get(TASK_KEY, HEAD_TASK)
+    if pick != HEAD_TASK:
+        st.session_state[TEAM_KEY] = pick.split(":", 1)[0]
+
+
+def task_label(pick: str) -> str:
+    if pick == HEAD_TASK:
+        return f"👔 부서장에게 맡기기 — {dept_head.name}이(가) 알맞은 팀을 골라 줍니다"
+    tid, tk = pick.split(":", 1)
+    t = teams_by_id[tid]
+    return f"{t.name} › " + ("💬 자유 질문" if tk == FREE_FORM else next(x.title for x in t.tasks if x.id == tk))
+
+
 def render_task_input() -> dict:
-    """업무 입력칸을 그리고, '맡기기'를 누른 경우 워크플로우로 넘길 요청(dict)을 돌려준다 (안 누르면 빈 dict)."""
+    """업무 입력칸을 그리고, '맡기기'를 누른 경우 워크플로우로 넘길 요청(dict)을 돌려준다 (안 누르면 빈 dict).
+
+    부서 업무 목록: 맨 위 '👔 부서장에게 맡기기'(기본) → 부서장이 팀을 골라 넘긴다 (building_ui.head_desk).
+    그 아래 팀별로 묶은 팀 업무(양식)·자유 질문 → 고르면 그 팀으로 바로 (부서장을 거치지 않음)."""
     request: dict = {}  # 업무 양식이든 자유 질문이든 여기에 모은다
-    st.markdown(f"#### 💬 {name_of(target)} 에게 업무 맡기기")
+    st.markdown(f"#### 💬 {dept.emoji} {dept.name}에 업무 맡기기")
+    options = [HEAD_TASK] + [f"{tid}:{x}" for tid in dept.teams for x in [*(t.id for t in teams_by_id[tid].tasks), FREE_FORM]]
+    pick = st.selectbox("📋 부서 업무 목록 (팀별로 묶여 있습니다 — 부서장에게 맡기거나 팀 업무를 직접 고르세요)", options,
+                        format_func=task_label, key=TASK_KEY, on_change=on_task_pick)
+    if pick == HEAD_TASK:
+        run_control_ui.step_mode_toggle(DEPT_STEP)  # 🔀 단계마다 확인 — 배정된 팀의 업무에 적용
+        with st.container(border=True):
+            building_ui.head_desk(dept, teams_by_id, models, dept_store, teams, go_to_dept)
+        return request
+    mode = pick.split(":", 1)[1]
+    st.caption(f"👔 {dept_head.name} → **{team.name}** · 직접 고른 업무 — 부서장 배정 없이 이 팀의 {name_of(target)}에게 바로 맡깁니다")
     warn_chosen_off()
     run_control_ui.step_mode_toggle(team_id)  # 🔀 단계마다 확인 (기본 꺼짐)
     # (안쪽에 '원하는 최종 상태' 접기 상자가 있어 바깥은 접기 상자가 아닌 테두리 상자로 둔다 — Streamlit 은 접기 상자 중첩 불가)
     with st.container(border=True):
-        task_ids = [t.id for t in team.tasks]
-        mode = (
-            st.selectbox(
-                "📋 업무 선택",
-                [*task_ids, FREE_FORM],
-                format_func=lambda tid: "💬 자유 질문" if tid == FREE_FORM else next(t.title for t in team.tasks if t.id == tid),
-                key=f"task_pick_{team_id}",
-            )
-            if team.tasks
-            else FREE_FORM
-        )
         task: TaskTemplate | None = next((t for t in team.tasks if t.id == mode), None)
 
         if task and is_concept:
@@ -1809,7 +2044,9 @@ for done_id in st.session_state.pop(NOTICE_KEY, []):
             st.toast(f"🔔 {where} 업무가 끝났습니다 — 결과를 확인하고 결정해 주세요: {short(run_title(done_run), 24)}", icon="🔔")
 if st.session_state.get(HISTORY_KEY):
     history_dialog(st.session_state.pop(HISTORY_KEY))
-building_ui.assignment_banner(team_id, current)  # 👔 부서장이 이 팀에 배정한 이유·모델
+# 👔 부서장 → 팀 — 부서장이 배정한 이유·모델 (없으면 지금 업무가 어느 팀 일인지 한 줄)
+if not building_ui.assignment_banner(team_id, team.name, current) and current is not None:
+    st.caption(f"👔 {dept_head.name} → **{team.name}** · {name_of(current['root_id'])}이(가) 맡은 업무")
 
 # 일이 없을 때는 업무 입력칸을 맨 위에 — 질문하려고 조직도 아래까지 내려가지 않아도 된다
 idle = current is None
@@ -1936,7 +2173,10 @@ if not idle:
 # 제출 → 백그라운드 실행 시작 (core/live.py)
 # ════════════════════════════════════════════════════════════════════
 # 👔 부서장이 배정하고 '▶ 바로 맡기기'를 누른 요청 (building_ui) · 🖥️ 커맨드 센터 터미널에서 맡긴 한 줄 (범위 확인을 거침)
-request = request or building_ui.pop_assigned(team_id, web_available) or command_center_ui.pop_request(team_id, web_available)
+assigned_request = building_ui.pop_assigned(team_id, web_available)
+if assigned_request:  # 부서장 창구의 '🔀 단계마다 확인'을 그대로
+    assigned_request["step_mode"] = bool(st.session_state.get(run_control_ui.step_key(DEPT_STEP)))
+request = request or assigned_request or command_center_ui.pop_request(team_id, web_available)
 if request:
     if running:
         st.warning("진행 중인 업무가 있습니다. 끝난 뒤에 새 업무를 맡겨 주세요.")

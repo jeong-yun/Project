@@ -154,9 +154,9 @@ def test_home_screen_shows_usage_current_and_previous_keys_and_saves_names(tmp_p
         storage.set_key_label(old_id, "예전 개인 키")
         at.run()
         assert not at.exception
-        # 팀 버튼 → 팀 업무 화면
+        # 팀 줄 '업무 보기' → 그 팀이 있는 🏢 부서 업무 화면
         next(b for b in at.button if b.key == "home_team_general").click().run()
-        assert not at.exception and at.session_state["view"] == "team"
+        assert not at.exception and at.session_state["view"] == "dept" and at.session_state["dept_pick"] == "research"
     finally:
         st.cache_resource.clear()
         usage.set_sink(None)

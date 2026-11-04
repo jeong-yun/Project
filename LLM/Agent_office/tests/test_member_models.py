@@ -393,6 +393,7 @@ def test_selector_and_task_input_show_chosen_model_off(app, tmp_path, set_keys, 
     (tmp_path / "data" / "member_models.json").write_text(json.dumps({"general": {"staff_draft": FREE_PICK}}), encoding="utf-8")
     at = app.run()
     assert not at.exception, at.exception
+    at = at.selectbox(key="dept_task_research").set_value("general:free").run()  # 팀 업무를 직접 고르면 맡기기 전에 경고
     off = [m.value for m in at.markdown if "고른 모델 꺼짐" in m.value]
     assert len(off) == 1 and "무료 서버 꺼짐" in off[0] and "Docker Desktop" in off[0]  # 사원·초안 한 명만
     warning = next(w.value for w in at.warning if "고른 모델이 꺼져 있는 팀원" in w.value)
