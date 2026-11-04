@@ -314,6 +314,23 @@ def test_docx_export_has_headings_tables_and_no_author():
     assert bullets and bullets[0].text == "문제: 수작업"
 
 
+def test_numbered_lists_restart_per_project():
+    """프로젝트마다 '역할' 번호 목록이 1부터 다시 — Word 자동 번호처럼 문서 전체로 이어지지 않는다 ('1. 1.' 로 적어도 1·2)."""
+    import docx
+
+    md = ("### 프로젝트 A\n- **역할**\n1. 수집\n2. 정제\n3. 학습\n\n### 프로젝트 B\n1. 설계\n1. 구현\n"
+          "   1. 하위 첫째\n   2. 하위 둘째\n2. 검증\n\n문단\n\n3) 괄호 번호\n4) 다음")
+    blocks = [b for b in doc_export.parse_markdown(md) if b.ordered]
+    assert [b.ordered for b in blocks] == ["1.", "2.", "3.", "1.", "2.", "1.", "2.", "3.", "3)", "4)"]
+
+    d = docx.Document(io.BytesIO(doc_export.to_docx(md)))
+    numbered = [p.text for p in d.paragraphs if p.text[:2].rstrip(".)\t").isdigit()]
+    assert numbered[:4] == ["1.\t수집", "2.\t정제", "3.\t학습", "1.\t설계"]
+    assert not [p for p in d.paragraphs if p.style.name == "List Number"]  # 문서 전체로 이어지는 자동 번호를 쓰지 않음
+    section = zipfile.ZipFile(io.BytesIO(doc_export.to_hwpx(md))).read("Contents/section0.xml").decode("utf-8")
+    assert "3. 학습" in section and "1. 설계" in section and "2. 구현" in section
+
+
 def test_hwpx_export_is_valid_package():
     data = doc_export.to_hwpx(PORTFOLIO, "포트폴리오")
     z = zipfile.ZipFile(io.BytesIO(data))
