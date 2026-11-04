@@ -626,6 +626,22 @@
   3. **career_facts 표 번호**: 마크다운 표의 첫 열이 숫자만인 줄(`| 13 |`)과 `13.`/`13)` 로 시작하는 목록 번호는 숫자 검사에서 제외. 표 안의 다른 칸 숫자는 그대로 검사. 테스트 추가.
   4. 고친 뒤 같은 문서·JD 로 다시 실행해 전체 시간·재작성 횟수·비평 점수 비교 (이번 실행이 기준).
 
+**모델 능력 판단 — 사진을 못 읽는 모델·제공처에서 사라진 모델을 선택지와 실행 후보에서 뺌**
+- 배경: 텍스트 전용 모델(gpt-oss·Solar)을 사진 일에 고르거나 대안으로 넘어가면 실패. 제공처가 지운 모델(Upstage solar-pro2·solar-mini)도 🎛 선택지에 그대로 보였음 (⚠️ 표시만).
+- `core/model_caps.py` 새로 — 능력(사진·형식 출력·스트리밍·문맥) 판단: 이름 규칙 → `config/model_caps.yaml`(근거·실측) → 목록 API 메타 → 🧪 시험 → 사람이 지정 (뒤가 우선).
+  한 함수로 거르기: `selectable_models(needs, keys)` → (보일 모델, 숨긴 모델+이유) · `runtime_specs` / `llm_factory.available_candidates(..., needs=)` · `check_choices`.
+- 실행 후보: 메시지에 사진이 있으면 자동으로 사진을 읽는 모델만 (`invoke_structured`·초안 스트림). 사라진 모델은 건너뛰고(한 번 ⚠️), 대체 모델을 정했으면 그 자리에 대체 모델.
+- 사라짐 판단: 목록을 24시간 안에 **성공적으로** 받았을 때만. 실패·오래됨·Claude 구독·직접 입력 모델은 숨기지 않음.
+- 화면: 🎛 팀원 모델 선택 아래 'ⓘ 숨긴 모델 N개 (이유)', 🧩 '👁 모델 능력'(사진 읽기 가능 목록·숨긴 이유·🧪 사진 시험·사람이 지정), '🔁 추천 대체 모델로 바꾸기'(model_caps.json, yaml 안 고침),
+  직접 입력의 '🖼 사진 읽기도 시험', 텍스트 전용 🔤 표시. 저장된 팀원 선택이 사라졌으면 저장값은 두고 ⚠️ + 대체/기본으로 진행.
+- Claude 구독(claude_cli) 사진 전달: `--input-format stream-json` 으로 [사진, 텍스트] 블록 (도구 끈 채로). 실측 haiku 정답·`--json-schema` 함께 OK → 도면 그림 읽기 후보에도 들어감.
+- 도면 그림 읽기(`floorplan_import.vision_models`)는 provider 목록 대신 능력으로 고름.
+- 실측 (스크래치 데이터 폴더, 키 출력 안 함): 목록 OpenAI 35·Google 24(문맥 길이만 줌, 입력 종류 정보 없음)·Upstage 6·Claude CLI 6, FreeLLMAPI 는 서버 꺼짐(Docker)이라 못 받음.
+  - 텍스트 전용: freellm gpt-oss-120b·20b, upstage solar-pro2·solar-mini. 사라짐: upstage solar-pro2(추천 solar-pro4)·solar-mini(추천 solar-mini4).
+  - 🧪 사진 시험: google gemini-3.5-flash-lite ✅(글자 R) · claude_cli claude-haiku-5-5 ✅(R) · upstage solar-pro4 ❌(400 'Image input is not allowed for this model').
+  - 무료 Gemini(freellm)의 사진 전달은 서버가 꺼져 있어 확인 못 함 → '모름'으로 두고 사진 일에서는 숨김.
+- 테스트: `tests/test_model_caps.py` 21개 (판단 순서·이름 규칙·사진 시험 성공/실패/연결 오류·선택지 숨김과 이유·사진 일의 후보 거르기·신선한 목록일 때만 숨김·오프라인·저장된 선택 경고와 대체·대체 모델·claude_cli 사진 전달).
+
 ---
 
 ## 누적 요약

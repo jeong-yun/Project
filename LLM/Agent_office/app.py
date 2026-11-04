@@ -48,7 +48,7 @@ import home_ui
 import models_ui
 import office_ui
 from core import (
-    audio_edit, concept, followup, iac_patch, llm_factory, member_models, model_catalog, music, stock_calc, usage, verification,
+    audio_edit, concept, followup, iac_patch, llm_factory, member_models, model_caps, model_catalog, music, stock_calc, usage, verification,
 )
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -131,6 +131,9 @@ catalog = model_catalog.merge(yaml_models, DATA_DIR, teams, selector_providers=t
     CATALOG_CFG.get("selector_providers") or model_catalog.SELECTOR_PROVIDERS))
 models = catalog.models
 usage.set_catalog_prices(lambda: model_catalog.catalog_prices(DATA_DIR))
+# 모델 능력·사라진 모델 판단에 데이터 폴더(목록·🧪 시험 결과·대체 모델)를 쓴다 (core/model_caps.py)
+# → 선택지는 그 일을 못 하는 모델·제공처에서 사라진 모델을 숨기고, 실행 후보는 건너뛴다
+model_caps.configure(DATA_DIR)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -345,12 +348,16 @@ with st.sidebar:
     models_ctx = models_ui.Ctx(models=models, yaml_models=yaml_models, merged=catalog, data_dir=DATA_DIR)
     with st.expander("🧩 모델 목록 · 직접 입력"):
         models_ui.render(models_ctx, "side")
+    models_ui.removed_notice(models_ctx)  # 제공처에서 사라진 기본 모델 — 세션당 한 번 ⚠️
 
 org = team_org(team, ranks)
 nodes = {n.id: n for n in org.walk()}
 parents = parent_map(org)
 LEGACY_ID = team.legacy.team if team.legacy else None  # 나뉘기 전 옛 팀 — 팀원 모델 선택을 물려받는다
 member_choices = member_store.load(team_id, LEGACY_ID)
+# 저장된 선택 중 제공처에서 사라졌거나 팀 업무를 못 하는 모델 → 저장값은 그대로 두고 이번엔 대체 모델·기본(다음 후보)으로 (경고 표시)
+member_choices, choice_issues = model_caps.check_choices(member_choices, model_caps.TEAM_WORK)
+choice_issue_of = {i.node_id: i for i in choice_issues}
 # 에이전트별 모델 후보 (팀원 모델 선택 반영 — 아무도 안 골랐으면 직급 설정 그대로). 조직도·에이전트 패널 표시용
 member_plans = member_models.plan(org, models, team, member_choices)
 member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
@@ -387,7 +394,8 @@ office_ctx = office_ui.OfficeCtx(
 def make_graph():
     return build_office_graph(
         org, ranks, team, models, settings, verification_cfg, storage=storage, checkpointer=get_checkpointer(),
-        member_models=member_store.load(team_id, LEGACY_ID),  # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로
+        # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로. 사라진·못 하는 모델은 대체·기본으로 (core/model_caps)
+        member_models=model_caps.check_choices(member_store.load(team_id, LEGACY_ID), model_caps.TEAM_WORK)[0],
     )
 
 
@@ -1548,9 +1556,13 @@ def render_member_models() -> None:
         head[0].caption("팀원")
         head[1].caption("모델 · 제공처 · 비용 (구독 / 유료 API / 무료)")
         head[2].caption(f"최근 {USAGE_DAYS}일 사용량")
+        hidden_all: dict[str, model_caps.Hidden] = {}
         for node in org.walk():
             p = plans[node.id]
-            options = ["", *member_models.allowed_keys(base_models, node, p)]
+            # 팀 업무를 못 하는 모델·제공처에서 사라진 모델은 선택지에서 숨긴다 (이유는 아래 'ⓘ 숨긴 모델')
+            shown, hidden = model_caps.selectable_models(model_caps.TEAM_WORK, member_models.allowed_keys(base_models, node, p))
+            hidden_all.update({h.key: h for h in hidden})
+            options = ["", *shown]
             # '기본'을 고르면 쓸 모델 (본인 선택만 뺀 결과 — 상사 규칙에 걸리면 자동으로 낮춘 모델)
             as_default = p if not p.choice else member_models.plan(
                 org, base_models, team, {k: v for k, v in member_choices.items() if k != node.id})[node.id]
@@ -1570,6 +1582,11 @@ def render_member_models() -> None:
             off = chosen_off(node.id)
             if off:
                 c_use.markdown(f":red[⛔ **고른 모델 꺼짐**] — {off[1]}")  # 무료 서버면 'Docker Desktop 실행 후 FreeLLMAPI 켜기'까지
+            issue = choice_issue_of.get(node.id)
+            if issue:  # 저장된 선택이 사라졌거나 못 하는 모델 — 저장값은 그대로, 이번엔 대체·기본으로
+                use = member_models.split_key(issue.use)[1] if issue.use else "기본(직급의 다음 후보)"
+                c_use.markdown(f":orange[⚠️ **고른 모델 {member_models.split_key(issue.key)[1]}**] — {issue.reasons[0]} → {use} 사용")
+        models_ui.hidden_note(list(hidden_all.values()), catalog)
         if chosen:
             st.button("↩️ 모두 기본으로", key=f"member_reset_{team_id}", on_click=reset_member_models)
         st.caption("🆕 = 최근 각 사 목록에 새로 나온 모델 · ✍️ = 직접 입력한 모델 · ⚠️ = 목록에서 사라진 모델. "

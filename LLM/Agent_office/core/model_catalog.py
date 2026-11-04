@@ -77,6 +77,7 @@ class Found:
     display: str = ""
     created: float = 0.0  # 각 사가 알려 준 출시(등록) 시각 (모르면 0)
     price: dict | None = None  # 목록 API 가 가격을 알려 주면 {input, output} (USD/100만 토큰)
+    caps: dict | None = None  # 목록 API 가 알려 준 능력 {input_modalities, context} (core/model_caps.py 가 읽음)
 
 
 NOT_CHAT = (  # 이름에 이것이 들어 있으면 대화 모델이 아니다 (메타데이터가 없는 OpenAI 호환 목록용)
@@ -115,6 +116,29 @@ def _price_meta(item: dict) -> dict | None:
     return {k: round(v, 6) for k, v in price.items()}
 
 
+def _caps_meta(item: dict) -> dict | None:
+    """목록 API 가 주는 능력 메타 — 입력 종류(사진 가능 여부)·문맥 길이. 형식이 provider 마다 달라 아는 것만 읽는다.
+    OpenRouter 형식 architecture.input_modalities·context_length, 그 밖에 input_modalities·context_window·max_input_tokens."""
+    if not isinstance(item, dict):
+        return None
+    out: dict = {}
+    arch = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+    mods = item.get("input_modalities") or arch.get("input_modalities") or item.get("inputModalities")
+    if isinstance(mods, list) and mods:
+        out["input_modalities"] = [str(m).lower() for m in mods]
+    elif isinstance(arch.get("modality"), str) and "->" in arch["modality"]:  # "text+image->text"
+        out["input_modalities"] = arch["modality"].split("->")[0].split("+")
+    caps = item.get("capabilities") if isinstance(item.get("capabilities"), dict) else {}
+    if isinstance(caps.get("vision"), bool):
+        out["vision"] = caps["vision"]
+    for name in ("context_length", "context_window", "max_input_tokens", "inputTokenLimit", "max_context_length"):
+        value = item.get(name)
+        if isinstance(value, (int, float)) and value > 0:
+            out["context"] = int(value)
+            break
+    return out or None
+
+
 def parse_openai_like(data: dict, drop_words: tuple[str, ...] = ()) -> list[Found]:
     """OpenAI 형식 {"data": [{"id", "created", "owned_by"}]} — OpenAI·Upstage·FreeLLMAPI. drop_words = 이 provider 만의 제외 단어."""
     found = []
@@ -123,7 +147,8 @@ def parse_openai_like(data: dict, drop_words: tuple[str, ...] = ()) -> list[Foun
         if (not model_id or model_id.startswith("ft:") or not _chat_name(model_id)
                 or any(word in model_id.lower() for word in drop_words)):
             continue  # ft: = 파인튜닝한 내 모델
-        found.append(Found(model_id, str(item.get("name") or ""), float(item.get("created") or 0), _price_meta(item)))
+        found.append(Found(model_id, str(item.get("name") or ""), float(item.get("created") or 0), _price_meta(item),
+                           _caps_meta(item)))
     return _drop_snapshots(found)
 
 
@@ -134,7 +159,7 @@ def parse_google(data: dict) -> list[Found]:
         name = str(item.get("name") or "").removeprefix("models/")
         if not name or "generateContent" not in (item.get("supportedGenerationMethods") or []) or not _chat_name(name):
             continue
-        found.append(Found(name, str(item.get("displayName") or "")))
+        found.append(Found(name, str(item.get("displayName") or ""), caps=_caps_meta(item)))
     return found
 
 
@@ -291,7 +316,7 @@ def refresh(models: ModelsConfig, data_dir: Path | str, now: float | None = None
             baseline = not old  # 처음 받은 목록은 모두 '원래 있던 모델' (🆕 아님)
             entry["models"] = {
                 f.id: {
-                    "display": f.display, "created": f.created, "price": f.price,
+                    "display": f.display, "created": f.created, "price": f.price, "caps": f.caps,
                     "first_seen": (old.get(f.id) or {}).get("first_seen", 0.0 if baseline else now),
                 }
                 for f in found
@@ -680,5 +705,9 @@ def connection_test(provider: str, model: str, models: ModelsConfig, structured:
         result.error = f"{type(e).__name__}: {str(e)[:300]}"
     result.elapsed_sec = round(time.perf_counter() - started, 2)
     result.ok = result.text_ok and result.structured_ok is not False
+    if result.text_ok:  # 구조화 출력 결과를 능력으로 기록 → 형식 출력이 필요한 일의 선택지에 반영 (core/model_caps.py)
+        from core import model_caps
+
+        model_caps.record_connection_test(f"{provider}:{model}", result.structured_ok)
     result.cost_usd = usage.estimate_cost(provider, model, result.input_tokens, result.output_tokens, calls=2)
     return result

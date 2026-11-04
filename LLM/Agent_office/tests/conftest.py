@@ -28,6 +28,18 @@ def clear_model_cooldown():
 
 
 @pytest.fixture(autouse=True)
+def no_model_caps_data():
+    """모델 능력 판단의 데이터 폴더 연결(app.py 가 연결)·알림 기록을 테스트마다 끊는다 — 이름 규칙·능력표만 쓴다."""
+    from core import model_caps
+
+    model_caps.configure(None)
+    model_caps._notices.clear()
+    yield
+    model_caps.configure(None)
+    model_caps._notices.clear()
+
+
+@pytest.fixture(autouse=True)
 def no_claude_cli(monkeypatch):
     """실제 claude CLI(구독)를 부르지 않는다 — 기본은 '설치 안 됨'. claude_cli 테스트는 가짜 실행 파일로 바꿔 쓴다."""
     from core import claude_cli

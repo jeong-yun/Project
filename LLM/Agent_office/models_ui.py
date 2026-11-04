@@ -10,7 +10,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from core import member_models, model_catalog, usage
+from core import member_models, model_caps, model_catalog, usage
 from core.schemas import ModelsConfig
 
 PROVIDER_NAMES = {"claude_cli": "Claude CLI", "anthropic": "Anthropic", "openai": "OpenAI", "google": "Google",
@@ -34,11 +34,13 @@ def model_name(key: str, merged: model_catalog.Merged) -> str:
 
 
 def badges(key: str, merged: model_catalog.Merged) -> str:
-    """🆕 새 모델 · ✍️ 직접 입력 · ⚠️ 목록에서 사라짐."""
+    """🆕 새 모델 · ✍️ 직접 입력 · ⚠️ 목록에서 사라짐 · 🔤 텍스트 전용(사진 못 읽음)."""
     info = merged.info.get(key)
+    text_only = model_caps.caps_for(key).text_only
     if not info:
-        return ""
-    marks = [m for m, on in (("🆕", info.new), ("✍️", info.source == "custom"), ("⚠️", info.missing)) if on]
+        return " 🔤" if text_only else ""
+    marks = [m for m, on in (("🆕", info.new), ("✍️", info.source == "custom"), ("⚠️", info.missing),
+                             ("🔤", text_only)) if on]
     return (" " + "".join(marks)) if marks else ""
 
 
@@ -84,7 +86,7 @@ def _cost_text(cost: float | None, provider: str) -> str:
     return usage.UNPRICED if cost is None else f"${cost:.6f}"
 
 
-def _status(ctx: Ctx) -> None:
+def _status(ctx: Ctx, where: str = "side") -> None:
     data = model_catalog.load_catalog(ctx.data_dir)
     providers = data.get("providers") or {}
     refreshed = float(data.get("refreshed_at") or 0)
@@ -111,12 +113,63 @@ def _status(ctx: Ctx) -> None:
     if new_keys:
         st.markdown("🆕 **새로 나온 모델**: " + ", ".join(f"`{member_models.split_key(k)[1]}`" for k in new_keys[:12])
                     + (f" 외 {len(new_keys) - 12}개" if len(new_keys) > 12 else ""))
+    _removed(ctx, where)
+
+
+def _removed(ctx: Ctx, where: str) -> None:
+    """제공처 목록에서 사라진 모델 — 선택지에서 숨기고 실행 때 건너뛴다 (core/model_caps). 추천 대체 모델로 바꾸기 버튼."""
+    store = model_caps.CapsStore(ctx.data_dir)
+    gone = {r.key: r for r in model_caps.removed_defaults(ctx.yaml_models, data_dir=ctx.data_dir)}
     for key, info in ctx.merged.info.items():
-        if info.missing:
-            provider, model = member_models.split_key(key)
+        if not info.missing:
+            continue
+        provider, model = member_models.split_key(key)
+        name = PROVIDER_NAMES.get(provider, provider)
+        r = gone.get(key)
+        if r is None:  # 목록 받기가 실패했거나 오래됨 → 숨기지 않고 알리기만
             hint = f" → 대신 `{member_models.split_key(info.suggest)[1]}` 를 고려해 보세요" if info.suggest else ""
-            st.warning(f"⚠️ `{model}` ({PROVIDER_NAMES.get(provider, provider)}) 가 목록에서 사라졌습니다{hint}. "
-                       "자동으로 바꾸지 않습니다 — 바꾸려면 config/models.yaml 또는 '🎛 팀원 모델 선택'에서.")
+            st.warning(f"⚠️ `{model}` ({name}) 가 목록에 없습니다{hint}. 목록 확인이 오래됐거나 실패해서 숨기지는 않았습니다.")
+            continue
+        if r.replacement:
+            st.info(f"🔁 `{model}` ({name}) 는 제공처 목록에서 사라져 **대체 모델 `{member_models.split_key(r.replacement)[1]}`** "
+                    "로 실행합니다 (config/models.yaml 은 그대로).")
+            if st.button("↩️ 대체 취소", key=f"replace_undo_{where}_{key}"):
+                store.set_replacement(key, None)
+                _note(where, f"`{model}` 대체를 취소했습니다 — 이 모델은 계속 건너뜁니다.")
+                st.rerun()
+            continue
+        hint = f" 추천 대체: `{member_models.split_key(r.suggest)[1]}`." if r.suggest else ""
+        st.warning(f"⚠️ `{model}` ({name}) 가 제공처 목록에서 사라졌습니다 — 선택지에서 숨기고, 실행 때는 건너뛰고 다음 후보를 씁니다."
+                   f"{hint} (config/models.yaml 은 자동으로 바꾸지 않음)")
+        if r.suggest and st.button(f"🔁 추천 대체 모델로 바꾸기 ({member_models.split_key(r.suggest)[1]})",
+                                   key=f"replace_{where}_{key}",
+                                   help="데이터 폴더 model_caps.json 에 기록합니다. 이 모델이 쓰이던 자리(직급 기본·대안)에 대체 모델을 씁니다."):
+            store.set_replacement(key, r.suggest)
+            _note(where, f"🔁 `{model}` → `{member_models.split_key(r.suggest)[1]}` 로 바꿔 실행합니다.")
+            st.rerun()
+
+
+def removed_notice(ctx: Ctx) -> None:
+    """사라진 기본 모델이 있으면 한 번만(세션당) ⚠️ 알림 — 자세한 내용·대체 버튼은 '🧩 모델 목록'."""
+    gone = [r for r in model_caps.removed_defaults(ctx.yaml_models, data_dir=ctx.data_dir) if not r.replacement]
+    keys = tuple(sorted(r.key for r in gone))
+    if keys and st.session_state.get("removed_notice_shown") != keys:
+        st.session_state["removed_notice_shown"] = keys
+        names = ", ".join(member_models.split_key(k)[1] for k in keys)
+        st.toast(f"제공처에서 사라진 모델 {len(keys)}개 ({names}) — 건너뛰고 다음 후보를 씁니다. "
+                 "'🧩 모델 목록'에서 추천 대체 모델로 바꿀 수 있습니다.", icon="⚠️")
+
+
+def hidden_note(hidden: list, merged: model_catalog.Merged | None = None, title: str = "") -> None:
+    """'ⓘ 숨긴 모델 N개 (이유)' — 선택지에서 뺀 모델과 이유 (model_caps.Hidden 목록).
+    expander 안에서도 쓸 수 있게 popover 로 그린다 (Streamlit 은 expander 를 겹칠 수 없다)."""
+    if not hidden:
+        return
+    with st.popover(title or f"ⓘ 숨긴 모델 {len(hidden)}개 (이유)"):
+        for h in hidden:
+            provider, model = member_models.split_key(h.key)
+            name = model_name(h.key, merged) if merged else model
+            st.markdown(f"- **{name}** · {PROVIDER_NAMES.get(provider, provider)} — " + "; ".join(h.reasons))
 
 
 def _refresh(ctx: Ctx, where: str) -> None:
@@ -158,9 +211,13 @@ def _custom_form(ctx: Ctx, where: str) -> None:
                    f"(짧은 호출 2번, 토큰 약 {sum(model_catalog.TEST_TOKENS)}개)")
     b1, b2 = st.columns(2)
     test_key = f"custom_test_{where}"
+    with_vision = st.checkbox("🖼 사진 읽기도 시험 (작은 그림 1장, 호출 1번 더)", key=f"custom_vision_{where}",
+                              help="글자 하나가 든 작은 그림을 보내 맞히는지 봅니다. 결과는 사진을 읽는 일의 선택지에 반영됩니다.")
     if b1.button("🧪 연결 시험", key=f"custom_test_btn_{where}", disabled=not name, use_container_width=True):
         with st.spinner(f"{name} 에 짧게 물어보는 중…"):
-            st.session_state[test_key] = (key, model_catalog.connection_test(provider, name, ctx.models))
+            result = model_catalog.connection_test(provider, name, ctx.models)
+            probe = model_caps.vision_probe(provider, name, ctx.models) if with_vision and result.text_ok else None
+            st.session_state[test_key] = (key, result, probe)
 
     def add() -> None:  # 버튼 콜백 — 입력칸을 비우려면 위젯을 다시 그리기 전에 해야 한다
         try:
@@ -177,6 +234,8 @@ def _custom_form(ctx: Ctx, where: str) -> None:
     tested = st.session_state.get(test_key)
     if tested and tested[0] == key:
         result: model_catalog.TestResult = tested[1]
+        if len(tested) > 2 and tested[2] is not None:
+            _probe_line(tested[2])
         spent = (f"실제 토큰 입력 {result.input_tokens}·출력 {result.output_tokens} · 비용 {_cost_text(result.cost_usd, provider)}"
                  f" · {result.elapsed_sec}초")
         if result.ok:
@@ -186,6 +245,62 @@ def _custom_form(ctx: Ctx, where: str) -> None:
             st.warning(f"⚠️ 텍스트는 되지만 구조화 출력이 안 됩니다 (팀 업무에는 구조화 출력이 필요) — {result.error} · {spent}")
         else:
             st.error(f"❌ 연결 실패 — {result.error} · {spent}")
+
+
+def _probe_line(probe: model_caps.ProbeResult) -> None:
+    if probe.ok:
+        st.success(f"🖼 사진 읽기 ✅ — 그림의 글자 {probe.expected} 를 맞힘 (답 “{probe.reply[:20]}”, {probe.elapsed_sec}초)")
+    elif probe.ok is False:
+        st.warning(f"🖼 사진 읽기 ❌ — 텍스트 전용으로 기록했습니다 (글자 {probe.expected}, 답 “{probe.reply[:20]}”"
+                   f"{', ' + probe.error[:120] if probe.error else ''}). 사진을 읽는 일의 선택지에서 숨깁니다.")
+    else:
+        st.info(f"🖼 사진 시험을 끝내지 못했습니다 — {probe.error[:160]} (기록 안 함)")
+
+
+def _caps_panel(ctx: Ctx, where: str) -> None:
+    """👁 모델 능력 — 모델마다 사진 읽기·형식 출력·문맥과 그 근거, 🧪 사진 시험, 사람이 지정."""
+    st.markdown("**👁 모델 능력** — 사진을 못 읽는 모델은 사진을 읽는 일(도면 그림·JD 이미지 등)의 선택지·대안에서 빠집니다.")
+    keys = list(dict.fromkeys([k for row in ctx.merged.models.model_tiers for k in row]))
+    if not keys:
+        return
+    shown, hidden = model_caps.selectable_models(model_caps.IMAGE_READING, keys, data_dir=ctx.data_dir)
+    st.caption(f"사진 읽기에 쓸 수 있는 모델 {len(shown)}개: " + ", ".join(member_models.split_key(k)[1] for k in shown[:14])
+               + (f" 외 {len(shown) - 14}개" if len(shown) > 14 else ""))
+    hidden_note(hidden, ctx.merged, f"ⓘ 사진 읽기에서 숨긴 모델 {len(hidden)}개 (이유)")
+    pick = st.selectbox("모델", keys, key=f"caps_model_{where}",
+                        format_func=lambda k: f"{model_name(k, ctx.merged)} · {PROVIDER_NAMES.get(member_models.split_key(k)[0])}"
+                        f"{badges(k, ctx.merged)}")
+    caps = model_caps.caps_for(pick, ctx.data_dir)
+    rows = []
+    for field, label in (("vision", "👁 사진 읽기"), ("structured_output", "📝 형식(구조화) 출력"), ("context", "📏 문맥")):
+        value = getattr(caps, field)
+        text = (f"약 {value:,} 토큰" if field == "context" and value else
+                "된다" if value is True else "안 된다" if value is False else "모름")
+        rows.append(f"- {label}: **{text}**" + (f" · 근거: {caps.why(field)}" if field in caps.source else ""))
+    st.markdown("\n".join(rows))
+    store = model_caps.CapsStore(ctx.data_dir)
+    widget = f"caps_user_{where}_{pick}"
+    user = (store.read()["user"].get(pick) or {}).get("vision")
+    st.session_state[widget] = "" if user is None else ("yes" if user else "no")
+
+    def save() -> None:
+        value = st.session_state.get(widget)
+        store.set_user(pick, "vision", None if not value else value == "yes")
+        _note(where, f"👁 {member_models.split_key(pick)[1]} 의 사진 읽기를 "
+              + ("자동 판단으로 되돌렸습니다." if not value else f"'{'된다' if value == 'yes' else '안 된다'}'로 지정했습니다."))
+
+    c1, c2 = st.columns(2)
+    c1.selectbox("사진 읽기 (사람이 지정)", ["", "yes", "no"], key=widget, on_change=save,
+                 format_func=lambda v: {"": "🤖 자동 판단", "yes": "된다", "no": "안 된다"}[v])
+    provider, model = member_models.split_key(pick)
+    probe_key = f"caps_probe_{where}"
+    if c2.button("🧪 사진 시험", key=f"caps_probe_btn_{where}", use_container_width=True,
+                 help="글자 하나가 든 작은 그림(약 1KB)을 보내 맞히는지 봅니다. 호출 1번 (사용량에 '사진 시험'으로 기록)."):
+        with st.spinner(f"{model} 에 작은 그림을 보내는 중…"):
+            st.session_state[probe_key] = (pick, model_caps.vision_probe(provider, model, ctx.models, ctx.data_dir))
+    probed = st.session_state.get(probe_key)
+    if probed and probed[0] == pick:
+        _probe_line(probed[1])
 
 
 def _tier_picker(ctx: Ctx, where: str) -> None:
@@ -222,8 +337,10 @@ def render(ctx: Ctx, where: str) -> None:
     if note:
         st.info(note)
     _refresh(ctx, where)
-    _status(ctx)
+    _status(ctx, where)
     st.divider()
     _custom_form(ctx, where)
     st.divider()
     _tier_picker(ctx, where)
+    st.divider()
+    _caps_panel(ctx, where)

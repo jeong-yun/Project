@@ -28,7 +28,7 @@ from core.floorplan import ROOM_TYPES, Floor, Layout, LayoutParseError, Rect, Ro
 from core.schemas import ModelsConfig, RankModels
 
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
-VISION_PROVIDERS = ("openai", "google", "anthropic")  # 그림을 읽을 수 있는 provider
+VISION_PROVIDERS = ("openai", "google", "anthropic", "claude_cli")  # 참고용 — 실제 판단은 core/model_caps (모델 단위)
 DWG_HELP = (
     "DWG 는 AutoCAD 전용 형식이라 직접 읽지 않습니다. 무료 'ODA File Converter'(Open Design Alliance)로 "
     "DXF(ASCII, 2010 이상)로 바꾼 뒤 다시 올려 주세요. 변환기는 직접 내려받아 설치해야 합니다."
@@ -217,11 +217,16 @@ VISION_PROMPT = "\n".join([
 
 
 def vision_models(models: ModelsConfig) -> RankModels | None:
-    """보조 모델 후보 중 그림을 읽을 수 있는 것만 (유료 모델 → 직급 모델 순으로 찾는다)."""
+    """보조 모델 후보 중 그림을 읽을 수 있는 것만 (유료 모델 → 직급 모델 순으로 찾는다).
+    '읽을 수 있는가'는 core/model_caps 가 판단한다 (텍스트 전용 gpt-oss·Solar, 사진 전달이 확인 안 된 무료 프록시,
+    제공처에서 사라진 모델은 빠진다)."""
+    from core import model_caps
+
     pool = [*models.utility.candidates, *[s for r in models.ranks.values() for s in r.candidates]]
+    pool = model_caps.runtime_specs(pool, model_caps.IMAGE_READING)[0]
     seen, picked = set(), []
     for spec in pool:
-        if spec.provider in VISION_PROVIDERS and spec.label not in seen:
+        if spec.label not in seen:
             seen.add(spec.label)
             picked.append(spec)
     if not picked:
