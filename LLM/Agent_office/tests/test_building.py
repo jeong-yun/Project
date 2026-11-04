@@ -273,7 +273,8 @@ def test_home_shows_building_and_list_and_dept_head(seeded):
     # 방을 누름 → 다음 실행 맨 앞에서 그 팀 화면으로
     at.session_state["building_nav"] = {"kind": "team", "id": "travel_abroad"}
     at.run()
-    assert not at.exception and at.session_state["view"] == "team" and at.session_state["team_pick"] == "travel_abroad"
+    assert not at.exception and at.session_state["view"] == "dept" and at.session_state["team_pick"] == "travel_abroad"
+    assert at.session_state["dept_pick"] == "travel" and at.session_state["dept_task_travel"] == "travel_abroad:plan"
 
 
 def test_list_view_and_dept_head_fill_question(seeded):
@@ -283,12 +284,13 @@ def test_list_view_and_dept_head_fill_question(seeded):
     assert not at.exception, at.exception
     assert any(b.key == "home_team_travel_domestic" for b in at.button)
     assert any(m.value.startswith("##### 3층 — ✈️ 여행부") for m in at.markdown)
-    at.radio(key="desk_pick").set_value("travel").run()
+    at.button(key="desk_dept_travel").click().run()  # 메인 접수 창구의 부서 버튼 → 🏢 여행부 업무 화면
+    assert at.session_state["view"] == "dept" and at.session_state["dept_pick"] == "travel"
     at.text_area(key="dept_head_text").input("비자랑 환전 필요한 오사카 해외 여행").run()
     at.button(key="dept_head_go").click().run()
     assert not at.exception and "🌏 해외 여행팀" in at.success[0].value  # 키 없음 → 낱말 비교
     at.button(key="dept_head_open").click().run()
-    assert not at.exception and at.session_state["view"] == "team" and at.session_state["team_pick"] == "travel_abroad"
+    assert not at.exception and at.session_state["view"] == "dept" and at.session_state["team_pick"] == "travel_abroad"
     assert at.text_area(key="q_text").value == "비자랑 환전 필요한 오사카 해외 여행"
 
 
@@ -300,6 +302,9 @@ def test_both_travel_teams_show_their_old_records(seeded, team_id, mine, other):
     at.run()
     assert not at.exception, at.exception
     assert at.radio(key="office_view").value == "office"  # 팀 화면 기본 = 🏢 픽셀 사무실
+    history = next(e for e in at.sidebar.expander if e.label.startswith("🕘 지난 업무"))
+    assert history.label == "🕘 지난 업무 (3)"  # 부서 단위: 국내 옛 업무 + 해외 옛 업무 + 국내/해외 말이 없는 옛 업무
+    at = at.sidebar.selectbox(key="hist_team_travel").set_value(team_id).run()  # 팀 필터 (선택)
     history = next(e for e in at.sidebar.expander if e.label.startswith("🕘 지난 업무"))
     assert history.label == "🕘 지난 업무 (2)"  # 내 옛 업무 + 국내/해외 말이 없는 옛 업무
     saved = next(e for e in at.sidebar.expander if e.label.startswith("📂 저장된 결과 파일"))

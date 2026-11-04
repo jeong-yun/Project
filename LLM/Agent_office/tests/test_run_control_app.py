@@ -79,6 +79,7 @@ def reopen() -> AppTest:
 def submit(at, question="테스트 질문", step=False):
     at.run()
     assert not at.exception, at.exception
+    at = at.selectbox(key="dept_task_research").set_value("general:free").run()  # 부서 업무 목록 → 범용 팀 자유 질문
     if step:
         at.toggle(key="step_mode_general").set_value(True)
     at.text_area(key="q_text").input(question)

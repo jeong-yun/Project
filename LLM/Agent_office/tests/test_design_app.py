@@ -18,32 +18,34 @@ def app(tmp_path, monkeypatch, set_keys):
     monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path / "results"))
     at = AppTest.from_file(APP, default_timeout=60)
     at.query_params["team"] = "design"
-    at.query_params["view"] = "team"  # 기본 화면은 🏠 메인 — 팀 업무 화면으로
+    at.query_params["view"] = "team"  # 기본 화면은 🏠 메인 — 예전 팀 업무 주소도 🏢 부서 업무 화면(크리에이티브부)으로
     return at
 
 
 def test_design_team_page_renders_task_forms(app):
     at = app.run()
     assert not at.exception, at.exception
-    picker = at.selectbox(key="task_pick_design")
-    assert picker.options[:3] == ["📐 평면도 만들기", "✏️ 도면 수정·층 추가", "🧊 3D 만들기"]
+    at = at.selectbox(key="dept_task_creative").set_value("design:plan").run()  # 부서 업무 목록에서 설계 팀 업무
+    picker = at.selectbox(key="dept_task_creative")
+    assert [o for o in picker.options if o.startswith("📐 설계 팀 › ")][:3] == [
+        "📐 설계 팀 › 📐 평면도 만들기", "📐 설계 팀 › ✏️ 도면 수정·층 추가", "📐 설계 팀 › 🧊 3D 만들기"]
     assert any(c.label == "🧊 3D 모델도 만들기" for c in at.checkbox)
     assert any(t.label.startswith("어떤 집·건물인가요") for t in at.text_area)
 
-    at = picker.set_value("edit").run()
+    at = picker.set_value("design:edit").run()
     assert not at.exception, at.exception
     uploaders = at.get("file_uploader")
     assert len(uploaders) == 1
     assert any(c.label == "첨부 대신 최근 저장한 설계안 사용" for c in at.checkbox)
 
-    at = at.selectbox(key="task_pick_design").set_value("model3d").run()
+    at = at.selectbox(key="dept_task_creative").set_value("design:model3d").run()
     assert not at.exception, at.exception
     assert next(c for c in at.checkbox if c.label == "🧊 3D 모델 만들기").value is True
 
 
 def test_design_form_requires_change_text(app):
     at = app.run()
-    at = at.selectbox(key="task_pick_design").set_value("edit").run()
+    at = at.selectbox(key="dept_task_creative").set_value("design:edit").run()
     at = at.button[[b.label for b in at.button].index("맡기기")].click().run()
     assert not at.exception, at.exception
     assert any("필수 입력이 비어 있습니다: 바꿀 내용" in w.value for w in at.warning)

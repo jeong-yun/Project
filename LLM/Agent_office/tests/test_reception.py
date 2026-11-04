@@ -234,8 +234,10 @@ def home() -> AppTest:
 
 def test_home_is_a_floor_guide_with_info_desk_and_full_rooms(app_env, teams):
     at = home()
-    assert at.radio(key="desk_pick").value == "info"  # 처음 창구 = 🛎 인포메이션 센터
-    assert at.radio(key="desk_pick").options[0] == "🛎 인포메이션 센터"
+    # 메인의 입력창은 🛎 인포메이션 센터 하나 — 부서장 입력칸은 🏢 부서 업무 화면에만 (두 군데 두지 않는다)
+    assert at.text_area(key="info_text") is not None
+    assert not any(t.key == "dept_head_text" for t in at.text_area)
+    assert {b.key for b in at.button} >= {f"desk_dept_{d}" for d in ("research", "invest", "travel", "creative", "security", "career")}
     snap = next(e for e in at.get("component_instance") if "pixel_building" in e.proto.component_name)
     snap = json.loads(snap.proto.json_args)["snapshot"]
     assert snap["layout"]["lobby"]["spots"][0]["id"] == "info"
@@ -249,15 +251,15 @@ def test_home_is_a_floor_guide_with_info_desk_and_full_rooms(app_env, teams):
     text = "\n".join(m.value for m in at.markdown)
     assert "🗂 층별 부서 안내" in text and "##### 3층 — ✈️ 여행부" in text
     assert any(b.key == "home_team_travel_domestic" for b in at.button)  # 팀 바로 들어가기 그대로
-    at = at.button(key="guide_dept_travel").click().run()  # 부서 카드 → 부서장 창구
-    assert not at.exception and at.radio(key="desk_pick").value == "travel"
-    assert at.text_area(key="dept_head_text") is not None
+    at = at.button(key="guide_dept_travel").click().run()  # 부서 카드 → 🏢 여행부 업무 화면 (부서장 창구)
+    assert not at.exception and at.session_state["view"] == "dept" and at.session_state["dept_pick"] == "travel"
+    assert at.selectbox(key="dept_task_travel").value == "head" and at.text_area(key="dept_head_text") is not None
 
 
 def test_dept_desk_assigns_and_starts_the_team(app_env, use_script):
     use_script(Script())  # 모델 답 없음 → 낱말 비교 (.env 의 실제 키로 진짜 호출하지 않게)
     at = home()
-    at = at.radio(key="desk_pick").set_value("travel").run()
+    at = at.button(key="desk_dept_travel").click().run()  # 메인 부서 버튼 → 🏢 여행부 업무 화면
     assert any("🎛 부서장 모델:" in c.value for c in at.caption)
     at.text_area(key="dept_head_text").input(DOM_Q).run()
     at = at.button(key="dept_head_go").click().run()
@@ -267,7 +269,7 @@ def test_dept_desk_assigns_and_starts_the_team(app_env, use_script):
     assert any("대신 **🌏 해외 여행팀**" in c.value for c in at.caption)
     at = at.button(key="dept_head_start").click().run()
     assert not at.exception, at.exception
-    assert at.session_state["view"] == "team" and at.session_state["team_pick"] == "travel_abroad"
+    assert at.session_state["view"] == "dept" and at.session_state["team_pick"] == "travel_abroad"
     assert app_env["started"] == [("travel_abroad", DOM_Q)]  # 팀장이 바로 시작 (기존 workflow)
     assert "여행부 부장" in at.info[0].value and "다른 팀으로 바꿔 보냄" in at.info[0].value
 
@@ -282,9 +284,10 @@ def test_info_center_hands_off_to_department_head(app_env, use_script, depts):
     table = next(m.value for m in at.markdown if "부서장 판단" in m.value)
     assert "| ✅ | ✈️ 여행부 | 9 |" in table and "| ❌ | 💹 투자부 | 0 |" in table
     assert "여행부** 이(가) 맡을 수 있습니다" in at.success[0].value
-    at = at.button(key="info_handoff").click().run()  # → 여행부 부서장 창구가 열리고 곧바로 팀 배정
+    at = at.button(key="info_handoff").click().run()  # → 🏢 여행부 업무 화면의 부서장 창구가 열리고 곧바로 팀 배정
     assert not at.exception, at.exception
-    assert at.radio(key="desk_pick").value == "travel" and at.text_area(key="dept_head_text").value == DOM_Q
+    assert at.session_state["view"] == "dept" and at.session_state["dept_pick"] == "travel"
+    assert at.text_area(key="dept_head_text").value == DOM_Q
     assert "🚄 국내 여행팀" in at.success[0].value and "강릉은 국내" in at.success[0].value
     assert any("사용 모델" in c.value for c in at.caption)
 

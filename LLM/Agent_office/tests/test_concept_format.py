@@ -210,6 +210,7 @@ def test_input_shows_applied_prompt(concept_app, root):
     at = concept_app.run()
     assert not at.exception, at.exception
     at = at.text_input(key="concept_root").set_value(str(root)).run()
+    at = at.selectbox(key="dept_task_research").set_value("concept:write").run()  # 부서 업무 목록 → 개념 작성
     at = at.text_input(key="cw_name_concept").set_value("FlashAttention-3(FA3)").run()
     assert not at.exception, at.exception
     version = concept.prompt_version()["hash"]

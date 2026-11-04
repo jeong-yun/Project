@@ -455,16 +455,17 @@ def app(tmp_path, monkeypatch, set_keys):
 def test_career_page_shows_both_new_forms(app):
     at = app.run()
     assert not at.exception, at.exception
-    picker = at.selectbox(key="task_pick_career")
-    assert picker.options[:4] == ["✍️ 자소서 작성", "📁 포트폴리오 작성", "🎯 업무(JD) 추천", "🔄 포트폴리오 최신화"]
+    picker = at.selectbox(key="dept_task_career")  # 🏢 부서 업무 목록 (팀별로 묶임)
+    assert [o.split(" › ")[1] for o in picker.options[1:5]] == ["✍️ 자소서 작성", "📁 포트폴리오 작성", "🎯 업무(JD) 추천",
+                                                                 "🔄 포트폴리오 최신화"]
 
-    at = picker.set_value("jd_recommend").run()
+    at = picker.set_value("career:jd_recommend").run()
     assert not at.exception, at.exception
     assert any("코드가 판정으로 계산" in c.value for c in at.caption)
     assert {t.label for t in at.text_area} >= {"또는 요약 문서 붙여 넣기", "JD 붙여 넣기 (여러 개는 '---' 만 있는 줄로 나눔)"}
     assert len(at.get("file_uploader")) == 2
 
-    at = at.selectbox(key="task_pick_career").set_value("portfolio_update").run()
+    at = at.selectbox(key="dept_task_career").set_value("career:portfolio_update").run()
     assert not at.exception, at.exception
     web = next(c for c in at.checkbox if c.label.startswith("🌐 외부 자료로"))
     assert web.value is False  # 기본 꺼짐

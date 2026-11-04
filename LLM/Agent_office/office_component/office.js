@@ -1,4 +1,4 @@
-// 🏢 픽셀 사무실 (팀 화면) — 스냅샷: core/office.py · 공용 그림: pixel.js · 불러오기: index.html
+// 🏢 픽셀 사무실 (부서 업무 화면 — 부서 하나 = 사무실 하나, 팀마다 색 구역) — 스냅샷: core/office.py · 공용 그림: pixel.js · 불러오기: index.html
 "use strict";
 const cv = document.getElementById("c"), g = cv.getContext("2d");
 const tip = document.getElementById("tip");
@@ -31,6 +31,7 @@ function drawBackground() {
   const b = bg.getContext("2d");
   rect(b, 0, 0, bg.width, bg.height, "#1f1c26");
   for (const r of L.rooms) {
+    if (r.kind === "zone") { drawZone(b, r); continue; }
     const [a, c2] = FLOORS[r.kind] || FLOORS.floor;
     const wood = r.kind === "lead" || r.kind === "library";
     for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++) {
@@ -78,8 +79,23 @@ function drawBackground() {
   rect(b, dx * T, dy * T, 2 * T, T, "#5a4632"); rect(b, dx * T + 3, dy * T + 3, 2 * T - 6, T - 6, "#8b6b47");
 }
 
+// 팀 구역 — 업무 공간 바닥 위에 팀 색 카펫 + 테두리 (사람은 그대로 지나다닌다)
+function hexA(hex, a) {
+  const n = parseInt((hex || "#888888").slice(1), 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+}
+function drawZone(b, r) {
+  const x0 = r.x * T, y0 = r.y * T, ww = r.w * T, hh = r.h * T;
+  for (let y = r.y; y < r.y + r.h; y++) for (let x = r.x; x < r.x + r.w; x++)
+    rect(b, x * T, y * T, T, T, (x + y) % 2 ? "#64807a" : "#5f7a74");
+  rect(b, x0, y0, ww, hh, hexA(r.color, 0.20));
+  rect(b, x0, y0, ww, T, hexA(r.color, 0.45));                      // 이름표 띠
+  rect(b, x0, y0, ww, 2, hexA(r.color, 0.95)); rect(b, x0, y0 + hh - 2, ww, 2, hexA(r.color, 0.75));
+  rect(b, x0, y0, 2, hh, hexA(r.color, 0.75)); rect(b, x0 + ww - 2, y0, 2, hh, hexA(r.color, 0.75));
+}
+
 // ── 길 찾기 (벽·가구는 못 지나감) ─────────────────────────────────
-const BLOCKING = new Set(["desk", "table", "shelf", "plant", "cooler", "sofa"]);
+const BLOCKING = new Set(["desk", "table", "shelf", "plant", "cooler", "sofa", "cabinet", "printer"]);
 function buildGrid() {
   grid = Array.from({ length: L.h }, () => new Uint8Array(L.w));
   const mark = (x, y, ww, hh) => { for (let j = y; j < y + hh; j++) for (let i = x; i < x + ww; i++) if (grid[j]) grid[j][i] = 1; };
@@ -210,6 +226,17 @@ function drawCooler(f) {
   rect(w, x0 + 3, y0 - 2, 10, 17, "#e9edf2"); rect(w, x0 + 4, y0 - 12, 8, 10, "#8ecdf5"); rect(w, x0 + 5, y0 - 11, 2, 7, "#c8ecff");
   rect(w, x0 + 6, y0 + 4, 4, 2, "#d33");
 }
+function drawCabinet(f) {   // 서류함
+  const x0 = f.x * T, y0 = f.y * T;
+  rect(w, x0 + 1, y0 - 10, 14, 25, "#7c8798"); rect(w, x0 + 2, y0 - 9, 12, 23, "#a3adbd");
+  for (const yy of [y0 - 7, y0 + 1, y0 + 9]) { rect(w, x0 + 3, yy, 10, 6, "#8d97a8"); rect(w, x0 + 6, yy + 2, 4, 1, "#e8ecf2"); }
+}
+function drawPrinter(f) {   // 복합기
+  const x0 = f.x * T, y0 = f.y * T, ww = f.w * T;
+  rect(w, x0 + 2, y0 - 4, ww - 4, 18, "#d9dde3"); rect(w, x0 + 2, y0 - 4, ww - 4, 3, "#eef1f5");
+  rect(w, x0 + 5, y0 - 8, ww - 10, 5, "#f7f7f7"); rect(w, x0 + 4, y0 + 4, ww - 8, 2, "#596273");
+  rect(w, x0 + ww - 9, y0 - 1, 3, 2, "#3ecf6e");
+}
 function drawSofa(f) {
   const x0 = f.x * T, y0 = f.y * T, ww = f.w * T;
   rect(w, x0, y0 - 4, ww, 8, "#2f6f73"); rect(w, x0, y0 + 4, ww, 9, "#3f8a8f"); rect(w, x0, y0 - 4, 3, 17, "#245659"); rect(w, x0 + ww - 3, y0 - 4, 3, 17, "#245659");
@@ -242,7 +269,11 @@ function drawChar(a, now) {
     }
   });
   if (dir !== "up") {
-    if (d.lead) { w.fillStyle = "#f5c518"; w.fillRect(left + 4 * P, top + 8 * P, 2 * P, 4 * P); }          // 팀장: 금색 넥타이
+    if (d.head) {                                                                                          // 부서장: 보라 넥타이 + 금 배지
+      w.fillStyle = "#c9a227"; w.fillRect(left + 4 * P, top + 8 * P, 2 * P, 4 * P);
+      w.fillStyle = "#ffe066"; w.fillRect(left + 7 * P, top + 9 * P, P, P);
+    }
+    else if (d.lead) { w.fillStyle = "#f5c518"; w.fillRect(left + 4 * P, top + 8 * P, 2 * P, 4 * P); }     // 팀장: 금색 넥타이
     else if (/부장/.test(d.rank)) { w.fillStyle = pal.t; w.fillRect(left + 4 * P, top + 8 * P, 2 * P, 4 * P); }
     else if (/차장/.test(d.rank)) { w.fillStyle = pal.g; w.fillRect(left + 2 * P, top + 4 * P, 3 * P, P); w.fillRect(left + 5 * P, top + 4 * P, 3 * P, P); }  // 안경
   }
@@ -288,6 +319,8 @@ function frame(now) {
     else if (f.type === "plant") items.push([y0 + T, () => drawPlant(f)]);
     else if (f.type === "cooler") items.push([y0 + T, () => drawCooler(f)]);
     else if (f.type === "sofa") items.push([y0 + T, () => drawSofa(f)]);
+    else if (f.type === "cabinet") items.push([y0 + T, () => drawCabinet(f)]);
+    else if (f.type === "printer") items.push([y0 + T, () => drawPrinter(f)]);
   }
   for (const a of Object.values(agents)) {
     if (a.d.id === snap.focus) items.push([a.y - 0.5, () => { w.fillStyle = "rgba(76,154,255,.55)"; w.fillRect(Math.round(a.x) - 12, Math.round(a.y) - 3, 24, 4); }]);
@@ -329,10 +362,14 @@ function drawOverlay(now) {
   // 방 이름
   g.font = `bold ${fs - 1}px "Malgun Gothic", sans-serif`;
   for (const r of L.rooms) {
-    const x = r.x * T * S + 6, y = r.y * T * S + (r.kind === "floor" ? 10 : 9);
-    const tw = g.measureText(r.label).width;
-    g.fillStyle = "rgba(20,18,28,.55)"; roundRect(x - 4, y - fs * 0.7, tw + 8, fs * 1.4, 4); g.fill();
-    g.fillStyle = "#f3ead7"; g.fillText(r.label, x, y);
+    if (!r.label) continue;
+    const zone = r.kind === "zone";
+    const x = r.x * T * S + 6, y = r.y * T * S + (r.kind === "floor" || zone ? 10 : 9);
+    const label = zone && snap.activeTeam === r.team ? r.label + " ◀ 지금 보는 팀" : r.label;
+    const tw = g.measureText(label).width;
+    g.fillStyle = zone ? hexA(r.color, 0.92) : "rgba(20,18,28,.55)"; roundRect(x - 4, y - fs * 0.7, tw + 8, fs * 1.4, 4); g.fill();
+    if (zone && snap.activeTeam === r.team) { g.strokeStyle = "#fff"; g.lineWidth = 1.5; g.stroke(); }
+    g.fillStyle = zone ? "#fff" : "#f3ead7"; g.fillText(label, x, y);
   }
   // 출입문 = 사용자
   {
@@ -358,7 +395,7 @@ function drawOverlay(now) {
     g.globalAlpha = alpha;
     g.font = `bold ${fs - 1}px "Malgun Gothic", sans-serif`;
     const name = clip(d.name, 9), nw = g.measureText(name).width, ny = (a.y + 13) * S;
-    g.fillStyle = d.id === snap.focus ? "#2563eb" : "rgba(25,22,32,.86)"; roundRect(x - nw / 2 - 5, ny - fs * 0.65, nw + 10, fs * 1.3, 3); g.fill();
+    g.fillStyle = d.id === snap.focus ? "#2563eb" : d.head ? "rgba(92,62,160,.92)" : "rgba(25,22,32,.86)"; roundRect(x - nw / 2 - 5, ny - fs * 0.65, nw + 10, fs * 1.3, 3); g.fill();
     g.fillStyle = "#fff"; g.fillText(name, x, ny);
     g.globalAlpha = 1;
   }
@@ -411,7 +448,7 @@ cv.addEventListener("mousemove", (ev) => {
   if (hoverId !== d.id) {
     hoverId = d.id;
     tip.innerHTML = "";
-    const b = document.createElement("b"); b.textContent = `${d.name} · ${d.rank}`; tip.appendChild(b);
+    const b = document.createElement("b"); b.textContent = `${d.name} · ${d.rank}` + (d.team ? ` · ${d.team}` : ""); tip.appendChild(b);
     tip.appendChild(document.createTextNode("\n" + [d.about, d.bubble && "지금: " + d.bubble, d.note && "⛔ " + d.note, "누르면 아래에서 자세히 봅니다"].filter(Boolean).join("\n")));
   }
   tip.style.display = "block";
