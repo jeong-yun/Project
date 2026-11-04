@@ -626,6 +626,20 @@
   3. **career_facts 표 번호**: 마크다운 표의 첫 열이 숫자만인 줄(`| 13 |`)과 `13.`/`13)` 로 시작하는 목록 번호는 숫자 검사에서 제외. 표 안의 다른 칸 숫자는 그대로 검사. 테스트 추가.
   4. 고친 뒤 같은 문서·JD 로 다시 실행해 전체 시간·재작성 횟수·비평 점수 비교 (이번 실행이 기준).
 
+**FreeLLMAPI(무료 모델 서버) 설치 안내서 — 다른 PC 에서 Docker 설치 내용이 없어 진행 못 하던 문제**
+- 배경: README 에는 'Docker Desktop 실행 후 `docker compose … up -d`' 한 줄뿐이라 새 PC 에서 Docker·`.env`·키 등록을 할 수 없었음.
+- 작업: `docs/FREELLM_설치.md` 새로 씀 (Windows 11 기준) — 무엇·왜(꺼지면 무료 모델 팀원은 실패, 기본 팀원은 유료로) → Docker Desktop·WSL2·가상화·라이선스 →
+  저장소 받기(git/zip, 폴더 이름 = 볼륨 이름) → `.env`(ENCRYPTION_KEY·PORT) → `pull`·`up -d`·`/api/ping`·계정 만들기 → Google AI Studio·Groq 키 등록 →
+  통합 키를 Agent_office `.env` 에 → 점검 → 자동 시작·업데이트(Watchtower 의 Docker 소켓 위험)·볼륨 백업/이전 → 문제 해결 10가지 → 보안(HOST_BIND·무료 등급 약관).
+  README 2-1 의 설치 단락은 요약 + 링크로 줄임. `scripts/check_freellm.py` 추가 — 서버 켜짐(/api/ping)·통합 키(/v1/models, 키 값 출력 안 함)·
+  `models.yaml` 의 무료 모델이 서버 목록에 있는지·(선택) `--chat` 질문 1회를 한국어로 진단. 가짜 HTTP 서버 테스트 8건.
+- 발견:
+  - compose 가 `NODE_ENV=production` 이라 `ENCRYPTION_KEY` 가 꼭 필요하고, 볼륨을 다른 PC 로 옮길 때 **같은 `.env` 를 함께** 옮겨야 공급자 키를 읽는다.
+  - 공식 문서의 PowerShell `Out-File -Encoding utf8` 은 5.1 에서 BOM 을 붙여 첫 변수 이름이 깨질 수 있음 → 안내서는 `Set-Content -Encoding ascii`.
+  - 볼륨 실제 이름은 compose 프로젝트(폴더) 이름이 붙은 `freellmapi_freellmapi-data`. zip 으로 받아 `freellmapi-main` 폴더 그대로 쓰면 이름이 달라짐.
+  - 앱 사이드바의 `✅ freellm` 은 포트만 보므로 키가 틀려도 ✅ — 키까지는 점검 스크립트로 확인.
+  - Gemini 무료 등급(Unpaid Services)은 입력을 제품 개선에 쓰고 사람이 검토할 수 있음 (약관), Groq 는 기본 미보관(예외: 최대 30일 임시 로그).
+
 ---
 
 ## 누적 요약

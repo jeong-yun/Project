@@ -84,13 +84,20 @@
 
 ## 2-1. 무료 모델 (FreeLLMAPI) — 유료 키를 쓸 수 없을 때
 
-`langchain-kr/25-FreeLLMAPI-FreeModels` 에서 설치한 **FreeLLMAPI**(Google·Groq 등 무료 티어를 OpenAI 호환 주소 하나로 묶는 내 PC 의 프록시)를
+**FreeLLMAPI**([저장소](https://github.com/tashfeenahmed/freellmapi), Google·Groq 등 무료 티어를 OpenAI 호환 주소 하나로 묶는 내 PC 의 프록시, Docker 로 실행)를
 `freellm` provider 로 연결했습니다. 직급마다 유료 후보가 모두 실패(키 없음·크레딧 부족·장애)하면 무료 모델로 넘어가고,
 사이드바의 **🆓 무료 모델만 사용** 을 켜면 처음부터 무료 모델만 씁니다.
 
-1. FreeLLMAPI 서버 켜기: Docker Desktop 실행 후 `docker compose -f C:/Users/<사용자>/freellmapi/docker-compose.yml up -d`
-2. `.env` 에 `FREELLMAPI_BASE_URL=http://127.0.0.1:3001/v1`, `FREELLMAPI_API_KEY=freellmapi-…`(대시보드 Keys 페이지의 통합 키)
-3. 사이드바 provider 상태에 `✅ freellm` 이 보이면 준비 완료 (`🔌 서버 꺼짐`이면 1번 확인). 평가도 `python -m evals.run_eval … --free`
+**Docker 가 필요합니다 — 설치·필요 사양은 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)**
+(요약: Windows 11 23H2 이상 또는 Windows 10 22H2, 64비트 Pro·Enterprise·Education · WSL 2.1.5 이상 · CPU 가상화 켜짐(SLAT) · RAM 8GB 이상 · 디스크 10GB 이상 여유).
+윈도우10은 [안내서 2-4절 '윈도우10에서 설치할 때'](docs/FREELLM_설치.md#2-4-윈도우10에서-설치할-때) 확인 — 22H2 면 최신 Docker Desktop 그대로, `wsl --update` 필수.
+
+**새 PC 설치는 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)** 를 따라 하세요 — Docker Desktop·WSL2 준비 → `.env`(암호화 키) → `docker compose up -d`
+→ 대시보드(<http://127.0.0.1:3001>)에 Google AI Studio·Groq 무료 키 등록 → 통합 키를 이 폴더 `.env` 의 `FREELLMAPI_API_KEY` 에 넣기
+(주소 `FREELLMAPI_BASE_URL`, 기본 `http://127.0.0.1:3001/v1`) → 자동 시작·업데이트·백업·문제 해결·보안까지.
+
+- 점검: `python scripts/check_freellm.py` (서버 켜짐·통합 키·`models.yaml` 의 무료 모델이 있는지, 키 값은 출력 안 함). 사이드바 ⚙️ 모델·검증 상태에 `✅ freellm` 이면 준비 완료.
+- 평소: Docker Desktop 만 켜면 자동으로 다시 켜집니다 (`restart: unless-stopped`). 평가도 `python -m evals.run_eval … --free`
 
 **직급별 무료 모델 배정** (2026-10-20 실측: FreeLLMAPI 카탈로그의 지능 순위·무료 한도 + 직접 호출한 속도·구조화 출력 성공 여부)
 
