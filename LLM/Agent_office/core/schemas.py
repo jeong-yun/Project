@@ -161,6 +161,27 @@ class LegacyLink(BaseModel):
     match: str = ""  # 옛 업무 중 질문에 이 말이 있는 것만 이 팀에 보인다. 어느 팀의 말도 없으면 모든 팀에 보인다
 
 
+class TeamScope(BaseModel):
+    """이 팀이 받는 자유 질문의 범위 (team.yaml 의 scope) — 화면 안내와 '맡기기' 전 범위 확인에 쓴다 (core/scope.py)."""
+
+    summary: str = ""  # 한 줄 — "이 팀이 다루는 질문: …"
+    accepts: list[str] = Field(default_factory=list)  # 다루는 것
+    rejects: list[str] = Field(default_factory=list)  # 다루지 않는 것 (→ 맞는 팀)
+    keywords: list[str] = Field(default_factory=list)  # 모델 없이 '분명히 이 팀 질문'인지 보는 낱말
+    accept_all: bool = False  # true = 무엇이든 받는 범용 창구 (기본 팀) — 범위 확인을 하지 않는다
+
+
+class FreeExample(BaseModel):
+    """자유 질문 예시 (team.yaml 의 free_examples) — 고르면 질문·최종 상태 칸이 채워진다."""
+
+    title: str
+    question: str
+    goal: str = ""
+    success_criteria: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    output_format: str = ""
+
+
 class Team(BaseModel):
     """팀 (teams/<id>/team.yaml). 팀마다 조직도·검토 기준·툴·하네스를 따로 가진다."""
 
@@ -177,6 +198,8 @@ class Team(BaseModel):
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
     rubric: dict | None = None  # 없으면 config/verification.yaml 의 review_rubric 사용
     tasks: list[TaskTemplate] = Field(default_factory=list)  # 정형 업무 양식 (없으면 자유 질문만)
+    scope: TeamScope | None = None  # 자유 질문 범위 (없으면 범위 확인 없이 받는다)
+    free_examples: list[FreeExample] = Field(default_factory=list)  # 자유 질문 예시 (이 팀 분야만)
     search: dict = Field(default_factory=dict)  # 웹 검색 설정 덮어쓰기 (hint, news_timelimit 등)
     features: list[str] = Field(default_factory=list)  # 추가 기능 (예: route_map = 여행 경로 지도)
     # 검증 설정 덮어쓰기 (config/verification.yaml 의 critic 위에 덮어씀)

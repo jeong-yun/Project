@@ -170,6 +170,7 @@ def team_card(team: Team, org: OrgNode, ranks: list[Rank]) -> dict:
         "lead": f"{lead} — {org.specialty}" if org.specialty else lead,
         "members": members, "headcount": headcount,
         "tasks": [t.title for t in team.tasks] or ["💬 자유 질문"],
+        "scope": team.scope.summary if team.scope else "",  # 자유 질문 범위 (team.yaml 의 scope)
         "tools": [TOOL_LABELS.get(t, t) for t in team.tools] + [FEATURE_LABELS.get(f, f) for f in team.features],
     }
 
