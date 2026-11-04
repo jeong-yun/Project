@@ -2,6 +2,9 @@
 
   confirm_step  : 맡기기 전 확인 단계 — JD·요약 문서에 그림(png·jpg·jpeg·webp)·스캔 PDF 가 있으면 비전 모델로 글자를 옮기고,
                   사람이 고친 뒤 '이 내용으로 진행'을 눌러야 업무가 시작된다 (확인한 글 = JD·사실의 출처)
+                  🎯 JD 추천은 JD 파일마다 따로 확인한다 (파일 하나 = JD 하나)
+  web_step      : 🔄 포트폴리오 최신화의 외부 자료 승인 — 검색어 초안(직무·일반 기술 용어만)을 보여 주고, 사람이 고치거나 지운 뒤
+                  '승인'을 눌러야 검색·GitHub 글 가져오기를 한다 (기본 꺼짐, core/career_search.py 가 개인 정보가 든 검색어를 막는다)
   preview       : 최종 결과 아래 '📄 문서' 상자 — 문항별 글자 수(코드 계산) · 사실 검사 요약 · 내려받기(.md · .docx · .hwpx)
   adopted_files : 채택 시 results/career/ 에 함께 저장할 파일 (채택한·고친 내용으로 다시 만든다)
 
@@ -14,7 +17,8 @@ import re
 
 import streamlit as st
 
-from core import career, llm_factory, usage, vision
+from core import career, career_search, llm_factory, search, usage, vision
+from core.config import load_settings
 from core.doc_export import to_docx, to_hwpx
 from core.schemas import HumanDecision, ModelsConfig, ModelSpec, RankModels
 from core.tools import career_docs
@@ -31,7 +35,7 @@ NOTICE = ("🔒 올린 문서·JD 는 이 PC 의 `data/uploads/`, 채택한 결�
 
 VISION_NOTICE = ("🔒 그림은 고른 모델의 회사(OpenAI · Google · Anthropic)로 전송됩니다 — 이 팀은 비공개 팀이라 결과는 이 PC 에만 "
                  "저장되지만, 그림 읽기는 외부 호출입니다. 보내기 싫으면 '취소'하고 글로 붙여 넣거나 PDF(글자 층)·Word 로 올려 주세요.")
-FIELD_TITLES = {"jd": "JD (채용 공고)", "docs": "요약 문서"}
+FIELD_TITLES = {"jd": "JD (채용 공고)", "jds": "JD (파일마다 하나)", "docs": "요약 문서"}
 
 
 # ─── 맡기기 전 확인 단계 (그림·스캔 PDF → 글자) ───────────────────────────
@@ -81,16 +85,25 @@ def apply_confirmed(request: dict, items: dict[str, list], texts: dict[str, obje
     inputs = dict(request["tool_inputs"])
     if "jd" in items:
         inputs["jd_confirmed"] = str(texts.get("jd") or "")
-    if "docs" in items:
-        confirmed = dict(inputs.get("docs_confirmed") or {})
-        confirmed.update({f.path: str(t) for f, t in zip(items["docs"], texts.get("docs") or [])})
-        inputs["docs_confirmed"] = confirmed
+    for fld in ("docs", "jds"):  # 파일마다 따로 확인한 글 → {경로: 글}
+        if fld in items:
+            confirmed = dict(inputs.get(f"{fld}_confirmed") or {})
+            confirmed.update({f.path: str(t) for f, t in zip(items[fld], texts.get(fld) or [])})
+            inputs[f"{fld}_confirmed"] = confirmed
     inputs["vision_summary"] = summary
     return {**request, "tool_inputs": inputs}
 
 
 def confirm_step(request: dict, team_id: str, task_id: str, models: ModelsConfig, chains: list[RankModels]) -> dict:
-    """맡기기 전 확인 단계. 그림·스캔 PDF 가 없으면 request 를 그대로 돌려준다.
+    """맡기기 전 확인 단계 — ① 그림·스캔 PDF 글자 확인 → ② (포트폴리오 최신화) 외부 검색어·GitHub 주소 승인.
+
+    둘 다 필요 없으면 request 를 그대로 돌려준다. 확인을 기다리는 동안은 빈 dict (업무를 시작하지 않는다).
+    """
+    return web_step(vision_step(request, team_id, task_id, models, chains), team_id, task_id, models)
+
+
+def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig, chains: list[RankModels]) -> dict:
+    """그림·스캔 PDF 확인 단계. 그림·스캔 PDF 가 없으면 request 를 그대로 돌려준다.
 
     있으면 request 를 붙잡아 두고(세션) 아래 상자를 그린다 → '이 내용으로 진행'을 누른 실행에서 확인한 글을 넣은 request 를 돌려준다.
     chains: 이번 업무에 참여할 팀원들의 모델 후보 (아래 직급부터) — 여기서 그림을 볼 수 있고 지금 쓸 수 있는 모델만 고른다.
@@ -145,7 +158,7 @@ def confirm_step(request: dict, team_id: str, task_id: str, models: ModelsConfig
                     st.session_state[f"{wkey}_text_jd"] = career_docs.join_transcripts(files)
                 else:
                     for i, f in enumerate(files):
-                        st.session_state[f"{wkey}_text_docs_{i}"] = f.text
+                        st.session_state[f"{wkey}_text_{fld}_{i}"] = f.text
         if pending["error"]:
             st.error(pending["error"])
             return {}
@@ -164,14 +177,17 @@ def confirm_step(request: dict, team_id: str, task_id: str, models: ModelsConfig
             for f in reads["jd"]:
                 st.caption(f"· {f.name}: {f.how}" + "".join(f" — ⚠️ 흐림: {u}" for r in f.reads for u in r.unclear[:3]))
             texts["jd"] = st.text_area("JD 글 (고칠 수 있음)", key=f"{wkey}_text_jd", height=260)
-        if "docs" in reads:
-            st.markdown("**요약 문서** — 확인한 글이 **사실의 출처**가 됩니다 (인용·숫자는 이 글과 대조합니다)")
-            texts["docs"] = []
-            for i, f in enumerate(reads["docs"]):
+        for fld, intro in (("jds", "**JD (파일마다 하나)** — 확인한 글이 그 JD 가 됩니다 (요구사항·점수는 이 글로 계산)"),
+                           ("docs", "**요약 문서** — 확인한 글이 **사실의 출처**가 됩니다 (인용·숫자는 이 글과 대조합니다)")):
+            if fld not in reads:
+                continue
+            st.markdown(intro)
+            texts[fld] = []
+            for i, f in enumerate(reads[fld]):
                 st.caption(f"· {f.name}: {f.how}" + "".join(f" — ⚠️ 흐림: {u}" for r in f.reads for u in r.unclear[:3]))
-                texts["docs"].append(st.text_area(f"{f.name} (고칠 수 있음)", key=f"{wkey}_text_docs_{i}", height=220))
+                texts[fld].append(st.text_area(f"{f.name} (고칠 수 있음)", key=f"{wkey}_text_{fld}_{i}", height=220))
         if st.button("✅ 이 내용으로 진행", type="primary", key=f"{wkey}_go"):
-            if "jd" in texts and not str(texts["jd"]).strip():
+            if "jd" in texts and not str(texts["jd"]).strip() or any(not str(t).strip() for t in texts.get("jds") or []):
                 st.warning("JD 글이 비어 있습니다. 내용을 넣거나 취소하세요.")
                 return {}
             summary = (f"그림·스캔 PDF 는 비전 모델({', '.join(used)})이 옮기고 사람이 확인·수정한 글입니다 "
@@ -179,6 +195,129 @@ def confirm_step(request: dict, team_id: str, task_id: str, models: ModelsConfig
             st.session_state.pop(key, None)
             return apply_confirmed(pending["request"], items, texts, summary)
     return {}
+
+
+# ─── 맡기기 전 외부 자료 승인 (🔄 포트폴리오 최신화) ────────────────────────
+
+WEB_NOTICE = ("🔒 이 팀은 평소 웹 검색을 하지 않습니다. 이 단계에서 **승인 버튼을 눌러야만** 아래 검색어를 검색 엔진(DuckDuckGo)으로 "
+              "보냅니다. 검색어에는 직무 이름·일반 기술 용어·연도만 넣습니다 — 이름·회사·프로젝트 이름·숫자·문서 문장이 있으면 "
+              "그 검색어는 보내지 않습니다. 검색 결과는 용어·트렌드에만 쓰고, 내 경력·숫자는 내 문서에서만 씁니다 (출처는 URL 로 표시).")
+
+
+def needs_web(inputs: dict) -> bool:
+    """포트폴리오 최신화에서 외부 검색을 켰거나 GitHub 주소를 넣었고, 아직 승인 단계를 거치지 않았는가."""
+    return (inputs.get("career_kind") == "portfolio_update" and not inputs.get("web_approved")
+            and bool(inputs.get("web_on") or str(inputs.get("github_url") or "").strip()))
+
+
+def private_text(inputs: dict) -> str:
+    """검색어 검사에 쓰는 '내 글' — 요약 문서·지금 포트폴리오 원문 + 올린 파일 이름 (이 글의 낱말이 검색어로 나가지 않게)."""
+    docs, _ = career_docs.read_docs(inputs)
+    old, _ = career_docs.read_portfolio(inputs)
+    names = [str(inputs.get(k) or "") for k in ("docs_name", "portfolio_name")]
+    return "\n".join([d.text for d in docs] + ([old.text] if old else []) + names)
+
+
+def approved_request(request: dict, queries: list[str], results: list[dict], github: tuple[str, str] | None,
+                     notes: list[str]) -> dict:
+    """승인한 검색어·결과·GitHub 글을 업무 입력에 넣는다 → career_docs 툴이 '외부 자료' 절로 보여 준다."""
+    inputs = dict(request["tool_inputs"])
+    inputs.update(web_approved=True, web_queries=list(queries), web_results=list(results), web_notes=list(notes))
+    if github:
+        inputs["github_text"], inputs["github_raw"] = github
+    return {**request, "tool_inputs": inputs}
+
+
+def web_step(request: dict, team_id: str, task_id: str, models: ModelsConfig) -> dict:
+    """외부 자료 승인 단계 — 검색어 초안을 보여 주고, 사람이 고치거나 지운 뒤 '승인'을 눌러야 검색·GitHub 가져오기를 한다.
+
+    필요 없으면 request 를 그대로 돌려준다. 기다리는 동안은 빈 dict.
+    """
+    key = f"career_web_{team_id}_{task_id}"
+    if request:
+        if not needs_web(request.get("tool_inputs") or {}):
+            st.session_state.pop(key, None)
+            return request
+        nonce = (st.session_state.get(key) or {}).get("nonce", 0) + 1
+        st.session_state[key] = {"request": request, "notes": None, "nonce": nonce}
+    pending = st.session_state.get(key)
+    if not pending:
+        return {}
+    inputs, wkey = pending["request"]["tool_inputs"], f"{key}_{pending['nonce']}"
+    role = career_docs.target_role(inputs)
+    private = private_text(inputs)
+    settings = load_settings()
+
+    with st.container(border=True):
+        st.markdown("##### 🌐 외부 자료 확인 — 업무 시작 전 (보내기 전에 검색어를 확인하세요)")
+        st.caption(WEB_NOTICE)
+        checks: list[tuple[str, list[str]]] = []
+        if inputs.get("web_on"):
+            if pending["notes"] is None:
+                with st.spinner("검색어 초안을 만드는 중… (직무 이름·일반 기술 용어만 씁니다)"):
+                    queries, pending["notes"] = career_search.draft_queries(role, private, models, settings)
+                st.session_state[f"{wkey}_queries"] = "\n".join(queries)
+            for note in pending["notes"]:
+                st.caption(f"· {note}")
+            text = st.text_area("보낼 검색어 (한 줄에 하나 — 고치거나 지울 수 있습니다. 승인 전에는 아무것도 보내지 않습니다)",
+                                key=f"{wkey}_queries", height=110)
+            checks = [(q, career_search.query_problems(q, private, role)) for q in (ln.strip() for ln in text.splitlines()) if q]
+            if checks:
+                st.markdown("\n".join(f"- ✅ `{q}`" if not p else f"- ⛔ `{q}` — {' / '.join(p)} → **보내지 않음**" for q, p in checks))
+            else:
+                st.caption("검색어가 없습니다 — 검색하지 않습니다.")
+        github_url = str(inputs.get("github_url") or "").strip()
+        raw = career_search.github_raw_url(github_url) if github_url else None
+        if github_url and raw:
+            use = "내 문서로 — 사실의 출처" if inputs.get("github_as_source") else "외부 자료 — 용어·프로젝트 이름 참고, 출처 URL 표시"
+            st.markdown(f"📥 가져올 GitHub 글: `{raw}` ({use})")
+        elif github_url:
+            st.error("이 GitHub 주소는 가져올 수 없습니다 — `https://github.com/계정/저장소` 또는 그 안의 .md·.txt 파일 주소만 됩니다. "
+                     "이 주소는 빼고 진행합니다.")
+        send = [q for q, p in checks if not p]
+        label = "🔍 승인 — 검색하고 진행" if send else ("📥 승인 — GitHub 글 가져오고 진행" if raw else "▶ 진행")
+        c1, c2, c3 = st.columns(3)
+        go = c1.button(label, type="primary", key=f"{wkey}_go")
+        skip = c2.button("🚫 외부 자료 없이 진행", key=f"{wkey}_skip")
+        if c3.button("✖ 취소 (업무 맡기지 않음)", key=f"{wkey}_cancel"):
+            st.session_state.pop(key, None)
+            st.rerun()
+        if skip:
+            st.session_state.pop(key, None)
+            return approved_request(pending["request"], [], [], None, ["외부 자료 없이 진행 (사용자 선택)"])
+        if go:
+            notes, results, github = [], [], None
+            if send:
+                with st.spinner(f"승인한 검색어 {len(send)}개로 검색하는 중…"):
+                    context = search.search_queries(send, settings)
+                results, notes = [r.model_dump() for r in context.results], list(context.notes)
+            if len(send) < len(checks):
+                notes.append(f"개인 정보 검사에 걸린 검색어 {len(checks) - len(send)}개는 보내지 않았습니다.")
+            if raw:
+                try:
+                    github = career_search.fetch_github(github_url)
+                except Exception as e:  # noqa: BLE001 — 가져오지 못해도 업무는 내 문서로 진행
+                    notes.append(f"GitHub 글을 가져오지 못했습니다: {type(e).__name__}: {str(e)[:150]}")
+            st.session_state.pop(key, None)
+            return approved_request(pending["request"], send, results, github, notes)
+    return {}
+
+
+# ─── 결과 문서 ────────────────────────────────────────────────────────
+
+TITLES = {"cover_letter": "자기소개서", "portfolio": "포트폴리오", "jd_recommend": "JD 추천", "portfolio_update": "포트폴리오(최신화)"}
+
+
+def _kind(inputs: dict, text: str) -> str:
+    """업무 종류 — 입력값이 없으면(되살린 업무) 답변 모양으로."""
+    if inputs.get("career_kind"):
+        return str(inputs["career_kind"])
+    data = career.answer_json(text) or {}
+    if "jd_fit" in data:
+        return "jd_recommend"
+    if "changes" in data or "no_changes" in data:
+        return "portfolio_update"
+    return "cover_letter" if re.search(r"^#{2,4}\s*문항\s*\d", text, re.M) else "portfolio"  # 포트폴리오의 '### 1. 프로젝트' 와 구분
 
 
 def _options(run: dict, text: str) -> dict:
@@ -193,14 +332,12 @@ def _options(run: dict, text: str) -> dict:
     inputs = run.get("career_inputs") or {}
     if "career_questions" not in opts and not inputs:
         opts["career_questions"] = [q.__dict__ for q in career.questions_from_request(str(run.get("question") or ""))]
-    looks_cover = bool(re.search(r"^#{2,4}\s*문항\s*\d", text, re.M))  # 포트폴리오의 '### 1. 프로젝트' 와 구분
-    kind = str(inputs.get("career_kind") or ("cover_letter" if looks_cover else "portfolio"))
     formats = [f for f in ("md", "docx", "hwpx") if inputs.get(f"fmt_{f}")] or (["md", "docx"] if inputs else ["md", "docx", "hwpx"])
-    return {**opts, "kind": kind, "formats": formats}
+    return {**opts, "kind": _kind(inputs, text), "formats": formats, "web": list(inputs.get("web_results") or [])}
 
 
 def build(run: dict, text: str) -> dict:
-    """답변 → {markdown, files, rows, facts}. 같은 글이면 다시 만들지 않는다."""
+    """답변 → {markdown, files, rows, facts, ranking, changes}. 같은 글이면 다시 만들지 않는다."""
     key = hashlib.sha1(text.encode("utf-8")).hexdigest()
     cached = run.get("career")
     if cached and cached.get("key") == key:
@@ -208,8 +345,11 @@ def build(run: dict, text: str) -> dict:
     opts = _options(run, text)
     questions = [career.Question(**q) for q in opts.get("career_questions") or []]
     kind = opts["kind"]
-    title = "자기소개서" if kind == "cover_letter" else "포트폴리오"
-    markdown = career.render_document(text, kind, questions, title, opts.get("career_requirement_text"))
+    title = TITLES.get(kind, "포트폴리오")
+    source = str(opts["career_source"]) if "career_source" in opts else None
+    jds = opts.get("career_jds") or []
+    markdown = career.render_document(text, kind, questions, title, opts.get("career_requirement_text"), jds=jds, source=source,
+                                      web=opts["web"])
     files: dict[str, bytes] = {}
     for fmt in opts["formats"]:
         if fmt == "md":
@@ -218,12 +358,46 @@ def build(run: dict, text: str) -> dict:
             files[f"{title}.docx"] = to_docx(markdown, title)
         elif fmt == "hwpx":
             files[f"{title}.hwpx"] = to_hwpx(markdown, title)
-    facts = career.check_facts(text, str(opts.get("career_source") or ""), str(opts.get("career_reference") or "")) \
-        if "career_source" in opts else None
+    facts = career.check_facts(text, source or "", str(opts.get("career_reference") or "")) if source is not None else None
     out = {"key": key, "markdown": markdown, "files": files, "rows": career.limit_rows(text, questions), "facts": facts,
-           "title": title}
+           "title": title, "kind": kind,
+           "ranking": career.ranked(career.score_jds(text, jds, source)) if kind == "jd_recommend" and jds else [],
+           "changes": career._items(career.answer_json(text), "changes") if kind == "portfolio_update" else [],
+           "change_problems": career.check_changes(text, str(opts["career_old_portfolio"]), source or "",
+                                                   list(opts.get("career_web_urls") or []), int(opts.get("career_web_count") or 0),
+                                                   str(opts.get("career_reference") or ""))
+           if kind == "portfolio_update" and "career_old_portfolio" in opts else []}
     run["career"] = out
     return out
+
+
+def _ranking_box(out: dict) -> None:
+    """🎯 JD 추천 — 코드가 계산한 순위·점수 표."""
+    if not out.get("ranking"):
+        return
+    lines = ["| 순위 | JD | 적합도 | 점수 근거 |", "|---|---|---|---|"]
+    lines += [f"| {i} | {s.id}. {career._cell(s.title)} | {f'**{s.score:g}점**' if s.score is not None else '-'} | {career._cell(s.basis)} |"
+              for i, s in enumerate(out["ranking"], 1)]
+    top = out["ranking"][0]
+    st.markdown("**추천 순위 (점수는 코드가 판정으로 계산 — 모델이 정한 숫자가 아님)**\n\n" + "\n".join(lines))
+    if top.score is not None:
+        st.success(f"🎯 가장 맞는 JD: **{top.id}. {top.title}** — {top.score:g}점")
+    st.caption(career.SCORE_RULE)
+
+
+def _changes_box(out: dict) -> None:
+    """🔄 포트폴리오 최신화 — 바뀐 점 요약 · 변경 목록 검사."""
+    if out.get("kind") != "portfolio_update":
+        return
+    changes = out.get("changes") or []
+    outside = sum(str(c.get("kind")).strip() == "외부" for c in changes)
+    st.markdown(f"**바뀐 점 {len(changes)}건** (내 문서 {len(changes) - outside} · 외부 자료 {outside}) — 전체 표는 문서 부록에 있습니다.")
+    for c in changes[:8]:
+        mark = "🌐" if str(c.get("kind")).strip() == "외부" else "📄"
+        before = career._cell(c.get("before"))[:60] or "(새로 추가)"
+        st.markdown(f"- {mark} **{career._cell(c.get('part'))}**: {before} → {career._cell(c.get('after'))[:80]}")
+    if out.get("change_problems"):
+        st.error("🔎 변경 목록 검사 — 확인하세요\n\n" + "\n".join(f"- {p}" for p in out["change_problems"][:8]))
 
 
 def preview(run: dict, final_text: str) -> None:
@@ -236,6 +410,8 @@ def preview(run: dict, final_text: str) -> None:
         return
     with st.container(border=True):
         st.markdown(f"##### 📄 {out['title']} 문서")
+        _ranking_box(out)
+        _changes_box(out)
         if out["rows"]:
             lines = ["| 문항 | 공백 포함 | 공백 제외 | 제한 | 판정 |", "|---|---|---|---|---|"]
             for r in out["rows"]:

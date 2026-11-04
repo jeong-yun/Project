@@ -315,8 +315,8 @@ def test_team_yaml_accepts_images_for_jd_and_docs():
     team = load_team("career")
     for task in team.tasks:
         fields = {f.key: f for f in task.fields}
-        for key in ("jd_file", "docs"):
+        for key in (k for k in ("jd_file", "docs") if k in fields):  # 포트폴리오 최신화는 JD 칸이 없다
             assert {"png", "jpg", "jpeg", "webp", "pdf", "docx"} <= set(fields[key].options)
             assert fields[key].multiple
-        assert "전송" in fields["jd_file"].help and "확인" in fields["docs"].help
+            assert "전송" in fields[key].help and "확인" in fields[key].help
 
