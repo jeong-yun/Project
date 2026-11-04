@@ -104,3 +104,38 @@
 | talos:1:59887 | HTTP/2 HPACK 바이너리 프레임 (HAProxy CVE-2020-11100) - solar-pro4 는 `\x00` 반복에서 끊기고 gpt-6-luna 는 안전 사유로 거절 (2026-11-03) |
 | talos:1:60890 | 정규식이 `"command": listPics` 처럼 따옴표 없는 값을 요구 - 실제 공격(`"command":"listFiles"`)과 맞지 않음 (2026-11-03) |
 | et:1:2020327 | `<string>` 뒤 `/` 없이 1,024바이트 이상 이어져야 함 (GHOST) - solar-pro4·gpt-6-luna 모두 공격 샘플을 만들지 못함 (2026-11-03) |
+| talos:1:21334 | HTTP 아님 (UDP 500 ISAKMP) - 2026-11-04 '완료인데 공격 0' 121룰 분석 (진행보고 11-03 4절) |
+| talos:1:28289 | HTTP 아님 (UDP 7329) |
+| talos:1:23444 | HTTP 아님 (TCP 27000 FlexNet 바이너리 프로토콜) |
+| talos:1:45320 | HTTP 아님 (TCP 37777 Dahua 바이너리, payload 맨 앞 20바이트) |
+| talos:1:45804 | HTTP 아님 (TCP 9124 바이너리, payload 맨 앞 4바이트) |
+| talos:1:26586 | HTTP 아님 (TCP 5432 PostgreSQL 시작 메시지) |
+| talos:1:49066 | HTTP 아님 (TCP 11311 ROS, payload 맨 앞이 TLS 레코드) |
+| talos:1:45798 | payload 맨 앞 3바이트가 Java 직렬화(AC ED, RMI·JRMP) - HTTP 요청 줄로 시작할 수 없음 |
+| talos:1:45799 | payload 맨 앞 3바이트가 Java 직렬화(AC ED) - HTTP 요청 줄로 시작할 수 없음 |
+| talos:1:45800 | payload 맨 앞 3바이트가 Java 직렬화(AC ED) - HTTP 요청 줄로 시작할 수 없음 |
+| talos:1:45801 | payload 맨 앞 3바이트가 Java 직렬화(AC ED) - HTTP 요청 줄로 시작할 수 없음 |
+| talos:1:58239 | HTTP 아님 (TLS 핸드셰이크 레코드가 payload 맨 앞, service ssl) |
+| talos:1:58240 | HTTP 아님 (TLS 핸드셰이크 레코드가 payload 맨 앞, service ssl) |
+| talos:1:58241 | HTTP 아님 (TLS 핸드셰이크 레코드가 payload 맨 앞, service ssl) |
+| talos:1:59796 | payload 맨 앞 32바이트가 빈 줄(CRLF) 16개 - HTTP 요청 줄로 시작할 수 없음 |
+| talos:1:59606 | payload 에 `:` 와 `HTTP` 가 없어야 함 - HTTP 요청 줄·헤더와 함께 성립 안 함 |
+| talos:1:63203 | 35바이트 content 가 18바이트 창 (distance 18, within 36) - Snort 에서도 성립 안 함 |
+| et:1:2072563 | 헤더 값(`query-id:`)에 http_method 가 붙은 룰 오류 - 성립 안 함 |
+| custom:1:2018093003 | method 자리에 바이너리 값 (사용자 룰) - HTTP 요청 줄로 만들 수 없음 |
+| et:1:2013416 | payload 는 TE 다음 Connection 헤더, http_header 정규식은 TE 바로 다음 Host 를 요구 - 함께 성립 안 함 (Snort 헤더 버퍼가 Connection 줄을 빼야만 성립) - 2026-11-04 공격 0 19룰 분석 (진행보고 11-04 3절) |
+| talos:1:43297 | raw URI `/%%` 가 Snort URI 정규화에서 `/\xff` 가 되는 것에 기댐 - 코드 검사로 재현할 수 없음 |
+
+## 룰별 생성 힌트
+
+같은 실수로 공격 샘플이 여러 번 모두 빠진 룰에 생성 모델이 지킬 점 (2026-11-04 공격 0 19룰 분석, `docs/보고용/진행보고.md` 11-04 3절). 3.2 가 그 룰이 든 생성 요청 메시지 앞에 '[룰별 주의]' 로 붙인다. 표 칸 안에는 `|` 를 쓰지 않는다. 사용자 룰은 룰 값을 쓰지 않는다 (이 파일은 공개본에 나감). 로컬 전용 힌트 파일 `docs/코드참조/룰별_생성_힌트_로컬.md` (공개본에 넣지 않음, '## 룰 id' 아래 본문)이 있으면 같은 룰은 그 힌트로 바꾸고, 힌트 안의 `{{값 형태}}` 는 3.2 가 생성 요청을 만들 때 그 룰의 content 값에서 바로 만든 형태(URI 값은 %XX, 그 밖은 원 글자 + `\xNN`)로 채운다 (2026-11-04).
+
+| 룰 id | 힌트 |
+| --- | --- |
+| et:1:2019263 | content 값 `(%29 %7b%20` 의 `(%29` 와 `%7b%20` 사이는 실제 공백 한 칸(0x20)이다. 요청 줄(URI)에는 공백을 넣을 수 없으니 이 값을 헤더 값(User-Agent·Cookie·Referer 등)에 글자 그대로 넣는다. 공백을 `%20` 으로 바꾸지 않는다 |
+| talos:1:40464 | 본문은 multipart/form-data 다. 필드 이름 `popularity[from]`·`popularity[to]`·`popularity[field_expr]` 를 평문으로 쓰고 (`Content-Disposition: form-data; name="popularity[from]"`), 그 필드 값(빈 줄 다음)에 SQL 주입과 숫자 0 이나 3 이 들어가게 한다. 본문에 `filter=` 와 base64 값도 둔다 |
+| talos:1:42134 | URI 쿼리에서 `substitute`·`bcl`·`FILE`·`../`(또는 `%2e%2e%2f`)가 `&` 없이 한 덩어리로 이어져야 한다. 예: `/CimWeb/gefebt.exe?substitute.bcl+FILE=../../../../windows/win.ini`. FILE 을 다른 파라미터(`&FILE=`)로 나누지 않는다 |
+| talos:1:57426 | 직렬화 문자열을 JSON 문자열 값 안에 넣어 따옴표가 `\"` 로 보이게 한다 (본문에 `:\"streamName\";O:` 처럼). 클래스 이름은 `Zend\\Http\\Response\\Stream` (역슬래시 두 개), `cleanup`·`b:1` 도 넣는다 |
+| talos:1:60671 | 본문에 `<rsp:Arguments>` 를 속성 없이 그대로 쓰고 바로 뒤에 base64 를 둔다. 그 base64 는 `{{B64:원문}}` 으로 쓰고, 원문에는 `TargetTypeForDeserialization`, `<BA N="SerializationData">`, `TeXN0ZW0uVW5pdHlTZXJpYWxpemF0aW9uSG9sZGVy`, `U3lzdGVtLldpbmRvd3MuTWFya3VwLlhhbWxSZWFkZX`, `<S>` 가 이 순서로 들어간다 (가운데 두 값은 글자 그대로). URI 는 `/Powershell` 을 포함한다 |
+| talos:1:65281 | 본문 `behaviors=` 값 하나 안에(`&` 없이) `"__class"`, `"__construct()"`, `"_fn_close"` 를 정확히 넣는다 (따옴표·밑줄은 그대로 또는 `%22`·`%5f`, `_fn_close` 는 밑줄 하나로 시작). 예: `behaviors={"as x":{"__class":"GuzzleHttp\Psr7\FnStream","__construct()":[[]],"_fn_close":"phpinfo"}}` |
+| custom:1:974507943 | content 값의 `\xNN` 바이트는 UTF-8 글자다. 그 글자로 바꿔 값과 한 글자도 다르지 않게(공백·기호·대소문자 포함) 넣고, URI 에서도 퍼센트 인코딩하지 않은 원 글자로 써서 같은 값이 요청 원문에도 그대로 보이게 한다 |

@@ -51,12 +51,74 @@ def with_examples(rule):
     return dict(rule, regex_examples=ex) if ex else rule
 
 
+LOCAL_HINTS_FILE = C.BASE_DIR / "docs" / "코드참조" / "룰별_생성_힌트_로컬.md"   # 로컬 전용 (공개본에 넣지 않음, 0_9 INCLUDE 밖)
+VALUE_FORMS = "{{값 형태}}"
+_URI_SAFE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~/?=&:;,+!*'()@$")
+
+
+def local_rule_hints(path=LOCAL_HINTS_FILE):
+    """로컬 전용 룰별 힌트 파일 ('## 룰 id' 아래 본문 = 힌트, 첫 '## ' 앞은 설명). 파일이 없으면 {} (2026-11-04~).
+    같은 룰의 LLM_설정.md '룰별 생성 힌트' 표 힌트를 대신한다."""
+    if not path.exists():
+        return {}
+    out, rid, buf = {}, None, []
+    for line in path.read_text(encoding="utf-8").splitlines() + ["## "]:
+        if line.startswith("## "):
+            if rid and "\n".join(buf).strip():
+                out[rid] = "\n".join(buf).strip()
+            rid, buf = line[3:].strip(), []
+        elif rid is not None:
+            buf.append(line)
+    return out
+
+
+def value_forms(rule):
+    """힌트의 {{값 형태}} 자리: 룰의 (부정 아닌) content 값 중 비ASCII 바이트가 든 것을 샘플에 넣을 형태로 - 생성 요청을 만들 때
+    룰에서 바로 만든다 (값을 파일에 남기지 않음). URI 값은 %XX (UTF-8 바이트), 그 밖은 원 글자 + 어려우면 쓸 \\xNN 표기."""
+    lines = []
+    for c in rule.get("conditions", []):
+        if c.get("type") != "content" or c.get("negated"):
+            continue
+        b = C.unescape_value(c.get("value", "")).encode("latin-1", "replace")
+        if b.isascii():
+            continue
+        try:
+            t = b.decode("utf-8")
+        except UnicodeDecodeError:
+            t = None
+        where = c.get("in", "payload")
+        esc = "".join(chr(x) if x < 0x80 else f"\\x{x:02x}" for x in b)
+        if where in ("uri", "raw_uri"):
+            enc = ("".join(ch if ch in _URI_SAFE else "".join(f"%{x:02X}" for x in ch.encode("utf-8")) for ch in t) if t
+                   else "".join(chr(x) if chr(x) in _URI_SAFE else f"%{x:02X}" for x in b))
+            lines.append(f"  - {where} 값: `{enc}` (요청 줄 URI 안에 이 %XX 형태 그대로" + (f", 글자로는 '{t}'" if t else "") + ")")
+        elif t:
+            lines.append(f"  - {where} 값: '{t}' (퍼센트 인코딩하지 않은 원 글자 그대로" + (", 대소문자 무관" if c.get("nocase") else "")
+                         + f", 원 글자가 어려우면 바이트 표기 `{esc}` - JSON 안에서는 \\\\xNN)")
+        else:
+            lines.append(f"  - {where} 값: 바이트 표기 `{esc}` (JSON 안에서는 \\\\xNN)")
+    return "\n".join(lines)
+
+
+def rule_hints():
+    """룰별 생성 힌트: LLM_설정.md 표 + 로컬 전용 파일 (같은 룰은 로컬 파일이 대신함)."""
+    hints = dict(C.rule_hints())
+    hints.update(local_rule_hints())
+    return hints
+
+
 def user_message(rules, n_a, n_n, hint="", examples=True):
     # 샘플 수를 요청 메시지에 다시 못박는다 (지시문의 출력 예시 개수를 그대로 따라 하는 모델이 있음)
     rules = [{k: v for k, v in r.items() if k != "_mask"} for r in rules]     # _mask: 3.1 의 마스킹 기록 (로컬 전용)
     if examples:
         rules = [with_examples(r) for r in rules]
+    # 룰별 생성 힌트 (LLM_설정.md '룰별 생성 힌트' + 로컬 전용 파일, 2026-11-04~): 여러 번 같은 실수로 공격 샘플이 모두 빠진 룰.
+    # 힌트의 {{값 형태}} 는 그 룰의 content 값에서 바로 만든 형태로 바꾼다 (value_forms)
+    hints = rule_hints()
+    rh = [f"- {r['id']}: " + hints[r["id"]].replace(VALUE_FORMS, "\n" + value_forms(r)) for r in rules if r.get("id") in hints]
     return ((hint + "\n\n" if hint else "") +
+            ("[룰별 주의] 아래 룰은 예전 생성에서 같은 실수로 공격 샘플이 모두 코드 검사에서 빠졌다. 이 룰의 anomalies 는 반드시 따른다.\n"
+             + "\n".join(rh) + "\n\n" if rh else "") +
             f"다음은 룰 {len(rules)}개다 (JSON Lines).\n"
             f"- 룰마다 반드시 anomalies {n_a}개, normal {n_n}개 (룰당 총 {n_a + n_n}개)를 만든다. "
             f"지시문의 출력 예시는 형식만 보여 주는 것이며 개수는 이 수를 따른다.\n"
@@ -188,10 +250,17 @@ def write_result(name, rules, got, texts, run, gen_dir, log, info):
                 if realistic:                     # 잘린 UA·빠진 기본 헤더·틀린 Content-Length → 실제 값
                     s = C.realistic_sample(s, r)
                 # 큰 반복 (…){100,}: 파트·빈 줄 반복은 3.3 merge 가 코드로 채우므로 채운 샘플로 검사 (검토 모델이 파트 수로 빼지 않게)
+                # 부정 창 길이 (2026-11-04, C.PAD_WINDOWS): 룰이 요구하는 길이보다 짧은 값도 3.3 merge 가 코드로 채우므로 채운 샘플로 검사
+                # 대소문자 우회 룰 (2026-11-04 오후, C.CASE_BYPASS): 값의 대소문자도 3.3 merge 가 코드로 바꾸므로 바꾼 샘플로 검사
                 big = C.repeat_parts(s, r)
-                chk = C.local_check(big, r)
-                if big is not s:
-                    chk = dict(chk, note="반복 부분(파트·빈 줄)은 코드가 기준 수 이상으로 늘림 (3.3) - 반복 수 때문에 drop·fix 하지 않음")
+                pad = C.pad_windows(big, r)
+                cb = C.case_bypass(pad, r)
+                chk = C.local_check(cb, r)
+                notes = (["반복 부분(파트·빈 줄)은 코드가 기준 수 이상으로 늘림 (3.3) - 반복 수 때문에 drop·fix 하지 않음"] if big is not s else []) \
+                    + (["값 길이(부정 창)는 코드가 룰이 요구하는 길이로 채움 (3.3) - 길이 때문에 drop·fix 하지 않음"] if pad is not big else []) \
+                    + (["대소문자 우회 룰: 값의 대소문자는 코드가 바꿈 (3.3) - 대소문자 때문에 drop·fix 하지 않음"] if cb is not pad else [])
+                if notes:
+                    chk = dict(chk, note=" / ".join(notes))
                 s = dict(s, local_check=chk)
             samples.append(s)
         out.append({"id": r["id"], "attack_type": g.get("attack_type") or r["attack_type"],

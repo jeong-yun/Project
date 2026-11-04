@@ -1586,7 +1586,13 @@ CODE_NUM = {"OK": "1", "RULE": "2", "CHECK": "3", "BAD": "4"}
 # 5 = 코드 검사 고침 2 (3_0a_common NEG_WINDOW·REGEX_V1, 2026-11-03): 위치(within 등)가 있는 부정 content 는 기준 content 뒤 창에서만,
 #     파이썬 re 가 못 읽는 정규식((?-i)·\h)은 regex 모듈 V1 로. 판 5 전 결과는 '불일치' 말고도 이 고침이 닿는 룰의 줄(_v5_touch)을
 #     다시 확인한다. analyze 는 C.with_anchors(rule) 로 기준 content 를 채운 조건을 본다
-VERIFY_LOGIC = 5
+# 6 = 코드 검사 고침 3 (3_0a_common NEG_PAYLOAD_ANCHOR·BYTE_WINDOW·UTF8_BYTES, 2026-11-04): payload 의 부정 content 창은 다른 버퍼의
+#     기준 content 뒤에서도, 창 길이는 UTF-8 바이트로, 0x80 이상 글자는 UTF-8 바이트 변형으로도 본다. 판 6 전 결과는 '불일치' 말고도
+#     이 고침이 닿는 줄(_v6_touch: 위치 있는 부정 content·0x80 이상 바이트 content 룰, 또는 0x80 이상 글자가 있는 payload)을 다시 확인한다
+# 7 = 코드 검사 고침 4 (3_0a_common B64_ANCHOR·REGEX_POSIX·PCRE_COND·URI_REL_REGEX, 2026-11-04 오후): base64_data 를 디코딩 시작점
+#     뒤 덩어리로, POSIX 묶음 정규식은 V1, PCRE 조건문 바꿔 읽기, http_uri 뒤 R 정규식은 URI 에서. 판 7 전 결과는 '불일치' 말고도
+#     이 고침이 닿는 룰의 줄(_v7_touch, C.fix4_touch)을 다시 확인한다
+VERIFY_LOGIC = 7
 
 
 def _has_r(rule):
@@ -1612,6 +1618,20 @@ def _v4_touch(rule, payload):
 def _v5_touch(C, rule):
     """판 5 의 코드 검사 고침 2 가 결과를 바꿀 수 있는 룰: 위치가 있는 부정 content, 또는 re 로 못 읽는 정규식 (C.fix2_touch)."""
     f = getattr(C, "fix2_touch", None)
+    return bool(rule) and f is not None and f(rule)
+
+
+def _v6_touch(C, rule, payload):
+    """판 6 의 코드 검사 고침 3 이 결과를 바꿀 수 있는 줄: 위치가 있는 부정 content·0x80 이상 바이트 content 가 있는 룰
+    (C.fix3_touch), 또는 payload 에 0x80 이상 글자가 있는 줄 (UTF-8 바이트 변형은 정규식 결과도 바꿀 수 있음)."""
+    f = getattr(C, "fix3_touch", None)
+    return bool(rule) and f is not None and (f(rule) or not (payload or "").isascii())
+
+
+def _v7_touch(C, rule):
+    """판 7 의 코드 검사 고침 4 가 결과를 바꿀 수 있는 룰: base64_data 조건, POSIX 묶음·PCRE 조건문 정규식, http_uri 뒤 R 정규식
+    (C.fix4_touch)."""
+    f = getattr(C, "fix4_touch", None)
     return bool(rule) and f is not None and f(rule)
 MS_PER_LINE = 12.0   # 검증 기록이 없을 때 새로 확인하는 줄 1개의 시간 (데이터에 따라 8~30ms)
 REUSE_SEC = 0.0003   # 이미 확인한 결과를 그대로 쓰는 줄 1개의 시간
@@ -1713,11 +1733,11 @@ def _known_rows(date, dev, in_dir):
 
 def _stale_bad(v):
     """예전 판정 규칙(VERIFY_LOGIC 전)으로 끝난 검증의 '불일치' 줄 수 - '검증 안 한 데이터만' 이 다시 확인한다.
-    판 5 전 검증은 R 정규식 룰·코드 검사 고침(1·2)이 닿는 줄도 다시 확인하므로 '불일치' 가 0 이어도 1 이상."""
+    판 7 전 검증은 R 정규식 룰·코드 검사 고침(1~4)이 닿는 줄도 다시 확인하므로 '불일치' 가 0 이어도 1 이상."""
     if v.get("logic", 1) >= VERIFY_LOGIC:
         return 0
     bad = (v.get("summary") or {}).get("BAD", 0)
-    return max(bad, 1) if v.get("logic", 1) < 5 else bad
+    return max(bad, 1) if v.get("logic", 1) < 7 else bad
 
 
 def _all_verified(date, dev):
@@ -2016,7 +2036,9 @@ def _verify_work(date, dev, mode, path, v):
                     if a.get("lv", 1) < VERIFY_LOGIC and (a.get("cons") == "BAD"
                                                           or (a.get("lv", 1) < 3 and _has_r(ctx[1].get(meta.get("id"))))
                                                           or (a.get("lv", 1) < 4 and _v4_touch(ctx[1].get(meta.get("id")), payload))
-                                                          or (a.get("lv", 1) < 5 and _v5_touch(ctx[0], ctx[1].get(meta.get("id"))))):
+                                                          or (a.get("lv", 1) < 5 and _v5_touch(ctx[0], ctx[1].get(meta.get("id"))))
+                                                          or (a.get("lv", 1) < 6 and _v6_touch(ctx[0], ctx[1].get(meta.get("id")), payload))
+                                                          or (a.get("lv", 1) < 7 and _v7_touch(ctx[0], ctx[1].get(meta.get("id"))))):
                         a, row_in = analyze(payload, lab, meta, ctx), in_dir
                         v["analyzed"] += 1
                     else:
@@ -4871,7 +4893,7 @@ $("refresh").onclick=async()=>{await post("/api/progress/refresh");$("progBody")
 /* ── 3. 룰별 상태 ── */
 async function loadRules(){const qs=new URLSearchParams({flag:$("rFlag").value,source:$("rSrc").value,q:$("rQ").value,offset:rOff,limit:50});
  const r=await get("/api/rules?"+qs);$("rCount").textContent=`${fmt(r.total)}개 중 ${r.total?rOff+1:0}–${Math.min(rOff+50,r.total)}`;
- $("rBody").innerHTML=r.rows.map(x=>`<tr><td>${esc(x.id)}</td><td>${chip(x.flag)}</td><td class="muted">${x.flag==="EXCLUDED"?esc(x.reason||""):""}</td><td>${esc(x.attack_type)}</td><td>${esc(x.rule_name)}</td><td class="muted">${esc(x.date)} ${esc(x.request)}</td><td class="n">${x.anomalies||""}</td><td class="n">${x.normal||""}</td><td class="n">${x.existing||""}</td></tr>`).join("");
+ $("rBody").innerHTML=r.rows.map(x=>`<tr><td>${esc(x.id)}</td><td>${chip(x.flag)}</td><td class="muted">${x.flag==="EXCLUDED"?esc(x.reason||""):""}</td><td>${esc(x.attack_type)}</td><td>${esc(x.rule_name)}</td><td class="muted">${esc(x.date)} ${esc(x.request)}${x.requests>1?` <span title="샘플 수는 이 룰의 모든 요청(샘플 있는 ${x.requests}개)을 합친 수">외 ${x.requests-1}개</span>`:""}</td><td class="n">${x.anomalies||""}</td><td class="n">${x.normal||""}</td><td class="n">${x.existing||""}</td></tr>`).join("");
  $("rPrev").disabled=rOff===0;$("rNext").disabled=rOff+50>=r.total;}
 let tm;$("rQ").oninput=()=>{clearTimeout(tm);tm=setTimeout(()=>{rOff=0;loadRules()},300)};$("rFlag").onchange=$("rSrc").onchange=()=>{rOff=0;loadRules()};
 $("rPrev").onclick=()=>{rOff=Math.max(0,rOff-50);loadRules()};$("rNext").onclick=()=>{rOff+=50;loadRules()};

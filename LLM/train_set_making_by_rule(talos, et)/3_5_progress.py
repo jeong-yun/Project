@@ -20,6 +20,11 @@
 [비율]  생성 대상 = 전체 - EXCLUDED - EXISTING
         완료율 = DONE / 생성 대상,   학습데이터 보유율 = (DONE + EXISTING) / 전체 룰
 
+[샘플 수]  anomalies·normal 열 = 그 룰(같은 룰 내용)의 모든 요청 최종 결과(07 맨 위 <요청>.jsonl, 3.4 per_rule)를 합친 수.
+        1.4 는 날짜 폴더의 모든 최종 파일을 학습 로그로 만들므로 08 에 실제로 들어간 수와 같다. 플래그·날짜 폴더·요청 열은
+        가장 많이 진행된 요청 하나 (같으면 최근), requests 열 = 샘플이 있는 요청 수. (2026-11-04 전에는 그 요청 하나의 수만 세어
+        새 요청이 정상만 남기면 예전 요청의 공격이 있어도 공격 0 으로 보였다 - 진행보고 2026-11-03 4절)
+
 [거부 편향 경보] (2026-10-29, 위험 등록부 R01) 검토 모델이 '안전' 을 이유로 공격 샘플을 빼거나 판정을 거절하면 위험한 공격
   유형일수록 학습데이터가 모자란다. 공격 유형별로 거부 비율 = (안전 사유로 뺀 공격 샘플 + 판정 거절로 빠진 공격 샘플) ÷ 생성된
   공격 샘플 을 지금 결과(다시 만들기 반영) 전체와 가장 최근 날짜 폴더로 따로 세고, '거부 편향 경보 기준'(%, 기본 5)을 넘는 유형을
@@ -77,6 +82,13 @@ def _json(path, default=None):
         return json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return default
+
+
+def pick(same):
+    """같은 룰 내용의 요청들 [(상태, 지문, 날짜, 요청, anomalies, normal)] → (가장 많이 진행된 것(같으면 최근), 공격 합, 정상 합,
+    샘플이 있는 요청 수). 샘플 수는 모든 요청을 합친다 (위 [샘플 수])."""
+    best = max(same, key=lambda e: (RANK[e[0]], e[2], e[3]))
+    return best, sum(e[4] for e in same), sum(e[5] for e in same), sum(1 for e in same if e[4] + e[5] > 0)
 
 
 def _listdir(d):
@@ -264,7 +276,7 @@ def compute(log=None):
         existing = cov.get(rid, {}).get("count", 0)
         row = {"id": rid, "source": rid.split(":")[0], "attack_type": r.get("attack_type", ""),
                "side": r.get("side", ""), "rule_name": r.get("rule_name", ""), "existing": existing,
-               "date": "", "request": "", "anomalies": 0, "normal": 0, "reason": ""}
+               "date": "", "request": "", "anomalies": 0, "normal": 0, "requests": 0, "reason": ""}
         if r.get("attack_type") in skip or r.get("side", "request") not in sides:
             flag = "EXCLUDED"
             row["reason"] = (f"생성 제외 유형 ({r.get('attack_type')})" if r.get("attack_type") in skip
@@ -274,16 +286,16 @@ def compute(log=None):
             row["reason"] = "생성 제외 룰: " + excl[rid]
             same = [e for e in entries.get(rid, []) if e[1] == h]
             if same:          # 이미 만든 샘플은 그대로 둔다 (어디 있는지만 보여 주고, 샘플 합계에는 넣지 않음)
-                best = max(same, key=lambda e: (RANK[e[0]], e[2], e[3]))
-                row.update(date=best[2], request=best[3], anomalies=best[4], normal=best[5])
+                best, a, n, k = pick(same)
+                row.update(date=best[2], request=best[3], anomalies=a, normal=n, requests=k)
         elif existing >= hi:
             flag = "EXISTING"
         else:
             same = [e for e in entries.get(rid, []) if e[1] == h]
             if same:
-                best = max(same, key=lambda e: (RANK[e[0]], e[2], e[3]))     # 가장 많이 진행된 것, 같으면 최근
+                best, a, n, k = pick(same)     # 상태는 가장 많이 진행된 것(같으면 최근), 샘플 수는 모든 요청 합
                 flag = best[0]
-                row.update(date=best[2], request=best[3], anomalies=best[4], normal=best[5])
+                row.update(date=best[2], request=best[3], anomalies=a, normal=n, requests=k)
             elif entries.get(rid):
                 flag = "CHANGED"
             else:
@@ -349,10 +361,11 @@ def compute(log=None):
     with open(tmp, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f)
         w.writerow(["룰 id", "플래그", "상태", "출처", "공격 유형", "방향", "룰 이름", "기존 샘플 수",
-                    "날짜 폴더", "요청", "anomalies", "normal", "제외 사유"])
+                    "날짜 폴더", "요청", "anomalies", "normal", "제외 사유", "샘플 있는 요청 수"])
         for r in rows:
             w.writerow([r["id"], r["flag"], r["status"], r["source"], r["attack_type"], r["side"], r["rule_name"],
-                        r["existing"], r["date"], r["request"], r["anomalies"], r["normal"], r.get("reason", "")])
+                        r["existing"], r["date"], r["request"], r["anomalies"], r["normal"], r.get("reason", ""),
+                        r.get("requests", 0)])
     tmp.replace(PROGRESS_DIR / "rule_status.csv")
     ptmp = PROGRESS_DIR / f"progress.json.{os.getpid()}.tmp"
     ptmp.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")

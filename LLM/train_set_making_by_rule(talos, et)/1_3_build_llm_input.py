@@ -178,8 +178,10 @@ def conditions(r):
         pos = {k: c[k] for k in ("offset", "depth", "distance", "within") if k in c}
         if pos:
             item["position"] = pos
-        # 상대 위치가 있는 부정 content 의 기준 = 바로 앞의 부정 아닌 content (같은 버퍼일 때만, 3_0a_common.neg_anchors 와 같음)
-        if c.get("negated") and ("distance" in pos or "within" in pos) and last and last["in"] == item["in"]:
+        # 상대 위치가 있는 부정 content 의 기준 = 바로 앞의 부정 아닌 content (같은 버퍼일 때만, 부정 content 가 payload 면
+        # 다른 버퍼의 기준도 - 3_0a_common.neg_anchors·NEG_PAYLOAD_ANCHOR 와 같음, 2026-11-04)
+        if c.get("negated") and ("distance" in pos or "within" in pos) and last \
+                and (last["in"] == item["in"] or item["in"] == "payload"):
             item["after"] = last
         if not c.get("negated"):
             last = {"in": item["in"], "value": item["value"], **({"nocase": True} if item.get("nocase") else {})}

@@ -157,6 +157,11 @@ def excluded_rules(path=SETTINGS_FILE):
     return {row[0]: (row[1] if len(row) > 1 else "") for row in md_tables(path).get("생성 제외 룰", []) if row and row[0]}
 
 
+def rule_hints(path=SETTINGS_FILE):
+    """LLM_설정.md '## 룰별 생성 힌트' 표 → {룰 id: 힌트}. 3.2 가 그 룰이 든 생성 요청 메시지에 붙인다 (2026-11-04~)."""
+    return {row[0]: row[1] for row in md_tables(path).get("룰별 생성 힌트", []) if len(row) > 1 and row[0] and row[1]}
+
+
 def run_int(run, key, default):
     try:
         return int(run.get(key, default))
@@ -637,20 +642,51 @@ def _fix_json_escapes(s):
 _FENCE = re.compile(r"```(?:json|jsonl)?")
 _RULE_OBJ = re.compile(r'\{\s*"id"\s*:')              # 룰 하나의 객체 시작 (생성·검토 응답 모두 "id" 가 첫 키)
 _NEXT_RULE_OBJ = re.compile(r'\n\s*\{\s*"id"\s*:')
+# 해석 고침 3 (2026-11-04, 진행보고 11-03 4절·11-04): solar-pro4 가 한 룰 객체 안에 "samples" 키를 두 번 쓰면(공격 10 → 정상 5)
+# JSON 은 마지막 값만 남겨 공격을 버렸고, 나뉜 공격 객체 끝의 쉼표(',]' ',}')로 객체가 통째로 읽히지 않았다.
+# 같은 객체의 "samples" 는 합치고, 읽히지 않는 룰 객체는 끝 쉼표를 지워 다시 읽는다 (False = 고치기 전, 비교·시험용).
+PARSE_FIX3 = True
+_TRAIL_COMMA = re.compile(r",(\s*[\]}])")
+
+
+def _merge_pairs(pairs):
+    """JSON 객체를 만들 때 같은 키 "samples"(목록)가 여러 번이면 합친다 (다른 키는 마지막 값, json 기본과 같음)."""
+    out = {}
+    for k, v in pairs:
+        if k == "samples" and isinstance(out.get(k), list) and isinstance(v, list):
+            out[k] = out[k] + v
+        else:
+            out[k] = v
+    return out
+
+
+_DEC_MERGE = json.JSONDecoder(object_pairs_hook=_merge_pairs)
+_DEC_PLAIN = json.JSONDecoder()
+
+
+def _decoder():
+    return _DEC_MERGE if PARSE_FIX3 else _DEC_PLAIN
 
 
 def _close_rule_obj(s, i):
     """i 에서 시작한 룰 객체가 끝 '}' 하나만 빠진 경우 ('…}]' 다음 줄에 바로 다음 룰 객체, solar-pro4 에서 봄):
-    다음 룰 객체 앞까지에 '}' 를 붙여 읽는다 → (객체, 끝 위치) 또는 None."""
+    다음 룰 객체 앞까지에 '}' 를 붙여 읽는다. PARSE_FIX3 면 끝 쉼표(',]' ',}')를 지운 것도 해 본다 → (객체, 끝 위치) 또는 None."""
     if not _RULE_OBJ.match(s, i):
         return None
     m = _NEXT_RULE_OBJ.search(s, i)
     j = m.start() if m else len(s)
-    try:
-        obj = json.loads(s[i:j].rstrip().rstrip(",").rstrip() + "}")
-    except ValueError:
-        return None
-    return (obj, j) if isinstance(obj, dict) else None
+    chunk = s[i:j].rstrip().rstrip(",").rstrip()
+    cands = [chunk + "}"]
+    if PARSE_FIX3:
+        fixed = _TRAIL_COMMA.sub(r"\1", chunk)
+        cands += [fixed, fixed + "}"]
+    for cand in cands:
+        try:
+            obj = _decoder().decode(cand)
+        except ValueError:
+            continue
+        return (obj, j) if isinstance(obj, dict) else None
+    return None
 
 
 def parse_json_lines(text):
@@ -659,14 +695,15 @@ def parse_json_lines(text):
     허용: ``` 코드 블록, 배열 하나, 한 줄에 객체 하나(JSON Lines), 객체 하나가 여러 줄에 걸친 형태(들여쓰기),
           앞뒤 설명 문장. 문자열 안의 '{' 는 건너뛴다 (json 해석기로 객체 단위로 읽음).
           룰 객체의 끝 '}' 하나가 빠진 형태도 고쳐 읽는다 (_close_rule_obj).
+          한 객체 안 "samples" 키가 여러 번이면 합치고, 룰 객체 끝 쉼표도 고쳐 읽는다 (PARSE_FIX3).
     """
     s = _fix_json_escapes(_FENCE.sub("", text).strip())
+    dec = _decoder()
     try:
-        obj = json.loads(s)
+        obj = dec.decode(s)
         return obj if isinstance(obj, list) else [obj]
     except ValueError:
         pass
-    dec = json.JSONDecoder()
     out, i = [], 0
     while True:
         i = s.find("{", i)
@@ -838,6 +875,11 @@ def split_http(http):
     return parts
 
 
+class _ByteText(str):
+    """글자 하나가 바이트 하나인 검사 변형 (UTF-8 바이트·%XX·\\xNN 을 라틴-1 글자로 푼 것). BYTE_WINDOW 도 이 변형의 창은 글자 수로 센다."""
+    __slots__ = ()
+
+
 def _variants(text, where):
     """URL 디코딩 값(Snort 는 http_uri 를 정규화해서 검사)과 CRLF 버전(실제 패킷 줄바꿈)도 함께 본다."""
     out = [text]
@@ -851,20 +893,21 @@ def _variants(text, where):
                     out.append(d)
             except Exception:
                 pass
-    if not CHECK_FIXES:
-        return out
-    extra = []                                              # 코드 검사 고침 (CHECK_FIXES 주석)
-    if where == "uri":
-        extra += [re.sub(r"/{2,}", "/", t) for t in out]
-    if where in ("header", "raw_header"):
-        extra += ["\n" + text + "\n\n", "\r\n" + text.replace("\n", "\r\n") + "\r\n\r\n"]
-    if "\\x" in text:
-        extra += [_ESC_HEX.sub(lambda m: chr(int(m.group(1), 16)), t) for t in out]
-    if where in ("uri", "body", "cookie", "payload") and _PCT_HIGH.search(text):
-        try:
-            extra.append(unquote_to_bytes(text).decode("latin-1"))
-        except Exception:
-            pass
+    extra = []
+    if CHECK_FIXES:                                         # 코드 검사 고침 (CHECK_FIXES 주석)
+        if where == "uri":
+            extra += [re.sub(r"/{2,}", "/", t) for t in out]
+        if where in ("header", "raw_header"):
+            extra += ["\n" + text + "\n\n", "\r\n" + text.replace("\n", "\r\n") + "\r\n\r\n"]
+        if "\\x" in text:
+            extra += [(_ByteText if t.isascii() else str)(_ESC_HEX.sub(lambda m: chr(int(m.group(1), 16)), t)) for t in out]
+        if where in ("uri", "body", "cookie", "payload") and _PCT_HIGH.search(text):
+            try:
+                extra.append(_ByteText(unquote_to_bytes(text).decode("latin-1")))
+            except Exception:
+                pass
+    if UTF8_BYTES and not text.isascii():                  # 코드 검사 고침 3: 글자 → UTF-8 바이트 (라틴-1 글자 하나가 바이트 하나)
+        extra += [_ByteText(t.encode("utf-8", "surrogatepass").decode("latin-1")) for t in out if not t.isascii()]
     return out + [e for e in dict.fromkeys(extra) if e not in out]
 
 
@@ -875,6 +918,108 @@ def _compile(pattern, flags):
         return re.compile(pattern, flags)
     except re.error:
         return None
+
+
+def _paren_end(p, i):
+    """p[i] == '(' 의 짝 ')' 위치 (\\ 이스케이프·[...] 안은 건너뜀). 없으면 -1."""
+    depth, k, in_cls = 0, i, False
+    while k < len(p):
+        ch = p[k]
+        if ch == "\\":
+            k += 2
+            continue
+        if in_cls:
+            if ch == "]":
+                in_cls = False
+        elif ch == "[":
+            in_cls = True
+            if p[k + 1:k + 2] == "]":
+                k += 1
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return k
+        k += 1
+    return -1
+
+
+def _top_bars(p, a, b):
+    """p[a:b] 의 맨 바깥 '|' 위치들."""
+    out, depth, k, in_cls = [], 0, a, False
+    while k < b:
+        ch = p[k]
+        if ch == "\\":
+            k += 2
+            continue
+        if in_cls:
+            if ch == "]":
+                in_cls = False
+        elif ch == "[":
+            in_cls = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "|" and depth == 0:
+            out.append(k)
+        k += 1
+    return out
+
+
+@functools.lru_cache(maxsize=None)
+def pcre_cond_rewrite(p):
+    """PCRE_COND: 조건문 (?(?!X)Y) → (?:(?!X)Y), (?(?!X)Y|Z) → (?:(?!X)Y|(?=X)Z) (lookbehind 도). 못 바꾸면 그대로."""
+    for _ in range(20):
+        m = _PCRE_COND.search(p)
+        if not m:
+            return p
+        i = m.start()
+        c0, g1 = i + 2, _paren_end(p, i)              # c0 = 조건 그룹 '(' 위치
+        c1 = _paren_end(p, c0)
+        if c1 < 0 or g1 < 0:
+            return p
+        cond = p[c0:c1 + 1]
+        bars = _top_bars(p, c1 + 1, g1)
+        if not bars:
+            new = "(?:" + cond + p[c1 + 1:g1] + ")"
+        else:
+            inv = {"(?!": "(?=", "(?=": "(?!", "(?<!": "(?<=", "(?<=": "(?<!"}
+            head = next(h for h in ("(?<!", "(?<=", "(?!", "(?=") if cond.startswith(h))
+            new = "(?:" + cond + p[c1 + 1:bars[0]] + "|" + inv[head] + cond[len(head):] + p[bars[0] + 1:g1] + ")"
+        p = p[:i] + new + p[g1 + 1:]
+    return p
+
+
+def _b64_after(payload, frm):
+    """B64_ANCHOR: payload(검사 변형 포함)에서 디코딩 시작 기준 frm({value, nocase})이 나온 자리 바로 뒤(공백·탭 건너뜀)의
+    base64 덩어리를 디코딩한 값들 (라틴-1 바이트 글자, UTF-8 로 읽히면 그것도)."""
+    v = unescape_value(frm.get("value", ""))
+    out = []
+    if not v:
+        return out
+    for t in _variants(payload, "payload"):
+        for m in _anchor_rx(v, bool(frm.get("nocase"))).finditer(t):
+            k = m.end()
+            while k < len(t) and t[k] in " \t":
+                k += 1
+            mm = _B64_RUN.match(t, k)
+            if not mm:
+                continue
+            s = mm.group(0).replace("-", "+").replace("_", "/")
+            try:
+                raw = base64.b64decode(s + "=" * (-len(s) % 4))
+            except ValueError:
+                continue
+            out.append(_ByteText(raw.decode("latin-1")))
+            try:
+                out.append(raw.decode("utf-8"))
+            except UnicodeDecodeError:
+                pass
+            if len(out) >= 2 * RELATIVE_MAX_TRIES:
+                return list(dict.fromkeys(out))
+    return list(dict.fromkeys(out))
 
 
 # 역추적이 폭발할 수 있는 모양의 정규식 (2026-10-26 추가). 예: et:1:2072556 의 (?:Content-Disposition\x3a\x20form-data.{,4096}){100,}
@@ -973,6 +1118,37 @@ CHECK_FIXES = True
 #   - 파이썬 re 가 읽지 못하는 PCRE 문법((?-i)…(?i) 처럼 중간에서 대소문자 구분을 켜고 끄기, \h)은 regex 모듈 V1 로 읽는다.
 NEG_WINDOW = True
 REGEX_V1 = True
+# 코드 검사 고침 3 (2026-11-04, 진행보고 11-03 4절·11-04): '완료인데 공격 0' 121룰 분석 (False = 고치기 전, 비교·시험용).
+#   - NEG_PAYLOAD_ANCHOR: 버퍼 표시가 없는(payload) 부정 content 는 기준 content 가 다른 버퍼(body 등)에 있어도 payload 안에서
+#     그 기준을 찾는다 (payload 는 모든 버퍼를 담음). 예: talos:1:44385 '<Captcha>'(body) 뒤 138바이트 안에 '</Captcha>' 없음
+#   - BYTE_WINDOW: 부정 content 의 창(distance·within·offset·depth)을 글자가 아니라 UTF-8 바이트로 센다 (é 는 2바이트, Snort 는 바이트)
+#   - UTF8_BYTES: 글자를 UTF-8 바이트로 본 변형도 함께 본다. 예: 룰 값 |60 c2 ac c2 aa| 와 샘플의 '`¬ª' (et:1:2033684)
+#   - PAD_WINDOWS: 공격 샘플의 값이 부정 창보다 짧으면 코드가 글자를 채워 창 밖으로 민다 (pad_windows, 코드 검사가 ok 가 될 때만).
+#     예: 'Host: ' 뒤 263바이트 안에 줄바꿈이 없어야 하는데 262자 (talos:1:52450), Citrix Bleed 의 Host 20,000바이트
+NEG_PAYLOAD_ANCHOR = True
+BYTE_WINDOW = True
+UTF8_BYTES = True
+PAD_WINDOWS = True
+# 코드 검사 고침 4 (2026-11-04 오후, 진행보고 11-04 3·4절): 66룰 다시 생성 뒤에도 공격 0 인 19룰 분석 (False = 고치기 전, 비교·시험용).
+#   - B64_ANCHOR (g): base64_data 조건은 Snort base64_decode:relative 처럼 디코딩 시작 기준(base64_decode 바로 앞의 부정 아닌 content)
+#     바로 뒤 base64 덩어리를 따로 디코딩한 값에서도 본다 (^ 는 그 값의 시작, R 기준이 base64_data 밖이면 그 값의 시작부터).
+#     예전에는 덩어리들을 이어 붙인 한 텍스트라 ^ 가 첫 덩어리(URI 등)에만 맞았다. 예: talos:1:21923 'Authorization: Basic' 뒤
+#     'password:password', talos:1:48740 '^administrator\x3a\x20$'. 부정 아닌 조건이 어긋날 때만 더 본다
+#   - REGEX_POSIX (c): POSIX 문자 묶음([[:alnum:]] 등)이 든 정규식은 regex 모듈 V1 로 (re 는 경고만 내고 '[[:alnum:]' + ']' 로 읽음)
+#   - PCRE_COND (i): PCRE 조건문 (?(?!X)Y) / (?(?=X)Y|Z) 를 (?:(?!X)Y) / (?:(?=X)Y|(?!X)Z) 로 바꿔 읽는다 (regex 모듈은 반복 안의
+#     조건문을 PCRE 와 다르게 읽음, talos:1:57251)
+#   - URI_REL_REGEX (k): R 정규식의 기준 content 가 버퍼 표시 없이 distance/within 으로 http_uri content 에 이어지면 정규식을 URI 에서
+#     본다 (ET 룰이 Suricata sticky buffer 에서 바뀐 꼴: content:"/obtainPorts.php"; http_uri; content:"portValue="; distance:0;
+#     pcre:"/…$/R", et:1:2065034). http_uri 일 때만 (http_method 등으로 넓히면 talos:1:24276 이 깨짐)
+#   - CASE_BYPASS (j): 같은 값이 nocase 로는 있고 대소문자 그대로는 없어야 하는 대소문자 우회 룰(Apache Camel)의 공격 샘플은
+#     코드가 그 값의 대소문자를 바꾼다 (case_bypass, pad_windows 처럼 코드 검사가 ok 일 때만, note 표시)
+B64_ANCHOR = True
+REGEX_POSIX = True
+PCRE_COND = True
+URI_REL_REGEX = True
+CASE_BYPASS = True
+_POSIX_CLS = re.compile(r"\[:(alnum|alpha|digit|xdigit|space|upper|lower|punct|print|graph|cntrl|word|blank|ascii):\]")
+_PCRE_COND = re.compile(r"\(\?\(\?<?[=!]")
 _ESC_HEX = re.compile(r"\\x([0-9a-fA-F]{2})")
 _PCT_HIGH = re.compile(r"%[89a-fA-F][0-9a-fA-F]")
 _B64_RUN = re.compile(r"[A-Za-z0-9+/_-]{8,}={0,2}")
@@ -1065,7 +1241,8 @@ def _pos_int(v):
 
 def neg_anchors(conds):
     """상대 위치(within·distance)가 있는 부정 content 에 기준 content(after)를 넣은 사본 (NEG_WINDOW 주석).
-    기준 = 룰 순서에서 바로 앞의 부정 아닌 content, 같은 버퍼일 때만. 넣을 것이 없으면 conds 그대로."""
+    기준 = 룰 순서에서 바로 앞의 부정 아닌 content, 같은 버퍼일 때만 (NEG_PAYLOAD_ANCHOR 면 부정 content 가 payload 일 때는
+    다른 버퍼의 기준도). 넣을 것이 없으면 conds 그대로."""
     out, last, changed = [], None, False
     for c in conds:
         if c.get("type") != "content":
@@ -1073,7 +1250,7 @@ def neg_anchors(conds):
             continue
         pos = c.get("position") or {}
         if c.get("negated") and "after" not in c and ("within" in pos or "distance" in pos) \
-                and last and last["in"] == c.get("in", "payload"):
+                and last and _anchor_ok(last, c):
             c = dict(c, after=last)
             changed = True
         if not c.get("negated"):
@@ -1084,14 +1261,34 @@ def neg_anchors(conds):
     return out if changed else conds
 
 
+def _anchor_ok(a, c):
+    """부정 content c 의 창을 기준 a 로 정해도 되는지: 같은 버퍼, 또는 (NEG_PAYLOAD_ANCHOR) c 가 payload."""
+    return a.get("in", "payload") == c.get("in", "payload") or (NEG_PAYLOAD_ANCHOR and c.get("in", "payload") == "payload")
+
+
+def _adv(t, i, nbytes):
+    """t 의 i 번째 글자부터 UTF-8 nbytes 바이트를 지난 글자 위치 (BYTE_WINDOW). 음수면 글자 수로 뒤로."""
+    if nbytes <= 0:
+        return max(0, i + nbytes)
+    n, k = 0, i
+    while k < len(t):
+        b = len(t[k].encode("utf-8", "surrogatepass"))
+        if n + b > nbytes:
+            break
+        n += b
+        k += 1
+    return k
+
+
 def _neg_window_found(c, v, texts):
     """위치가 있는 부정 content 의 값이 창 안에 나오는지 → True / False, 창을 정할 수 없으면 None (그때는 예전처럼 버퍼 전체).
     상대 위치: 기준 content 가 나온 자리(앞에서부터 RELATIVE_MAX_TRIES 곳)마다 [끝 + distance, + within) 창. 기준이 있는 텍스트에서
-    모든 자리의 창에 값이 있어야 '나옴' (한 자리라도 창에 없으면 Snort 가 그 자리로 맞춘다). 절대 위치: [offset, offset + depth)."""
+    모든 자리의 창에 값이 있어야 '나옴' (한 자리라도 창에 없으면 Snort 가 그 자리로 맞춘다). 절대 위치: [offset, offset + depth).
+    BYTE_WINDOW 면 창을 UTF-8 바이트로 센다 (ASCII 만 있는 텍스트는 글자 수와 같음)."""
     pos = c["position"]
     rel = "within" in pos or "distance" in pos
     a = c.get("after")
-    if rel and not (a and a.get("in", "payload") == c.get("in", "payload")):
+    if rel and not (a and _anchor_ok(a, c)):
         return None
     keys = ("distance", "within") if rel else ("offset", "depth")
     nums = {k: _pos_int(pos[k]) for k in keys if k in pos}
@@ -1107,13 +1304,29 @@ def _neg_window_found(c, v, texts):
                 continue                                    # 기준이 없으면 그 조건(기준 content)이 이미 어긋남
         else:
             starts = [0]
-        if all(vv in tt[max(0, s + lo):(max(0, s + lo) + span) if span is not None else None] for s in starts):
+        if BYTE_WINDOW and not isinstance(t, _ByteText) and not tt.isascii():
+            wins = [(_adv(tt, s, lo), span) for s in starts]
+            found = all(vv in tt[b:_adv(tt, b, n) if n is not None else None] for b, n in wins)
+        else:
+            found = all(vv in tt[max(0, s + lo):(max(0, s + lo) + span) if span is not None else None] for s in starts)
+        if found:
             return True
     return False
 
 
 def check_condition(c, parts):
-    """조건 하나를 만족하면 True, 아니면 False, 판단 불가(정규식 오류·검사 시간 초과)면 None."""
+    """조건 하나를 만족하면 True, 아니면 False, 판단 불가(정규식 오류·검사 시간 초과)면 None.
+    B64_ANCHOR: 부정 아닌 base64_data 조건이 어긋나면 디코딩 시작 기준(b64_from, with_anchors 가 닮) 뒤 덩어리마다 다시 본다."""
+    r = _check_condition(c, parts)
+    if r is False and B64_ANCHOR and c.get("b64_from") and c.get("in") == "base64_data" and not c.get("negated"):
+        c2 = c if (c.get("after") or {}).get("in") == "base64_data" else {k: v for k, v in c.items() if k != "after"}
+        for run in _b64_after(parts["payload"], c["b64_from"]):
+            if _check_condition(c2, dict(parts, base64_data=run)) is True:
+                return True
+    return r
+
+
+def _check_condition(c, parts):
     where = c.get("in", "payload")
     after = c.get("after") if c["type"] == "regex" and RELATIVE_REGEX and "R" in c.get("flags", "") else None
     if after and where == "payload" and after.get("in"):
@@ -1133,14 +1346,18 @@ def check_condition(c, parts):
         for ch, fl in (("i", re.I), ("s", re.S), ("m", re.M), ("x", re.X)):
             if ch in c.get("flags", ""):
                 flags |= fl
-        rx = _compile(c["pattern"], flags)
-        v1 = _compile_v1(c["pattern"], flags) if rx is None and REGEX_V1 else None
+        pattern = c["pattern"]
+        if PCRE_COND and _PCRE_COND.search(pattern):        # 코드 검사 고침 4 (PCRE_COND 주석)
+            pattern = pcre_cond_rewrite(pattern)
+        posix = REGEX_POSIX and _POSIX_CLS.search(pattern)   # re 는 [[:alnum:]] 를 다르게 읽음 → V1 (REGEX_POSIX 주석)
+        rx = None if posix else _compile(pattern, flags)
+        v1 = _compile_v1(pattern, flags) if rx is None and (REGEX_V1 or posix) else None
         if rx is None and v1 is None:
             return None
         found, unknown = False, False
         for t in texts:
             for piece in (_after_pieces(t, after) if after else (t,)):
-                r = _v1_search(v1, c["pattern"], piece) if v1 is not None else regex_search(rx, c["pattern"], flags, piece)
+                r = _v1_search(v1, pattern, piece) if v1 is not None else regex_search(rx, pattern, flags, piece)
                 if r:
                     found = True
                     break
@@ -1184,7 +1401,7 @@ def with_anchors(rule):
         c.get("in") == "response_body" or (c.get("after") or {}).get("in") == "response_body" for c in conds)
     # 원문이 없으면(예: 1.4 의 {"conditions": …}) 채울 수 없으니 그대로 - 원문 없는 룰끼리 캐시 키가 같아 섞이지 않게
     if not raw or not (need_r or need_fd):
-        return neg_anchors(conds) if NEG_WINDOW else conds
+        return _post_anchors(conds, raw)
     key = (rule.get("id"), rule_hash(rule), need_r, need_fd)
     hit = _ANCHORS["cache"].get(key)
     if hit is None:
@@ -1199,7 +1416,67 @@ def with_anchors(rule):
         if need_fd:
             hit = [_fd_body(c) for c in hit]
         _ANCHORS["cache"][key] = hit
-    return neg_anchors(hit) if NEG_WINDOW else hit
+    return _post_anchors(hit, raw)
+
+
+def _post_anchors(conds, raw):
+    """with_anchors 의 마지막 손질 (플래그로 켜고 끔): 부정 content 창 기준(NEG_WINDOW), base64_data 디코딩 시작 기준(B64_ANCHOR),
+    http_uri 뒤 R 정규식(URI_REL_REGEX)."""
+    if NEG_WINDOW:
+        conds = neg_anchors(conds)
+    if B64_ANCHOR:
+        conds = b64_anchors(conds, raw)
+    if URI_REL_REGEX:
+        conds = uri_rel_anchors(conds)
+    return conds
+
+
+def b64_anchors(conds, raw=""):
+    """B64_ANCHOR: base64_data 조건에 디코딩 시작 기준(b64_from)을 단 사본. 기준 = base64_decode 바로 앞의 부정 아닌 content
+    (원문이 있으면 base64_decode 앞의 content 수로 찾고 relative 가 없으면 달지 않음, 원문이 없으면 첫 base64_data 조건 앞의 content).
+    달 것이 없으면 conds 그대로."""
+    if not any(c.get("in") == "base64_data" for c in conds):
+        return conds
+    contents = [c for c in conds if c.get("type") == "content"]
+    frm = None
+    i = raw.find("base64_decode") if raw else -1
+    n = len(re.findall(r"\bcontent\s*:", raw[:i])) if i >= 0 else -1
+    if i >= 0 and 0 < n <= len(contents):
+        j = raw.find(";", i)
+        if "relative" not in raw[i:j if j > 0 else None]:
+            return conds
+        cand = [c for c in contents[:n] if not c.get("negated")]
+        frm = cand[-1] if cand else None
+    else:
+        for c in conds:
+            if c.get("in") == "base64_data":
+                break
+            if c.get("type") == "content" and not c.get("negated"):
+                frm = c
+    if not frm or frm.get("in") == "base64_data":
+        return conds
+    f = {"value": frm.get("value", ""), "nocase": bool(frm.get("nocase"))}
+    return [dict(c, b64_from=f) if c.get("in") == "base64_data" else c for c in conds]
+
+
+def uri_rel_anchors(conds):
+    """URI_REL_REGEX: R 정규식의 기준 content 가 payload 이고 distance/within 이 있으며 그 바로 앞의 부정 아닌 content 가 uri 면
+    기준을 uri 로 바꾼 사본 (정규식도 URI 에서 봄, uri_rel 표시). 바꿀 것이 없으면 conds 그대로."""
+    contents = [c for c in conds if c.get("type") == "content"]
+    out, changed = [], False
+    for c in conds:
+        a = c.get("after") if c.get("type") == "regex" and "R" in c.get("flags", "") else None
+        if a and a.get("in", "payload") == "payload" and c.get("in", "payload") == "payload":
+            idx = [k for k, x in enumerate(contents) if not x.get("negated") and x.get("in", "payload") == "payload"
+                   and x.get("value") == a.get("value")]
+            if idx:
+                pos = contents[idx[-1]].get("position") or {}
+                prev = [x for x in contents[:idx[-1]] if not x.get("negated")]
+                if ("distance" in pos or "within" in pos) and prev and prev[-1].get("in") == "uri":
+                    c = dict(c, after=dict(a, **{"in": "uri"}), uri_rel=True)
+                    changed = True
+        out.append(c)
+    return out if changed else conds
 
 
 def local_check(sample, rule):
@@ -1246,6 +1523,54 @@ def fix2_touch(rule):
             if _compile(c.get("pattern", ""), fl) is None:
                 return True
     return False
+
+
+def fix3_touch(rule):
+    """코드 검사 고침 3(NEG_PAYLOAD_ANCHOR·BYTE_WINDOW·UTF8_BYTES)이 결과를 바꿀 수 있는 룰: 위치가 있는 부정 content,
+    또는 값에 0x80 이상 글자(바이트)가 있는 content (화면 4 검증 판 6 이 다시 확인할 줄)."""
+    for c in (rule or {}).get("conditions", []):
+        if c.get("type") != "content":
+            continue
+        if c.get("negated") and c.get("position"):
+            return True
+        if not unescape_value(c.get("value", "")).isascii():
+            return True
+    return False
+
+
+def fix4_touch(rule):
+    """코드 검사 고침 4(B64_ANCHOR·REGEX_POSIX·PCRE_COND·URI_REL_REGEX)가 결과를 바꿀 수 있는 룰: 부정 아닌 base64_data 조건,
+    POSIX 묶음·PCRE 조건문이 든 정규식, http_uri 뒤 payload content 를 기준으로 하는 R 정규식 (화면 4 검증 판 7 이 다시 확인할 줄)."""
+    conds = (rule or {}).get("conditions", [])
+    for c in conds:
+        if c.get("in") == "base64_data" and not c.get("negated"):
+            return True
+        if c.get("type") == "regex" and (_POSIX_CLS.search(c.get("pattern", "")) or _PCRE_COND.search(c.get("pattern", ""))):
+            return True
+    return any(c.get("uri_rel") for c in uri_rel_anchors(with_anchors(rule)))
+
+
+def case_bypass(sample, rule):
+    """CASE_BYPASS: 대소문자 우회 룰(같은 버퍼에서 같은 값이 nocase 긍정 content + 대소문자 그대로인 부정 content, Apache Camel
+    CVE-2025-27636 등)의 공격 샘플 → 그 값의 앞 글자 덩어리 대소문자를 바꾼 사본 (소문자로, 이미 소문자면 대문자로). 바꾼 뒤
+    코드 검사가 ok 일 때만 바꾸고 note 에 표시한다 (pad_windows 처럼). 대상이 아니거나 바꿔도 안 되면 그대로."""
+    if not CASE_BYPASS or not valid_sample(sample) or sample.get("label") != "anomalies":
+        return sample
+    conds = (rule or {}).get("conditions", [])
+    pos = {(c.get("in", "payload"), unescape_value(c.get("value", ""))) for c in conds
+           if c.get("type") == "content" and not c.get("negated") and c.get("nocase")}
+    neg = {(c.get("in", "payload"), unescape_value(c.get("value", ""))) for c in conds
+           if c.get("type") == "content" and c.get("negated") and not c.get("nocase")}
+    toks = {m.group(0) for _, v in (pos & neg) for m in [re.match(r"[A-Za-z0-9]+", v)] if m and m.group(0).lower() != m.group(0).upper()}
+    if not toks or local_check(sample, rule)["result"] == "ok":
+        return sample
+    http = sample["http"]
+    for t in sorted(toks, key=len, reverse=True):
+        http = http.replace(t, t.lower() if t != t.lower() else t.upper())
+    out = dict(sample, http=http)
+    if http == sample["http"] or local_check(out, rule)["result"] != "ok":
+        return sample
+    return dict(out, note=(str(sample.get("note") or "") + " [코드: 대소문자 우회 값으로 바꿈]").strip())
 
 
 def valid_sample(s):
@@ -1412,6 +1737,66 @@ def repeat_parts(sample, rule):
     if local_check(out, rule)["result"] != "ok":
         return sample
     return dict(out, note=(str(sample.get("note") or "") + f" [코드: 반복 부분을 {max(done)}개로 늘림]").strip())
+
+
+PAD_MAX_CHARS = 30000                # 길이 채우기 한 번에 넣는 최대 글자 수
+_PAD_NL = {"\r\n": "\n", "\r": "\n"}  # 샘플은 줄바꿈이 \n 하나 (CRLF 는 검사 변형에서 봄)
+
+
+def pad_windows(sample, rule):
+    """PAD_WINDOWS: 공격 샘플에서 위치가 있는 부정 content 가 창 안에 걸리면(값이 룰이 요구하는 길이보다 짧음), 기준 뒤 처음 나온
+    그 값 앞에 바로 앞 글자(영숫자가 아니면 'A')를 채워 창 밖으로 민다. 'isdataat:N,relative; content:!"|0A|"; within:N;' 같은
+    버퍼 오버플로 룰 (예: Host 263바이트 필요한데 262자). 채운 뒤 Content-Length 를 맞추고, 코드 검사가 ok 일 때만 바꾸고 note 에
+    표시한다 (repeat_parts 처럼). 대상이 아니거나 채워도 안 되면 그대로."""
+    if not PAD_WINDOWS or not valid_sample(sample) or sample.get("label") != "anomalies":
+        return sample
+    conds = with_anchors(rule)
+    if not any(c.get("type") == "content" and c.get("negated") and c.get("position") for c in conds):
+        return sample
+    if local_check(sample, rule)["result"] == "ok":
+        return sample
+    http, added = sample.get("http", ""), 0
+    for c in conds:
+        if not (c.get("type") == "content" and c.get("negated") and c.get("position")):
+            continue
+        if check_condition(c, split_http(http)) is not False:
+            continue
+        pos = c["position"]
+        rel = "within" in pos or "distance" in pos
+        span = _pos_int(pos.get("within") if rel else pos.get("depth"))
+        lo = _pos_int(pos.get("distance" if rel else "offset", 0) or 0)
+        if span is None or lo is None:
+            continue
+        v = unescape_value(c.get("value", ""))
+        v = _PAD_NL.get(v, v)
+        if rel:
+            a = c.get("after")
+            if not a:
+                continue
+            av = unescape_value(a.get("value", "")).replace("\r\n", "\n")
+            i = http.lower().find(av.lower()) if a.get("nocase") else http.find(av)
+            if i < 0:
+                continue
+            base = i + len(av)
+        else:
+            base = 0
+        start = _adv(http, base, lo) if BYTE_WINDOW else max(0, base + lo)    # 창 시작 (_neg_window_found 와 같게)
+        j = http.lower().find(v.lower(), start) if c.get("nocase") else http.find(v, start)
+        if j < 0 or j - start >= span:
+            continue
+        gap = len(http[start:j].encode("utf-8", "surrogatepass")) if BYTE_WINDOW else j - start
+        need = span - gap + 1
+        if need <= 0 or need > PAD_MAX_CHARS:
+            continue
+        ch = http[j - 1] if j > 0 and http[j - 1].isascii() and http[j - 1].isalnum() else "A"
+        http = http[:j] + ch * need + http[j:]
+        added += need
+    if not added:
+        return sample
+    out = dict(sample, http=_set_length(http))
+    if local_check(out, rule)["result"] != "ok":
+        return sample
+    return dict(out, note=(str(sample.get("note") or "") + f" [코드: 값 길이를 {added}자 채움]").strip())
 
 
 def norm_payload(p):

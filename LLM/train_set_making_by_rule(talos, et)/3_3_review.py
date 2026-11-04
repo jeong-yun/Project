@@ -111,6 +111,8 @@ def merge(rule, gen, review, policy, rejected, unknown_policy="drop", realistic=
         if realistic:
             s = C.realistic_sample(s, rule)
         s = C.repeat_parts(s, rule)        # 큰 반복 (…){100,}: 넣은 파트·빈 줄을 코드가 기준 수 이상으로 (2026-10-30)
+        s = C.pad_windows(s, rule)         # 부정 창 길이: 룰이 요구하는 길이보다 짧은 공격 값을 코드가 채움 (2026-11-04, C.PAD_WINDOWS)
+        s = C.case_bypass(s, rule)         # 대소문자 우회 룰: 공격 값의 대소문자를 코드가 바꿈 (2026-11-04 오후, C.CASE_BYPASS)
         chk = C.local_check(s, rule)
         # 룰 기준 라벨만 남긴다: anomalies = 룰이 탐지, normal = 룰이 탐지 안 함. 어긋나면(fail) 뺀다
         if chk["result"] == "fail" and policy == "drop":
