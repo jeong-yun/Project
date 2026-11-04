@@ -47,8 +47,9 @@ import design_ui
 import home_ui
 import models_ui
 import office_ui
+import run_control_ui
 from core import (
-    audio_edit, concept, followup, iac_patch, llm_factory, member_models, model_catalog, music, stock_calc, usage, verification,
+    audio_edit, call_monitor, concept, followup, iac_patch, llm_factory, member_models, model_catalog, music, stock_calc, usage, verification,
 )
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -72,14 +73,16 @@ from core.config import (
 )
 from core.harness import REGISTRY as HARNESS_REGISTRY
 from core.llm_factory import NoAvailableModelError
-from core.live import KIND_LABELS, STAGES, new_run, restore_run, stage_of, start_run
+from core.live import KIND_LABELS, STAGES, archive_attempt, new_run, prepare_resume, restore_run, stage_of, start_run
 from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTemplate, ToolResult
 from core.search import WebContext
 from core.storage import Storage
 from core.tasks import TaskInputError, build_request, store_uploads
 from core.exporter import MIME, export_adopted, list_results
 from core.route import CATEGORIES, RouteResult, build_route, map_html
-from core.workflow import WEB_SEARCH_TOOL, build_office_graph, make_checkpointer, resume_with_decision, stream_office
+from core.workflow import (
+    WEB_SEARCH_TOOL, build_office_graph, make_checkpointer, restart_from, resume_step, resume_with_decision, stream_office,
+)
 
 load_env()
 st.set_page_config(page_title="Agent Office", page_icon="🏢", layout="wide")
@@ -272,7 +275,8 @@ with st.sidebar:
     if open_runs:
         st.markdown("### 🔔 진행 중인 업무")
         for r in sorted(open_runs, key=lambda r: r["started_at"], reverse=True):
-            state = "⏳ 진행 중" if not r["done"] else ("⚠️ 오류" if r["error"] else "👤 결정 대기")
+            state = "⏳ 진행 중" if not r["done"] else ("⚠️ 오류" if r["error"] else
+                                                       "🔀 확인 대기" if r["status"] == "step_check" else "👤 결정 대기")
             st.button(f"{state} · {team_names[r['team_id']]}\n\n{short(run_title(r))}", key=f"go_{r['run_id']}",
                       on_click=go_to_run, args=(r,), use_container_width=True)
 
@@ -382,6 +386,23 @@ office_ctx = office_ui.OfficeCtx(
     storage=storage, runs=runs, settings=settings, data_dir=DATA_DIR, go_to_run=go_to_run,
     web=WEB_SEARCH_TOOL in team.tools,
 )
+
+
+# ⏱ 호출 모니터·⏭ 다른 모델로·✏️ 고쳐 다시·🔀 단계 확인 (run_control_ui.py)
+rc_ctx = run_control_ui.Ctx(
+    team_id=team_id, team=team, org=org, base_models=base_models, names={nid: name_of(nid) for nid in nodes},
+    label=lambda key: model_option_label(key, runtime_states), member_choices=member_choices,
+    stall_sec=float((settings.get("call_monitor") or {}).get("stall_sec") or call_monitor.STALL_SEC),
+)
+
+
+def save_monitor(run: dict) -> None:
+    """⏱ 호출 기록·개입 기록·이전 시도를 실행과 함께 저장 (🕘 지난 업무에서 다시 봄). 실패해도 업무는 계속."""
+    try:
+        storage.save_monitor(run["run_id"], {**call_monitor.dump(run["run_id"]),
+                                             "attempts": run_control_ui.serialize_attempts(run)})
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def make_graph():
@@ -1117,6 +1138,7 @@ def submit_decision(run: dict, decision: HumanDecision) -> None:
             elif kind == "note":
                 notes.append(payload)
     storage.save_decision(run["run_id"], decision)  # 피드백이 있는 결과만 저장소에 남는다
+    save_monitor(run)  # 교훈 생성 호출까지 포함한 ⏱ 호출 기록
     if decision.action == "adopt":
         run["saved_files"] = save_adopted(run, decision)
     run.update(status="adopted" if decision.action == "adopt" else "rejected",
@@ -1298,6 +1320,7 @@ def history_dialog(run_id: str) -> None:
         st.warning(f"❌ 전체 반려 · 만족도 {decision.score}/5")
     if decision and decision.comment:
         st.caption(f"코멘트: {decision.comment}")
+    run_control_ui.render_history(storage.get_monitor(run_id), {nid: name_of(nid) for nid in nodes})  # ⏱ 호출 기록
     lessons = [l for l in storage.list_lessons(row["team_id"]) if l["run_id"] == run_id]
     if lessons:
         st.markdown("##### 📚 이 업무에서 생긴 교훈")
@@ -1415,6 +1438,8 @@ def render_live() -> None:
             render_stages(run)
             st.caption(f"{progress} · 완료된 단계 {done_steps}개 — 조직도에서 에이전트를 누르면 그 에이전트가 한 일과 지금 작성 중인 내용을 볼 수 있습니다."
                        + (" 새로 고침하거나 다른 팀을 봐도 작업은 계속됩니다." if not run["done"] else ""))
+            run_control_ui.render_summary(rc_ctx, run)  # ⏱ 모델 호출 한 줄 요약 + ⚠️ 응답 없음
+        run_control_ui.render_monitor(rc_ctx, run)  # ⏱ 호출 모니터 (진행 중·조작 / 시간표 / 요약 / 개입 기록)
 
     if focus != NO_FOCUS:
         render_agent_panel(focus, run)
@@ -1437,6 +1462,9 @@ def render_live() -> None:
             for nid, text in list(run["drafting"].items()):
                 with st.chat_message("assistant", avatar=avatar_for_chat(nid, working=True)):
                     st.markdown(f"**{name_of(nid)}** · ✍️ 작성 중\n\n{text}▌")
+            for entry in call_monitor.interventions(run["run_id"]):  # 사람이 개입한 기록 (누가·무엇을·언제)
+                st.caption(f"👤 {time.strftime('%H:%M:%S', time.localtime(entry['ts']))} · {entry['who']} · "
+                           f"{entry['what']} — {entry['detail']}")
         with tab_ctx, st.container(height=560):
             render_brief(run.get("brief"))
             render_tools(run.get("tools") or [])
@@ -1631,6 +1659,7 @@ def render_task_input() -> dict:
     request: dict = {}  # 업무 양식이든 자유 질문이든 여기에 모은다
     st.markdown(f"#### 💬 {name_of(target)} 에게 업무 맡기기")
     warn_chosen_off()
+    run_control_ui.step_mode_toggle(team_id)  # 🔀 단계마다 확인 (기본 꺼짐)
     # (안쪽에 '원하는 최종 상태' 접기 상자가 있어 바깥은 접기 상자가 아닌 테두리 상자로 둔다 — Streamlit 은 접기 상자 중첩 불가)
     with st.container(border=True):
         task_ids = [t.id for t in team.tasks]
@@ -1746,6 +1775,9 @@ for done_id in st.session_state.pop(NOTICE_KEY, []):
         where = team_names.get(done_run["team_id"], done_run["team_id"])
         if done_run["error"]:
             st.toast(f"⚠️ {where} 업무가 오류로 멈췄습니다: {short(run_title(done_run), 24)}", icon="⚠️")
+        elif done_run["status"] == "step_check":
+            st.toast(f"🔀 {where} 업무가 단계 확인을 기다립니다 — 확인하고 '▶ 이대로 진행'을 눌러 주세요: "
+                     f"{short(run_title(done_run), 24)}", icon="🔀")
         else:
             st.toast(f"🔔 {where} 업무가 끝났습니다 — 결과를 확인하고 결정해 주세요: {short(run_title(done_run), 24)}", icon="🔔")
 if st.session_state.get(HISTORY_KEY):
@@ -1763,11 +1795,109 @@ render_member_models()
 # ════════════════════════════════════════════════════════════════════
 # 본문 ③ 최종 결과·결정 (작업이 끝난 뒤)
 # ════════════════════════════════════════════════════════════════════
+def launch(run: dict, events_factory) -> None:
+    """워크플로우 이벤트를 백그라운드 스레드로 돌린다 — 새 업무·🔀 단계 확인 뒤 이어 가기·✏️ 고쳐 다시가 함께 쓴다."""
+    features = set(team.features)  # 백그라운드 스레드에서 쓸 값은 미리 잡아 둔다
+    design = design_ui.FEATURE in features
+    run["post_busy"] = run.pop("post_busy_later", run["post_busy"])  # 단계 확인으로 미뤄 둔 후처리 표시를 되돌린다
+
+    def on_finish(r: dict) -> None:
+        paused = r["status"] == "step_check" or r.get("restarting")  # 아직 끝이 아님 — 후처리(지도·곡·도면)는 마지막에
+        try:
+            if r["status"] == "error":
+                discard_run(r)  # 결정할 수 없는 실패 결과는 저장하지 않는다
+                return
+            storage.save_steps(r["run_id"], r["steps"], "reviewing" if paused else r["status"])
+            if paused:
+                return
+            final = final_answer(r)
+            if r["post_busy"] and final and design:
+                # 설계 팀: 최종 레이아웃 JSON 으로 도면(+요청 시 3D) 그리기
+                r["activity"][r["root_id"]] = "📐 도면 그리는 중"
+                design_ui.post_process(r, final.content)
+            elif r["post_busy"] and final and ROUTE_MAP in features:
+                # 여행 팀: 최종 계획서로 경로 지도 만들기 (사람은 그동안 결과를 보고 결정할 수 있다)
+                r["activity"][r["root_id"]] = "🗺 지도 만드는 중"
+                try:
+                    r["route"] = build_route(final.content, models, cache_path=DATA_DIR / "geocode_cache.json")
+                except Exception as e:  # noqa: BLE001 — 지도 실패가 결과를 막지 않게
+                    r["route_error"] = f"{type(e).__name__}: {e}"
+            if r["post_busy"] and final and MUSIC_TRACK in features:
+                # 음악 팀: 최종 답변의 가사·Lyria 블록으로 곡 만들기 (유료) → 길이 확인 → 듣고 채점 → 낮으면 다시
+                r["activity"][r["root_id"]] = "🎵 곡 만드는 중 (Lyria)"
+                try:
+                    build_music(r, final.content)
+                except Exception as e:  # noqa: BLE001 — 곡 생성 실패가 결과·결정을 막지 않게
+                    r["music_error"] = f"{type(e).__name__}: {e}"
+        finally:
+            if r["status"] != "error":
+                save_monitor(r)  # ⏱ 호출 기록 (멈출 때마다 덮어씀)
+            r["activity"].pop(r["root_id"], None)
+            if paused and r["post_busy"]:
+                r["post_busy_later"] = True
+            r["post_busy"] = False  # 화면 자동 갱신을 멈춰도 된다는 신호
+
+    run["thread"] = start_run(run, events_factory, on_step=lambda r: storage.save_steps(r["run_id"], r["steps"], "reviewing"),
+                              on_finish=on_finish)
+
+
+def continue_step(run: dict, answer: dict) -> None:
+    """🔀 단계 확인에서 고른 답으로 이어 간다 (같은 체크포인트 thread)."""
+    prepare_resume(run)
+    graph = make_graph()
+    launch(run, lambda: resume_step(graph, org, answer, run["run_id"]))
+
+
+def restart_run(run: dict, req: dict) -> str | None:
+    """✏️ 질문·브리프 고쳐 다시 — 진행 중이면 멈추고, 지금 시도를 보관한 뒤 체크포인트에서 갈래를 만들어 다시. 실패 이유 또는 None."""
+    rid = run["run_id"]
+    if not run["done"]:
+        run["restarting"] = True
+        call_monitor.stop(rid, "✏️ 고쳐 다시 하려고 중단")
+        thread = run.get("thread")
+        if thread is not None:
+            thread.join(30)
+            if thread.is_alive():
+                return "아직 멈추는 중입니다 — 잠시 뒤 다시 눌러 주세요."
+    run["restarting"] = False
+    what = []
+    if req["question"] != run["question"]:
+        what.append("질문 고침")
+    if req["point"] == "plan" and run.get("brief") is not None and req["brief"] != run["brief"]:
+        what.append("브리프 고침")
+    why = f"{run_control_ui.RESTART_POINTS[req['point']]} · " + (", ".join(what) or "그대로 다시")
+    archive_attempt(run, why)
+    call_monitor.new_round(rid)
+    call_monitor.log(rid, "✏️ 고쳐 다시", why + (" · 🔀 단계마다 확인" if req["step_mode"] else ""))
+    # 업무 분배부터면 고친 브리프가 곧 이번 브리프 (요청 정리를 다시 하지 않아 브리프 이벤트가 오지 않는다), 처음부터면 새로 정리될 때까지 비움
+    run.update(question=req["question"], step_mode=req["step_mode"], brief=req["brief"] if req["point"] == "plan" else None)
+    prepare_resume(run, "✏️ 고쳐 다시")
+    graph = make_graph()
+    launch(run, lambda: restart_from(graph, org, rid, req["point"], req["question"], req["brief"], req["step_mode"]))
+    return None
+
+
 if current and current["done"]:
     if current["error"]:
         st.error(current["error"])
+    elif current["status"] == "step_check":
+        step_answer = run_control_ui.render_step_check(rc_ctx, current)  # 🔀 멈춘 곳 — 고르고 이어 가기
+        if step_answer is not None:
+            continue_step(current, step_answer)
+            st.rerun()
     elif current["steps"]:
         render_final_and_decision(current, run_key)
+
+if current and not current["error"] and current["status"] not in DECIDED and not current.get("restored"):
+    final_now = final_answer(current) if current["done"] and current["status"] == "awaiting_human" else None
+    run_control_ui.render_attempts(rc_ctx, current, final_now.content if final_now else None)  # 🆚 이전 시도와 비교
+    restart_req = run_control_ui.render_restart(rc_ctx, current)  # ✏️ 질문·브리프 고쳐 다시
+    if restart_req:
+        problem = restart_run(current, restart_req)
+        if problem:
+            st.warning(problem)
+        else:
+            st.rerun()
 
 if not idle:
     st.divider()
@@ -1791,11 +1921,15 @@ if request:
         run["extra_validators"] = request["extra_validators"]  # 결정 전 수정본도 같은 검증기로 검사
         run["concept"] = request.get("concept")  # 개념 편집 팀: 자동 판정(추가/수정)·대상 항목
         # 지도 기능이 있는 팀은 처음부터 '후처리 예정'으로 표시 — 워크플로우가 끝난 뒤 지도까지 다 만들 때까지 화면이 자동 갱신된다
-        features = set(team.features)  # 백그라운드 스레드에서 쓸 값은 미리 잡아 둔다
+        features = set(team.features)
         design = design_ui.FEATURE in features
         run["post_busy"] = ROUTE_MAP in features or design or (MUSIC_TRACK in features and MUSIC_CFG["auto_generate"])
         run["design_opts"] = design_ui.options_from_inputs(request["tool_inputs"]) if design else None
         run["career_inputs"] = request["tool_inputs"] if career_ui.FEATURE in features else None  # 받을 형식·업무 종류
+        # 🔀 단계마다 확인 · ⏭ 다른 모델로 고를 때의 규칙(🆓 무료만·팀원 모델)은 맡기는 순간 값으로
+        run["step_mode"] = bool(request.get("step_mode", st.session_state.get(run_control_ui.step_key(team_id))))
+        run["free_only"] = bool(st.session_state.get("free_only"))
+        run["member_choices"] = member_store.load(team_id, LEGACY_ID)
         runs[run_key] = run
         st.session_state[PENDING_FOCUS_KEY] = NO_FOCUS  # 새 업무는 조직도·질문만 보이는 상태로 시작 (에이전트를 누르면 펼침)
         storage.create_run(run["run_id"], team_id, target, run["question"])
@@ -1806,38 +1940,8 @@ if request:
                 graph, org, run["question"], target, thread_id=run["run_id"],
                 use_web=request["use_web"], brief=request["brief"], auto_brief=request["auto_brief"],
                 tool_inputs=request["tool_inputs"], extra_validators=request["extra_validators"],
-                harness_options=request["harness_options"],
+                harness_options=request["harness_options"], step_mode=run["step_mode"],
             )
 
-        def on_finish(r: dict) -> None:
-            try:
-                if r["status"] == "error":
-                    discard_run(r)  # 결정할 수 없는 실패 결과는 저장하지 않는다
-                    return
-                storage.save_steps(r["run_id"], r["steps"], r["status"])
-                final = final_answer(r)
-                if r["post_busy"] and final and design:
-                    # 설계 팀: 최종 레이아웃 JSON 으로 도면(+요청 시 3D) 그리기
-                    r["activity"][r["root_id"]] = "📐 도면 그리는 중"
-                    design_ui.post_process(r, final.content)
-                elif r["post_busy"] and final and ROUTE_MAP in features:
-                    # 여행 팀: 최종 계획서로 경로 지도 만들기 (사람은 그동안 결과를 보고 결정할 수 있다)
-                    r["activity"][r["root_id"]] = "🗺 지도 만드는 중"
-                    try:
-                        r["route"] = build_route(final.content, models, cache_path=DATA_DIR / "geocode_cache.json")
-                    except Exception as e:  # noqa: BLE001 — 지도 실패가 결과를 막지 않게
-                        r["route_error"] = f"{type(e).__name__}: {e}"
-                if r["post_busy"] and final and MUSIC_TRACK in features:
-                    # 음악 팀: 최종 답변의 가사·Lyria 블록으로 곡 만들기 (유료) → 길이 확인 → 듣고 채점 → 낮으면 다시
-                    r["activity"][r["root_id"]] = "🎵 곡 만드는 중 (Lyria)"
-                    try:
-                        build_music(r, final.content)
-                    except Exception as e:  # noqa: BLE001 — 곡 생성 실패가 결과·결정을 막지 않게
-                        r["music_error"] = f"{type(e).__name__}: {e}"
-            finally:
-                r["activity"].pop(r["root_id"], None)
-                r["post_busy"] = False  # 화면 자동 갱신을 멈춰도 된다는 신호
-
-        start_run(run, events, on_step=lambda r: storage.save_steps(r["run_id"], r["steps"], "reviewing"),
-                  on_finish=on_finish)
+        launch(run, events)
         st.rerun()

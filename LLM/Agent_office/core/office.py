@@ -281,7 +281,8 @@ def rundown(run: dict | None, org: OrgNode, *, names: dict[str, str], parents: d
     else:
         stage = STAGES[min(stage_of(run), len(STAGES) - 1)]
         state = ("진행 중" if not run["done"] else "오류로 멈춤" if run.get("error")
-                 else "결정 대기" if run["status"] == "awaiting_human" else "끝남")
+                 else "결정 대기" if run["status"] == "awaiting_human"
+                 else "단계 확인 대기" if run["status"] == "step_check" else "끝남")
         head = (f"팀원 {len(members)}명에게 물어봤어요 ({state} · 지금 단계 {stage}) — "
                 f"일하는 중 {counts['▶']} · 기다리는 중 {counts['…']} · 끝남 {counts['✓']}")
     return [head, *lines]

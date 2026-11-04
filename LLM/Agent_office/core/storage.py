@@ -24,6 +24,11 @@ from core.schemas import AgentAnswer, HumanDecision, Lesson
 DECIDED = ("adopted", "rejected")
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS run_monitor (
+    run_id      TEXT PRIMARY KEY,           -- ⏱ 호출 모니터 기록 (core/call_monitor.py dump) + 고쳐 다시 전 시도
+    data        TEXT NOT NULL               -- JSON {"calls": [...], "interventions": [...], "attempts": [...]}
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id          TEXT PRIMARY KEY,           -- 실행 id (= LangGraph thread_id)
     team_id     TEXT NOT NULL,
@@ -219,6 +224,16 @@ class Storage:
     def delete_run(self, run_id: str) -> None:
         """실행 기록 삭제 (사람 피드백이 없는 불필요한 결과 정리용)."""
         self._execute("DELETE FROM runs WHERE id=?", (run_id,))
+        self._execute("DELETE FROM run_monitor WHERE run_id=?", (run_id,))
+
+    def save_monitor(self, run_id: str, data: dict) -> None:
+        """⏱ 호출 모니터 기록을 실행과 함께 저장 (🕘 지난 업무에서 다시 본다)."""
+        self._execute("INSERT OR REPLACE INTO run_monitor (run_id, data) VALUES (?,?)",
+                      (run_id, json.dumps(data, ensure_ascii=False, default=str)))
+
+    def get_monitor(self, run_id: str) -> dict | None:
+        rows = self._execute("SELECT data FROM run_monitor WHERE run_id=?", (run_id,))
+        return json.loads(rows[0]["data"]) if rows else None
 
     def purge_undecided(self, older_than_hours: float) -> list[str]:
         """결정 없이 남은 오래된 실행을 삭제하고, 삭제한 id 목록을 반환 (체크포인트도 지우도록)."""

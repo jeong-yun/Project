@@ -44,6 +44,10 @@ claude_cli:
   timeout_sec: 600         # 이 시간 안에 안 끝나면 중단하고 대안 모델로 (CLI 시작에만 5~7초)
   effort: ""               # low | medium | high | xhigh | max — 비우면 CLI 기본값. 낮추면 빠르고 구독 한도를 덜 쓴다
 
+call_monitor:
+  # ⏱ 호출 모니터 (core/call_monitor.py, run_control_ui.py) — 모델 호출마다 시간·상태를 보고, 끊거나 다른 모델로 바꾼다
+  stall_sec: 60            # 이 시간 동안 응답(토큰)이 없으면 '⚠️ 응답 없음' 표시
+
 web_search:
   # 팀 team.yaml 의 tools 에 web_search 가 있고, 질문 화면의 '🌐 웹 검색' 이 켜져 있을 때 사용
   provider: duckduckgo     # 현재 지원: duckduckgo (API 키 불필요)
