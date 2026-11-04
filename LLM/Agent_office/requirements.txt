@@ -6,7 +6,7 @@ streamlit>=1.43,<1.67   # 1.43·1.66 에서 검증 (이후 버전은 일부 옵�
 
 # LangChain / LangGraph
 langchain-core>=0.3.46,<1.0
-langgraph>=0.5,<1.0
+langgraph>=0.5,<0.6   # 0.6 은 지난 체크포인트에서 갈래를 만들 때(✏️ 고쳐 다시 — workflow.restart_from) 예전 단계가 섞여 들어온다 (tests/test_run_control.py)
 langgraph-checkpoint-sqlite>=2.0.11,<2.1
 
 # LLM providers (Upstage 는 OpenAI 호환 API → langchain-openai 로 호출)

@@ -76,7 +76,11 @@ def answer_with(layout_dict) -> str:
 
 
 def shared(a, b) -> float:
-    return a.boundary.intersection(b.boundary).length
+    # 앱과 같은 기준(core.floorplan.shared_wall — 작은 틈은 맞닿은 것으로 봄). 정확한 경계 교차는 7.2 와 7.1999… 처럼
+    # 부동소수점이 조금만 달라도 0 이 된다 (리눅스 CI 에서 실제로 그랬다).
+    from core.floorplan import shared_wall
+
+    return sum(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 for (x1, y1), (x2, y2) in shared_wall(a, b))
 
 
 @pytest.fixture(scope="module")
