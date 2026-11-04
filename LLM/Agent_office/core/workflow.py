@@ -39,11 +39,12 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from core import harness, llm_factory, search, usage, verification
+from core import dept_heads, harness, llm_factory, search, usage, verification
 from core.agent import OrgAgent, chunk_text, with_feedback
 from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
 from core.config import load_skills, parent_map, subtree
+from core.dept_heads import DeptHead
 from core.feedback import generate_lessons
 from core.member_models import team_rank_models
 from core.schemas import AgentAnswer, HumanDecision, Lesson, ModelsConfig, OrgNode, Rank, Team, ToolResult
@@ -105,11 +106,15 @@ def build_office_graph(
     storage: Storage | None = None,
     checkpointer=None,
     member_models: dict[str, str] | None = None,
+    dept_head: DeptHead | None = None,
+    head_choice: str = "",
 ):
     """조직도 전체로 그래프를 만든다. 어느 에이전트부터 시작할지는 실행할 때 root_id 로 정한다.
 
     member_models: 화면에서 고른 팀원별 모델 {에이전트 id: "provider:model"} (core/member_models.py).
     모델 후보는 여기서 한 번 정해 에이전트에 넣으므로, 실행 중에 선택을 바꿔도 이번 실행은 시작할 때의 모델 그대로다.
+    dept_head / head_choice: 이 팀이 속한 부서의 부장과 화면에서 고른 부장 모델 — 비평가 (core/dept_heads.py).
+    없으면 models.yaml critic → utility 로 비평한다 (비공개 팀은 팀장 모델).
     """
     verification_cfg = verification_cfg or {}
     rewrite_answer = settings.get("review", {}).get("rewrite_answer", True)
@@ -130,6 +135,7 @@ def build_office_graph(
         for n in nodes.values()
     }
     parents = parent_map(org)
+    critic_plan = dept_heads.critic_plan(models, team, chains, org.id, dept_head, head_choice)  # 비평가 = 부서 부장
 
     # ── 작은 도우미 ──────────────────────────────────────────────
 
@@ -328,19 +334,26 @@ def build_office_graph(
         # 비평가(Critic): 검토 과정의 논리 비약을 채점 → 불합격이면 자가 교정
         use_critic = critic_cfg["enabled"] and (critic_cfg["scope"] == "all" or node_id == state["root_id"])
         if use_critic:
-            reviewed_input = "\n\n".join(c.content for c in children)
+            # 입력이 너무 크면 비평이 느리고 멈춘다 (2026-11-04 실측: 팀장 통합본 4만 토큰) → 하위 결과를 몫대로 줄인다
+            reviewed_input = verification.trim_evidence([c.content for c in children], critic_cfg["input_chars"], "검토 대상")
             # 비평가도 근거 자료를 봐야 '숫자에는 출처·기준일' 같은 규칙을 실제로 대조할 수 있다 (길이는 예산 안으로)
             evidence = verification.trim_evidence(evidence_parts(state), critic_cfg["evidence_chars"])
+            answer.verification_log = [*answer.verification_log, *(f"⚠️ {w}" for w in critic_plan.warnings)]
             tried: list[AgentAnswer] = []  # 비평을 받은 답변들 (원본 → 교정본 순)
             for round_ in range(critic_cfg["max_self_corrections"] + 1):
                 emit({"type": "start", "node": node_id, "kind": "critic"})
-                critic, errs = verification.critique(
+                done = verification.critique(
                     # 채점 기준 = 팀 검토 기준 + 브리프의 완료 기준
                     question, reviewed_input, answer.review, [*team.review_criteria, *brief.success_criteria], models,
-                    critic_cfg.get("rules"), evidence,
+                    critic_cfg.get("rules"), evidence, chain=critic_plan.chain,
+                    persona=dept_head.critic_persona() if dept_head else "", who=f"{critic_plan.who} (비평가)",
+                    answer_chars=critic_cfg["answer_chars"],
                 )
-                answer.critic = critic
-                answer.verification_log += errs
+                critic = done.critic
+                answer.critic, answer.critic_model, answer.critic_by = critic, done.spec, critic_plan.who
+                answer.verification_log += done.errors
+                if done.is_fallback and done.spec:
+                    answer.verification_log.append(f"비평가 대안 모델 {done.spec.label} 로 비평")
                 tried.append(answer)
                 passed = verification.critic_passed(critic, critic_cfg["min_score"], critic_cfg["fail_on"])
                 if passed or round_ == critic_cfg["max_self_corrections"]:

@@ -9,11 +9,13 @@
 설정: config/verification.yaml (팀별 루브릭은 team.yaml 의 rubric)
 """
 
+from dataclasses import dataclass, field
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core import llm_factory
 from core.llm_factory import NoAvailableModelError
-from core.schemas import CriticResult, ModelsConfig, ReviewResult
+from core.schemas import CriticResult, ModelsConfig, ModelSpec, RankModels, ReviewResult
 
 DEFAULT_CRITIC = {
     "enabled": True,
@@ -22,6 +24,10 @@ DEFAULT_CRITIC = {
     "max_self_corrections": 1,
     "fail_on": "severe",  # severe: 심각한 위반이 있을 때만 불합격 / any: 지적이 하나라도 있으면 불합격 (이전 동작)
     "evidence_chars": 6000,  # 비평가에게 넘기는 근거 자료(데이터 툴·웹 검색) 최대 글자 수
+    # 비평가에게 넘기는 검토 대상(하위 결과 모음)·수정 답변 최대 글자 수 — 팀장 통합본(출력 4만 토큰)과 하위 결과를
+    # 그대로 넘기면 입력이 너무 커져 느리고 멈췄다 (2026-11-04 실측). 앞·뒤를 남기고 가운데를 줄인다.
+    "input_chars": 16000,
+    "answer_chars": 24000,
 }
 
 
@@ -46,7 +52,16 @@ def rubric_text(rubric: dict | None) -> str:
     return "\n".join(lines)
 
 
-def trim_evidence(parts: list[str], budget: int) -> str:
+def trim_middle(text: str, budget: int) -> str:
+    """budget 글자보다 길면 앞 2/3 · 뒤 1/3 을 남기고 가운데를 줄인다 (결론·표 끝부분이 남게). budget 0 = 그대로."""
+    if budget <= 0 or len(text) <= budget:
+        return text
+    head = budget * 2 // 3
+    tail = budget - head
+    return f"{text[:head].rstrip()}\n…(가운데 {len(text) - budget:,}자 생략 — 비평 입력 한도)…\n{text[-tail:].lstrip()}"
+
+
+def trim_evidence(parts: list[str], budget: int, what: str = "근거 자료") -> str:
     """근거 자료 묶음(툴 결과마다 1개 + 웹 검색 1개)을 budget 글자 안으로 줄인다.
 
     앞에서부터 자르면 뒤의 웹 검색 결과가 통째로 빠지므로, 짧은 묶음은 통째로 넣고 남은 몫을 긴 묶음끼리 나눈다.
@@ -63,20 +78,23 @@ def trim_evidence(parts: list[str], budget: int) -> str:
         shares[i] = min(len(parts[i]), remaining // (len(order) - n))
         remaining -= shares[i]
     trimmed = [p if shares[i] >= len(p) else p[: shares[i]].rstrip() + " …(생략)" for i, p in enumerate(parts)]
-    return "\n\n".join(trimmed) + f"\n\n(근거 자료가 길어 {total}자 중 약 {budget}자만 표시)"
+    return "\n\n".join(trimmed) + f"\n\n({what}가 길어 {total}자 중 약 {budget}자만 표시)"
 
 
 def build_critic_messages(
     question: str, reviewed_input: str, review: ReviewResult, criteria: list[str], rules: list[str] | None = None,
-    evidence: str = "",
+    evidence: str = "", persona: str = "", answer_chars: int = 0,
 ) -> list:
     """비평가 프롬프트. 최종 답변의 좋고 나쁨이 아니라 '검토 과정의 논리'만 보게 한다.
 
     rules = 팀 전용 비평 규칙
     evidence = 근거 자료(데이터 툴·웹 검색) — '숫자에는 출처·기준일' 같은 규칙을 비평가가 실제로 대조할 수 있게 한다
+    persona = 비평하는 부서 부장의 관점 (core/dept_heads.py) — 예: 보안부 부장은 보안 사실의 정확성을 먼저 본다
+    answer_chars = 수정 답변 최대 글자 수 (0 = 그대로)
     """
     system = "\n".join(
         [
+            *([persona] if persona else []),
             "너는 비평가(Critic)다. 다른 검토자가 작성한 '검토 과정'의 논리만 전문적으로 채점한다.",
             "- 검토자가 찾은 문제점(issues)이 실제 검토 대상 답변에 근거하는가?",
             "- 수정 답변(revised_answer)이 그 문제점들을 실제로 해결했는가? 근거 없이 새 주장을 추가하지 않았는가?",
@@ -106,26 +124,38 @@ def build_critic_messages(
             f"[검토 기준]\n{criteria_text}",
             "[검토자의 출력]\n"
             f"분석: {review.analysis}\n문제점: {review.issues}\n점수: {review.score}\n판정: {review.verdict}\n"
-            f"수정 답변:\n{review.revised_answer or '(승인 — 수정 없음)'}",
+            f"수정 답변:\n{trim_middle(review.revised_answer, answer_chars) or '(승인 — 수정 없음)'}",
             *([f"[근거 자료 — 데이터 툴·웹 검색 (숫자·출처·날짜 대조용)]\n{evidence}"] if evidence else []),
         ]
     )
     return [SystemMessage(system), HumanMessage(human)]
 
 
+@dataclass
+class Critique:
+    """비평가 호출 결과 — critic 이 None 이면 모델이 모두 실패해 비평을 건너뜀 (답변을 막지 않음)."""
+
+    critic: CriticResult | None
+    errors: list[str] = field(default_factory=list)
+    spec: ModelSpec | None = None  # 실제로 비평한 모델
+    is_fallback: bool = False
+
+
 def critique(
     question: str, reviewed_input: str, review: ReviewResult, criteria: list[str], models: ModelsConfig,
-    rules: list[str] | None = None, evidence: str = "",
-) -> tuple[CriticResult | None, list[str]]:
-    """비평가 호출. 모델이 모두 실패하면 (None, 에러) — 비평 없이 진행한다 (답변을 막지 않음)."""
-    messages = build_critic_messages(question, reviewed_input, review, criteria, rules, evidence)
+    rules: list[str] | None = None, evidence: str = "", *, chain: RankModels | None = None, persona: str = "",
+    who: str = "비평가", answer_chars: int = 0,
+) -> Critique:
+    """비평가 호출. chain = 비평가 모델 후보 (없으면 models.critic → utility, core/dept_heads.critic_plan 참고)."""
+    messages = build_critic_messages(question, reviewed_input, review, criteria, rules, evidence, persona, answer_chars)
+    chain = chain or models.critic or models.utility
     try:
-        call = llm_factory.invoke_structured(models.utility, models, CriticResult, messages, "비평가")
+        call = llm_factory.invoke_structured(chain, models, CriticResult, messages, who)
     except NoAvailableModelError as e:
-        return None, [f"비평가 호출 실패 → 비평 생략: {e}"]
+        return Critique(None, [f"비평가 호출 실패 → 비평 생략: {e}"])
     critic: CriticResult = call.parsed
     critic.score = min(max(critic.score, 1), 5)
-    return critic, call.errors
+    return Critique(critic, call.errors, call.spec, call.is_fallback)
 
 
 def critic_passed(critic: CriticResult | None, min_score: int, fail_on: str = "severe") -> bool:

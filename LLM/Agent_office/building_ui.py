@@ -2,7 +2,7 @@
 
   - 파이썬은 배치와 방마다 상태·요약 카드만 보낸다. 그림·깜빡임·엘리베이터·낮밤은 브라우저가 그린다.
   - 일하는 팀이 있을 때만 3초마다 상태를 다시 보낸다 (조각 fragment — 화면 전체를 다시 그리지 않음).
-  - 방을 누르면 그 팀 화면, 부서 띠를 누르면 🧭 부서장, 로비를 누르면 아래 섹션.
+  - 방을 누르면 그 팀 화면, 부서 띠를 누르면 🧭 부서장과 🎛 부서별 모델(그 부서), 로비를 누르면 아래 섹션.
     누른 값은 다음 실행 맨 앞(apply_nav)에서 처리한다 — 사이드바 위젯이 그려진 뒤에는 그 값을 바꿀 수 없어서.
   - '📋 목록으로 보기'를 켜면 그림 없이 부서·팀 목록 (좁은 화면·접근성용).
 """
@@ -26,6 +26,8 @@ LIST_KEY = "building_list"
 DEPT_KEY = "dept_head_pick"
 DEPT_TEXT_KEY = "dept_head_text"
 ROUTE_KEY = "dept_head_route"
+MODELS_PICK_KEY = "dept_models_pick"  # 🎛 부서별 모델 — 고른 부서
+MODELS_OPEN_KEY = "dept_models_open"  # 부서 띠를 누르면 펼친다
 SECTION_KEY = "home_section"
 AUTONOMY_OPEN_KEY = "home_autonomy_open"
 SECTIONS = {"brief": "📰 AI 브리핑·아이디어", "usage": "💰 사용량·API 키·가격표"}
@@ -42,6 +44,8 @@ def apply_nav(go_to_team: Callable[..., None]) -> None:
         go_to_team(nav["id"], nav.get("question") or "")
     elif nav["kind"] == "dept":
         st.session_state[DEPT_KEY] = nav["id"]
+        st.session_state[MODELS_PICK_KEY] = nav["id"]
+        st.session_state[MODELS_OPEN_KEY] = True
         st.session_state.pop(ROUTE_KEY, None)
     elif nav["kind"] == "section":
         if nav["id"] in SECTIONS:
@@ -65,10 +69,10 @@ def snapshot(storage, teams: list[Team], ranks: list[Rank], open_runs: list[dict
 
 
 def render(storage, teams: list[Team], ranks: list[Rank], open_runs: list[dict], go_to_team: Callable[..., None],
-           models=None) -> None:
+           models=None, dept_models=None) -> None:
     cfg = building.load_config()
     head, toggle = st.columns([4, 1])
-    head.caption("층마다 부서, 방마다 팀입니다. 방에 마우스를 올리면 팀 소개, 누르면 그 팀 화면 · 부서 띠를 누르면 🧭 부서장 · "
+    head.caption("층마다 부서, 방마다 팀입니다. 방에 마우스를 올리면 팀 소개, 누르면 그 팀 화면 · 부서 띠를 누르면 🧭 부서장·🎛 부서별 모델 · "
                  "로비(1층)를 누르면 아래 내용이 바뀝니다. 팀을 추가하면 층이 자동으로 늘어납니다 (config/departments.yaml).")
     as_list = toggle.toggle("📋 목록으로 보기", key=LIST_KEY, help="그림 대신 부서·팀 목록 — 좁은 화면이나 화면 읽기 프로그램용")
     live = any(not r["done"] for r in open_runs)
@@ -82,7 +86,18 @@ def render(storage, teams: list[Team], ranks: list[Rank], open_runs: list[dict],
         else:
             _draw(storage, teams, ranks, open_runs, cfg)
     if models is not None:
-        _dept_head(teams, cfg, models)
+        _dept_head(teams, cfg, models, dept_models.dept_store if dept_models is not None else None)
+    if dept_models is not None:
+        _dept_models(dept_models)
+
+
+def _dept_models(ctx) -> None:
+    """🎛 부서별 모델 선택 — 부서 → 👔 부장(비평가·🧭 부서장) → 팀 → 팀원 (dept_models_ui.py).
+    빌딩이 몇 초마다 다시 그려져도 이 상자는 다시 그리지 않는다 (조각 밖)."""
+    import dept_models_ui  # 메인 화면을 처음 그릴 때만
+
+    with st.expander("🎛 부서별 모델 선택 — 👔 부장(비평가) · 팀원", expanded=bool(st.session_state.pop(MODELS_OPEN_KEY, False))):
+        dept_models_ui.render_home(ctx, MODELS_PICK_KEY)
 
 
 def _draw(storage, teams: list[Team], ranks: list[Rank], open_runs: list[dict], cfg: dict) -> None:
@@ -118,8 +133,9 @@ def _list_view(snap: dict, go_to_team: Callable[..., None]) -> None:
     st.caption("1층 로비 — 📰 안내 데스크(브리핑) · 🤖 승인 데스크(자율 실행) · 💰 관리실(사용량)은 아래에 있습니다.")
 
 
-def _dept_head(teams: list[Team], cfg: dict, models) -> None:
-    """🧭 부서장 — 부서에 요청을 쓰면 보조 모델(1회)이 알맞은 팀을 골라 준다. 고른 뒤 그 팀 화면에 질문을 채워 이동."""
+def _dept_head(teams: list[Team], cfg: dict, models, dept_store=None) -> None:
+    """🧭 부서장 — 부서에 요청을 쓰면 부서 부장(모델 1회)이 알맞은 팀을 골라 준다. 고른 뒤 그 팀 화면에 질문을 채워 이동.
+    부장 모델 = '🎛 부서별 모델 선택'에서 고른 모델 (없으면 models.yaml critic → utility — core/dept_heads.py)."""
     depts = building.departments([t.id for t in teams], cfg)
     by_id = {t.id: t for t in teams}
     multi = [d for d in depts if len(d.teams) > 1] or depts
@@ -133,14 +149,15 @@ def _dept_head(teams: list[Team], cfg: dict, models) -> None:
         st.caption(f"{dept.description}  \n팀: " + " · ".join(by_id[t].name for t in dept.teams))
         text = st.text_area("요청", key=DEPT_TEXT_KEY, height=80, placeholder="예: 다음 달 아이랑 2박 3일 강릉 가고 싶어")
         if st.button("🧭 부서장에게 맡기기", key="dept_head_go", disabled=not text.strip(),
-                     help="팀이 둘 이상이면 보조 모델 1회(아주 적은 비용)로 고릅니다. 모델을 못 쓰면 낱말 비교로 고릅니다."):
+                     help="팀이 둘 이상이면 부장 모델 1회로 고릅니다. 모델을 못 쓰면 낱말 비교로 고릅니다."):
             with st.spinner("부서장이 알맞은 팀을 고르는 중…"):
-                pick = building.route_request(text.strip(), dept, [by_id[t] for t in dept.teams], models)
+                pick = building.route_request(text.strip(), dept, [by_id[t] for t in dept.teams], models,
+                                              dept_store.get(dept.id) if dept_store is not None else "")
             st.session_state[ROUTE_KEY] = {**pick, "dept": dept.id, "text": text.strip()}
             st.session_state.pop("dept_head_team", None)  # 아래 '맡길 팀'을 새 추천으로
         pick = st.session_state.get(ROUTE_KEY)
         if pick and pick["dept"] == dept.id:
-            how = {"llm": f"보조 모델 {pick['model']}", "keyword": "낱말 비교", "one": "팀이 하나"}[pick["how"]]
+            how = {"llm": f"부장 모델 {pick['model']}", "keyword": "낱말 비교", "one": "팀이 하나"}[pick["how"]]
             st.success(f"➡️ **{by_id[pick['team_id']].name}** 에 맡기면 좋겠습니다 — {pick['reason']} ({how})")
             if pick.get("note"):
                 st.caption(pick["note"])

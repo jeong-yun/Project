@@ -355,7 +355,7 @@ def app(tmp_path, monkeypatch, set_keys):
 def test_member_model_selector(app, tmp_path):
     at = app.run()
     assert not at.exception, at.exception
-    assert any(e.label == "🎛 팀원 모델 선택" for e in at.expander)
+    assert any(e.label == "🎛 부서별 모델 선택 — 🔬 리서치·지식부" for e in at.expander)
     gm = at.selectbox(key="member_model_general_gm_research")
     assert gm.value == "" and gm.format_func("").startswith("기본 · gpt-5.4 · OpenAI · 유료 API")
     assert any(o.startswith("claude-opus-5-5 · Claude CLI · 구독") for o in gm.options)  # 화면의 선택지 = 표시 이름

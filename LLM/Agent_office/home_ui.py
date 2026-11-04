@@ -77,11 +77,12 @@ def fmt_day(ts: float | None) -> str:
 
 def render(storage: Storage, models, open_runs: list[dict], team_names: dict, go_to_team,
            settings: dict | None = None, data_dir: Path | None = None, teams: list | None = None,
-           ranks: list | None = None) -> None:
+           ranks: list | None = None, dept_models=None) -> None:
     st.title("🏠 Agent Office")
 
     if teams is not None and ranks is not None:
-        building_ui.render(storage, teams, ranks, open_runs, go_to_team, models=models)  # 🏙 픽셀 빌딩 + 🧭 부서장
+        # 🏙 픽셀 빌딩 + 🧭 부서장 + 🎛 부서별 모델 (dept_models = dept_models_ui.Ctx)
+        building_ui.render(storage, teams, ranks, open_runs, go_to_team, models=models, dept_models=dept_models)
     else:
         _team_shortcuts(open_runs, team_names, go_to_team)
     # 빌딩 아래에 볼 내용 — 고른 섹션 하나만 그린다 (📰 브리핑 / 💰 사용량)

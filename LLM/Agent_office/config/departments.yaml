@@ -9,6 +9,14 @@
 #
 # 팀 추가 방법: teams/<새 팀>/team.yaml 을 만들고, 아래 알맞은 부서의 teams 에 id 를 적는다 (안 적어도 '기타'로 보인다).
 # color 는 방 간판·부서 띠 색 (#RRGGBB).
+#
+# 👔 부장(head) — 부서마다 한 명 (core/dept_heads.py). 팀 조직도 밖에서 부서 전체를 본다.
+#   ① ⚖️ 비평가: 이 부서 모든 팀의 최종 답변(검토 과정의 논리)을 채점한다 — 불합격이면 자가 교정
+#   ② 🧭 부서장: 메인 화면에서 부서에 맡긴 요청을 알맞은 팀으로 보낸다
+#   name    : 화면·검증 기록에 보이는 이름 (없으면 '<부서 이름> 부장')
+#   persona : 비평·배정할 때의 관점 — 비평가 프롬프트 맨 앞에 들어간다 (없으면 부서 소개로)
+#   모델은 여기에 적지 않는다 — 화면 '🎛 부서별 모델 선택'에서 고르고 데이터 폴더 department_models.json 에 저장.
+#   고르지 않으면 config/models.yaml 의 critic(선택) → utility. 비공개 팀(team.yaml private: true)은 팀장 모델로 비평.
 
 rooms_per_floor: 4
 
@@ -19,6 +27,9 @@ departments:
     color: "#3B82F6"
     description: 무엇이든 조사·정리하고, IT 개념 카탈로그를 원전 기준으로 다듬는다.
     teams: [general, concept]
+    head:
+      name: 리서치·지식부 부장
+      persona: 사실과 출처를 먼저 본다. 원전·공식 문서와 어긋나는 설명, 출처 없는 단정, 용어 혼동을 가장 무겁게 지적한다.
 
   - id: invest
     name: 투자부
@@ -26,6 +37,9 @@ departments:
     color: "#10B981"
     description: 공시·리포트·시세를 근거로 종목 판단과 매매 전략을 세운다.
     teams: [stock]
+    head:
+      name: 투자부 부장
+      persona: 숫자의 출처·기준일과 계산이 맞는지를 먼저 본다. 근거 자료와 다른 수치, 위험을 빠뜨린 낙관적 결론, 확정적 투자 권유를 가장 무겁게 지적한다.
 
   - id: travel
     name: 여행부
@@ -33,6 +47,9 @@ departments:
     color: "#F59E0B"
     description: 날짜·인원·예산을 받아 그대로 따라 할 수 있는 국내·해외 여행 계획서를 만든다.
     teams: [travel_domestic, travel_abroad]
+    head:
+      name: 여행부 부장
+      persona: 그대로 따라 할 수 있는 계획인지 본다. 날짜·요일·이동 시간·운영 시간이 맞지 않거나, 인원·예산 조건을 어긴 부분을 가장 무겁게 지적한다.
 
   - id: creative
     name: 크리에이티브부
@@ -40,6 +57,9 @@ departments:
     color: "#A855F7"
     description: 노래·반주를 만들고, 집·건물 평면도와 3D 모델을 그린다.
     teams: [music, design]
+    head:
+      name: 크리에이티브부 부장
+      persona: 요청한 형식·제약을 지켰는지 본다. 곡은 가사·구성·프롬프트 형식, 설계는 면적·방 구성·동선 조건을 어긴 부분을 가장 무겁게 지적한다.
 
   - id: security
     name: 보안부
@@ -47,6 +67,9 @@ departments:
     color: "#EF4444"
     description: 보안 통제 항목 증적을 점검하고, 인프라 코드(IaC)의 위험을 찾아 수정안을 낸다.
     teams: [security_governance, infra_security]
+    head:
+      name: 보안부 부장
+      persona: 보안 사실의 정확성을 먼저 본다. 통제 번호·표준 조항을 지어내거나 잘못 인용한 것, 증적과 맞지 않는 판정, 위험을 낮춰 쓴 수정안을 가장 무겁게 지적한다.
 
   - id: career
     name: 커리어부
@@ -54,6 +77,9 @@ departments:
     color: "#0EA5E9"
     description: 내가 올린 경력 요약 문서만 근거로 JD 에 맞춘 자기소개서와 직무별 포트폴리오를 쓴다.
     teams: [career]
+    head:
+      name: 커리어부 부장
+      persona: 30년 차 인사 담당자의 눈으로 본다. 올린 문서에 없는 경력·숫자를 지어낸 것, 문항·JD 와 동떨어진 내용, 글자 수 제한을 어긴 것을 가장 무겁게 지적한다.
 
 # 부서에 적지 않은 팀이 들어가는 곳
 other:
@@ -62,3 +88,6 @@ other:
   emoji: 📦
   color: "#64748B"
   description: 아직 부서를 정하지 않은 팀 — config/departments.yaml 에 적으면 그 부서 층으로 옮겨 간다.
+  head:
+    name: 기타 부서 부장
+    persona: 요청한 내용에 답했는지, 근거 없는 단정이 없는지를 본다.

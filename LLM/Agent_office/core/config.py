@@ -209,8 +209,9 @@ def validate_config(ranks: list[Rank], models: ModelsConfig, teams: list[Team]) 
 
 
 def used_model_keys(models: ModelsConfig, teams: list[Team] = ()) -> set[str]:
-    """설정에 쓰인 모든 모델 ("provider:model") — 직급·보조 작업·팀 override."""
-    chains = [*models.ranks.values(), models.utility, *[rm for t in teams for rm in t.model_overrides.values()]]
+    """설정에 쓰인 모든 모델 ("provider:model") — 직급·보조 작업·비평가(critic)·팀 override."""
+    chains = [*models.ranks.values(), models.utility, *([models.critic] if models.critic else []),
+              *[rm for t in teams for rm in t.model_overrides.values()]]
     return {f"{s.provider}:{s.model}" for chain in chains for s in chain.candidates}
 
 

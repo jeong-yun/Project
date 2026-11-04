@@ -377,10 +377,21 @@ def _derived_percent(value: str, others: list[float]) -> bool:
     return False
 
 
+# 순서 번호 — 사실이 아니라 줄 번호다. 마크다운 표의 첫 칸이 숫자뿐인 줄(`| 13 | IPS… |`)과
+# '13.' '13)' 로 시작하는 목록 번호. 2026-11-04 실측: 프로젝트를 11개 넘게 번호 매긴 표를 매번 '문서에 없는 숫자'로 잡아 재작성.
+TABLE_ROW_NO = re.compile(r"^(\s*\|\s*)\d{1,3}(\s*\|)", re.M)
+LIST_NO = re.compile(r"^(\s*(?:[-*+]\s+)?)\d{1,3}[.)](?=\s)", re.M)
+
+
+def strip_ordinals(body: str) -> str:
+    """표 첫 칸의 순서 번호와 목록 번호를 지운다 (표의 다른 칸·문장 안 숫자는 그대로 검사)."""
+    return LIST_NO.sub(r"\1", TABLE_ROW_NO.sub(r"\1\2", body))
+
+
 def unsourced_numbers(body: str, allowed: set[str]) -> list[str]:
-    """본문 숫자 중 원문·JD·문항에 없는 것 ('[확인 필요]'가 붙은 문장은 건너뛴다)."""
+    """본문 숫자 중 원문·JD·문항에 없는 것 ('[확인 필요]'가 붙은 문장, 표·목록의 순서 번호는 건너뛴다)."""
     out: list[str] = []
-    for sent in _sentences(body):
+    for sent in _sentences(strip_ordinals(body)):
         if NEEDS_CHECK in sent or "확인 필요" in sent:
             continue
         norm = normalize_text(sent)

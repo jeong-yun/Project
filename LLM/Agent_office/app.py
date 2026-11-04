@@ -44,11 +44,13 @@ import career_ui
 import command_center_ui
 import concept_ui
 import design_ui
+import dept_models_ui
 import home_ui
 import models_ui
 import office_ui
 from core import (
-    audio_edit, concept, followup, iac_patch, llm_factory, member_models, model_catalog, music, stock_calc, usage, verification,
+    audio_edit, building, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_catalog, music, stock_calc,
+    usage, verification,
 )
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -116,6 +118,8 @@ MUSIC_TRACK = "music_track"  # team.yaml features 에 있으면 끝난 뒤 Lyria
 MUSIC_CFG = music.music_settings(settings)  # settings.yaml 의 music: (모델·가격·채점·자동 재생성)
 # 화면에서 고른 팀원별 모델 — 데이터 폴더의 member_models.json (config/*.yaml 은 바꾸지 않는다)
 member_store = member_models.MemberModelStore(DATA_DIR)
+# 화면에서 고른 부서 부장 모델 (비평가·🧭 부서장) — 데이터 폴더의 department_models.json (core/dept_heads.py)
+dept_store = dept_heads.DeptModelStore(DATA_DIR)
 
 # 고를 수 있는 모델 = yaml + 각 사 목록 API 로 찾은 모델 + 직접 입력한 모델 (core/model_catalog.py)
 # 목록은 데이터 폴더 model_catalog.json 에 저장하고, 하루가 지났으면 백그라운드로 새로 받는다 (화면은 기다리지 않음).
@@ -131,6 +135,9 @@ catalog = model_catalog.merge(yaml_models, DATA_DIR, teams, selector_providers=t
     CATALOG_CFG.get("selector_providers") or model_catalog.SELECTOR_PROVIDERS))
 models = catalog.models
 usage.set_catalog_prices(lambda: model_catalog.catalog_prices(DATA_DIR))
+# 🎛 부서별 모델 선택 (메인·팀 화면 공통 — dept_models_ui.py)
+dept_ctx = dept_models_ui.Ctx(teams=teams, ranks=ranks, models=models, merged=catalog, member_store=member_store,
+                              dept_store=dept_store, storage=None, status_icons=PROVIDER_STATUS, data_dir=DATA_DIR)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -161,6 +168,7 @@ def get_storage() -> Storage:
 
 
 storage = get_storage()
+dept_ctx.storage = storage
 # 나뉜 팀(예: 여행 → 국내·해외)은 옛 팀 id 의 지난 업무·교훈·사용량을 읽을 때 이어 붙인다 (DB 는 그대로)
 storage.set_team_links({t.id: (t.legacy.team, t.legacy.match) for t in teams if t.legacy})
 DECIDED = ("adopted", "rejected")
@@ -252,7 +260,7 @@ st.query_params["view"] = view
 if view == HOME:
     home_open = [r for r in runs.values() if r["status"] not in DECIDED and r["team_id"] in team_names]
     home_ui.render(storage, models, home_open, team_names, go_to_team, settings=settings, data_dir=DATA_DIR,
-                   teams=teams, ranks=ranks)
+                   teams=teams, ranks=ranks, dept_models=dept_ctx)
     st.stop()
 
 with st.sidebar:
@@ -280,6 +288,7 @@ with st.sidebar:
     base_models = models  # 팀원 모델 선택 규칙은 '무료만' 토글과 상관없이 원래 설정으로 판단한다
     if st.toggle("🆓 무료 모델만 사용", key="free_only", help="FreeLLMAPI(무료 티어) 모델만 사용합니다. 무료 모델은 하루 호출 한도가 작습니다."):
         models = llm_factory.free_only(models)
+        dept_ctx.runtime_models = models  # '고른 모델 꺼짐' 표시는 지금 쓰는 설정으로
         if llm_factory.provider_status(models).get("freellm") != "ok":
             st.warning("FreeLLMAPI 가 꺼져 있거나 키가 없습니다. README 의 '무료 모델' 절을 확인하세요.")
 
@@ -330,6 +339,7 @@ with st.sidebar:
         st.caption(
             f"⚖️ 비평가: {'켜짐' if critic.get('enabled', True) else '꺼짐'} "
             f"({'최종 통합만' if critic.get('scope', 'final') == 'final' else '모든 검토'}, 자가 교정 최대 {critic.get('max_self_corrections', 1)}회)"
+            " — 비평은 이 팀 부서의 👔 부장이 합니다 (모델: 본문 '🎛 부서별 모델 선택')"
         )
         validators = team.harness.validators
         st.caption(
@@ -354,6 +364,9 @@ member_choices = member_store.load(team_id, LEGACY_ID)
 # 에이전트별 모델 후보 (팀원 모델 선택 반영 — 아무도 안 골랐으면 직급 설정 그대로). 조직도·에이전트 패널 표시용
 member_plans = member_models.plan(org, models, team, member_choices)
 member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
+# 이 팀이 속한 부서와 부장 — 부장이 이 팀의 ⚖️ 비평가 (core/dept_heads.py)
+dept = building.dept_of(team_id, building.departments([t.id for t in teams], building.load_config()))
+dept_head = dept_heads.head_of(dept)
 runtime_states = llm_factory.provider_status(models)
 
 
@@ -388,6 +401,7 @@ def make_graph():
     return build_office_graph(
         org, ranks, team, models, settings, verification_cfg, storage=storage, checkpointer=get_checkpointer(),
         member_models=member_store.load(team_id, LEGACY_ID),  # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로
+        dept_head=dept_head, head_choice=dept_store.get(dept.id),  # 비평가 = 이 부서 부장 (맡기는 순간의 모델)
     )
 
 
@@ -575,6 +589,13 @@ def render_meta(step: AgentAnswer) -> None:
     st.caption(f"{step.model.label} · {step.elapsed_sec}초{tokens}{fallback}{attempts}")
 
 
+def critic_badge(step: AgentAnswer) -> str:
+    """'🛡️ 보안부 부장 (gpt-5.4)' — 누가 어느 모델로 비평했는지 (예전 기록은 빈 문자열)."""
+    if not step.critic_model:
+        return step.critic_by
+    return f"{step.critic_by or '비평가'} ({step.critic_model.model})"
+
+
 def render_verification(step: AgentAnswer) -> None:
     """비평가·하네스·자가 교정 기록."""
     if not (step.critic or step.harness or step.verification_log or step.errors):
@@ -585,11 +606,14 @@ def render_verification(step: AgentAnswer) -> None:
         cfg = verification.critic_settings(verification_cfg, team.verification)
         ok = verification.critic_passed(step.critic, cfg["min_score"], cfg["fail_on"])
         noted = " · 지적 있음" if ok and (step.critic.logical_leaps or step.critic.rule_violations) else ""
-        marks.append(f"⚖️ 비평 {step.critic.score}/5 {'통과' if ok else '불합격'}{noted}")
+        by = critic_badge(step)
+        marks.append(f"⚖️ 비평 {step.critic.score}/5 {'통과' if ok else '불합격'}{noted}" + (f" · {by}" if by else ""))
     if step.harness:
         marks.append("🧪 하네스 " + ("통과" if all(h.passed for h in step.harness) else "실패"))
     with st.expander("검증 기록 · " + (" · ".join(marks) if marks else "상세")):
         if step.critic:
+            if step.critic_model:
+                st.caption(f"⚖️ 비평한 사람·모델: {step.critic_by or '비평가'} · {step.critic_model.label}")
             st.markdown(f"**비평가 분석**: {step.critic.analysis}")
             for x in [*step.critic.logical_leaps, *step.critic.rule_violations]:
                 st.markdown(f"- {x}")
@@ -1478,102 +1502,15 @@ def live_area() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 본문 ③-1 팀원 모델 선택 — 에이전트마다 모델을 고른다 (상하 관계 규칙: core/member_models.py)
+# 본문 ③-1 부서별 모델 선택 — 부서 → 👔 부장(비평가·🧭 부서장) → 팀 → 팀원 (dept_models_ui.py)
 # ════════════════════════════════════════════════════════════════════
-MEMBER_NOTE_KEY = "member_model_note"
-USAGE_DAYS = 7
-
-
-def model_option_label(key: str, states: dict[str, str]) -> str:
-    """'모델 · 제공처 · 비용' + 🆕(새 모델) ✍️(직접 입력) ⚠️(목록에서 사라짐) + 꺼진 provider 아이콘 (models_ui.py)."""
-    return models_ui.option_label(key, states, PROVIDER_STATUS, catalog)
-
-
-def member_widget_key(node_id: str) -> str:
-    return f"member_model_{team_id}_{node_id}"
-
-
-def on_member_model_change(node_id: str) -> None:
-    """선택을 저장하고, 규칙을 어기게 된 하위를 낮춘 뒤 무엇이 바뀌었는지 알림으로 남긴다 (위젯 콜백)."""
-    new_key = st.session_state.get(member_widget_key(node_id)) or ""
-    choices, changes = member_models.apply_choice(org, base_models, team, member_store.load(team_id, LEGACY_ID), node_id, new_key)
-    member_store.save(team_id, choices, LEGACY_ID)
-    if changes:
-        lines = [f"{name_of(c.node_id)}: {member_models.split_key(c.before)[1]} → {member_models.split_key(c.after)[1]}"
-                 for c in changes]
-        st.session_state[MEMBER_NOTE_KEY] = "🔽 상하 관계 규칙에 따라 아래 팀원의 모델이 함께 바뀌었습니다 — " + " · ".join(lines)
-    else:
-        st.session_state.pop(MEMBER_NOTE_KEY, None)
-
-
-def reset_member_models() -> None:
-    member_store.save(team_id, {}, LEGACY_ID)
-    st.session_state[MEMBER_NOTE_KEY] = "모든 팀원을 기본(직급 설정)으로 되돌렸습니다."
-
-
-def usage_text(rows: list[dict]) -> str:
-    if not rows:
-        return "최근 사용 없음"
-    calls = sum(r["calls"] or 0 for r in rows)
-    tokens = sum(r["tokens"] or 0 for r in rows)
-    top = rows[0]["model"] + (f" 외 {len(rows) - 1}개" if len(rows) > 1 else "")
-    return f"{calls}회 · {tokens / 1000:,.1f}천 토큰 · {top}"
 
 
 def render_member_models() -> None:
-    chosen = len(member_choices)
-    # 제목은 고정 — 제목이 바뀌면 Streamlit 이 새 상자로 보고 접어 버린다 (고를 때마다 닫히지 않게)
-    with st.expander("🎛 팀원 모델 선택"):
-        st.caption(
-            ("지금: 모두 기본(직급 설정). " if not chosen else f"지금: {chosen}명 직접 선택. ")
-            + "팀원마다 쓸 모델을 고릅니다. **기본** = config/models.yaml 의 직급 모델 (지금과 같음). "
-            "규칙: 팀원은 상사보다 강한 모델을 쓸 수 없고, 상사의 모델을 **직접 고르면** 그 아래 팀원은 **더 낮은** 모델만 쓸 수 있습니다. "
-            "팀장이 기본이면(Opus 5.5) 부장도 Opus 까지 고를 수 있습니다. 상사를 바꿔 규칙에 걸린 팀원은 자동으로 낮춰집니다. "
-            "모델이 안 되면 직급의 대안 모델로 넘어가되, 상사 규칙을 넘는 대안은 쓰지 않습니다. "
-            "바꾼 선택은 **다음에 맡기는 업무부터** 적용됩니다."
-        )
-        if running:
-            st.info("진행 중인 업무는 시작할 때의 모델을 그대로 씁니다.")
-        note = st.session_state.pop(MEMBER_NOTE_KEY, None)
-        if note:
-            st.info(note)
-        plans = member_models.plan(org, base_models, team, member_choices)
-        states = llm_factory.provider_status(base_models)
-        used = storage.usage_by_agent(team_id, since=time.time() - USAGE_DAYS * 86400)
-        depth = {org.id: 0}
-        for node in org.walk():
-            for child in node.children:
-                depth[child.id] = depth[node.id] + 1
-        head = st.columns([3, 5, 3])
-        head[0].caption("팀원")
-        head[1].caption("모델 · 제공처 · 비용 (구독 / 유료 API / 무료)")
-        head[2].caption(f"최근 {USAGE_DAYS}일 사용량")
-        for node in org.walk():
-            p = plans[node.id]
-            options = ["", *member_models.allowed_keys(base_models, node, p)]
-            # '기본'을 고르면 쓸 모델 (본인 선택만 뺀 결과 — 상사 규칙에 걸리면 자동으로 낮춘 모델)
-            as_default = p if not p.choice else member_models.plan(
-                org, base_models, team, {k: v for k, v in member_choices.items() if k != node.id})[node.id]
-            default_label = ("🔽 기본(자동 제한) · " if as_default.limited else "기본 · ") + model_option_label(as_default.effective, states)
-            key = member_widget_key(node.id)
-            st.session_state[key] = p.choice if p.choice in options else ""  # 저장값이 기준 (자동으로 낮춘 값 반영)
-            c_name, c_pick, c_use = st.columns([3, 5, 3])
-            rank = ranks_by_id[node.rank]
-            c_name.markdown("&emsp;" * depth[node.id] + f"{rank.emoji} **{name_of(node.id)}**"
-                            + ("" if name_of(node.id).startswith(rank.name) else f" · {rank.name}"))
-            c_pick.selectbox(
-                f"{name_of(node.id)} 모델", options, key=key, label_visibility="collapsed",
-                format_func=lambda k, d=default_label: d if not k else model_option_label(k, states),
-                on_change=on_member_model_change, args=(node.id,),
-            )
-            c_use.caption(usage_text(used.get(node.id, [])))
-            off = chosen_off(node.id)
-            if off:
-                c_use.markdown(f":red[⛔ **고른 모델 꺼짐**] — {off[1]}")  # 무료 서버면 'Docker Desktop 실행 후 FreeLLMAPI 켜기'까지
-        if chosen:
-            st.button("↩️ 모두 기본으로", key=f"member_reset_{team_id}", on_click=reset_member_models)
-        st.caption("🆕 = 최근 각 사 목록에 새로 나온 모델 · ✍️ = 직접 입력한 모델 · ⚠️ = 목록에서 사라진 모델. "
-                   "목록에 없는 모델은 아래 '직접 입력'으로 넣습니다.")
+    dept_ctx.running = running
+    # 제목은 팀이 바뀔 때만 바뀐다 — 제목이 바뀌면 Streamlit 이 새 상자로 보고 접어 버린다 (고를 때마다 닫히지 않게)
+    with st.expander(f"🎛 부서별 모델 선택 — {dept.emoji} {dept.name}"):
+        dept_models_ui.render_dept(dept_ctx, dept, "team", team_id)
         if st.toggle("➕ 직접 입력 · 🔄 모델 목록 새로 고침", key=f"member_catalog_{team_id}"):
             models_ui.render(models_ctx, "member")
 
