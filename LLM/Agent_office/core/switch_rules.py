@@ -9,7 +9,7 @@
 
 from dataclasses import dataclass
 
-from core import llm_factory, member_models
+from core import llm_factory, member_models, model_caps
 from core.call_monitor import CallRecord
 from core.schemas import ModelsConfig, ModelSpec, OrgNode, Team
 
@@ -47,6 +47,8 @@ def options(rec: CallRecord, org: OrgNode, team: Team | None, base_models: Model
             reason = "무료 모델을 쓰게 된 팀원 — 무료 모델만"
         elif provider in run_models.disabled_providers and provider not in base_models.disabled_providers:
             reason = "🆓 무료 모델만 사용 중"
+        elif caps_why := model_caps.reasons(key, model_caps.TEAM_WORK):  # 제공처에서 사라짐·형식 출력 못 함 (core/model_caps)
+            reason = caps_why[0]
         else:
             reason = llm_factory.STATUS_REASONS.get(status.get(provider, "no_key"), status.get(provider, ""))
         out.append(Option(key, not reason, reason))

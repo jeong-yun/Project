@@ -412,7 +412,7 @@ office_ctx = office_ui.OfficeCtx(
 # ⏱ 호출 모니터·⏭ 다른 모델로·✏️ 고쳐 다시·🔀 단계 확인 (run_control_ui.py)
 rc_ctx = run_control_ui.Ctx(
     team_id=team_id, team=team, org=org, base_models=base_models, names={nid: name_of(nid) for nid in nodes},
-    label=lambda key: model_option_label(key, runtime_states), member_choices=member_choices,
+    label=lambda key: models_ui.option_label(key, runtime_states, PROVIDER_STATUS, catalog), member_choices=member_choices,
     stall_sec=float((settings.get("call_monitor") or {}).get("stall_sec") or call_monitor.STALL_SEC),
 )
 
