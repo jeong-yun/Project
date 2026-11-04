@@ -13,7 +13,7 @@ FreeLLMAPI 는 Docker 안에서 돌기 때문에 **Docker Desktop for Windows �
 
 | 항목 | 최소 사항 | 확인 방법 |
 |---|---|---|
-| Windows | **Windows 11 64비트 23H2(빌드 22631) 이상** 또는 **Windows 10 64비트 22H2(빌드 19045)** — Pro·Enterprise·Education 판 | `Win+R` → `winver` |
+| Windows | **Windows 11 64비트 23H2(빌드 22631) 이상** 또는 **Windows 10 64비트 22H2(빌드 19045)** — Pro·Enterprise·Education 판. **윈도우10은 [2-4](#2-4-윈도우10에서-설치할-때) 먼저 읽기** | `Win+R` → `winver` |
 | WSL | **WSL 2, 버전 2.1.5 이상** (Windows 기능 'WSL 2' 켜짐) | `wsl --version` (없으면 2-1 의 `wsl --install`) |
 | CPU | **64비트 + SLAT**(2단계 주소 변환) 지원 — 최근 10년 안의 Intel·AMD CPU 는 대부분 지원 | 작업 관리자 → 성능 → CPU |
 | 가상화 | **BIOS/UEFI 에서 하드웨어 가상화 켜짐** (Intel VT-x / AMD SVM) | 작업 관리자 → 성능 → CPU → **가상화: 사용** |
@@ -32,7 +32,7 @@ FreeLLMAPI 는 Docker 안에서 돌기 때문에 **Docker Desktop for Windows �
 
 **빠른 순서 (자세한 설명은 아래 각 절)**
 
-1. 위 필요 사양 확인 → Docker Desktop 설치·실행 (WSL2 필요) → [2절](#2-준비물)
+1. 위 필요 사양 확인 (윈도우10 이면 [2-4](#2-4-윈도우10에서-설치할-때)) → Docker Desktop 설치·실행 (WSL2 필요) → [2절](#2-준비물)
 2. FreeLLMAPI 저장소를 `C:\Users\<사용자>\freellmapi` 에 받기 → [3-1](#3-1-저장소-받기)
 3. `.env` 만들기 (`ENCRYPTION_KEY`, `PORT`) → [3-2](#3-2-env-만들기-암호화-키)
 4. `docker compose pull` → `docker compose up -d` → [3-3](#3-3-켜기)
@@ -63,8 +63,8 @@ Agent Office 에서 쓰는 곳:
 | 무료 모델을 고른 팀원 | **유료로 넘어가지 않고** '무료 서버 꺼짐 — Docker Desktop 실행 후 FreeLLMAPI 켜기' 로 실패합니다 (실무자는 '작성 실패'로 남고 나머지는 계속, 관리자면 업무가 멈춤). |
 | 🆓 무료 모델만 사용 을 켠 경우 | 쓸 모델이 없어 업무가 시작되지 않습니다. 사이드바에 'FreeLLMAPI 가 꺼져 있거나 키가 없습니다' 경고가 나옵니다. |
 
-> 참고: FreeLLMAPI 는 Windows 용 **데스크톱 앱(.exe)** 도 있습니다 (저장소 Releases). 이 문서는 지금 쓰는 PC 와 같은 **Docker 방식**만 다룹니다.
-> 데스크톱 앱은 기본 포트가 31415 라서 쓰려면 `FREELLMAPI_BASE_URL` 도 그 포트로 바꿔야 합니다.
+> 참고: FreeLLMAPI 는 Windows 용 **데스크톱 앱(.exe)** 도 있습니다 (저장소 Releases). 이 문서는 지금 쓰는 PC 와 같은 **Docker 방식**을 기준으로 하고,
+> Docker 를 못 쓰는 PC 용 데스크톱 앱 연결 방법은 [2-4 끝부분](#2-4-윈도우10에서-설치할-때)에 짧게 적었습니다 (기본 포트 31415).
 
 ---
 
@@ -115,6 +115,116 @@ docker run --rm hello-world
 
 - FreeLLMAPI 이미지: 1GB 안쪽 (+ 데이터베이스는 수십 MB 수준).
 - Docker Desktop·WSL2 자체가 몇 GB 를 쓰므로 **C 드라이브에 10GB 이상** 여유를 두는 것이 안전합니다.
+
+### 2-4. 윈도우10에서 설치할 때
+
+**결론: Windows 10 22H2(빌드 19045) 면 지금(2026-11) 최신 Docker Desktop 을 그대로 설치하면 됩니다.**
+Windows 11 과 설치 순서는 같고, 다른 점은 ① 22H2 인지 먼저 확인, ② WSL 을 최신으로 올리기(`wsl --update`) 두 가지입니다.
+
+**지원 현황 (공식 문서 기준, 2026-11-04 확인)**
+
+- Docker Desktop 최신판 **4.98.0 (2026-11-03)** 의 Windows 사양에 아직 **'Windows 10 64-bit: Enterprise, Pro, or Education version 22H2 (build 19045)'** 가 있습니다.
+  → [System requirements](https://docs.docker.com/desktop/setup/install/windows-install/)
+- 릴리스 노트 ([Docker Desktop release notes](https://docs.docker.com/desktop/release-notes/)):
+  - 4.35.0 (2024-10-24): 새 설치는 빌드 19045 이상 필요.
+  - 4.49.0 (2025-10-23): Windows 10 21H2(19044) 지원 종료, 다음 판부터 Windows 10 22H2(19045) 또는 Windows 11 23H2(22631) 필요.
+  - 4.92.0 (2026-09-21): 'Windows 10 의 기본(inbox) wsl.exe 에서 WSL 업데이트 안내 대신 오류가 보이던 문제' 수정 → Windows 10 을 아직 고치고 있다는 뜻.
+  - 2026-11-04 까지 'Windows 10 22H2 지원 종료' 공지는 찾지 못했습니다. **그래서 옛 버전을 따로 찾아 설치할 필요가 없습니다.**
+- 다만 Docker 의 원칙은 **'Microsoft 서비스 기간 안에 있는 Windows 만 지원'** 입니다 (같은 사양 페이지).
+  - Windows 10 은 **2025-10-14 에 지원이 끝났고**, 유료·무료 **ESU(확장 보안 업데이트)** 로만 보안 업데이트를 받습니다.
+    - 개인용 ESU: **2027-10-12 까지**. 22H2 + Microsoft 계정 필요, 설정 동기화 시 무료 또는 30달러. 회사 도메인·MDM 에 가입된 PC 는 대상이 아님 → [Windows 10 Consumer ESU](https://www.microsoft.com/windows/extended-security-updates)
+    - 회사용 ESU: 최대 3년 → [ESU program for Windows 10](https://learn.microsoft.com/en-us/windows/whats-new/extended-security-updates)
+  - **Docker 문서에는 ESU 기간을 '서비스 기간'으로 치는지 적혀 있지 않습니다** — 이 부분은 불분명합니다.
+    지금은 사양에 22H2 가 남아 있으니 설치는 되지만, 앞으로 어느 판에서 Windows 10 을 빼면 그 판부터 설치·업데이트가 막힐 수 있습니다.
+  - 그때는 바로 전 판을 계속 쓰면 됩니다. 판별 내려받기 링크는 릴리스 노트 각 판 아래에 있습니다.
+    단, 그 뒤로는 Docker Desktop 보안 업데이트가 없습니다. 이미 받은 FreeLLMAPI 이미지·`docker compose` 는 그대로 돌아갑니다.
+- **Windows 10 자체의 보안**: ESU 에 가입하지 않은 Windows 10 은 보안 업데이트가 없습니다. 이 PC 에 API 키를 두므로 ESU 가입 또는 Windows 11 업그레이드를 권합니다.
+
+**① 버전 확인** — `Win+R` → `winver`
+
+- '**버전 22H2 (OS 빌드 19045.xxxx)**' 이면 됩니다.
+- 21H2(19044) 이하면 설정 → 업데이트 및 보안 → Windows 업데이트로 22H2 를 받습니다. 안 보이면 [Windows 10 업데이트 도우미](https://www.microsoft.com/software-download/windows10) 를 씁니다.
+- 판(에디션)은 설정 → 시스템 → 정보 → **Windows 사양 → 에디션** 에서 봅니다. Pro·Enterprise·Education 이 공식 지원판입니다.
+
+**② WSL 2 설치 (관리자 PowerShell)**
+
+22H2 는 Microsoft 가 `wsl --install` 의 조건으로 적은 'Windows 10 2004(빌드 19041) 이상'에 해당하므로 한 줄로 됩니다.
+→ [Install WSL](https://learn.microsoft.com/en-us/windows/wsl/install)
+
+```powershell
+wsl --install --no-distribution
+```
+
+다시 시작한 뒤:
+
+```powershell
+wsl --update
+wsl --version
+```
+
+- `--no-distribution` 은 Ubuntu 를 깔지 않는 옵션입니다. Docker 는 자기 것을 따로 쓰므로 Ubuntu 가 없어도 됩니다. 그냥 `wsl --install` 로 Ubuntu 까지 깔아도 문제는 없습니다.
+- **Windows 10 에 원래 들어 있는(inbox) WSL 은 오래돼서** `wsl --version` 이 도움말만 보이거나 오류가 납니다.
+  `wsl --update` 로 Microsoft Store 판 WSL 로 바꿔야 Docker 가 요구하는 **2.1.5 이상**이 됩니다.
+
+**`wsl --install` 이 안 될 때 (수동 설치)** — [Manual installation steps](https://learn.microsoft.com/en-us/windows/wsl/install-manual)
+
+```powershell
+dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+```
+
+```powershell
+dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+```
+
+PC 를 다시 시작한 다음:
+
+```powershell
+wsl --update
+```
+
+```powershell
+wsl --set-default-version 2
+```
+
+- `wsl --update` 도 막혀 있으면(회사 PC 의 Store 차단 등) Microsoft 문서의 **WSL2 Linux 커널 업데이트 패키지**를 설치합니다.
+  [x64 용 wsl_update_x64.msi](https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi)
+  - 이것은 커널만 올립니다. WSL 자체 버전(2.1.5 이상)은 `wsl --update` 나 [WSL 릴리스](https://github.com/microsoft/WSL/releases) 의 설치 파일로 올려야 합니다.
+
+**③ 그다음은 Windows 11 과 같습니다** — 2-1 의 Docker Desktop 설치부터 이어서 합니다.
+
+**윈도우10에서 자주 나는 문제**
+
+| 증상 | 해결 |
+|---|---|
+| Docker Desktop 설치 프로그램이 '지원하지 않는 Windows' 로 멈춤 | 21H2 이하 → ① 처럼 22H2 로 업데이트. Windows Server 는 지원 안 함 |
+| `WSL 2 installation is incomplete` / `WSL needs updating` / WSL 관련 날 오류 | 관리자 PowerShell 에서 `wsl --update` → 다시 시작. inbox WSL 이 남아 있는 경우가 대부분 |
+| `0x80370102` / 'Virtual Machine Platform' 이 없다 / 가상 머신을 시작할 수 없음 | 위의 `VirtualMachinePlatform` dism 명령 → 다시 시작. 그래도 안 되면 BIOS 가상화 확인 (2-1) |
+| Home 판 | 공식 사양 목록에는 Home 이 없습니다. 같은 페이지에 'Home·Education 은 Linux 컨테이너만 가능'이라는 문구는 있어 설치가 될 수는 있지만 공식 지원 밖입니다. Home 에는 Hyper-V 가 없으므로 **WSL 2 방식만** 쓸 수 있습니다 (설치 화면의 WSL 2 체크 유지) |
+| 회사가 관리하는 PC 라 `dism`·BIOS·Store 가 막힘 | IT 담당자에게 'WSL2 + Virtual Machine Platform 사용, BIOS 가상화' 를 요청 |
+
+**Docker 를 못 쓰는 윈도우10 PC 라면: FreeLLMAPI 데스크톱 앱 (Docker 없이)**
+
+- 저장소 [Releases](https://github.com/tashfeenahmed/freellmapi/releases/latest) 에서 **`FreeLLMAPI-Setup-<버전>.exe`** (Windows **x64 전용**) 를 받아 설치합니다.
+  Electron 38 기반이라 Windows 10 이상에서 돕니다.
+- ⚠️ FreeLLMAPI 의 `desktop/README.md` 에는 **'Windows build is config-complete but largely untested'** (Windows 판은 거의 시험되지 않음)라고 적혀 있습니다.
+  Docker 방식이 안 될 때만 쓰세요.
+- **다른 점**
+  - 계정·비밀번호가 없습니다.
+  - 트레이(작업 표시줄 오른쪽 아래) 아이콘 → **Open Dashboard** 로 같은 대시보드가 열리고, Keys 페이지에서 Google·Groq 키를 등록합니다.
+  - 통합 키는 트레이 팝업의 **Copy Key** 로 복사합니다.
+  - 데이터는 `%APPDATA%\FreeLLMAPI\` 에 있습니다.
+- **포트가 31415** 입니다. 비어 있지 않으면 다음 번호를 고르고 기억합니다. 실제 주소는 트레이 팝업의 URL 로 확인합니다.
+  Agent Office `.env` 는 이렇게 맞춥니다:
+
+  ```dotenv
+  FREELLMAPI_BASE_URL=http://127.0.0.1:31415/v1
+  FREELLMAPI_API_KEY=트레이에서-복사한-통합-키
+  ```
+
+  그 뒤 `python scripts/check_freellm.py` 로 점검하는 방법은 같습니다.
+- 자동 시작은 트레이 팝업의 **Start at login** 으로 켭니다.
+- 업데이트는 **⋯ → Settings → Check for updates** 입니다. 업데이트 전에 DB 백업을 자동으로 만듭니다.
+- Docker 방식과 동시에 둘 다 켤 필요는 없습니다 — 하나만 쓰세요.
 
 ---
 
@@ -419,7 +529,7 @@ Docker Desktop 앱이 꺼져 있다는 뜻입니다. 시작 메뉴에서 Docker 
 
 Docker Desktop 이 `WSL 2 installation is incomplete` / `WSL needs updating` 을 띄우면 관리자 PowerShell 에서
 `wsl --install` (처음) 또는 `wsl --update` 후 다시 시작합니다. 가상화가 꺼져 있으면 2-1 참고.
-'Virtual Machine Platform' 기능이 꺼져 있다는 메시지면 `wsl --install` 이 켜 줍니다.
+'Virtual Machine Platform' 기능이 꺼져 있다는 메시지면 `wsl --install` 이 켜 줍니다. 윈도우10 은 [2-4](#2-4-윈도우10에서-설치할-때) 의 수동 설치·문제 표를 보세요.
 
 ### 8-4. 401 Unauthorized
 

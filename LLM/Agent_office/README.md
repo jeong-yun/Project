@@ -90,6 +90,7 @@
 
 **Docker 가 필요합니다 — 설치·필요 사양은 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)**
 (요약: Windows 11 23H2 이상 또는 Windows 10 22H2, 64비트 Pro·Enterprise·Education · WSL 2.1.5 이상 · CPU 가상화 켜짐(SLAT) · RAM 8GB 이상 · 디스크 10GB 이상 여유).
+윈도우10은 [안내서 2-4절 '윈도우10에서 설치할 때'](docs/FREELLM_설치.md#2-4-윈도우10에서-설치할-때) 확인 — 22H2 면 최신 Docker Desktop 그대로, `wsl --update` 필수.
 
 **새 PC 설치는 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)** 를 따라 하세요 — Docker Desktop·WSL2 준비 → `.env`(암호화 키) → `docker compose up -d`
 → 대시보드(<http://127.0.0.1:3001>)에 Google AI Studio·Groq 무료 키 등록 → 통합 키를 이 폴더 `.env` 의 `FREELLMAPI_API_KEY` 에 넣기
