@@ -44,6 +44,12 @@ claude_cli:
   timeout_sec: 600         # 이 시간 안에 안 끝나면 중단하고 대안 모델로 (CLI 시작에만 5~7초)
   effort: ""               # low | medium | high | xhigh | max — 비우면 CLI 기본값. 낮추면 빠르고 구독 한도를 덜 쓴다
 
+google:
+  # Gemini(provider: google) 호출 하나의 시간 제한 (core/llm_factory.py). 넘으면 같은 모델로 1번 더 → 그래도 안 되면 대안 모델.
+  # 비워 두면 구글 라이브러리 기본값 600초까지 기다린다 (2026-11-04 실측: 비평가·재작성 호출이 약 10분 무응답).
+  # 4만 토큰 입력도 정상이면 1~2분 안에 끝나므로 180초. 0 이하 = 제한 없음.
+  timeout_sec: 180
+
 web_search:
   # 팀 team.yaml 의 tools 에 web_search 가 있고, 질문 화면의 '🌐 웹 검색' 이 켜져 있을 때 사용
   provider: duckduckgo     # 현재 지원: duckduckgo (API 키 불필요)

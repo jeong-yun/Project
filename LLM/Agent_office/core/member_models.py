@@ -61,7 +61,8 @@ def catalog(models: ModelsConfig) -> list[str]:
 
 def spec_for(key: str, models: ModelsConfig, team: Team | None, rank_id: str) -> ModelSpec:
     """모델 키 → ModelSpec. 그 직급 목록에 있으면 그 설정(temperature 등)을, 없으면 다른 직급·보조 작업의 설정을 쓴다."""
-    chains = [rank_models(rank_id, models, team), *[rank_models(r, models, team) for r in models.ranks], models.utility]
+    chains = [rank_models(rank_id, models, team), *[rank_models(r, models, team) for r in models.ranks], models.utility,
+              *([models.critic] if models.critic else [])]
     for chain in chains:
         for spec in chain.candidates:
             if model_key(spec) == key:

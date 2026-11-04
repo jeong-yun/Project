@@ -115,3 +115,14 @@ utility:
     - { provider: openai, model: gpt-5.4-mini }
     - { provider: freellm, model: gpt-oss-120b, temperature: 0.0 }
     - { provider: freellm, model: gemini-3.1-flash-lite, temperature: 0.0 }
+
+# 비평가(⚖️) 전용 모델 (선택 항목) — 비평가는 각 부서의 👔 부장이다 (core/dept_heads.py, config/departments.yaml head).
+# 정하는 순서: ① 화면 '🎛 부서별 모델 선택'에서 고른 부장 모델 → ② 비공개 팀(private: true)은 팀장 모델
+#             → ③ 아래 critic → ④ 위 utility (critic 이 없으면 예전과 같다)
+# 고른 부장 모델이 안 될 때의 대안도 이 목록(없으면 utility)에서, 고른 모델보다 강하지 않은 것만 쓴다.
+# claude_cli 를 넣으면 비평마다 구독 한도를 함께 쓴다 (사람이 쓰는 Claude 와 공유). 예:
+# critic:
+#   primary:  { provider: openai, model: gpt-5.4 }
+#   fallback:
+#     - { provider: google, model: gemini-3.8-flash, temperature: 0.0 }
+#     - { provider: freellm, model: gpt-oss-120b, temperature: 0.0 }

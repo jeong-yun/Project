@@ -47,6 +47,7 @@ class Department:
     color: str
     description: str
     teams: list[str] = field(default_factory=list)
+    head: dict = field(default_factory=dict)  # 부서 부장 {name, persona} — 비평가·🧭 부서장 (core/dept_heads.py)
 
 
 # ─── 부서·층 ─────────────────────────────────────────────────────────
@@ -65,7 +66,7 @@ def _dept(raw: dict, teams: list[str]) -> Department:
     color = str(raw.get("color") or OTHER["color"])
     return Department(id=str(raw["id"]), name=str(raw.get("name") or raw["id"]), emoji=str(raw.get("emoji") or "🏢"),
                       color=color if HEX.match(color) else OTHER["color"], description=str(raw.get("description") or ""),
-                      teams=teams)
+                      teams=teams, head=raw.get("head") if isinstance(raw.get("head"), dict) else {})
 
 
 def departments(team_ids: list[str], cfg: dict) -> list[Department]:
@@ -81,6 +82,11 @@ def departments(team_ids: list[str], cfg: dict) -> list[Department]:
     if rest:
         out.append(_dept({**OTHER, **(cfg.get("other") or {})}, rest))
     return out
+
+
+def dept_of(team_id: str, depts: list[Department]) -> Department | None:
+    """이 팀이 속한 부서 (없으면 None)."""
+    return next((d for d in depts if team_id in d.teams), None)
 
 
 def plan_floors(depts: list[Department], rooms_per_floor: int) -> list[list[tuple[str, str]]]:
@@ -290,29 +296,35 @@ def route_messages(text: str, dept: Department, candidates: list[Team]):
 
     lines = [f"- {t.id}: {t.name} — {t.description} (업무: {', '.join(x.title for x in t.tasks) or '자유 질문'})"
              for t in candidates]
-    system = (f"당신은 '{dept.name}' 부서장입니다. 부서 소개: {dept.description}\n"
+    from core.dept_heads import head_of
+
+    head = head_of(dept)  # 부서 부장 — 비평가와 같은 사람 (config/departments.yaml head)
+    system = (f"당신은 '{dept.name}' 부서장({head.name})입니다. 관점: {head.persona}\n부서 소개: {dept.description}\n"
               "사람의 요청을 읽고 아래 팀 중 가장 알맞은 팀 하나를 고르세요. 요청을 직접 처리하지 마세요.\n\n"
               "[팀 목록]\n" + "\n".join(lines))
     return [SystemMessage(content=system), HumanMessage(content=text)]
 
 
-def route_request(text: str, dept: Department, candidates: list[Team], models) -> dict:
-    """{team_id, reason, how: one|llm|keyword, model, note} — 팀이 하나면 바로, 아니면 보조 모델 1회, 실패하면 낱말 비교."""
+def route_request(text: str, dept: Department, candidates: list[Team], models, choice: str = "") -> dict:
+    """{team_id, reason, how: one|llm|keyword, model, note} — 팀이 하나면 바로, 아니면 부장 모델 1회, 실패하면 낱말 비교.
+
+    choice = 화면에서 고른 부장 모델 ("provider:model", 없으면 models.yaml critic → utility — core/dept_heads.py)."""
     if len(candidates) == 1:
         return {"team_id": candidates[0].id, "reason": "이 부서의 팀은 하나뿐입니다.", "how": "one", "model": "", "note": ""}
-    from core import llm_factory, usage  # 순환·무거운 import 방지
+    from core import dept_heads, llm_factory, usage  # 순환·무거운 import 방지
 
     note = ""
+    chain, _ = dept_heads.head_chain(models, choice)
     try:
         with usage.scope(purpose="부서장 배정"):
-            call = llm_factory.invoke_structured(models.utility, models, TeamPick, route_messages(text, dept, candidates),
+            call = llm_factory.invoke_structured(chain, models, TeamPick, route_messages(text, dept, candidates),
                                                  f"{dept.name} 부서장")
         pick: TeamPick = call.parsed
         if pick.team_id in {t.id for t in candidates}:
             return {"team_id": pick.team_id, "reason": pick.reason, "how": "llm", "model": call.spec.label, "note": ""}
         note = f"모델이 목록에 없는 팀({pick.team_id})을 골라 낱말 비교로 정했습니다."
     except Exception as e:  # noqa: BLE001 — 키 없음·한도 초과 등: 배정은 낱말 비교로라도 끝낸다
-        note = f"보조 모델을 쓰지 못해 낱말 비교로 정했습니다 ({type(e).__name__})."
+        note = f"부장 모델을 쓰지 못해 낱말 비교로 정했습니다 ({type(e).__name__})."
     team_id, reason = keyword_pick(text, candidates)
     return {"team_id": team_id, "reason": reason, "how": "keyword", "model": "", "note": note}
 
