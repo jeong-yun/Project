@@ -419,7 +419,8 @@ def check_facts(answer: str, source: str, reference: str = "") -> FactCheck:
     result = FactCheck()
     data = answer_json(answer)
     src = normalize_text(source)
-    for item in [*_items(data, "evidence"), *_items(data, "jd_coverage")]:
+    fit_cover = [x for fit in _items(data, "jd_fit") for x in _items(fit, "coverage")]  # JD 추천의 JD 마다 판정
+    for item in [*_items(data, "evidence"), *_items(data, "jd_coverage"), *fit_cover]:
         if str(item.get("status") or "").strip() == "공백":
             continue
         for snippet in quote_snippets(item.get("quote")):
@@ -489,16 +490,368 @@ def check_portfolio(answer: str) -> list[str]:
     return problems
 
 
+# ─── 🎯 업무(JD) 추천 — 모델은 판정만, 점수·순위는 코드가 ───────────────────
+
+STATUS_VALUE = {"근거 있음": 1.0, "부분": 0.5, "공백": 0.0}
+# 요구사항 가중치 — 자격 요건(필수)이 맞아야 서류가 통과하므로 두 배. 주요 업무·우대·구분 없음은 1배.
+REQ_WEIGHT = {"자격": 2.0, "업무": 1.0, "우대": 1.0, "": 1.0}
+SECTION_LABEL = {"자격": "필수", "업무": "업무", "우대": "우대", "": "기타"}
+SCORE_RULE = ("점수 = Σ(가중치 × 판정값) ÷ Σ가중치 × 100 — 판정값: 근거 있음 1 · 부분 0.5 · 공백 0, "
+              "가중치: 필수(자격 요건) ×2 · 주요 업무 ×1 · 우대 ×1 · 구분 없음 ×1. "
+              "근거 있음·부분인데 인용이 올린 문서에 글자 그대로 없으면 0 으로 센다.")
+JD_SPLIT = re.compile(r"^\s*(?:-{3,}|={3,}|\*{3,}|_{3,})\s*$", re.M)
+
+
+def split_jds(text: str) -> list[str]:
+    """붙여 넣은 글 → JD 여러 개. '---' · '===' 만 있는 줄로 나눈다 (그런 줄이 없으면 JD 하나)."""
+    return [p.strip() for p in JD_SPLIT.split(text or "") if p.strip()]
+
+
+def jd_title(text: str, fallback: str = "") -> str:
+    """JD 의 첫 줄(회사·직무 이름이 보통 여기 있다) — 표에 보일 짧은 이름."""
+    for line in (text or "").splitlines():
+        s = line.strip().strip("[]【】<>#*=:- ").strip()
+        if len(s) >= 2:
+            return s[:50]
+    return fallback
+
+
+@dataclass
+class JobPost:
+    id: str  # J1…
+    name: str  # 파일 이름 또는 '붙여 넣은 JD 1'
+    text: str
+    reqs: list[Requirement]
+
+    @property
+    def title(self) -> str:
+        return jd_title(self.text, self.name)
+
+    def as_option(self) -> dict:
+        """하네스·화면에 넘기는 모양 (JSON 으로 저장할 수 있게 dict)."""
+        return {"id": self.id, "name": self.name, "title": self.title,
+                "reqs": [{"id": r.id, "section": r.section, "text": r.text} for r in self.reqs]}
+
+
+def job_posts(parts: list[tuple[str, str]], limit: int = 15) -> list[JobPost]:
+    """[(이름, JD 글)] → J1, J2 … 요구사항 ID 는 'J1-R1' 처럼 JD 번호를 붙인다 (JD 끼리 섞이지 않게)."""
+    out = []
+    for i, (name, text) in enumerate(parts, 1):
+        reqs = extract_requirements(text, limit)
+        for r in reqs:
+            r.id = f"J{i}-{r.id}"
+        out.append(JobPost(f"J{i}", name, text, reqs))
+    return out
+
+
+def fit_items(answer: str) -> dict[str, dict]:
+    """JSON jd_fit → {JD id: 그 JD 판정}."""
+    return {str(x.get("jd") or "").strip(): x for x in _items(answer_json(answer), "jd_fit")}
+
+
+@dataclass
+class JdScore:
+    id: str
+    title: str
+    score: float | None  # 0~100 (요구사항을 못 뽑은 JD 는 None)
+    earned: float
+    total: float
+    rows: list[dict]  # 요구사항마다 {id, section, text, status, quote, counted, note}
+    missing: list[str] = field(default_factory=list)  # 판정이 없는 요구사항 (공백으로 셈)
+    unverified: list[str] = field(default_factory=list)  # 인용이 문서에 없어 0 으로 센 요구사항
+
+    def counts(self, section: str) -> dict[str, int]:
+        rows = [r for r in self.rows if r["section"] == section]
+        return {s: sum(r["status"] == s for r in rows) for s in COVER_STATUSES}
+
+    @property
+    def basis(self) -> str:
+        """점수 근거 한 줄 — '필수 2개(근거 1·부분 1·공백 0) ×2 · 우대 … → 5.0/7.0 × 100 = 71.4'."""
+        if self.score is None:
+            return "요구사항을 찾지 못해 점수를 매기지 않음 (JD 에 '자격 요건'·글머리표가 있으면 더 잘 뽑힙니다)"
+        parts = []
+        for sec in ("자격", "업무", "우대", ""):
+            rows = [r for r in self.rows if r["section"] == sec]
+            if rows:
+                c = self.counts(sec)
+                parts.append(f"{SECTION_LABEL[sec]} {len(rows)}개(근거 {c['근거 있음']}·부분 {c['부분']}·공백 {c['공백']}) "
+                             f"×{REQ_WEIGHT[sec]:g}")
+        tail = f" → {self.earned:g}/{self.total:g} × 100 = {self.score:g}"
+        flags = ""
+        if self.unverified:
+            flags += f" · 인용 불일치로 0 처리: {', '.join(self.unverified)}"
+        if self.missing:
+            flags += f" · 판정 없음(공백 처리): {', '.join(self.missing)}"
+        return " · ".join(parts) + tail + flags
+
+
+def score_jds(answer: str, jds: list[dict], source: str | None = None) -> list[JdScore]:
+    """모델의 판정(jd_fit.coverage) → JD 마다 점수 (JD 순서 그대로). 같은 입력이면 늘 같은 점수.
+
+    source 를 주면 근거 있음·부분의 인용이 올린 문서에 글자 그대로 있는지 보고, 없으면 0 으로 센다
+    (인용 없는 '근거 있음'으로 점수를 올리지 못하게).
+    """
+    fits = fit_items(answer)
+    src = normalize_text(source) if source is not None else None
+    out = []
+    for jd in jds:
+        cover = {str(x.get("id") or "").strip(): x for x in _items(fits.get(jd["id"]), "coverage")}
+        rows, missing, unverified = [], [], []
+        earned = total = 0.0
+        for req in jd.get("reqs") or []:
+            item = cover.get(req["id"])
+            status = str((item or {}).get("status") or "").strip()
+            if status not in STATUS_VALUE:
+                missing.append(req["id"])
+                status = "공백"
+            quote = str((item or {}).get("quote") or "").strip()
+            value, note = STATUS_VALUE[status], ""
+            if value and src is not None:
+                snippets = quote_snippets(quote)
+                if not snippets or any(s not in src for s in snippets):
+                    value, note = 0.0, "인용이 문서에 없음 → 0"
+                    unverified.append(req["id"])
+            weight = REQ_WEIGHT.get(req.get("section") or "", 1.0)
+            earned += weight * value
+            total += weight
+            rows.append({"id": req["id"], "section": req.get("section") or "", "text": req.get("text") or "", "status": status,
+                         "quote": quote, "counted": value, "note": note})
+        score = round(earned / total * 100, 1) if total else None
+        out.append(JdScore(jd["id"], jd.get("title") or jd.get("name") or jd["id"], score, earned, total, rows, missing, unverified))
+    return out
+
+
+def ranked(scores: list[JdScore]) -> list[JdScore]:
+    """점수 높은 순 (같은 점수는 올린 순서, 점수 없는 JD 는 맨 뒤)."""
+    order = {s.id: i for i, s in enumerate(scores)}
+    return sorted(scores, key=lambda s: (s.score is None, -(s.score or 0), order[s.id]))
+
+
+def ranking_text(scores: list[JdScore]) -> str:
+    return " > ".join(f"{s.id} {s.score:g}점" if s.score is not None else f"{s.id} (점수 없음)" for s in ranked(scores))
+
+
+def check_recommend(answer: str, jds: list[dict], source: str | None = None) -> list[str]:
+    """JD 추천 검사 — 모든 JD·요구사항을 판정했는지, 순위·추천이 코드가 계산한 점수와 맞는지."""
+    data = answer_json(answer)
+    fits = fit_items(answer)
+    if not fits:
+        return [f"JSON 에 jd_fit 가 없다 — {', '.join(j['id'] for j in jds)} 마다 요구사항 판정(coverage)·한 줄 요약을 적는다"]
+    problems = []
+    absent = [j["id"] for j in jds if j["id"] not in fits]
+    if absent:
+        problems.append(f"판정하지 않은 JD: {', '.join(absent)}")
+    for jd in jds:
+        fit = fits.get(jd["id"])
+        if fit is None:
+            continue
+        items = _items(fit, "coverage")
+        seen = {str(x.get("id") or "").strip() for x in items}
+        missing = [r["id"] for r in jd.get("reqs") or [] if r["id"] not in seen]
+        if missing:
+            problems.append(f"{jd['id']} 에서 판정하지 않은 요구사항: {', '.join(missing)}")
+        bad = [f"{x.get('id')}({x.get('status')})" for x in items if str(x.get("status") or "").strip() not in COVER_STATUSES]
+        if bad:
+            problems.append(f"{jd['id']} status 는 {' / '.join(COVER_STATUSES)} 중 하나: {', '.join(bad[:6])}")
+        unquoted = [str(x.get("id")) for x in items if str(x.get("status") or "").strip() in ("근거 있음", "부분")
+                    and not quote_snippets(x.get("quote"))]
+        if unquoted:
+            problems.append(f"{jd['id']} 근거 있음·부분인데 quote(문서 원문)가 없다: {', '.join(unquoted[:6])} — 인용할 원문이 없으면 '공백'")
+        if not str(fit.get("summary") or "").strip():
+            problems.append(f"{jd['id']} 한 줄 요약(summary)이 없다")
+        weak = any(str(x.get("status") or "").strip() in ("부분", "공백") for x in items)
+        if weak and not [x for x in fit.get("fill_first") or [] if str(x).strip()]:
+            problems.append(f"{jd['id']} 에 부분·공백 요구사항이 있는데 먼저 채울 것(fill_first)이 없다")
+
+    scores = {s.id: s for s in score_jds(answer, jds, source)}
+    order = [str(x).strip() for x in (data or {}).get("ranking") or []]
+    expected = ranking_text(list(scores.values()))
+    if sorted(order) != sorted(scores):
+        problems.append(f"ranking 은 JD id 를 하나씩 모두 담아야 한다 (지금 {order or '없음'}) — 코드가 계산한 순위: {expected}")
+    else:
+        values = [scores[i].score for i in order if scores[i].score is not None]
+        if any(a < b for a, b in zip(values, values[1:])):
+            problems.append(f"ranking {' > '.join(order)} 이 코드가 계산한 점수 순서와 다르다 — 코드 계산: {expected} "
+                            "(같은 점수는 순서 상관없음). 점수를 바꾸지 말고 판정을 다시 보거나 순위를 고친다.")
+    best = str(((data or {}).get("best") or {}).get("jd") or "").strip() if isinstance((data or {}).get("best"), dict) else ""
+    top = [s for s in scores.values() if s.score is not None]
+    high = max((s.score for s in top), default=None)
+    if not best:
+        problems.append("best(가장 맞는 JD 와 이유)가 없다 — {\"jd\": \"J…\", \"why\": \"…\"}")
+    elif high is not None and (best not in scores or scores[best].score != high):
+        problems.append(f"best {best} 는 코드 계산 1위가 아니다 — 코드 계산: {expected}")
+    return problems
+
+
+def recommend_markdown(answer: str, jds: list[dict], source: str | None = None) -> str:
+    """코드가 만든 추천 표 — 순위·점수·점수 근거, JD 마다 요구사항 대응표·강점·공백·먼저 채울 것."""
+    fits = fit_items(answer)
+    data = answer_json(answer) or {}
+    scores = ranked(score_jds(answer, jds, source))
+    lines = ["## 추천 순위 (점수는 코드가 계산)", "", f"> {SCORE_RULE}", "",
+             "| 순위 | JD | 한 줄 요약 | 적합도 | 점수 근거 |", "|---|---|---|---|---|"]
+    for i, s in enumerate(scores, 1):
+        summary = (fits.get(s.id) or {}).get("summary") or "-"
+        score = f"**{s.score:g}점**" if s.score is not None else "-"
+        lines.append(f"| {i} | {s.id}. {_cell(s.title)} | {_cell(summary)} | {score} | {_cell(s.basis)} |")
+    best = data.get("best") if isinstance(data.get("best"), dict) else {}
+    if scores and scores[0].score is not None:
+        top = scores[0]
+        why = str(best.get("why") or "").strip()
+        lines += ["", f"**가장 맞는 JD: {top.id}. {top.title}** ({top.score:g}점)" + (f" — {why}" if why and best.get("jd") == top.id else "")]
+        if best.get("jd") and best.get("jd") != top.id:
+            lines.append(f"> ⚠️ 모델이 고른 추천({best.get('jd')})이 코드 계산 1위({top.id})와 다릅니다 — 코드 점수를 따르세요.")
+    for s in scores:
+        fit = fits.get(s.id) or {}
+        lines += ["", f"### {s.id}. {s.title} — 요구사항별 대응", "", "| ID | 구분 | 요구사항 | 판정 | 근거(문서 원문) |", "|---|---|---|---|---|"]
+        lines += [f"| {r['id']} | {SECTION_LABEL.get(r['section'], '기타')} | {_cell(r['text'])} | {r['status']}"
+                  f"{' ⚠️ ' + r['note'] if r['note'] else ''} | {_cell(r['quote']) or '-'} |" for r in s.rows]
+        for label, key in (("강점", "strengths"), ("공백", "gaps"), ("먼저 채울 것", "fill_first")):
+            values = [str(x).strip() for x in fit.get(key) or [] if str(x).strip()]
+            if values:
+                lines += ["", f"**{label}**", *[f"- {v}" for v in values]]
+    return "\n".join(lines).strip()
+
+
+# ─── 🔄 포트폴리오 최신화 — 바뀐 점 찾기 · 변경 목록 검사 ─────────────────────
+
+# 일반 기술·직무 용어 (사람·회사·프로젝트 이름이 아닌 공개 용어) — 바뀐 기술 찾기와 검색어 안전 검사(core/career_search.py)가 쓴다
+TECH_TERMS = (
+    "Python", "SQL", "Java", "Rust", "JavaScript", "TypeScript", "Bash", "PowerShell", "pandas", "NumPy", "scikit-learn",
+    "PyTorch", "TensorFlow", "Keras", "XGBoost", "LightGBM", "Isolation Forest", "Spark", "Kafka", "Airflow", "dbt", "Hadoop",
+    "Flink", "Elasticsearch", "OpenSearch", "Kibana", "Logstash", "Splunk", "Grafana", "Prometheus", "Datadog", "ClickHouse",
+    "PostgreSQL", "MySQL", "Oracle", "MongoDB", "Redis", "BigQuery", "Snowflake", "Databricks", "AWS", "Azure", "GCP", "EC2", "S3",
+    "Lambda", "CloudTrail", "GuardDuty", "IAM", "VPC", "EKS", "ECS", "Terraform", "Ansible", "Docker", "Kubernetes", "Helm",
+    "GitHub Actions", "Jenkins", "GitLab", "CI/CD", "Linux", "Windows", "SIEM", "SOAR", "EDR", "XDR", "NDR", "IDS", "IPS", "WAF",
+    "DLP", "PAM", "MFA", "SSO", "Zero Trust", "제로 트러스트", "IoC", "TTP", "MITRE ATT&CK", "ATT&CK", "Sigma", "YARA", "CVE",
+    "OWASP", "OWASP Top 10", "ISMS-P", "ISMS", "ISO/IEC 27001", "ISO 27001", "ISO/IEC 27701", "ISO/IEC 42001", "NIST CSF",
+    "NIST CSF 2.0", "NIST AI RMF", "AI RMF", "EU AI Act", "GDPR", "개인정보보호법", "SOC 2", "PCI DSS", "CSPM", "CNAPP", "SBOM",
+    "DevSecOps", "MLOps", "LLMOps", "LLM", "RAG", "LangChain", "LangGraph", "Streamlit", "FastAPI", "Django", "Flask", "React",
+    "Tableau", "Power BI", "Excel", "Jupyter", "Git", "API", "REST", "GraphQL", "ETL", "ELT", "데이터 파이프라인", "데이터 거버넌스",
+    "AI 거버넌스", "AI 보안", "프롬프트 인젝션", "레드팀", "위협 헌팅", "침해사고 대응", "취약점 진단", "모의해킹", "보안 관제",
+    "로그 분석", "이상 탐지", "이상탐지", "머신러닝", "딥러닝", "생성형 AI", "AI 에이전트", "멀티 에이전트", "클라우드 보안",
+    "컨테이너 보안", "공급망 보안", "IaC", "관측성", "Observability",
+)
+
+
+def tech_terms(text: str) -> list[str]:
+    """글에 나온 일반 기술·직무 용어 (TECH_TERMS 중) — 영어는 낱말 경계, 한글은 띄어쓰기를 무시하고 찾는다."""
+    found = []
+    flat = re.sub(r"\s+", "", text or "")
+    for term in TECH_TERMS:
+        if re.match(r"[A-Za-z]", term):
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", text or "", re.I):
+                found.append(term)
+        elif re.sub(r"\s+", "", term) in flat:
+            found.append(term)
+    return list(dict.fromkeys(found))
+
+
+def diff_candidates(old: str, new: str) -> dict[str, list[str]]:
+    """지금 포트폴리오(old) ↔ 최신 요약 문서(new) — 코드가 찾은 '바뀐 점 후보' (모델이 놓치지 않게 참고로 준다).
+
+      projects : 최신 문서의 제목 줄(#) 중 낱말 대부분이 포트폴리오에 없는 것 → 새 프로젝트 후보
+      numbers  : 최신 문서에만 있는 숫자가 든 문장 → 새 숫자·성과 후보
+      terms    : 최신 문서에만 있는 기술 용어
+    """
+    old_low = (old or "").lower()
+    projects = []
+    for line in (new or "").splitlines():
+        m = re.match(r"^\s*#{2,4}\s+(.+)$", line)
+        if not m:
+            continue
+        words = keywords(re.sub(r"[\d.~()\-]+", " ", m.group(1)))
+        if words and sum(w.lower() in old_low for w in words) / len(words) < 0.5:
+            projects.append(m.group(1).strip())
+    old_numbers = numbers_in(old or "")
+    numbers = []
+    for sent in _sentences(new or ""):
+        norm = normalize_text(sent)
+        fresh = []
+        for m in NUMBER.finditer(norm):
+            value, unit = _norm_number(m.group(1), m.group(2)), _unit(norm[m.end():])
+            if NAME_PREFIX.search(norm[: m.start()][-14:]) or (value.isdigit() and int(value) <= 10 and not unit):
+                continue
+            if (value + unit if unit else value) not in old_numbers:
+                fresh.append(value + unit)
+        if fresh:
+            numbers.append(sent.strip()[:160])
+    terms = [t for t in tech_terms(new) if t not in tech_terms(old)]
+    return {"projects": projects[:12], "numbers": list(dict.fromkeys(numbers))[:15], "terms": terms[:20]}
+
+
+CHANGE_KINDS = ("문서", "외부")
+WEB_REF = re.compile(r"\[W(\d{1,2})\]")
+
+
+def check_changes(answer: str, old: str, source: str, urls: list[str], web_count: int = 0, reference: str = "") -> list[str]:
+    """변경 목록(JSON changes) 검사.
+
+      before : 지금 포트폴리오에 글자 그대로 있어야 한다 (새로 더한 것은 빈칸)
+      문서    : source 는 내 문서 원문 인용 (글자 그대로)
+      외부    : source 는 승인한 검색 결과·GitHub 주소 중 하나 — 용어·트렌드에만 쓴다
+      after  : 내 문서에 없는 숫자를 넣지 않는다 (외부 자료의 숫자는 내 경력이 아니다)
+      본문 [W번호] 는 외부 자료 목록 안의 번호
+    """
+    data = answer_json(answer)
+    changes = _items(data, "changes")
+    if not changes:
+        if str((data or {}).get("no_changes") or "").strip():
+            return []
+        return ["JSON 에 changes(바뀐 점 목록)가 없다 — 바뀐 곳마다 {part, before, after, why, source, kind}. "
+                "정말 바뀐 것이 없으면 no_changes 에 이유를 적는다"]
+    problems = []
+    old_n, src_n = normalize_text(old), normalize_text(source)
+    allowed_urls = {u.strip().rstrip("/") for u in urls if u}
+    allowed_numbers = numbers_in(source) | numbers_in(reference)
+    for i, c in enumerate(changes, 1):
+        label = f"변경 {i}({str(c.get('part') or '?')[:20]})"
+        kind = str(c.get("kind") or "").strip()
+        if kind not in CHANGE_KINDS:
+            problems.append(f"{label}: kind 는 '문서' 또는 '외부'")
+        if not str(c.get("after") or "").strip():
+            problems.append(f"{label}: after(바뀐 뒤 내용)가 비었다")
+        if not str(c.get("why") or "").strip():
+            problems.append(f"{label}: why(바꾼 이유)가 비었다")
+        missing_before = [s for s in quote_snippets(c.get("before")) if s not in old_n]
+        if missing_before:
+            problems.append(f"{label}: before 가 지금 포트폴리오에 글자 그대로 없다 (\"{missing_before[0][:50]}\") — 그대로 복사하거나, 새로 더한 것이면 빈칸")
+        src = str(c.get("source") or "").strip()
+        if kind == "문서":
+            snippets = quote_snippets(src)
+            if not snippets:
+                problems.append(f"{label}: source(내 문서 원문 인용)가 없다")
+            elif any(s not in src_n for s in snippets):
+                problems.append(f"{label}: source 인용이 내 문서에 글자 그대로 없다 (\"{src[:50]}\")")
+        elif kind == "외부" and src.rstrip("/") not in allowed_urls:
+            problems.append(f"{label}: source 는 승인한 외부 자료의 URL 이어야 한다 (지금 \"{src[:60]}\")"
+                            + ("" if allowed_urls else " — 이번에는 외부 자료가 없으므로 '외부' 변경을 쓰지 않는다"))
+        nums = unsourced_numbers(str(c.get("after") or ""), allowed_numbers)
+        if nums:
+            problems.append(f"{label}: after 에 내 문서에 없는 숫자 {', '.join(nums[:3])} — 외부 자료의 숫자를 내 경력처럼 쓰지 않는다")
+    refs = sorted({int(n) for n in WEB_REF.findall(body_text(answer))})
+    bad = [n for n in refs if n < 1 or n > web_count]
+    if bad:
+        problems.append(f"본문의 {', '.join(f'[W{n}]' for n in bad)} 은 외부 자료 목록에 없다 (외부 자료 {web_count}건)")
+    return problems
+
+
 # ─── 내려받기용 문서 ────────────────────────────────────────────────────
 
 
 def render_document(answer: str, kind: str, questions: list[Question] | None = None, title: str = "",
-                    requirements: dict[str, str] | None = None) -> str:
+                    requirements: dict[str, str] | None = None, jds: list[dict] | None = None, source: str | None = None,
+                    web: list[dict] | None = None) -> str:
     """최종 답변 → 내려받기용 마크다운.
 
     본문(JSON 빼고) + 자소서면 문항마다 코드가 센 글자 수 + 부록(JD 대응표 · 확인 필요 · 근거 인용 — JSON 에서 코드가 만든 표).
+    JD 추천(jd_recommend)은 맨 앞에 코드가 계산한 순위·점수·요구사항 대응표 (jds = 툴이 뽑은 JD·요구사항, source = 문서 원문).
+    포트폴리오 최신화(portfolio_update)는 부록에 바뀐 점(이전 → 이후 · 이유 · 출처)과 외부 자료 목록(web).
     """
     body = body_text(answer)
+    if kind == "jd_recommend" and jds:
+        explained = "\n\n---\n\n## 설명 (작성: 팀)\n\n" + body if body else ""
+        body = recommend_markdown(answer, jds, source) + explained
     if kind == "cover_letter" and questions:
         rows = {r.no: r for r in limit_rows(answer, questions)}
         out_lines, current = [], None
@@ -529,6 +882,21 @@ def render_document(answer: str, kind: str, questions: list[Question] | None = N
         gaps = [x for x in cover if str(x.get("status") or "").strip() == "공백"]
         if gaps:
             appendix += ["", "공백(문서에 근거가 없는 요구사항)은 지어내지 않았습니다. 실제 경험이 있다면 요약 문서에 더해 다시 작성하세요."]
+        appendix.append("")
+    changes = _items(data, "changes")
+    if kind == "portfolio_update" and (changes or data.get("no_changes")):
+        appendix += ["## 바뀐 점 (이전 → 이후)", ""]
+        if changes:
+            appendix += ["| # | 부분 | 이전 | 이후 | 이유 | 출처 |", "|---|---|---|---|---|---|"]
+            appendix += [f"| {i} | {_cell(c.get('part'))} | {_cell(c.get('before')) or '(새로 추가)'} | {_cell(c.get('after'))} | "
+                         f"{_cell(c.get('why'))} | {'🌐 ' if str(c.get('kind')).strip() == '외부' else '📄 '}{_cell(c.get('source'))} |"
+                         for i, c in enumerate(changes, 1)]
+        else:
+            appendix.append(f"바뀐 점 없음 — {_cell(data.get('no_changes'))}")
+        appendix.append("")
+    if kind == "portfolio_update" and web:
+        appendix += ["## 외부 자료 (용어·트렌드에만 사용 — 내 경력·숫자의 근거 아님)", ""]
+        appendix += [f"- [W{i}] {_cell(w.get('title'))} — {w.get('url')}" for i, w in enumerate(web, 1)]
         appendix.append("")
     checks = [str(x) for x in (data.get("needs_check") or []) if str(x).strip()]
     if checks:

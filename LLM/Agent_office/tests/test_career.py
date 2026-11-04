@@ -346,7 +346,7 @@ def test_team_config_is_valid_and_private(ranks, models):
     validate_config(ranks, models, teams)
     team = load_team("career")
     assert team.private and "web_search" not in team.tools and team.tools == ["career_docs"]
-    assert [t.id for t in team.tasks] == ["cover_letter", "portfolio"]
+    assert [t.id for t in team.tasks] == ["cover_letter", "portfolio", "jd_recommend", "portfolio_update"]
     assert {"career_facts", "char_limits", "jd_coverage"} <= set(team.harness.validators)
     nodes = {n.id: n for n in team.org.walk()}
     assert [nodes[i].rank for i in ("lead", "gm_role", "am_writer", "staff_facts")] == ["team_lead", "gm", "assistant_manager", "staff"]

@@ -156,16 +156,25 @@ def research(question: str, models: ModelsConfig, settings: dict) -> WebContext:
     """검색 계획 → 검색 → 중복 제거. 어떤 단계가 실패해도 예외 없이 notes 에 남긴다."""
     cfg = settings.get("web_search", {})
     provider = cfg.get("provider", "duckduckgo")
+    plan, notes = plan_queries(question, models, cfg.get("max_queries", 3), cfg.get("hint", ""))
+    if not plan.need_search or not plan.queries:
+        return WebContext(provider=provider, notes=[*notes, "검색이 필요 없는 질문으로 판단"])
+    context = search_queries(plan.queries, settings)
+    context.notes = notes + context.notes
+    return context
+
+
+def search_queries(queries: list[str], settings: dict) -> WebContext:
+    """정해진 검색어로만 검색 (검색어를 모델이 다시 만들지 않는다) — 사람이 승인한 검색어를 그대로 보낼 때 쓴다
+    (👔 포트폴리오 최신화, career_ui). 실패는 예외 없이 notes 에."""
+    cfg = settings.get("web_search", {})
+    provider = cfg.get("provider", "duckduckgo")
     max_results = cfg.get("max_results", 5)
     max_total = cfg.get("max_total_results", 8)
     region = cfg.get("region", "kr-kr")
-
-    plan, notes = plan_queries(question, models, cfg.get("max_queries", 3), cfg.get("hint", ""))
-    context = WebContext(provider=provider, notes=notes)
-    if not plan.need_search or not plan.queries:
-        context.notes.append("검색이 필요 없는 질문으로 판단")
+    context = WebContext(provider=provider, queries=[q for q in queries if q.strip()])
+    if not context.queries:
         return context
-    context.queries = plan.queries
 
     backend = SEARCH_BACKENDS.get(provider)
     if backend is None:
@@ -182,13 +191,13 @@ def research(question: str, models: ModelsConfig, settings: dict) -> WebContext:
             return e
 
     # 검색어들을 동시에 검색하고, 합치는 것은 검색어 순서대로 → 결과 번호([1], [2]…)가 실행마다 같다
-    with ThreadPoolExecutor(max_workers=len(plan.queries)) as pool:
-        fetched = list(pool.map(fetch, plan.queries))
+    with ThreadPoolExecutor(max_workers=len(context.queries)) as pool:
+        fetched = list(pool.map(fetch, context.queries))
 
     seen: set[str] = set()
     exclude = cfg.get("exclude_domains") or []
     dropped = 0
-    for query, results in zip(plan.queries, fetched):
+    for query, results in zip(context.queries, fetched):
         if isinstance(results, Exception):
             context.notes.append(f"검색 실패 ({query}): {type(results).__name__}: {str(results)[:200]}")
             continue

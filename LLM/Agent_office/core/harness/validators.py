@@ -16,6 +16,8 @@
   char_limits   : 자소서 문항마다 답변이 있고 글자 수 제한(공백 포함/제외)을 지키는지 (코드가 센다)
   jd_coverage   : JD 요구사항(R1…)을 하나도 빼지 않고 근거 있음/부분/공백으로 판정했는지
   portfolio_format: 포트폴리오 절(요약·역량 표·프로젝트)과 프로젝트 카드 다섯 항목(문제·역할·기술·결과·배운 점)
+  jd_recommend  : JD 추천 — 모든 JD·요구사항 판정 + 순위·추천이 코드가 계산한 점수 순서와 같은지 (점수는 코드가 셈)
+  portfolio_changes: 포트폴리오 최신화 변경 목록 — 이전 글 그대로 · 문서 인용 그대로 · 외부 출처는 승인한 URL · 외부 숫자 금지
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
 테스트 DB 에 쿼리를 보내고 문법 에러·타임아웃을 fail(log) 로 돌려주면 된다.
@@ -388,3 +390,45 @@ class PortfolioFormatValidator(Validator):
         if problems:
             return self.fail("포트폴리오 형식 오류: " + " / ".join(problems) + " — 팀 업무 지침의 포트폴리오 형식대로 다시 써라.")
         return self.ok(f"포트폴리오 형식 통과 (프로젝트 카드 {len(career.project_cards(answer))}개)")
+
+
+@register
+class JdRecommendValidator(Validator):
+    name = "jd_recommend"
+    description = ("JD 추천 — 모든 JD·요구사항(J1-R1…)을 근거 있음/부분/공백으로 판정했는지, ranking·best 가 코드가 판정으로 계산한 "
+                   "점수 순서와 같은지 (점수는 코드가 셈 — core/career.py score_jds)")
+
+    def check(self, answer: str, options: dict):
+        from core import career
+
+        jds = list(options.get("career_jds") or [])
+        if not jds:
+            return self.ok("비교할 JD 없음")
+        source = options.get("career_source") if "career_source" in options else None
+        problems = career.check_recommend(answer, jds, source)
+        if problems:
+            return self.fail("JD 추천 오류: " + " / ".join(problems[:10]) + " — 점수는 코드가 판정으로 계산한다. 판정(coverage)은 문서 원문 "
+                             "인용으로만 하고, ranking·best 는 코드 계산 순서를 따른다.")
+        return self.ok("JD 추천 통과 — 코드 계산 순위: " + career.ranking_text(career.score_jds(answer, jds, source)))
+
+
+@register
+class PortfolioChangesValidator(Validator):
+    name = "portfolio_changes"
+    description = ("포트폴리오 최신화 변경 목록 — before 는 지금 포트폴리오에 그대로, 문서 변경의 source 는 내 문서 원문 인용, 외부 변경의 "
+                   "source 는 승인한 검색 결과 URL, after 에 내 문서에 없는 숫자 없음, 본문 [W번호]는 외부 자료 목록 안")
+
+    def check(self, answer: str, options: dict):
+        from core import career
+
+        if "career_old_portfolio" not in options:
+            return self.ok("비교할 포트폴리오 정보 없음")
+        problems = career.check_changes(answer, str(options.get("career_old_portfolio") or ""), str(options.get("career_source") or ""),
+                                        list(options.get("career_web_urls") or []), int(options.get("career_web_count") or 0),
+                                        str(options.get("career_reference") or ""))
+        if problems:
+            return self.fail("변경 목록 오류: " + " / ".join(problems[:10]) + " — 내 경험·숫자는 내 문서에서만, 외부 자료는 용어·트렌드에만 "
+                             "쓰고 출처 URL 을 단다.")
+        changes = career._items(career.answer_json(answer), "changes")
+        outside = sum(str(c.get("kind")).strip() == "외부" for c in changes)
+        return self.ok(f"변경 목록 통과 — {len(changes)}건 (문서 {len(changes) - outside} · 외부 {outside})")
