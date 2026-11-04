@@ -7,9 +7,32 @@ Agent Office 의 `freellm` provider 는 **FreeLLMAPI** 라는 프로그램을 �
 - FreeLLMAPI 공식 설치 문서(영어): <https://github.com/tashfeenahmed/freellmapi/blob/main/docs/en/install/01-install.md>
 - 이 문서는 2026-11-04 기준, 저장소의 `docker-compose.yml`·`.env.example`·설치 문서를 읽고 정리했습니다.
 
+## 필요 사양 (PC 최소 사항)
+
+FreeLLMAPI 는 Docker 안에서 돌기 때문에 **Docker Desktop for Windows 의 공식 최소 사양**이 곧 이 PC 의 최소 사양입니다 (WSL 2 방식 기준).
+
+| 항목 | 최소 사항 | 확인 방법 |
+|---|---|---|
+| Windows | **Windows 11 64비트 23H2(빌드 22631) 이상** 또는 **Windows 10 64비트 22H2(빌드 19045)** — Pro·Enterprise·Education 판 | `Win+R` → `winver` |
+| WSL | **WSL 2, 버전 2.1.5 이상** (Windows 기능 'WSL 2' 켜짐) | `wsl --version` (없으면 2-1 의 `wsl --install`) |
+| CPU | **64비트 + SLAT**(2단계 주소 변환) 지원 — 최근 10년 안의 Intel·AMD CPU 는 대부분 지원 | 작업 관리자 → 성능 → CPU |
+| 가상화 | **BIOS/UEFI 에서 하드웨어 가상화 켜짐** (Intel VT-x / AMD SVM) | 작업 관리자 → 성능 → CPU → **가상화: 사용** |
+| RAM | **8GB 이상** | 작업 관리자 → 성능 → 메모리 |
+| 디스크 | 공식 최소값은 없음 → **C 드라이브 10GB 이상 여유 권장** (Docker Desktop·WSL2 몇 GB + FreeLLMAPI 이미지 1GB 안쪽) | 파일 탐색기 → 내 PC |
+| 그 밖 | Windows 서비스 **Server(LanmanServer)** 가 '자동' 시작 | `services.msc` → Server |
+| 인터넷 | 이미지 받기·공급자(Google·Groq) 호출에 필요. 회사망이면 프록시 확인 (8-8) | |
+
+- **Windows Home 판**은 공식 지원 목록에 없습니다. **Windows Server** 도 지원하지 않습니다. Microsoft 지원이 끝난 Windows 버전도 지원하지 않습니다.
+- **ARM64 Windows**(Snapdragon 노트북 등)는 'Docker Desktop for Windows - Arm' **Early Access(정식 출시 전)** 로만 있습니다. 같은 Windows·WSL·RAM 조건이고,
+  FreeLLMAPI 이미지는 `linux/arm64` 도 제공하므로 돌아갈 수는 있지만 정식 지원이 아니라 권하지 않습니다.
+- **라이선스**: Docker Desktop 은 개인·교육·비상업 오픈소스·소규모 회사(직원 250명 미만 **그리고** 연 매출 1천만 달러 미만)는 무료입니다.
+  직원 250명 이상 **또는** 연 매출 1천만 달러 이상인 회사의 업무용, 그리고 정부 기관은 **유료 구독**이 필요합니다. 회사 PC 라면 먼저 회사 정책을 확인하세요.
+- 출처: Docker 공식 문서 [Install Docker Desktop on Windows — System requirements](https://docs.docker.com/desktop/setup/install/windows-install/),
+  라이선스 [Docker Desktop license agreement](https://docs.docker.com/subscription/desktop-license/) (2026-11-04 확인).
+
 **빠른 순서 (자세한 설명은 아래 각 절)**
 
-1. Docker Desktop 설치·실행 (WSL2 필요) → [2절](#2-준비물)
+1. 위 필요 사양 확인 → Docker Desktop 설치·실행 (WSL2 필요) → [2절](#2-준비물)
 2. FreeLLMAPI 저장소를 `C:\Users\<사용자>\freellmapi` 에 받기 → [3-1](#3-1-저장소-받기)
 3. `.env` 만들기 (`ENCRYPTION_KEY`, `PORT`) → [3-2](#3-2-env-만들기-암호화-키)
 4. `docker compose pull` → `docker compose up -d` → [3-3](#3-3-켜기)
@@ -80,9 +103,7 @@ docker run --rm hello-world
 
 마지막 줄이 `Hello from Docker!` 를 출력하면 Docker 가 정상입니다.
 
-> **라이선스 주의**: Docker Desktop 은 개인·교육·소규모 회사(직원 250명 미만 **그리고** 연 매출 1천만 달러 미만)는 무료이고,
-> 그보다 큰 회사에서 업무로 쓰면 유료 구독이 필요합니다. 회사 PC 에 설치한다면 회사 정책을 먼저 확인하세요.
-> (조건: <https://docs.docker.com/subscription/desktop-license/>)
+> **라이선스 주의**: 큰 회사(직원 250명 이상 또는 연 매출 1천만 달러 이상)의 업무용은 유료 구독이 필요합니다 — 맨 위 [필요 사양](#필요-사양-pc-최소-사항) 참고.
 
 ### 2-2. Git (선택)
 

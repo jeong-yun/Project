@@ -88,6 +88,9 @@
 `freellm` provider 로 연결했습니다. 직급마다 유료 후보가 모두 실패(키 없음·크레딧 부족·장애)하면 무료 모델로 넘어가고,
 사이드바의 **🆓 무료 모델만 사용** 을 켜면 처음부터 무료 모델만 씁니다.
 
+**Docker 가 필요합니다 — 설치·필요 사양은 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)**
+(요약: Windows 11 23H2 이상 또는 Windows 10 22H2, 64비트 Pro·Enterprise·Education · WSL 2.1.5 이상 · CPU 가상화 켜짐(SLAT) · RAM 8GB 이상 · 디스크 10GB 이상 여유).
+
 **새 PC 설치는 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)** 를 따라 하세요 — Docker Desktop·WSL2 준비 → `.env`(암호화 키) → `docker compose up -d`
 → 대시보드(<http://127.0.0.1:3001>)에 Google AI Studio·Groq 무료 키 등록 → 통합 키를 이 폴더 `.env` 의 `FREELLMAPI_API_KEY` 에 넣기
 (주소 `FREELLMAPI_BASE_URL`, 기본 `http://127.0.0.1:3001/v1`) → 자동 시작·업데이트·백업·문제 해결·보안까지.
