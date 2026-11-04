@@ -2,7 +2,8 @@
 
 탭 (고른 탭만 그린다 → 1초마다 다시 그려도 가볍다. 데이터는 모두 기존 것을 다시 쓴다)
   ▸ 터미널   팀장에게 한 줄. '다들 뭐 해?' 같은 상태 질문은 LLM 없이 바로 한 줄씩 보고 (core/office.rundown),
-             그 밖의 말은 평소처럼 업무로 맡긴다 (app.py 가 pop_request 로 받아 자유 질문으로 시작)
+             그 밖의 말은 업무로 맡긴다 — 먼저 자유 질문과 같은 범위 확인(core/scope.py)을 거쳐, 범위 밖이면 맡기지 않고
+             맞는 팀을 알려 주고 '➡️ 그 팀에 맡기기' 버튼을 보인다. 범위 안이면 app.py 가 pop_request 로 받아 자유 질문으로 시작
   📈 모니터 · ✓ 업무 · 🔔 결정 대기 · ⏱ 자동 실행 · 📚 기억 · ◆ 조직도 · 📜 활동 · ⌘ 명령어 · 🛠 팀원
   🔔·⏱ 탭에는 자율 실행의 👤 승인 대기열(승인·기각 버튼)도 그린다 (autonomy_ui.render_queue — 🏠 패널과 같은 것)
 """
@@ -27,7 +28,7 @@ COMMANDS = [
     ("/status", "'다들 뭐 해?'와 같음"),
     ("/help", "이 명령어 목록"),
     ("/clear", "터미널 기록 지우기"),
-    ("그 밖의 한 줄", "팀장에게 업무로 맡김 → 팀장이 팀원들에게 나눠 주고 결과를 모아 올림"),
+    ("그 밖의 한 줄", "이 팀 범위인지 확인한 뒤 팀장에게 업무로 맡김 → 팀장이 팀원들에게 나눠 주고 결과를 모아 올림 (범위 밖이면 맞는 팀 안내)"),
 ]
 MAX_LOG = 80
 CSS = """<style>
@@ -66,6 +67,10 @@ def _pending_key(team_id: str) -> str:
 
 def _tab_key(team_id: str) -> str:
     return f"cc_tab_{team_id}"
+
+
+def _redirect_key(team_id: str) -> str:
+    return f"cc_redirect_{team_id}"
 
 
 def _quick_key(team_id: str) -> str:
@@ -140,6 +145,16 @@ def answer(ctx, run: dict | None, target: str, active_ids: set[str] | None, text
         _log(tid, "lead", "결정을 기다리는 결과가 있어요. 먼저 아래에서 채택·반려해 주세요 "
                           "(새 업무를 맡기면 그 결과가 지워집니다 — 그래도 맡기려면 아래 '업무 맡기기'를 쓰세요).")
         return False
+    check = getattr(ctx, "scope_check", None)
+    if check is not None:  # 자유 질문과 같은 범위 확인 (core/scope.py) — 범위 밖이면 맡기지 않고 맞는 팀을 알려 준다
+        st.session_state.pop(_redirect_key(tid), None)
+        decision = check(text)
+        if not decision["in_scope"]:
+            _log(tid, "lead", "🚫 " + decision.get("message", "이 팀 범위가 아닙니다."))
+            _log(tid, "line", f"이유: {decision.get('reason', '')}")
+            _log(tid, "dim", f"아래 '➡️ {decision.get('team_name', decision['team_id'])}에 맡기기'를 누르면 그 팀이 바로 시작합니다.")
+            st.session_state[_redirect_key(tid)] = {**decision, "question": text}
+            return False
     st.session_state[_pending_key(tid)] = text
     _log(tid, "lead", f"알겠습니다 — {lead}이(가) 팀원들에게 나눠 맡기고 결과를 모아 보고할게요.")
     return True
@@ -174,6 +189,16 @@ def _terminal(ctx, run, target, active_ids) -> None:
     parts.append(f"<div class='ao-cc-foot'>이번 업무 토큰 {tokens / 1000:,.1f}천 · 끝난 단계 "
                  f"{len(run['steps']) if run else 0}개 · /help 명령어</div>")
     log_area.markdown(_box(parts, fixed=True), unsafe_allow_html=True)
+    redirect = st.session_state.get(_redirect_key(tid))
+    if redirect and getattr(ctx, "redirect", None) is not None:
+        r1, r2 = st.columns([3, 1])
+        if r1.button(f"➡️ {redirect.get('team_name', redirect['team_id'])}에 맡기기", key=f"cc_redirect_go_{tid}", type="primary",
+                     use_container_width=True):
+            st.session_state.pop(_redirect_key(tid), None)
+            ctx.redirect(redirect["team_id"], redirect["question"], redirect)
+        if r2.button("취소", key=f"cc_redirect_no_{tid}", use_container_width=True):
+            st.session_state.pop(_redirect_key(tid), None)
+            st.rerun(scope="fragment")
 
 
 def _monitor(ctx, run, target, active_ids) -> None:

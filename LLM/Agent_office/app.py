@@ -406,6 +406,8 @@ office_ctx = office_ui.OfficeCtx(
     models={nid: member_models.split_key(p.effective)[1] for nid, p in member_plans.items()},
     storage=storage, runs=runs, settings=settings, data_dir=DATA_DIR, go_to_run=go_to_run,
     web=WEB_SEARCH_TOOL in team.tools,
+    # 터미널의 '그 밖의 한 줄'도 자유 질문처럼 범위 확인 → 범위 밖이면 맞는 팀으로 보내기 (아래 함수들은 부를 때 찾는다)
+    scope_check=lambda q: cc_scope_check(q), redirect=lambda tid, q, d: cc_redirect(tid, q, d),
 )
 
 
@@ -1615,6 +1617,23 @@ def check_scope(question: str) -> dict:
     return decision
 
 
+def cc_scope_check(question: str) -> dict:
+    """🖥️ 커맨드 센터 한 줄 업무 — 자유 질문과 같은 범위 확인. 범위 밖이면 터미널에 보일 안내 글·맞는 팀 이름을 붙인다."""
+    decision = check_scope(question)
+    if not decision["in_scope"]:
+        decision["message"] = team_scope.blocked_message(decision, team, teams).replace("**", "")
+        decision["team_name"] = team_names.get(decision["team_id"], decision["team_id"])
+    return decision
+
+
+def cc_redirect(other_id: str, question: str, decision: dict) -> None:
+    """커맨드 센터에서 '➡️ 맞는 팀에 맡기기' — 그 팀 화면으로 가서 곧바로 시작 (부서장 배정과 같은 길, building_ui)."""
+    how = "부장 모델" if decision.get("stage") == "router" else "낱말 확인"
+    building_ui.navigate({"kind": "team", "id": other_id, "question": question, "start": True,
+                          "assigned": {"head": "🧭 범위 확인", "reason": decision.get("reason", ""), "how": how,
+                                       "model": decision.get("model", ""), "changed": False}})
+
+
 def go_to_scope_team(block_key: str) -> None:
     """'◇◇팀으로 가서 질문하기' — 그 팀 화면으로 옮기고 자유 질문 칸에 같은 질문을 채운다 (콜백)."""
     block = st.session_state.pop(block_key, None)
@@ -1790,6 +1809,7 @@ for done_id in st.session_state.pop(NOTICE_KEY, []):
             st.toast(f"🔔 {where} 업무가 끝났습니다 — 결과를 확인하고 결정해 주세요: {short(run_title(done_run), 24)}", icon="🔔")
 if st.session_state.get(HISTORY_KEY):
     history_dialog(st.session_state.pop(HISTORY_KEY))
+building_ui.assignment_banner(team_id, current)  # 👔 부서장이 이 팀에 배정한 이유·모델
 
 # 일이 없을 때는 업무 입력칸을 맨 위에 — 질문하려고 조직도 아래까지 내려가지 않아도 된다
 idle = current is None
@@ -1915,7 +1935,8 @@ if not idle:
 # ════════════════════════════════════════════════════════════════════
 # 제출 → 백그라운드 실행 시작 (core/live.py)
 # ════════════════════════════════════════════════════════════════════
-request = request or command_center_ui.pop_request(team_id, web_available)  # 🖥️ 커맨드 센터 터미널에서 맡긴 한 줄
+# 👔 부서장이 배정하고 '▶ 바로 맡기기'를 누른 요청 (building_ui) · 🖥️ 커맨드 센터 터미널에서 맡긴 한 줄 (범위 확인을 거침)
+request = request or building_ui.pop_assigned(team_id, web_available) or command_center_ui.pop_request(team_id, web_available)
 if request:
     if running:
         st.warning("진행 중인 업무가 있습니다. 끝난 뒤에 새 업무를 맡겨 주세요.")

@@ -6,7 +6,7 @@
 const cv = document.getElementById("c"), g = cv.getContext("2d");
 const tip = document.getElementById("tip");
 const world = document.createElement("canvas"), w = world.getContext("2d");
-let L = null, S = null, bg = null, bgKey = "", scale = 1, lastH = 0, hover = null, hoverKey = "";
+let FH = 5, L = null, S = null, bg = null, bgKey = "", scale = 1, lastH = 0, hover = null, hoverKey = "";
 const FPS_MS = 1000 / 12;
 let lastDraw = 0;
 const lift = { y: null, target: null, wait: 0 };   // 엘리베이터 칸 (세계 px)
@@ -58,7 +58,7 @@ function drawBackground(ph) {
   }
   // 층마다: 층 번호판 · 부서 띠 · 방 · 바닥판
   for (const f of L.floors) {
-    const fy = f.y * T, fh = 5 * T;
+    const fy = f.y * T, fh = FH * T;
     rect(b, L.plate.x * T, fy, L.plate.w * T, fh, "#2d3142"); rect(b, L.plate.x * T, fy, L.plate.w * T, 2, "#3d4258");
     for (const r of f.rooms) drawRoomShell(b, r, ph);
     for (const bn of f.banners) {
@@ -72,7 +72,7 @@ function drawBackground(ph) {
   const sx = L.shaft.x * T, sw = L.shaft.w * T;
   rect(b, sx, L.shaft.y * T, sw, L.shaft.h * T, "#232031");
   rect(b, sx + sw / 2 - 1, L.shaft.y * T, 1, L.shaft.h * T, "#4b4560"); rect(b, sx + 4, L.shaft.y * T, 1, L.shaft.h * T, "#35304a"); rect(b, sx + sw - 5, L.shaft.y * T, 1, L.shaft.h * T, "#35304a");
-  for (const f of [...L.floors.map((f) => f.y), L.lobby.y]) { rect(b, sx, f * T + 5 * T - 3, sw, 3, "#2a2433"); rect(b, sx + 6, f * T + 6, sw - 12, 5, "#141220"); }
+  for (const f of [...L.floors.map((f) => f.y), L.lobby.y]) { rect(b, sx, f * T + FH * T - 3, sw, 3, "#2a2433"); rect(b, sx + 6, f * T + 6, sw - 12, 5, "#141220"); }
   // 길 · 인도
   const gy = L.ground.y * T;
   rect(b, 0, gy, W, 10, "#b7b2a8"); for (let x = 0; x < W; x += 24) rect(b, x, gy, 1, 10, "#9d978c");
@@ -113,7 +113,12 @@ function drawLobby(b, ph) {
   for (const s of L.lobby.spots) {
     const sx = s.x * T, sw = s.w * T, fy = y0 + hh - 12;
     rect(b, sx, y0, 2, hh - 12, "#d8d0bd");
-    if (s.kind === "reception") {
+    if (s.kind === "info") {   // 🛎 인포메이션 센터: 둥근 안내 데스크 · 종 · 물음표 간판
+      rect(b, sx + 10, fy - 20, sw - 20, 20, "#1f6f8b"); rect(b, sx + 10, fy - 20, sw - 20, 3, "#4fb3d9"); rect(b, sx + 12, fy - 14, sw - 24, 1, "#185a71");
+      rect(b, sx + sw - 30, fy - 25, 9, 5, "#f2c94c"); rect(b, sx + sw - 27, fy - 27, 3, 2, "#f2c94c");   // 🛎 종
+      rect(b, sx + 14, y0 + 8, 16, 16, "#f2c94c"); rect(b, sx + 16, y0 + 10, 12, 12, "#1f6f8b");   // ? 간판
+      rect(b, sx + 19, y0 + 12, 6, 2, "#fff"); rect(b, sx + 23, y0 + 14, 2, 3, "#fff"); rect(b, sx + 21, y0 + 16, 2, 2, "#fff"); rect(b, sx + 21, y0 + 19, 2, 2, "#fff");
+    } else if (s.kind === "reception") {
       rect(b, sx + 14, fy - 18, sw - 28, 18, "#7a4e2d"); rect(b, sx + 14, fy - 18, sw - 28, 3, "#a26a3c");
       rect(b, sx + 22, fy - 28, 12, 9, "#2b2b35"); rect(b, sx + 23, fy - 27, 10, 7, "#9bd8ff");
       for (let i = 0; i < 4; i++) rect(b, sx + sw - 40 + i * 6, fy - 24, 5, 6, ["#f4f1e8", "#fde68a", "#f4f1e8", "#bfdbfe"][i]);   // 신문
@@ -141,7 +146,7 @@ function onSnapshot(s) {
   S = s;
   const ph = phase();
   if (!L || s.layout.key !== L.key || bgKey !== s.layout.key + ph + JSON.stringify(s.depts)) {
-    L = s.layout; world.width = L.w * T; world.height = L.h * T;
+    L = s.layout; FH = L.floorH || 5; world.width = L.w * T; world.height = L.h * T;
     bgKey = L.key + ph + JSON.stringify(s.depts);
     drawBackground(ph);
   }
@@ -168,16 +173,22 @@ function drawRoomLife(r, now, ph) {
   const x0 = r.x * T, y0 = r.y * T, ww = r.w * T, hh = r.h * T, floorY = y0 + hh - 8;
   const busy = room.status === "running";
   if (ph !== "day" && (busy || room.status === "waiting")) rect(w, x0 + ww - 46, y0 + 11, 26, 16, "rgba(255,214,102,.75)");   // 밤에 켜진 창
-  const n = room.people.length, span = (ww - 60) / n;
-  room.people.forEach((p, i) => {
-    const px = x0 + 14 + span * (i + 0.5);
-    const bob = busy && Math.floor(now / 300 + i) % 2 ? -1 : 0;
-    drawPerson(w, px, floorY - 8, 1, room.id + p.id, p.color, { seated: true, bob, alpha: room.status === "idle" && ph === "night" ? 0.55 : 1 });
-    if (i === 0) rect(w, px - 1, floorY - 17 + bob, 2, 3, "#f5c518");   // 팀장: 금색 넥타이 (몸통 첫 줄 아래)
-    rect(w, px - 11, floorY - 12, 22, 4, "#c8975b"); rect(w, px - 11, floorY - 8, 22, 8, "#9a6b3c"); rect(w, px - 9, floorY - 1, 2, 1, "#3d2a18");   // 책상
-    const on = busy && i < Math.max(1, room.working);
-    rect(w, px + 4, floorY - 19, 8, 7, "#2b2b35");
-    rect(w, px + 5, floorY - 18, 6, 5, on ? ["#7fd1ff", "#8fe3c0", "#9bd8ff"][Math.floor(now / 180 + i) % 3] : "#3a4a5a");
+  // 팀원 전원 자리 — 4명까지 한 줄, 더 많으면 뒷줄(위)·앞줄(아래) 두 줄. 팀장은 앞줄 첫 자리 (금색 넥타이)
+  const n = room.people.length, perRow = n > 4 ? Math.ceil(n / 2) : n;
+  const rows = n > 4 ? [room.people.slice(perRow), room.people.slice(0, perRow)] : [room.people];
+  rows.forEach((people, ri) => {
+    const front = ri === rows.length - 1, fy = front ? floorY : floorY - 24, span = (ww - 58) / Math.max(1, people.length);
+    people.forEach((p, k) => {
+      const i = front ? k : perRow + k;   // 사람 순서 (0 = 팀장)
+      const px = x0 + 14 + span * (k + 0.5) + (front ? 0 : span * 0.25);
+      const bob = busy && Math.floor(now / 300 + i) % 2 ? -1 : 0;
+      drawPerson(w, px, fy - 8, 1, room.id + p.id, p.color, { seated: true, bob, alpha: room.status === "idle" && ph === "night" ? 0.55 : 1 });
+      if (i === 0) rect(w, px - 1, fy - 17 + bob, 2, 3, "#f5c518");   // 팀장: 금색 넥타이 (몸통 첫 줄 아래)
+      rect(w, px - 10, fy - 12, 20, 4, "#c8975b"); rect(w, px - 10, fy - 8, 20, 8, "#9a6b3c"); rect(w, px - 8, fy - 1, 2, 1, "#3d2a18");   // 책상
+      const on = busy && i < Math.max(1, room.working);
+      rect(w, px + 3, fy - 19, 8, 7, "#2b2b35");
+      rect(w, px + 4, fy - 18, 6, 5, on ? ["#7fd1ff", "#8fe3c0", "#9bd8ff"][Math.floor(now / 180 + i) % 3] : "#3a4a5a");
+    });
   });
   // 상태등
   const lit = room.status === "idle" || room.status === "error" || Math.floor(now / (room.status === "running" ? 350 : 700)) % 2 === 0;
@@ -186,14 +197,14 @@ function drawRoomLife(r, now, ph) {
 }
 
 function drawLift(now) {
-  const stops = [...L.floors.map((f) => f.y), L.lobby.y].map((y) => y * T + 5 * T - 3 - 22);
+  const stops = [...L.floors.map((f) => f.y), L.lobby.y].map((y) => y * T + FH * T - 3 - 22);
   const live = Object.values(S.rooms).filter((r) => r.status === "running").map((r) => r.id);
   if (lift.y === null) lift.y = stops[stops.length - 1];
   if (lift.target === null || (Math.abs(lift.y - lift.target) < 0.5 && now > lift.wait)) {
     let next = stops[hash(String(Math.floor(now / 4000))) % stops.length];
     if (live.length) {   // 일하는 팀이 있으면 그 층과 로비를 오간다 (쪽지 배달)
       const f = L.floors.find((fl) => fl.rooms.some((r) => r.team === live[Math.floor(now / 8000) % live.length]));
-      next = Math.abs(lift.y - stops[stops.length - 1]) < 1 && f ? f.y * T + 5 * T - 25 : stops[stops.length - 1];
+      next = Math.abs(lift.y - stops[stops.length - 1]) < 1 && f ? f.y * T + FH * T - 25 : stops[stops.length - 1];
     }
     if (Math.abs(lift.y - next) < 0.5) lift.wait = now + 1500; else lift.target = next;
   }
@@ -210,7 +221,11 @@ function drawLobbyLife(now) {
   const y0 = L.lobby.y * T, fy = y0 + L.lobby.h * T - 12;
   for (const s of L.lobby.spots) {
     const sx = s.x * T, sw = s.w * T;
-    if (s.kind === "reception") drawPerson(w, sx + sw / 2, fy - 12, 1, "reception", "#2563eb", { seated: true });
+    if (s.kind === "info") {   // 안내원 + 줄 선 방문객 (질문 접수 창구)
+      drawPerson(w, sx + sw / 2 - 4, fy - 14, 1, "info_desk", "#0e7490", { seated: true });
+      const sway = Math.floor(now / 900) % 2;
+      drawPerson(w, sx + sw - 14 + sway, fy + 2, 1, "visitor1", "#a855f7", { frame: sway });
+    } else if (s.kind === "reception") drawPerson(w, sx + sw / 2, fy - 12, 1, "reception", "#2563eb", { seated: true });
     else if (s.kind === "entrance") {
       const step = Math.floor(now / 600) % 2;
       drawPerson(w, sx + sw / 2 + (step ? 1 : 0), fy + 2, 2, "__user__", "#f97316", { frame: 0 });
@@ -280,13 +295,20 @@ function drawOverlay(now) {
     if (cost) label(`💰 ${cost}`, cx, fy + 3.6 * T * s, { size: fs - 2, align: "center", fg: "#9be7b4", bold: false });
     for (const bn of f.banners) {
       const d = S.depts[bn.dept];
-      if (d) label(`${d.emoji} ${d.name}`, (bn.x * T + 6) * s, (f.y * T + 7) * s, { size: fs - 1 });
+      if (!d) continue;
+      const tw = label(`${d.emoji} ${d.name}`, (bn.x * T + 6) * s, (f.y * T + 7) * s, { size: fs - 1 });
+      const more = `👔 ${d.head} · ${d.teams.length}팀 ${d.headcount}명` + (d.busy ? ` · ● ${d.busy}팀 일하는 중` : "") + (d.waiting ? ` · ❗ ${d.waiting}` : "");
+      g.font = `${fs - 3}px ${FONT}`;
+      if ((bn.x * T + 6) * s + tw + 14 + g.measureText(more).width < (bn.x + bn.w) * T * s - 4)
+        label(more, (bn.x * T + 6) * s + tw + 12, (f.y * T + 7) * s, { size: fs - 3, bold: false, fg: "#fffbe8" });
     }
     for (const r of f.rooms) {
       const x = (r.x * T + 7) * s, y = (r.y * T + 11) * s;
       if (!r.team) { label("빈 사무실", x, y, { size: fs - 2, fg: "#cfc8dd", bold: false }); continue; }
       const room = S.rooms[r.team];
       const tw = label(clip(room.name, 11), x, y, { size: fs - 1, fg: "#2a2030", bgc: "rgba(255,250,238,.88)", pad: 3 });
+      label(`👥 ${room.card.headcount}` + (room.more ? ` (+${room.more})` : ""), (r.x * T + r.w * T - 56) * s, (r.y * T + r.h * T - 5) * s,
+            { size: fs - 3, fg: "#2a2030", bgc: "rgba(255,250,238,.8)", pad: 2, bold: false });
       if (room.status === "waiting" || room.status === "error") {   // 이름표 오른쪽 (창문 아래 줄로 내려가지 않게 자리 확인)
         const text = room.status === "waiting" ? "❗ 결정 대기" : "⚠ 오류", right = (r.x * T + r.w * T - 14) * s;
         const bob = Math.floor(now / 400) % 2 ? -1 : 0;
@@ -316,7 +338,7 @@ function hitAt(ev) {
     for (const bn of f.banners) if (inside(bn.x * T, bn.y * T, bn.w * T, T)) return { kind: "dept", id: bn.dept, box: [bn.x * T, bn.y * T, bn.w * T, T] };
     for (const rm of f.rooms) if (inside(rm.x * T, rm.y * T, rm.w * T, rm.h * T))
       return rm.team ? { kind: "team", id: rm.team, box: [rm.x * T, rm.y * T, rm.w * T, rm.h * T] } : { kind: "vacant", id: "", box: [rm.x * T, rm.y * T, rm.w * T, rm.h * T] };
-    if (inside(L.plate.x * T, f.y * T, L.plate.w * T, 5 * T)) return { kind: "floor", id: String(f.n), floor: f, box: [L.plate.x * T, f.y * T, L.plate.w * T, 5 * T] };
+    if (inside(L.plate.x * T, f.y * T, L.plate.w * T, FH * T)) return { kind: "floor", id: String(f.n), floor: f, box: [L.plate.x * T, f.y * T, L.plate.w * T, FH * T] };
   }
   for (const sp of L.lobby.spots) if (sp.id !== "user" && inside(sp.x * T, L.lobby.y * T, sp.w * T, L.lobby.h * T))
     return { kind: "section", id: sp.id, label: sp.label, box: [sp.x * T, L.lobby.y * T, sp.w * T, L.lobby.h * T] };
@@ -352,9 +374,11 @@ function fillTip(h) {
   } else if (h.kind === "dept") {
     const d = S.depts[h.id];
     hd.style.background = d.color; hd.textContent = `${d.emoji} ${d.name}`;
+    hd.appendChild(el("small", "", `👔 ${d.head} · ${d.teams.length}팀 · ${d.headcount}명`));
     bd.appendChild(el("div", "", d.description));
-    chips(bd, "팀", d.teams);
-    bd.appendChild(el("div", "foot", "누르면 🧭 부서장에게 요청할 수 있습니다 (알맞은 팀을 골라 줌)"));
+    for (const t of d.teamCards) row(bd, t.name, `${t.headcount}명 · ${t.tasks.join(" / ")}`);
+    row(bd, "지금", d.state);
+    bd.appendChild(el("div", "foot", "누르면 이 부서 부서장 창구가 열립니다 — 요청을 쓰면 부서장이 알맞은 팀에 배정"));
   } else if (h.kind === "floor") {
     hd.style.background = "#2d3142"; hd.textContent = `${h.floor.n}층`;
     const names = h.floor.banners.map((b) => S.depts[b.dept] ? `${S.depts[b.dept].emoji} ${S.depts[b.dept].name}` : b.dept);
@@ -368,9 +392,9 @@ function fillTip(h) {
     bd.appendChild(el("div", "", "teams/ 에 새 팀을 만들면 config/departments.yaml 의 부서 순서대로 이 칸부터 채워집니다. 층이 꽉 차면 위에 새 층이 생깁니다."));
   } else if (h.kind === "section") {
     hd.style.background = "#7a5c2e"; hd.textContent = h.label;
-    const what = { brief: "📰 오늘의 AI 브리핑·아이디어 카드·전체 화면 보드", autonomy: "🤖 자율 실행 상태와 승인 대기열", usage: "💰 모델별 토큰·추정 비용, API 키별 내역, 가격표" }[h.id];
+    const what = { info: "🛎 무엇이든 물어보세요 — 부서장 회의로 맡을 부서를 찾고, 없으면 새 부서를 제안합니다", brief: "📰 오늘의 AI 브리핑·아이디어 카드·전체 화면 보드", autonomy: "🤖 자율 실행 상태와 승인 대기열", usage: "💰 모델별 토큰·추정 비용, API 키별 내역, 가격표" }[h.id];
     bd.appendChild(el("div", "", what));
-    bd.appendChild(el("div", "foot", "누르면 빌딩 아래에 이 내용을 엽니다"));
+    bd.appendChild(el("div", "foot", h.id === "info" ? "누르면 위쪽 접수 창구가 🛎 인포메이션 센터로 바뀝니다" : "누르면 빌딩 아래에 이 내용을 엽니다"));
   }
 }
 

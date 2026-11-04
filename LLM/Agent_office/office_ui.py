@@ -42,6 +42,8 @@ class OfficeCtx:
     data_dir: Path
     go_to_run: Callable[[dict], None]
     web: bool
+    scope_check: Callable[[str], dict] | None = None  # 🖥️ 터미널 한 줄 업무의 범위 확인 (app.cc_scope_check)
+    redirect: Callable[[str, str, dict], None] | None = None  # 범위 밖 → 맞는 팀에 맡기기 (팀 id, 질문, 판단)
 
 
 def view_picker() -> str:
