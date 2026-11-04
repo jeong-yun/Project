@@ -49,8 +49,8 @@ import home_ui
 import models_ui
 import office_ui
 from core import (
-    audio_edit, building, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_catalog, music, stock_calc,
-    usage, verification,
+    audio_edit, building, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_caps, model_catalog,
+    music, stock_calc, usage, verification,
 )
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -138,6 +138,9 @@ usage.set_catalog_prices(lambda: model_catalog.catalog_prices(DATA_DIR))
 # 🎛 부서별 모델 선택 (메인·팀 화면 공통 — dept_models_ui.py)
 dept_ctx = dept_models_ui.Ctx(teams=teams, ranks=ranks, models=models, merged=catalog, member_store=member_store,
                               dept_store=dept_store, storage=None, status_icons=PROVIDER_STATUS, data_dir=DATA_DIR)
+# 모델 능력·사라진 모델 판단에 데이터 폴더(목록·🧪 시험 결과·대체 모델)를 쓴다 (core/model_caps.py)
+# → 선택지는 그 일을 못 하는 모델·제공처에서 사라진 모델을 숨기고, 실행 후보는 건너뛴다
+model_caps.configure(DATA_DIR)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -355,12 +358,16 @@ with st.sidebar:
     models_ctx = models_ui.Ctx(models=models, yaml_models=yaml_models, merged=catalog, data_dir=DATA_DIR)
     with st.expander("🧩 모델 목록 · 직접 입력"):
         models_ui.render(models_ctx, "side")
+    models_ui.removed_notice(models_ctx)  # 제공처에서 사라진 기본 모델 — 세션당 한 번 ⚠️
 
 org = team_org(team, ranks)
 nodes = {n.id: n for n in org.walk()}
 parents = parent_map(org)
 LEGACY_ID = team.legacy.team if team.legacy else None  # 나뉘기 전 옛 팀 — 팀원 모델 선택을 물려받는다
 member_choices = member_store.load(team_id, LEGACY_ID)
+# 저장된 선택 중 제공처에서 사라졌거나 팀 업무를 못 하는 모델 → 저장값은 그대로 두고 이번엔 대체 모델·기본(다음 후보)으로 (경고 표시)
+member_choices, choice_issues = model_caps.check_choices(member_choices, model_caps.TEAM_WORK)
+choice_issue_of = {i.node_id: i for i in choice_issues}
 # 에이전트별 모델 후보 (팀원 모델 선택 반영 — 아무도 안 골랐으면 직급 설정 그대로). 조직도·에이전트 패널 표시용
 member_plans = member_models.plan(org, models, team, member_choices)
 member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
@@ -400,7 +407,8 @@ office_ctx = office_ui.OfficeCtx(
 def make_graph():
     return build_office_graph(
         org, ranks, team, models, settings, verification_cfg, storage=storage, checkpointer=get_checkpointer(),
-        member_models=member_store.load(team_id, LEGACY_ID),  # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로
+        # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로. 사라진·못 하는 모델은 대체·기본으로 (core/model_caps.py)
+        member_models=model_caps.check_choices(member_store.load(team_id, LEGACY_ID), model_caps.TEAM_WORK)[0],
         dept_head=dept_head, head_choice=dept_store.get(dept.id),  # 비평가 = 이 부서 부장 (맡기는 순간의 모델)
     )
 

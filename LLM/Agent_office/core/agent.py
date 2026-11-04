@@ -15,7 +15,7 @@ from collections.abc import Iterator
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
 
-from core import llm_factory
+from core import llm_factory, model_caps
 from core.config import date_label, rank_models, today
 from core.llm_factory import NoAvailableModelError
 from core.schemas import (
@@ -334,8 +334,8 @@ class OrgAgent:
             input_tokens=call.input_tokens, output_tokens=call.output_tokens, errors=call.errors,
         )
 
-    def candidates(self) -> list[tuple[ModelSpec, bool]]:
-        return llm_factory.require_candidates(self.rank_models, self.models, self.name)
+    def candidates(self, needs=None) -> list[tuple[ModelSpec, bool]]:
+        return llm_factory.require_candidates(self.rank_models, self.models, self.name, needs)
 
 
 class AnswerStream:
@@ -357,9 +357,10 @@ class AnswerStream:
         self.result: AgentAnswer | None = None
 
     def __iter__(self) -> Iterator[str]:
-        candidates = self.agent.candidates()
+        needs = model_caps.needs_for_messages(self.messages)  # 사진이 든 질문이면 사진을 읽는 모델만 (core/model_caps)
+        candidates = self.agent.candidates(needs) if not needs.empty else self.agent.candidates()
 
-        errors: list[str] = llm_factory.skip_notes(self.agent.rank_models, candidates)
+        errors: list[str] = llm_factory.skip_notes(self.agent.rank_models, candidates, needs)
         for spec, is_fallback in candidates:
             for attempt in range(len(llm_factory.RETRY_DELAYS) + 1):
                 started = time.perf_counter()

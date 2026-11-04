@@ -14,6 +14,10 @@
   - 자식 프로세스 환경에서 ANTHROPIC_API_KEY 등을 지운다 — .env 의 API 키(크레딧 없음)를 CLI 가 쓰지 않게
   - 초안 스트리밍: --output-format stream-json --include-partial-messages 의 text_delta
   - 구조화 출력: --json-schema → 결과의 structured_output (with_structured_output 이 {raw, parsed, parsing_error} 반환)
+  - 사진: 메시지에 사진 블록(image_url data URI 등)이 있으면 --input-format stream-json 으로 사용자 메시지 하나를
+    [사진…, 텍스트] 블록으로 보낸다 (stream-json 입력은 stream-json 출력이 필요 → 결과 줄은 같은 방식으로 찾는다).
+    도구를 끈 채로 읽힌다 — 2026-11-04 실측 (haiku: 글자·배경색 정답, --json-schema 함께 OK). 파일 경로를 주면 Read 도구가
+    필요하므로 쓰지 않는다.
 
 실패 처리 (llm_factory 의 재시도·대안 모델 로직이 아래 속성을 읽는다)
   - CLI 없음·로그인 안 됨 → ClaudeCLIUnavailable (상태 캐시를 '사용 불가'로 → 다음 호출부터 후보에서 빠짐)
@@ -225,6 +229,49 @@ def _text(content) -> str:
     return "".join(b.get("text", "") if isinstance(b, dict) else str(b) for b in content)
 
 
+def _image_block(block) -> dict | None:
+    """LangChain 메시지의 사진 블록 → Claude 메시지 형식 {"type": "image", "source": {...}} (사진이 아니면 None)."""
+    if not isinstance(block, dict):
+        return None
+    kind = block.get("type")
+    if kind == "image" and isinstance(block.get("source"), dict):
+        return {"type": "image", "source": block["source"]}  # 이미 Claude 형식
+    if kind == "image" and block.get("data"):  # LangChain 표준 형식 {source_type: base64, data, mime_type}
+        return {"type": "image", "source": {"type": "base64", "media_type": block.get("mime_type") or "image/png",
+                                            "data": block["data"]}}
+    if kind == "image" and block.get("url"):
+        url = str(block["url"])
+    elif kind == "image_url":
+        value = block.get("image_url")
+        url = str(value.get("url") if isinstance(value, dict) else value or "")
+    else:
+        return None
+    if url.startswith("data:") and ";base64," in url:
+        media, data = url[5:].split(";base64,", 1)
+        return {"type": "image", "source": {"type": "base64", "media_type": media or "image/png", "data": data}}
+    if url.startswith(("http://", "https://")):
+        return {"type": "image", "source": {"type": "url", "url": url}}
+    return None
+
+
+def images_of(messages: list[BaseMessage]) -> list[dict]:
+    """시스템 메시지가 아닌 메시지들에 든 사진 (순서대로, Claude 형식)."""
+    found = []
+    for m in messages:
+        if isinstance(m, SystemMessage) or not isinstance(m.content, list):
+            continue
+        found += [b for b in (_image_block(x) for x in m.content) if b]
+    return found
+
+
+def stdin_payload(prompt: str, images: list[dict]) -> str:
+    """사진이 있으면 stream-json 입력 한 줄 (사용자 메시지 = 사진들 + 텍스트), 없으면 프롬프트 그대로."""
+    if not images:
+        return prompt
+    message = {"type": "user", "message": {"role": "user", "content": [*images, {"type": "text", "text": prompt}]}}
+    return json.dumps(message, ensure_ascii=False) + "\n"
+
+
 def to_prompt(messages: list[BaseMessage]) -> tuple[str, str]:
     """(시스템 프롬프트, 표준 입력으로 보낼 프롬프트).
 
@@ -329,19 +376,27 @@ class _Run:
     """claude -p 프로세스 하나 — 빈 임시 폴더에서 실행, 표준 입력으로 프롬프트, 시간 초과면 강제 종료."""
 
     def __init__(self, exe: str, model: str, system: str, prompt: str, *, stream: bool,
-                 schema: dict | None = None, effort: str | None = None, timeout: float = DEFAULT_TIMEOUT_SEC):
+                 schema: dict | None = None, effort: str | None = None, timeout: float = DEFAULT_TIMEOUT_SEC,
+                 images: list[dict] | None = None):
         self.timeout = timeout
         self.timed_out = False
         self._dir = tempfile.TemporaryDirectory(prefix="agent_office_claude_")
+        if images:  # 사진은 stream-json 입력으로만 보낼 수 있고, 그때 출력도 stream-json 이어야 한다
+            stream_out = True
+            prompt = stdin_payload(prompt, images)
+        else:
+            stream_out = stream
         cmd = [
             exe, "-p", "--model", model,
-            "--output-format", "stream-json" if stream else "json",
+            "--output-format", "stream-json" if stream_out else "json",
             "--safe-mode", "--tools", "", "--strict-mcp-config",
             "--permission-mode", "dontAsk", "--permission-prompts", "none",
             "--disable-slash-commands", "--no-session-persistence",
         ]
-        if stream:
-            cmd += ["--verbose", "--include-partial-messages"]
+        if images:
+            cmd += ["--input-format", "stream-json"]
+        if stream_out:
+            cmd += ["--verbose"] + (["--include-partial-messages"] if stream else [])
         if system:
             # 명령줄 길이 한도(Windows 32K)를 넘지 않게 파일로 넘긴다 — 스킬·교훈·루브릭이 붙으면 길다
             path = Path(self._dir.name) / "system_prompt.txt"
@@ -434,7 +489,8 @@ class ClaudeCLIChatModel(BaseChatModel):
         if not exe:
             raise ClaudeCLIUnavailable("Claude CLI(claude) 가 설치되어 있지 않음")
         system, prompt = to_prompt(messages)
-        return _Run(exe, self.model, system, prompt, stream=stream, schema=schema, effort=self.effort, timeout=self.timeout)
+        return _Run(exe, self.model, system, prompt, stream=stream, schema=schema, effort=self.effort, timeout=self.timeout,
+                    images=images_of(messages))
 
     def run_json(self, messages: list[BaseMessage], schema: dict | None = None) -> dict:
         """--output-format json 으로 한 번 호출하고 성공한 result 메시지를 돌려준다."""

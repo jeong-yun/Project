@@ -462,16 +462,27 @@ def free_only(models: ModelsConfig) -> ModelsConfig:
 
 
 def available_candidates(
-    rank_models: RankModels, models: ModelsConfig, team: str | None = None
+    rank_models: RankModels, models: ModelsConfig, team: str | None = None, needs=None
 ) -> list[tuple[ModelSpec, bool]]:
     """사용 가능한 후보 모델을 우선순위대로 반환. (spec, is_fallback) 목록.
 
     할당량 소진·안전 필터 거부로 쉬는 중인 모델은 뒤로 미룬다 (모두 쉬는 중이면 그래도 시도한다).
     team: 팀별로 쉬는 기록(거부)을 볼 팀 — 안 주면 지금 usage.scope 의 팀 (화면은 직접 넘긴다).
+    needs: 이 일이 요구하는 능력 (core/model_caps.JobNeeds, 예: 사진 읽기) — 못 하는 모델·제공처에서 사라진 모델은 빼고,
+           사라진 모델에 '대체 모델'이 정해져 있으면 그 자리에 대체 모델을 쓴다. None 이어도 사라진 모델은 뺀다.
     """
-    usable = [(spec, i > 0) for i, spec in enumerate(rank_models.candidates) if is_available(spec.provider, models)]
+    specs = runtime_candidates(rank_models, needs)
+    primary = runtime_candidates(RankModels(primary=rank_models.primary), needs)
+    usable = [(spec, not (primary and spec == primary[0])) for spec in specs if is_available(spec.provider, models)]
     resting = {id(c) for c in usable if cooling_down(c[0], team)}
     return [c for c in usable if id(c) not in resting] + [c for c in usable if id(c) in resting]
+
+
+def runtime_candidates(rank_models: RankModels, needs=None) -> list[ModelSpec]:
+    """후보 목록에서 이 일을 못 하는 모델·사라진 모델을 거른 것 (core/model_caps.runtime_specs)."""
+    from core import model_caps
+
+    return model_caps.runtime_specs(rank_models.candidates, needs or model_caps.ANY)[0]
 
 
 def create_chat_model(spec: ModelSpec, models: ModelsConfig) -> BaseChatModel:
@@ -555,10 +566,13 @@ def unavailable_reason(provider: str, models: ModelsConfig) -> str:
     return STATUS_REASONS.get(status, status)
 
 
-def skip_notes(rank_models: RankModels, candidates: list[tuple[ModelSpec, bool]]) -> list[str]:
-    """첫 후보보다 앞 순위인데 쉬는 중이라 뒤로 미룬 모델 — 단계 기록('건너뛴 모델')과 '⚠️ 대안 모델' 옆에 이유를 남긴다."""
+def skip_notes(rank_models: RankModels, candidates: list[tuple[ModelSpec, bool]], needs=None) -> list[str]:
+    """첫 후보보다 앞 순위인데 쉬는 중이라 뒤로 미룬 모델 — 단계 기록('건너뛴 모델')과 '⚠️ 대안 모델' 옆에 이유를 남긴다.
+    이 일을 못 하는 모델·제공처에서 사라진 모델을 건너뛴 기록도 함께 (core/model_caps)."""
+    from core import model_caps
+
     first = candidates[0][0] if candidates else None
-    notes = []
+    notes = model_caps.runtime_specs(rank_models.candidates, needs or model_caps.ANY)[1]
     for spec in rank_models.candidates:
         if spec == first:
             break
@@ -568,9 +582,14 @@ def skip_notes(rank_models: RankModels, candidates: list[tuple[ModelSpec, bool]]
     return notes
 
 
-def require_candidates(rank_models: RankModels, models: ModelsConfig, who: str) -> list[tuple[ModelSpec, bool]]:
-    candidates = available_candidates(rank_models, models)
+def require_candidates(rank_models: RankModels, models: ModelsConfig, who: str, needs=None) -> list[tuple[ModelSpec, bool]]:
+    candidates = available_candidates(rank_models, models, needs=needs)
     if not candidates:
+        from core import model_caps
+
+        skipped = model_caps.runtime_specs(rank_models.candidates, needs or model_caps.ANY)[1]
+        if skipped and any(is_available(s.provider, models) for s in rank_models.candidates):
+            raise NoAvailableModelError(f"{who}: 이 일을 할 수 있는 모델이 후보에 없습니다.\n" + "\n".join(skipped))
         providers = sorted({s.provider for s in rank_models.candidates})
         if providers == ["freellm"]:
             # 팀원 모델 선택으로 무료 모델만 쓰게 된 팀원 — 유료 모델로 넘어가지 않고 이유를 알려 준다
@@ -599,9 +618,13 @@ def invoke_structured(
     messages: list[BaseMessage],
     who: str,
 ) -> StructuredCall:
-    """구조화 출력 호출. 일시적 오류는 같은 모델로 재시도하고, 그래도 실패하면 다음 후보로 넘어간다."""
-    candidates = require_candidates(rank_models, models, who)
-    errors: list[str] = skip_notes(rank_models, candidates)
+    """구조화 출력 호출. 일시적 오류는 같은 모델로 재시도하고, 그래도 실패하면 다음 후보로 넘어간다.
+    메시지에 사진이 있으면 사진을 읽을 수 있는 모델만 후보로 쓴다 (core/model_caps — 텍스트 전용 모델로 넘어가지 않게)."""
+    from core import model_caps
+
+    needs = model_caps.needs_for_messages(messages, model_caps.JobNeeds(structured_output=True, label=who))
+    candidates = require_candidates(rank_models, models, who, needs)
+    errors: list[str] = skip_notes(rank_models, candidates, needs)
     for spec, is_fallback in candidates:
         out = None
         for attempt in range(len(RETRY_DELAYS) + 1):

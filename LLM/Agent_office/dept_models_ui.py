@@ -16,7 +16,7 @@ from pathlib import Path
 import streamlit as st
 
 import models_ui
-from core import building, dept_heads, llm_factory, member_models, model_catalog
+from core import building, dept_heads, llm_factory, member_models, model_caps, model_catalog
 from core.config import team_org
 from core.schemas import ModelsConfig, OrgNode, Rank, Team
 
@@ -90,9 +90,18 @@ def render_head(ctx: Ctx, dept: building.Department, where: str) -> None:
     st.session_state[widget] = choice  # 저장값이 기준 (다른 화면에서 바꿔도 맞게)
     c1, c2 = st.columns([3, 5])
     c1.markdown(f"**{head.label}**  \n⚖️ 비평가 · 🧭 부서장")
-    c2.selectbox(f"{head.name} 모델", ["", *member_models.catalog(ctx.models)], key=widget, label_visibility="collapsed",
+    # 비평·팀 고르기를 못 하는 모델·제공처에서 사라진 모델은 숨긴다 (이유는 아래 'ⓘ 숨긴 모델', core/model_caps.py)
+    shown, hidden = model_caps.selectable_models(model_caps.TEAM_WORK, member_models.catalog(ctx.models))
+    options = ["", *shown]
+    if choice and choice not in options:  # 저장값이 사라졌거나 못 하는 모델 — 지우지 않고 그대로 보여 주고 경고
+        options.append(choice)
+    c2.selectbox(f"{head.name} 모델", options, key=widget, label_visibility="collapsed",
                  format_func=lambda k: default if not k else _label(ctx, k, states),
                  on_change=_on_head_change, args=(ctx, dept.id, widget))
+    if choice and choice not in shown:
+        c2.markdown(f":orange[⚠️ **고른 모델 {member_models.split_key(choice)[1]}**] — 지금 쓸 수 없는 모델입니다 (사라짐·능력 부족). "
+                    "비평은 기본 순서의 다음 모델로 합니다.")
+    models_ui.hidden_note(hidden, ctx.merged)
     st.caption(f"관점: {head.persona}  \n부장은 팀 조직도 밖에서 이 부서 **모든 팀의 최종 답변을 비평**하고, 🧭 부서장으로 요청을 알맞은 팀에 보냅니다. "
                "강도 제한은 없습니다 — 다만 채점 대상(팀장)보다 약한 모델이면 ⚠️ 로 알립니다. "
                "비공개 팀은 부장 모델을 고르지 않으면 팀장 모델로 비평합니다 (문서가 팀 밖 제공처로 가지 않게).")
@@ -174,6 +183,10 @@ def render_members(ctx: Ctx, team: Team) -> None:
     org = team_org(team, ctx.ranks)
     ranks_by_id = {r.id: r for r in ctx.ranks}
     choices = ctx.member_store.load(team.id, _legacy(team))
+    # 저장된 선택 중 사라졌거나 팀 업무를 못 하는 모델 — 저장값은 그대로, 이번엔 대체·기본으로 (경고 표시, core/model_caps.py)
+    _, issues = model_caps.check_choices(choices, model_caps.TEAM_WORK)
+    issue_of = {i.node_id: i for i in issues}
+    hidden_all: dict[str, model_caps.Hidden] = {}
     st.caption(
         ("지금: 모두 기본(직급 설정). " if not choices else f"지금: {len(choices)}명 직접 선택. ")
         + "**기본** = config/models.yaml 의 직급 모델. 규칙: 팀원은 상사보다 강한 모델을 쓸 수 없고, 상사의 모델을 **직접 고르면** "
@@ -198,7 +211,10 @@ def render_members(ctx: Ctx, team: Team) -> None:
     head[2].caption(f"최근 {USAGE_DAYS}일 사용량")
     for node in org.walk():
         p = plans[node.id]
-        options = ["", *member_models.allowed_keys(ctx.models, node, p)]
+        # 팀 업무를 못 하는 모델·제공처에서 사라진 모델은 선택지에서 숨긴다 (이유는 아래 'ⓘ 숨긴 모델')
+        shown, hidden = model_caps.selectable_models(model_caps.TEAM_WORK, member_models.allowed_keys(ctx.models, node, p))
+        hidden_all.update({h.key: h for h in hidden})
+        options = ["", *shown]
         # '기본'을 고르면 쓸 모델 (본인 선택만 뺀 결과 — 상사 규칙에 걸리면 자동으로 낮춘 모델)
         as_default = p if not p.choice else member_models.plan(
             org, ctx.models, team, {k: v for k, v in choices.items() if k != node.id})[node.id]
@@ -218,6 +234,11 @@ def render_members(ctx: Ctx, team: Team) -> None:
         off = chosen_off(runtime_plans[node.id], runtime_states)
         if off:
             c_use.markdown(f":red[⛔ **고른 모델 꺼짐**] — {off[1]}")  # 무료 서버면 'Docker Desktop 실행 후 FreeLLMAPI 켜기'까지
+        issue = issue_of.get(node.id)
+        if issue:  # 저장된 선택이 사라졌거나 못 하는 모델 — 저장값은 그대로, 이번엔 대체·기본으로
+            use = member_models.split_key(issue.use)[1] if issue.use else "기본(직급의 다음 후보)"
+            c_use.markdown(f":orange[⚠️ **고른 모델 {member_models.split_key(issue.key)[1]}**] — {issue.reasons[0]} → {use} 사용")
+    models_ui.hidden_note(list(hidden_all.values()), ctx.merged)
     if choices:
         st.button("↩️ 모두 기본으로", key=f"member_reset_{team.id}", on_click=_reset_members, args=(ctx, team))
 
