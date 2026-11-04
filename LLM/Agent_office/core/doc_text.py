@@ -78,14 +78,14 @@ def read_docx(data: bytes) -> tuple[str, str]:
     return "\n".join(lines), f"문단 {len(document.paragraphs)}개 · 표 {len(document.tables)}개"
 
 
-def read_pdf(data: bytes) -> tuple[str, str, list[str]]:
+def pdf_page_texts(data: bytes) -> tuple[list[str], int]:
+    """PDF 쪽마다 글자 층 (앞 MAX_PAGES 쪽) + 전체 쪽 수. 글자 층이 없는 쪽(스캔 그림)은 빈 글자."""
     import pypdfium2 as pdfium
 
     try:
         pdf = pdfium.PdfDocument(data)
     except Exception as e:  # noqa: BLE001
         raise DocReadError(f"PDF 를 열지 못했습니다 ({type(e).__name__}). 암호가 걸려 있으면 풀어서 올려 주세요.") from e
-    notes: list[str] = []
     try:
         total = len(pdf)
         pages = []
@@ -97,11 +97,17 @@ def read_pdf(data: bytes) -> tuple[str, str, list[str]]:
             page.close()
     finally:
         pdf.close()
+    return pages, total
+
+
+def read_pdf(data: bytes) -> tuple[str, str, list[str]]:
+    pages, total = pdf_page_texts(data)
+    notes: list[str] = []
     if total > MAX_PAGES:
         notes.append(f"PDF {total}쪽 중 앞 {MAX_PAGES}쪽만 읽었습니다.")
     text = "\n\n".join(pages)
     if total and not text.strip():
-        notes.append("PDF 에 글자 층이 없습니다 (스캔한 그림 PDF). 글자가 들어 있는 PDF 나 .docx 로 올려 주세요.")
+        notes.append("PDF 에 글자 층이 없습니다 (스캔한 그림 PDF). 포트폴리오·자소서 팀 양식에 올리면 그림 읽기(확인 단계)로 읽습니다.")
     return text, f"{min(total, MAX_PAGES)}쪽", notes
 
 

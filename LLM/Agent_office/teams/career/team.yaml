@@ -7,6 +7,11 @@
 #   팀장·인사      : 30년 차 인사 팀장 — 채용 담당자가 읽는 눈으로 JD 적합도·구성·설득력, 최종본
 #
 # 근거 자료: career_docs 툴이 올린 문서(docx·pdf·hwp·hwpx·md·txt)·JD·문항을 코드로 읽어 준다 (외부 호출 없음).
+# 그림 입력: JD·요약 문서 칸에 그림(png·jpg·jpeg·webp — 채용 공고 화면 캡처 등, 여러 장이면 순서대로)·스캔 PDF(글자 층 없는 쪽)도 올릴 수 있다.
+#   맡기기 전에 비전 모델(core/vision.py — 설계 팀 도면 그림 읽기와 같은 부분)이 글자를 그대로 옮기고, 사람이 화면에서 확인·수정해
+#   '이 내용으로 진행'을 눌러야 시작한다 (career_ui.confirm_step). 확인한 글이 JD·사실의 출처 → 사실 검사도 그 글과 대조한다.
+#   모델은 이 업무 팀원들의 모델 후보(🎛 팀원 모델 선택·🆓 무료만·끈 provider 반영) 중 그림을 볼 수 있는 것(OpenAI·Google·Anthropic).
+#   그림은 그 모델 회사로 전송된다 (무료 모델·Claude 구독은 그림을 넘기지 않아 후보에서 빠진다 → 없으면 글로 붙여 넣으라고 안내).
 # 하네스 (코드가 검사)
 #   career_facts     : JSON 인용이 올린 문서에 글자 그대로 있는지 + 본문 숫자가 문서·JD·문항에 있는지 ([확인 필요] 문장 제외)
 #   char_limits      : 자소서 문항별 글자 수 (공백 포함/제외) — 넘거나 절반에 못 미치면 다시 쓰기
@@ -19,7 +24,7 @@
 # 시험용 가상 인물: samples/ (실제 사람·회사 아님). 업무 양식의 '샘플로 해 보기'를 켜면 쓴다.
 
 name: 👔 포트폴리오·자소서 팀
-description: 내가 올린 요약 문서(Word·PDF·한글·md)만 근거로 JD 에 맞춘 자기소개서 답변과 직무별 포트폴리오를 쓴다. 문서에 없는 경험·숫자는 지어내지 않고 [확인 필요]로 표시한다.
+description: 내가 올린 요약 문서(Word·PDF·한글·md, 그림·스캔 PDF 는 확인 단계를 거쳐)만 근거로 JD 에 맞춘 자기소개서 답변과 직무별 포트폴리오를 쓴다. 문서에 없는 경험·숫자는 지어내지 않고 [확인 필요]로 표시한다.
 
 # 자유 질문 범위 — 화면 안내 · '맡기기' 전 범위 확인 (core/scope.py). keywords 가 분명히 맞으면 모델 없이 통과
 scope:
@@ -140,13 +145,14 @@ tasks:
       - {key: use_sample, label: 🧪 가상 인물 샘플 문서·JD로 해 보기, type: checkbox}
       - {key: tone, label: 말투·강조하고 싶은 점 (선택), placeholder: "예: 차분하고 담백하게, 데이터 분석 경험을 앞에"}
       - {key: fmt_docx, label: Word(.docx) 로도 받기, type: checkbox, default: true}
-      - {key: docs, label: 요약 문서 (경력·프로젝트 정리), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt],
-         help: "여러 개 올릴 수 있습니다. 한글은 .hwpx 가 가장 정확합니다 (.hwp 는 암호·배포용·문서보안(DRM) 문서를 읽지 못합니다)"}
+      - {key: docs, label: 요약 문서 (경력·프로젝트 정리), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
+         help: "여러 개 올릴 수 있습니다. 한글은 .hwpx 가 가장 정확합니다 (.hwp 는 암호·배포용·문서보안(DRM) 문서를 읽지 못합니다). 그림·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전에 확인·수정한 그 글이 사실의 출처가 됩니다 (그림은 고른 모델 회사로 전송)"}
       - {key: fmt_hwpx, label: 한글(.hwpx) 로도 받기, type: checkbox}
       - {key: questions, label: "자소서 문항 (한 줄에 하나)", type: textarea, required: true,
          placeholder: "1. 지원 동기와 입사 후 포부를 작성해 주세요 (700자)\n2. 직무 관련 경험과 성과 (1,000자, 공백 제외)"}
       - {key: jd, label: JD (채용 공고 붙여 넣기), type: textarea, placeholder: "주요 업무·자격 요건·우대 사항을 그대로 붙여 넣으세요"}
-      - {key: jd_file, label: 또는 JD 파일, type: file, options: [docx, pdf, hwp, hwpx, md, txt]}
+      - {key: jd_file, label: 또는 JD 파일·화면 캡처, type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
+         help: "여러 장이면 공고 순서대로 올려 주세요. 그림(png·jpg·webp)·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전에 확인·수정 단계가 있습니다 (그림은 고른 모델 회사로 전송)"}
     fixed: {career_kind: cover_letter, fmt_md: "예"}
     question: |
       올린 요약 문서만 근거로 아래 자기소개서 문항에 JD 에 맞춘 답변을 써줘.
@@ -190,11 +196,12 @@ tasks:
       - {key: fmt_docx, label: Word(.docx), type: checkbox, default: true}
       - {key: length, label: 분량, type: select, options: ["보통 (A4 3~5쪽)", "간단 (A4 1~2쪽)", "상세 (A4 6쪽 이상)"]}
       - {key: fmt_hwpx, label: 한글(.hwpx), type: checkbox, default: true}
-      - {key: docs, label: 요약 문서 (경력·프로젝트 정리), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt],
-         help: "여러 개 올릴 수 있습니다. 한글은 .hwpx 가 가장 정확합니다 (.hwp 는 암호·배포용·문서보안(DRM) 문서를 읽지 못합니다)"}
+      - {key: docs, label: 요약 문서 (경력·프로젝트 정리), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
+         help: "여러 개 올릴 수 있습니다. 한글은 .hwpx 가 가장 정확합니다 (.hwp 는 암호·배포용·문서보안(DRM) 문서를 읽지 못합니다). 그림·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전에 확인·수정한 그 글이 사실의 출처가 됩니다 (그림은 고른 모델 회사로 전송)"}
       - {key: fmt_md, label: Markdown(.md), type: checkbox, default: true}
       - {key: jd, label: JD (선택 — 붙여 넣으면 대응표도 만듭니다), type: textarea}
-      - {key: jd_file, label: 또는 JD 파일 (선택), type: file, options: [docx, pdf, hwp, hwpx, md, txt]}
+      - {key: jd_file, label: 또는 JD 파일·화면 캡처 (선택), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
+         help: "여러 장이면 공고 순서대로 올려 주세요. 그림(png·jpg·webp)·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전에 확인·수정 단계가 있습니다 (그림은 고른 모델 회사로 전송)"}
     fixed: {career_kind: portfolio}
     question: |
       올린 요약 문서만 근거로 아래 직무에 맞춘 포트폴리오를 써줘.

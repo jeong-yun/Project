@@ -7,11 +7,10 @@
                  - 이 앱이 만든 DXF 면 안에 넣어 둔 원본 JSON 을 꺼낸다 (정확)
                  - 다른 프로그램의 DXF 면 닫힌 폴리선 = 방, 그 안의 글자 = 방 이름으로 읽는다 (근사 — 한 층만)
   .png .jpg .pdf : 비전 모델(OpenAI·Google)이 그림을 보고 방 배치를 추정한다 (근사 — 치수는 '확인 필요')
-                 PDF 는 첫 쪽을 그림으로 바꿔 읽는다 (pypdfium2)
+                 PDF 는 첫 쪽을 그림으로 바꿔 읽는다 (pypdfium2) — 그림 읽기 공용 부분은 core/vision.py
   .dwg         : 읽지 않는다. ODA File Converter(무료)로 DXF 로 바꿔 다시 올리도록 안내한다
 """
 
-import base64
 import io
 import json
 import re
@@ -25,10 +24,9 @@ from shapely.ops import unary_union
 
 from core import llm_factory
 from core.floorplan import ROOM_TYPES, Floor, Layout, LayoutParseError, Rect, Room, parse_layout
-from core.schemas import ModelsConfig, RankModels
+from core.schemas import ModelsConfig
+from core.vision import IMAGE_TYPES, VISION_PROVIDERS, image_part, pdf_first_page_png, vision_models  # noqa: F401 — 공용 그림 읽기
 
-IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
-VISION_PROVIDERS = ("openai", "google", "anthropic", "claude_cli")  # 참고용 — 실제 판단은 core/model_caps (모델 단위)
 DWG_HELP = (
     "DWG 는 AutoCAD 전용 형식이라 직접 읽지 않습니다. 무료 'ODA File Converter'(Open Design Alliance)로 "
     "DXF(ASCII, 2010 이상)로 바꾼 뒤 다시 올려 주세요. 변환기는 직접 내려받아 설치해야 합니다."
@@ -216,45 +214,15 @@ VISION_PROMPT = "\n".join([
 ])
 
 
-def vision_models(models: ModelsConfig) -> RankModels | None:
-    """보조 모델 후보 중 그림을 읽을 수 있는 것만 (유료 모델 → 직급 모델 순으로 찾는다).
-    '읽을 수 있는가'는 core/model_caps 가 판단한다 (텍스트 전용 gpt-oss·Solar, 사진 전달이 확인 안 된 무료 프록시,
-    제공처에서 사라진 모델은 빠진다)."""
-    from core import model_caps
-
-    pool = [*models.utility.candidates, *[s for r in models.ranks.values() for s in r.candidates]]
-    pool = model_caps.runtime_specs(pool, model_caps.IMAGE_READING)[0]
-    seen, picked = set(), []
-    for spec in pool:
-        if spec.label not in seen:
-            seen.add(spec.label)
-            picked.append(spec)
-    if not picked:
-        return None
-    return RankModels(primary=picked[0], fallback=picked[1:4])
-
-
-def pdf_first_page_png(data: bytes) -> bytes:
-    import pypdfium2 as pdfium
-
-    pdf = pdfium.PdfDocument(data)
-    page = pdf[0]
-    image = page.render(scale=2.0).to_pil()
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
-
-
 def from_image(data: bytes, mime: str, models: ModelsConfig) -> ImportResult:
     rank_models = vision_models(models)
     if rank_models is None or not llm_factory.available_candidates(rank_models, models):
         return ImportResult(None, "그림 읽기", notes=["그림을 읽으려면 OpenAI 또는 Google API 키가 필요합니다 (.env)."])
-    url = f"data:{mime};base64,{base64.b64encode(data).decode()}"
     messages = [
         SystemMessage(VISION_PROMPT),
         HumanMessage(content=[
             {"type": "text", "text": "이 평면도의 방 배치를 읽어 줘."},
-            {"type": "image_url", "image_url": {"url": url}},
+            image_part(data, mime),
         ]),
     ]
     call = llm_factory.invoke_structured(rank_models, models, VisionLayout, messages, "도면 그림 읽기")
