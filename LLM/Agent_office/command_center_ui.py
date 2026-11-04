@@ -15,7 +15,7 @@ import streamlit as st
 
 import autonomy_ui
 import office_ui
-from core import autonomy, office
+from core import autonomy, call_monitor, office
 from core.live import STAGES, stage_of
 
 TABS = {
@@ -94,6 +94,8 @@ def lead_state(run: dict | None) -> str:
         return "▶ 진행 중"
     if run.get("error"):
         return "⚠ 오류"
+    if run["status"] == "step_check":
+        return "🔀 확인 대기"
     return "🔔 결정 대기" if run["status"] == "awaiting_human" else "✓ 끝남"
 
 
@@ -187,6 +189,14 @@ def _monitor(ctx, run, target, active_ids) -> None:
                                                 active_ids=active_ids, blocked=ctx.blocked)
         drafting = len(run["drafting"].get(node.id, ""))
         parts.append(_line(f"{icon} {ctx.names[node.id]:<10} {now_text}" + (f" · 초안 {drafting}자" if drafting else "")))
+    # ⏱ 모델 호출 — 어느 호출이 왜 오래 걸리는지 (조작은 아래 '⏱ 호출 모니터')
+    calls = call_monitor.calls(run["run_id"])
+    if calls:
+        stall = float((ctx.settings.get("call_monitor") or {}).get("stall_sec") or call_monitor.STALL_SEC)
+        parts.append(_line("⏱ " + call_monitor.headline(calls, stall_sec=stall), "ao-cc-lead"))
+        parts += [_line(line) for line in call_monitor.console_lines(calls, stall_sec=stall)]
+        if not run["done"]:
+            parts.append(_line("느린 호출은 '⏱ 호출 모니터'에서 다른 모델로 바꾸거나 건너뛸 수 있습니다.", "ao-cc-dim"))
     st.markdown(_box(parts), unsafe_allow_html=True)
 
 

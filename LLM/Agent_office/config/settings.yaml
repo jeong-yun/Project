@@ -49,6 +49,9 @@ google:
   # 비워 두면 구글 라이브러리 기본값 600초까지 기다린다 (2026-11-04 실측: 비평가·재작성 호출이 약 10분 무응답).
   # 4만 토큰 입력도 정상이면 1~2분 안에 끝나므로 180초. 0 이하 = 제한 없음.
   timeout_sec: 180
+call_monitor:
+  # ⏱ 호출 모니터 (core/call_monitor.py, run_control_ui.py) — 모델 호출마다 시간·상태를 보고, 끊거나 다른 모델로 바꾼다
+  stall_sec: 60            # 이 시간 동안 응답(토큰)이 없으면 '⚠️ 응답 없음' 표시
 
 web_search:
   # 팀 team.yaml 의 tools 에 web_search 가 있고, 질문 화면의 '🌐 웹 검색' 이 켜져 있을 때 사용

@@ -413,6 +413,9 @@ class _Run:
             self._dir.cleanup()
             mark_unavailable("not_installed")
             raise ClaudeCLIUnavailable(f"Claude CLI 실행 파일이 없음: {exe}") from e
+        from core import call_monitor  # ⏱ 호출 모니터에서 끊으면 이 프로세스를 강제 종료한다
+
+        call_monitor.attach_process(self.proc)
         self._stderr: list[str] = []
         self._threads = [threading.Thread(target=self._drain_stderr, daemon=True),
                          threading.Thread(target=self._write_stdin, args=(prompt,), daemon=True)]

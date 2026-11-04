@@ -15,7 +15,7 @@ from collections.abc import Iterator
 
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, SystemMessage
 
-from core import llm_factory, model_caps
+from core import call_monitor, llm_factory, model_caps
 from core.config import date_label, rank_models, today
 from core.llm_factory import NoAvailableModelError
 from core.schemas import (
@@ -361,24 +361,41 @@ class AnswerStream:
         candidates = self.agent.candidates(needs) if not needs.empty else self.agent.candidates()
 
         errors: list[str] = llm_factory.skip_notes(self.agent.rank_models, candidates, needs)
-        for spec, is_fallback in candidates:
+        todo = call_monitor.prefer(list(candidates), self.agent.name)  # ⏱ 호출 모니터에서 '남은 업무에도 이 모델'
+        while todo:
+            spec, is_fallback = todo.pop(0)
             for attempt in range(len(llm_factory.RETRY_DELAYS) + 1):
                 started = time.perf_counter()
                 full: AIMessageChunk | None = None
+                call = call_monitor.begin(spec, self.agent.name, attempt, is_fallback, streaming=True)
                 try:
-                    llm = llm_factory.create_chat_model(spec, self.agent.models)
-                    # tags: LangGraph 스트림에서 '이 토큰은 누구의 초안인지' 알아보는 표시
-                    config = {"tags": [self.tag]} if self.tag else None
-                    with llm_factory.provider_slot(spec.provider):  # provider 별 동시 호출 제한 (재시도 대기 중엔 자리를 비움)
-                        started = time.perf_counter()
-                        for chunk in llm.stream(self.messages, config=config):
-                            full = chunk if full is None else full + chunk
-                            text = chunk_text(chunk.content)
-                            if text:
-                                yield text
+                    with call_monitor.active(call):
+                        llm = llm_factory.create_chat_model(spec, self.agent.models)
+                        # tags: LangGraph 스트림에서 '이 토큰은 누구의 초안인지' 알아보는 표시
+                        config = {"tags": [self.tag]} if self.tag else None
+                        with llm_factory.provider_slot(spec.provider):  # provider 별 동시 호출 제한 (재시도 대기 중엔 자리를 비움)
+                            call.running()
+                            started = time.perf_counter()
+                            # 보조 스레드에서 받는다 → ⏱ 호출 모니터에서 끊으면 다음 조각에서 멈추고 반쯤 받은 글은 버린다
+                            for chunk in call.stream(lambda: llm.stream(self.messages, config=config)):
+                                full = chunk if full is None else full + chunk
+                                text = chunk_text(chunk.content)
+                                if text:
+                                    call.token(text)
+                                    yield text
                     if full is None or not chunk_text(full.content).strip():
                         # 조각 0개·공백뿐인 응답은 '성공'이 아니다 → 빈 초안이 위로 올라가지 않게 다음 후보로
                         raise EmptyResponseError("모델이 빈 응답을 반환했습니다 (스트림 조각 0개 또는 공백뿐)")
+                except call_monitor.CallCancelled as e:
+                    if full is not None and chunk_text(full.content) and self.on_restart:
+                        self.on_restart()  # 끊긴 호출이 반쯤 쓴 초안은 버린다
+                    if e.switch_to is None:
+                        call._end("cancelled")
+                        raise
+                    call._end("switched")
+                    errors.append(f"{spec.label}: 사용자가 {e.switch_to.label} 로 바꿈")
+                    todo.insert(0, (e.switch_to, True))
+                    break
                 except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
                     # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
                     started_writing = full is not None and bool(chunk_text(full.content))
@@ -391,11 +408,24 @@ class AnswerStream:
                         self.on_restart()  # 반쯤 쓴 초안은 버린다
                     delay = llm_factory.retry_delay(e, attempt)
                     if delay is not None:
-                        llm_factory.sleep(delay)  # 잠깐 기다렸다 같은 모델로 다시 (곧 풀리는 무료 한도면 그 시간만큼)
+                        call.waiting_retry(delay)
+                        try:
+                            with call_monitor.active(call):
+                                llm_factory.sleep(delay)  # 잠깐 기다렸다 같은 모델로 다시 (곧 풀리는 무료 한도면 그 시간만큼)
+                        except call_monitor.CallCancelled as c:
+                            if c.switch_to is None:
+                                call._end("cancelled")
+                                raise
+                            call._end("switched")
+                            todo.insert(0, (c.switch_to, True))
+                            break
+                        call.fail(e)
                         continue
+                    call.fail(e)
                     break  # 영구 오류이거나 재시도를 다 썼으면 다음 후보로
 
                 usage = full.usage_metadata or {}
+                call.finish(usage.get("input_tokens"), usage.get("output_tokens"))
                 self.result = AgentAnswer(
                     node_id=self.agent.node.id,
                     rank_id=self.agent.rank.id,

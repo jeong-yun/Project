@@ -22,7 +22,7 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel
 
-from core import usage
+from core import call_monitor, usage
 from core.schemas import ModelsConfig, ModelSpec, RankModels
 
 
@@ -190,8 +190,8 @@ def failure_reason(error: str) -> str:
 
 
 def sleep(seconds: float) -> None:
-    """재시도 대기 (테스트에서 0 초로 바꿀 수 있게 함수로 분리)."""
-    time.sleep(seconds)
+    """재시도 대기 (테스트에서 0 초로 바꿀 수 있게 함수로 분리). ⏱ 호출 모니터에서 끊으면 바로 깬다."""
+    call_monitor.wait(seconds)
 
 
 # ─── provider 별 동시 호출 제한 ──────────────────────────────────────
@@ -238,8 +238,12 @@ def provider_slot(provider: str) -> Iterator[None]:
         slot = _slots.get(provider)
         if slot is None:
             slot = _slots[provider] = threading.BoundedSemaphore(limit)
-    with slot:
+    while not slot.acquire(timeout=0.25):  # 자리를 기다리는 동안에도 ⏱ 호출 모니터의 '다른 모델로'·중단을 알아챈다
+        call_monitor.check_cancel()
+    try:
         yield
+    finally:
+        slot.release()
 
 # Upstage Solar 는 OpenAI 호환 API 를 제공하므로 별도 패키지 없이 ChatOpenAI 로 호출한다.
 UPSTAGE_BASE_URL = "https://api.upstage.ai/v1"
@@ -619,24 +623,42 @@ def invoke_structured(
     who: str,
 ) -> StructuredCall:
     """구조화 출력 호출. 일시적 오류는 같은 모델로 재시도하고, 그래도 실패하면 다음 후보로 넘어간다.
-    메시지에 사진이 있으면 사진을 읽을 수 있는 모델만 후보로 쓴다 (core/model_caps — 텍스트 전용 모델로 넘어가지 않게)."""
+    메시지에 사진이 있으면 사진을 읽을 수 있는 모델만 후보로 쓴다 (core/model_caps — 텍스트 전용 모델로 넘어가지 않게).
+
+    호출마다 ⏱ 호출 모니터(core/call_monitor.py)에 기록한다. 사람이 '다른 모델로 다시'를 누르면 그 모델을 맨 앞에 넣고
+    다시 하고, 건너뛰기·중단이면 CallCancelled 를 그대로 올린다 (모델 실패로 치지 않음 — 쿨다운·대안 모델 없음).
+    """
     from core import model_caps
 
     needs = model_caps.needs_for_messages(messages, model_caps.JobNeeds(structured_output=True, label=who))
     candidates = require_candidates(rank_models, models, who, needs)
     errors: list[str] = skip_notes(rank_models, candidates, needs)
-    for spec, is_fallback in candidates:
+    todo = call_monitor.prefer(list(candidates), who)
+    while todo:
+        spec, is_fallback = todo.pop(0)
         out = None
         for attempt in range(len(RETRY_DELAYS) + 1):
             started = time.perf_counter()
+            call = call_monitor.begin(spec, who, attempt, is_fallback, schema.__name__)
             try:
-                llm = create_chat_model(spec, models)
-                structured = llm.with_structured_output(schema, include_raw=True, **structured_output_kwargs(spec))
-                with provider_slot(spec.provider):  # 동시 호출 제한 — 자리가 빌 때까지 기다린 시간은 빼고 잰다
-                    started = time.perf_counter()
-                    out = structured.invoke(messages)
+                with call_monitor.active(call):
+                    llm = create_chat_model(spec, models)
+                    structured = llm.with_structured_output(schema, include_raw=True, **structured_output_kwargs(spec))
+                    with provider_slot(spec.provider):  # 동시 호출 제한 — 자리가 빌 때까지 기다린 시간은 빼고 잰다
+                        call.running()
+                        started = time.perf_counter()
+                        out = call.run(lambda: structured.invoke(messages))
                 if out.get("parsed") is None:
                     raise ValueError(f"구조화 출력 파싱 실패: {out.get('parsing_error')}")
+                break
+            except call_monitor.CallCancelled as e:
+                out = None
+                if e.switch_to is None:
+                    call._end("cancelled")
+                    raise
+                call._end("switched")  # 사람이 고른 모델로 이 단계를 다시
+                errors.append(f"{spec.label}: 사용자가 {e.switch_to.label} 로 바꿈")
+                todo.insert(0, (e.switch_to, True))
                 break
             except Exception as e:  # noqa: BLE001 — provider 별 예외 타입이 제각각
                 # provider 에러 메시지는 매우 길 수 있어 앞부분만 남긴다
@@ -645,12 +667,25 @@ def invoke_structured(
                 out = None
                 delay = retry_delay(e, attempt)
                 if delay is not None:
-                    sleep(delay)  # 잠깐 기다렸다 같은 모델로 다시 (곧 풀리는 무료 한도면 그 시간만큼)
+                    call.waiting_retry(delay)
+                    try:
+                        with call_monitor.active(call):
+                            sleep(delay)  # 잠깐 기다렸다 같은 모델로 다시 (곧 풀리는 무료 한도면 그 시간만큼)
+                    except call_monitor.CallCancelled as c:
+                        if c.switch_to is None:
+                            call._end("cancelled")
+                            raise
+                        call._end("switched")
+                        todo.insert(0, (c.switch_to, True))
+                        break
+                    call.fail(e)
                     continue
+                call.fail(e)
                 break  # 영구 오류이거나 재시도를 다 썼으면 다음 후보로
         if out is None:
             continue
         usage = getattr(out.get("raw"), "usage_metadata", None) or {}
+        call.finish(usage.get("input_tokens"), usage.get("output_tokens"))
         return StructuredCall(
             parsed=out["parsed"],
             spec=spec,

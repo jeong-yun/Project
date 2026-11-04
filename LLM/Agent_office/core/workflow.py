@@ -39,7 +39,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from core import dept_heads, harness, llm_factory, search, usage, verification
+from core import call_monitor, dept_heads, harness, llm_factory, search, step_mode, usage, verification
 from core.agent import OrgAgent, chunk_text, with_feedback
 from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
@@ -77,6 +77,10 @@ class OfficeState(TypedDict, total=False):
     decision: HumanDecision
     lessons: list[Lesson]
     notes: list[str]
+    # 🔀 단계마다 확인 (core/step_mode.py) — 끄면(기본) 아래 값은 쓰지 않는다
+    step_mode: bool
+    directions: list  # 팀장이 내놓은 진행 방향 (DirectionOption)
+    root_plan: dict | None  # 팀장의 업무 분배 {"chosen": [(하위 id, 업무)…]} — 사람이 확인·수정한 것
 
 
 def make_checkpointer(db_path):
@@ -186,11 +190,21 @@ def build_office_graph(
             results = harness.run_validators(validators, answer.content, options)
             if harness.all_passed(results) or attempt == cfg.max_retries:
                 break
+            if call_monitor.skipped("harness") or call_monitor.stopped():
+                log.append("⛔ 사용자가 하네스 재시도를 건너뜀 → 지금 답변으로 진행")
+                break
             feedback = harness.harness_feedback(results)
             log.append(f"하네스 실패 → 재작성 {attempt + 1}회: " + " / ".join(r.log for r in results if not r.passed))
             emit({"type": "retry", "node": answer.node_id, "reason": "harness"})
             previous = answer
-            answer = redo(feedback, previous)
+            try:
+                with call_monitor.purpose("harness"):
+                    answer = redo(feedback, previous)
+            except call_monitor.CallCancelled:
+                # ⏱ 호출 모니터에서 건너뛰기·중단 → 끊긴 재작성은 버리고 직전 답변 유지
+                answer = previous
+                log.append("⛔ 하네스 재작성을 끊음 → 직전 답변 유지")
+                break
             answer.attempts = previous.attempts + 1
             answer.verification_log = [*previous.verification_log, *answer.verification_log]
         answer.harness = results
@@ -232,7 +246,11 @@ def build_office_graph(
         if not state.get("auto_brief", True):
             return {"brief": partial.model_copy(update={"goal": partial.goal or state["question"]}), "notes": []}
         emit({"type": "start", "node": state["root_id"], "kind": "brief"})
-        brief, notes = draft_brief(state["question"], models, partial)
+        try:
+            brief, notes = draft_brief(state["question"], models, partial)
+        except call_monitor.CallCancelled:  # ⏹ 중단 → 질문을 그대로 목표로
+            return {"brief": partial.model_copy(update={"goal": partial.goal or state["question"]}),
+                    "notes": ["⏹ 사용자가 중단 — 요청 정리 생략"]}
         return {"brief": brief, "notes": notes}
 
     def research_node(state: OfficeState) -> dict:
@@ -253,11 +271,18 @@ def build_office_graph(
             )
 
         use_web = bool(state.get("use_web") and WEB_SEARCH_TOOL in team.tools)
+
+        def unless_stopped(future, empty):
+            try:
+                return future.result() if future else empty
+            except call_monitor.CallCancelled:  # ⏹ 중단 → 조사 결과 없이
+                return empty
+
         with ContextThreadPoolExecutor(max_workers=2) as pool:
-            tools_f = pool.submit(tools_job) if data_tools else None
-            web_f = pool.submit(web_job) if use_web else None
-            tool_results = tools_f.result() if tools_f else []
-            web = web_f.result() if web_f else None
+            tools_f = pool.submit(tools_job) if data_tools and not call_monitor.stopped() else None
+            web_f = pool.submit(web_job) if use_web and not call_monitor.stopped() else None
+            tool_results = unless_stopped(tools_f, [])
+            web = unless_stopped(web_f, None)
         return {
             "web": web,
             "tool_results": tool_results,
@@ -340,15 +365,26 @@ def build_office_graph(
             evidence = verification.trim_evidence(evidence_parts(state), critic_cfg["evidence_chars"])
             answer.verification_log = [*answer.verification_log, *(f"⚠️ {w}" for w in critic_plan.warnings)]
             tried: list[AgentAnswer] = []  # 비평을 받은 답변들 (원본 → 교정본 순)
+            passed, user_skip = True, False
             for round_ in range(critic_cfg["max_self_corrections"] + 1):
+                if call_monitor.skipped("critic") or call_monitor.stopped():
+                    answer.verification_log.append("⛔ 사용자가 비평을 건너뜀 → 지금 답변으로 진행")
+                    user_skip = True
+                    break
                 emit({"type": "start", "node": node_id, "kind": "critic"})
-                done = verification.critique(
-                    # 채점 기준 = 팀 검토 기준 + 브리프의 완료 기준
-                    question, reviewed_input, answer.review, [*team.review_criteria, *brief.success_criteria], models,
-                    critic_cfg.get("rules"), evidence, chain=critic_plan.chain,
-                    persona=dept_head.critic_persona() if dept_head else "", who=f"{critic_plan.who} (비평가)",
-                    answer_chars=critic_cfg["answer_chars"],
-                )
+                try:
+                    with call_monitor.purpose("critic"):
+                        done = verification.critique(
+                            # 채점 기준 = 팀 검토 기준 + 브리프의 완료 기준
+                            question, reviewed_input, answer.review, [*team.review_criteria, *brief.success_criteria], models,
+                            critic_cfg.get("rules"), evidence, chain=critic_plan.chain,
+                            persona=dept_head.critic_persona() if dept_head else "", who=f"{critic_plan.who} (비평가)",
+                            answer_chars=critic_cfg["answer_chars"],
+                        )
+                except call_monitor.CallCancelled:
+                    answer.verification_log.append("⛔ 사용자가 비평을 끊음 → 지금 답변으로 진행")
+                    user_skip = True
+                    break
                 critic = done.critic
                 answer.critic, answer.critic_model, answer.critic_by = critic, done.spec, critic_plan.who
                 answer.verification_log += done.errors
@@ -360,28 +396,62 @@ def build_office_graph(
                     break
                 emit({"type": "retry", "node": node_id, "reason": "critic"})
                 previous = answer
-                answer = again(verification.correction_message(critic), previous)
+                try:
+                    with call_monitor.purpose("self_correct"):
+                        answer = again(verification.correction_message(critic), previous)
+                except call_monitor.CallCancelled:
+                    answer = previous
+                    answer.verification_log.append("⛔ 사용자가 자가 교정을 끊음 → 직전 답변 유지")
+                    user_skip = True
+                    break
                 answer.attempts = previous.attempts + 1
                 answer.verification_log = [
                     *previous.verification_log,
                     f"비평가 불합격({critic.score}/5) → 자가 교정 {round_ + 1}회",
                     *answer.verification_log,
                 ]
-            answer = keep_best_attempt(tried, passed)
+            if tried and not user_skip:
+                answer = keep_best_attempt(tried, passed)
 
         return run_harness(answer, again, state)
 
     # ── 스케줄러 ────────────────────────────────────────────────
 
-    def work_node(state: OfficeState) -> dict:
+    def partial_answer(node_id: str, assigned: dict, results: dict) -> AgentAnswer:
+        """⏹ 중단 — node_id 의 결과가 없으면 그 아래에서 끝난 결과(가장 위쪽)를 모아 부분 결과로 만든다."""
+        def collect(nid: str) -> list[AgentAnswer]:
+            if nid in results:
+                return [results[nid]]
+            return [a for cid in assigned.get(nid, []) for a in collect(cid)]
+
+        parts = collect(node_id)
+        agent = agents[node_id]
+        body = "\n\n".join(f"### {names.get(a.node_id, a.node_id)}\n{a.content}" for a in parts)
+        return AgentAnswer(
+            node_id=node_id, rank_id=agent.rank.id, kind="integrate",
+            content=body or "⏹ 중단됨 — 아직 완성된 결과가 없습니다.",
+            model=agent.rank_models.primary,
+            verification_log=[f"⏹ 사용자가 중단 — 지금까지 끝난 결과 {len(parts)}개를 모은 부분 결과 (검토·통합 안 함)"],
+        )
+
+    def run_work(state: OfficeState, phase: str) -> dict:
         """조직도 전체를 처리한다. 서로 기다릴 필요가 없는 일(형제 서브트리)은 스레드로 동시에 진행한다.
 
         상태(tasks·assigned·results)는 이 함수(메인 스레드)만 바꾼다 → 스레드끼리 경쟁하지 않는다.
         한 에이전트에서 예외가 나면 새 일은 더 시작하지 않고, 이미 진행 중인 일이 끝난 뒤 그 예외를 그대로 올린다.
+
+        phase (🔀 단계마다 확인일 때만 나뉜다)
+          all       : 분배·초안·검토·통합을 한 번에 (기본)
+          visit     : 분배·초안까지만 — 통합은 사람이 초안을 확인한 뒤로 미룬다
+          integrate : 미뤄 둔 통합만 (아래부터)
+        ⏹ 중단(⏱ 호출 모니터)되면 새 일을 시작하지 않고, 끝난 결과를 모아 supervisor 의 부분 결과로 마무리한다.
         """
         root = state["root_id"]
-        tasks, assigned, results = dict(state["tasks"]), {}, {}
+        tasks = dict(state["tasks"])
+        assigned = dict(state.get("assigned") or {}) if phase == "integrate" else {}
+        results = dict(state.get("results") or {}) if phase == "integrate" else {}
         plans: dict[str, AgentAnswer] = {}
+        fresh: set[int] = set()  # 이번 호출에서 새로 나온 단계 (id) — 상태의 steps 에는 이것만 더한다
         running: dict[Future, tuple[str, str]] = {}  # future → (op, 에이전트 id)
         failures: list[BaseException] = []
 
@@ -396,8 +466,10 @@ def build_office_graph(
         with ContextThreadPoolExecutor(max_workers=len(subtree(org, root).walk())) as pool:
 
             def start(op: str, node_id: str) -> None:
-                if failures:
-                    return  # 이미 실패한 실행 — 새 일은 시작하지 않는다
+                if failures or call_monitor.stopped():
+                    return  # 이미 실패했거나 사람이 중단한 실행 — 새 일은 시작하지 않는다
+                if op == "integrate" and phase == "visit":
+                    return  # 통합은 사람이 초안을 확인한 뒤 (check_drafts → integrate 노드)
                 lessons = lessons_for(node_id)  # 저장소 조회는 메인 스레드에서
                 if op == "integrate":
                     children = [results[cid] for cid in assigned[node_id]]
@@ -408,46 +480,149 @@ def build_office_graph(
                     future = pool.submit(as_agent(draft, node_id), state, node_id, tasks[node_id], lessons)
                 running[future] = (op, node_id)
 
-            start("visit", root)
+            def delegate(node_id: str, chosen: list[tuple[str, str]], plan: AgentAnswer | None) -> None:
+                assigned[node_id] = [cid for cid, _ in chosen]
+                for cid, subtask in chosen:
+                    tasks[cid] = subtask
+                # 화면: 관리자는 '하위 결과 대기', 업무를 받은 하위는 '대기' 로 표시
+                emit({"type": "delegated", "node": node_id, "children": assigned[node_id]})
+                if plan is not None:
+                    plans[node_id] = plan
+                    fresh.add(id(plan))
+                    emit({"type": "step", "step": plan})
+                for cid in assigned[node_id]:
+                    start("visit", cid)  # 형제들을 한꺼번에 시작 → 동시에 진행
+
+            def finished(node_id: str, outcome: AgentAnswer) -> None:
+                # 결과 확정 → 화면에 바로 알리고, 형제가 모두 끝났으면 상사의 통합을 시작한다
+                results[node_id] = outcome
+                fresh.add(id(outcome))
+                emit({"type": "step", "step": outcome})
+                parent = parents.get(node_id)
+                if node_id != root and parent in assigned and all(cid in results for cid in assigned[parent]):
+                    start("integrate", parent)
+
+            if phase == "integrate":
+                # 미뤄 둔 통합 — 하위가 모두 끝난 관리자부터 (그 위는 아래 통합이 끝나면 차례로 열린다)
+                for node_id in [n for n, kids in assigned.items() if n not in results and all(c in results for c in kids)]:
+                    start("integrate", node_id)
+            elif state.get("root_plan") and nodes[root].children:
+                delegate(root, [tuple(x) for x in state["root_plan"]["chosen"]], None)  # 팀장 분배는 lead_plan 노드에서 끝남
+            else:
+                start("visit", root)
             while running:
                 done, _ = wait(running, return_when=FIRST_COMPLETED)
                 for future in sorted(done, key=lambda f: running[f][1]):  # 같은 순간에 끝난 일은 id 순으로
                     op, node_id = running.pop(future)
                     try:
                         outcome = future.result()
+                    except call_monitor.CallCancelled:
+                        if not call_monitor.stopped():
+                            raise
+                        continue  # ⏹ 중단으로 끊긴 일 — 끝난 결과만으로 마무리한다
                     except Exception as e:  # noqa: BLE001 — 진행 중인 형제들이 끝날 때까지 기다렸다가 다시 올린다
                         failures.append(e)
                         continue
                     if op == "visit" and nodes[node_id].children:
-                        chosen, plan = outcome
-                        assigned[node_id] = [cid for cid, _ in chosen]
-                        for cid, subtask in chosen:
-                            tasks[cid] = subtask
-                        # 화면: 관리자는 '하위 결과 대기', 업무를 받은 하위는 '대기' 로 표시
-                        emit({"type": "delegated", "node": node_id, "children": assigned[node_id]})
-                        if plan is not None:
-                            plans[node_id] = plan
-                            emit({"type": "step", "step": plan})
-                        for cid in assigned[node_id]:
-                            start("visit", cid)  # 형제들을 한꺼번에 시작 → 동시에 진행
+                        delegate(node_id, *outcome)
                         continue
-                    # 결과 확정 → 화면에 바로 알리고, 형제가 모두 끝났으면 상사의 통합을 시작한다
-                    results[node_id] = outcome
-                    emit({"type": "step", "step": outcome})
-                    parent = parents.get(node_id)
-                    if node_id != root and parent in assigned and all(cid in results for cid in assigned[parent]):
-                        start("integrate", parent)
+                    finished(node_id, outcome)
         if failures:
             raise failures[0]
+        if call_monitor.stopped() and root not in results:
+            results[root] = partial_answer(root, assigned, results)
+            fresh.add(id(results[root]))
+            emit({"type": "step", "step": results[root]})
 
         def in_order(node_id: str) -> list[AgentAnswer]:
             # 그래프 상태에는 한 명씩 처리하던 때와 같은 깊이 우선 순서로 남긴다 → 실행마다 같은 순서
             steps = [plans[node_id]] if node_id in plans else []
             for cid in assigned.get(node_id, []):
                 steps += in_order(cid)
-            return steps + [results[node_id]]
+            return steps + ([results[node_id]] if node_id in results else [])
 
-        return {"tasks": tasks, "assigned": assigned, "results": results, "steps": in_order(root)}
+        steps = [s for s in in_order(root) if id(s) in fresh]
+        return {"tasks": tasks, "assigned": assigned, "results": results, "steps": steps}
+
+    def work_node(state: OfficeState) -> dict:
+        return run_work(state, "all")
+
+    # ── 🔀 단계마다 확인 (state["step_mode"] 일 때만 지나가는 노드) ──────────
+    # 멈추는 노드(check_*)에는 LLM 호출이 없다 — interrupt 뒤 재개하면 그 노드를 처음부터 다시 실행하기 때문.
+
+    def run_id_of(config: RunnableConfig) -> str:
+        return (config or {}).get("configurable", {}).get("thread_id") or ""
+
+    def propose_node(state: OfficeState) -> dict:
+        """팀장이 서로 다른 진행 방향 2~3개를 제안한다 (사람이 ① 에서 고름)."""
+        root = state["root_id"]
+        if call_monitor.stopped():
+            return {"directions": []}
+        agent = agents[root]
+        emit({"type": "start", "node": root, "kind": "plan"})
+        try:
+            with usage.scope(agent_id=root), call_monitor.purpose("directions"):
+                call = llm_factory.invoke_structured(
+                    agent.rank_models, models, step_mode.DirectionOptions,
+                    step_mode.direction_messages(agent.system_prompt(lessons_for(root)), state["brief"].as_prompt(state["question"])),
+                    agent.name,
+                )
+            return {"directions": call.parsed.options[:3]}
+        except (NoAvailableModelError, call_monitor.CallCancelled) as e:
+            return {"directions": [], "notes": [f"방향 제안 생략: {str(e).splitlines()[0][:200]}"]}
+
+    def check_brief_node(state: OfficeState, config: RunnableConfig) -> dict:
+        if call_monitor.stopped():
+            return {}
+        answer = interrupt(step_mode.brief_payload(state["brief"], state.get("directions") or [], state["root_id"]))
+        brief, note = step_mode.apply_brief(state["brief"], answer)
+        call_monitor.log(run_id_of(config), "🔀 " + step_mode.POINTS["brief"], note)
+        return {"brief": brief, "tasks": {state["root_id"]: brief.goal or state["question"]}}
+
+    def lead_plan_node(state: OfficeState) -> dict:
+        """팀장의 업무 분배만 먼저 (사람이 ② 에서 확인). 하위가 없으면 할 일 없음."""
+        root = state["root_id"]
+        if not nodes[root].children or call_monitor.stopped():
+            return {"root_plan": None}
+        try:
+            with usage.scope(agent_id=root):
+                chosen, plan = plan_children(state, root, state["tasks"][root], lessons_for(root))
+        except call_monitor.CallCancelled:
+            return {"root_plan": None}
+        if plan is not None:
+            emit({"type": "step", "step": plan})
+        return {"root_plan": {"chosen": chosen}, "steps": [plan] if plan is not None else []}
+
+    def check_plan_node(state: OfficeState, config: RunnableConfig) -> dict:
+        root, plan = state["root_id"], state.get("root_plan")
+        if not plan or call_monitor.stopped():
+            return {}
+        chosen = [tuple(x) for x in plan["chosen"]]
+        last_plan = next((s for s in reversed(state.get("steps") or []) if s.kind == "plan" and s.node_id == root), None)
+        answer = interrupt(step_mode.plan_payload(root, chosen, last_plan, [c.id for c in nodes[root].children]))
+        new, note = step_mode.apply_plan(chosen, answer, {c.id for c in nodes[root].children})
+        call_monitor.log(run_id_of(config), "🔀 " + step_mode.POINTS["plan"], note)
+        return {"root_plan": {"chosen": new}}
+
+    def visit_node(state: OfficeState) -> dict:
+        return run_work(state, "visit")
+
+    def check_drafts_node(state: OfficeState, config: RunnableConfig) -> dict:
+        results = state.get("results") or {}
+        if call_monitor.stopped() or state["root_id"] in results:
+            return {}
+        leaves = [n.id for n in subtree(org, state["root_id"]).walk() if not n.children]
+        answer = interrupt(step_mode.drafts_payload(state["root_id"], results, leaves))
+        new_results, instruction, note = step_mode.apply_drafts(results, answer)
+        call_monitor.log(run_id_of(config), "🔀 " + step_mode.POINTS["drafts"], note)
+        update: dict = {"results": new_results}
+        if instruction:  # 통합하는 관리자들이 모두 보도록 브리프의 제약에 넣는다
+            brief = state["brief"]
+            update["brief"] = brief.model_copy(update={"constraints": [*brief.constraints, f"통합 지시(사용자): {instruction}"]})
+        return update
+
+    def integrate_node(state: OfficeState) -> dict:
+        return run_work(state, "integrate")
 
     def human_decision_node(state: OfficeState) -> dict:
         # 여기서 그래프가 멈추고, UI 가 Command(resume=HumanDecision 값)으로 재개한다
@@ -463,21 +638,45 @@ def build_office_graph(
             storage.add_lessons(team.id, run_id, lessons)
         return {"lessons": lessons, "notes": notes}
 
+    def stepwise(state: OfficeState) -> bool:
+        return bool(with_human and state.get("step_mode"))
+
+    after_work = "human_decision" if with_human else END
     graph = StateGraph(OfficeState)
     graph.add_node("brief", brief_node)
     graph.add_node("research", research_node)
     graph.add_node("work", work_node)
     graph.add_edge(START, "brief")
-    graph.add_edge("brief", "research")
-    graph.add_edge("research", "work")
     if with_human:
+        # 🔀 단계마다 확인 — 켰을 때만 옆길로 간다 (끄면 brief → research → work → human_decision 그대로)
+        graph.add_node("propose", propose_node)
+        graph.add_node("check_brief", check_brief_node)
+        graph.add_node("lead_plan", lead_plan_node)
+        graph.add_node("check_plan", check_plan_node)
+        graph.add_node("visit", visit_node)
+        graph.add_node("check_drafts", check_drafts_node)
+        graph.add_node("integrate", integrate_node)
+        graph.add_conditional_edges("brief", lambda s: "propose" if stepwise(s) else "research", ["propose", "research"])
+        graph.add_edge("propose", "check_brief")
+        graph.add_edge("check_brief", "research")
+        graph.add_conditional_edges("research", lambda s: "lead_plan" if stepwise(s) else "work", ["lead_plan", "work"])
+        graph.add_edge("lead_plan", "check_plan")
+        graph.add_edge("check_plan", "visit")
+        graph.add_edge("visit", "check_drafts")
+        graph.add_conditional_edges(
+            "check_drafts", lambda s: "human_decision" if s["root_id"] in (s.get("results") or {}) else "integrate",
+            ["human_decision", "integrate"],
+        )
+        graph.add_edge("integrate", "human_decision")
         graph.add_node("human_decision", human_decision_node)
         graph.add_node("feedback", feedback_node)
-        graph.add_edge("work", "human_decision")
+        graph.add_edge("work", after_work)
         graph.add_edge("human_decision", "feedback")
         graph.add_edge("feedback", END)
     else:
-        graph.add_edge("work", END)
+        graph.add_edge("brief", "research")
+        graph.add_edge("research", "work")
+        graph.add_edge("work", after_work)
     return graph.compile(checkpointer=checkpointer)
 
 
@@ -515,6 +714,11 @@ def _events(graph, inputs, config) -> Iterator[tuple[str, object]]:
                 yield "brief", update.get("brief")
                 for note in update.get("notes", []):
                     yield "note", note
+            elif node in ("check_brief", "check_drafts", "propose") and update:
+                if update.get("brief") is not None:
+                    yield "brief", update["brief"]  # 사람이 고친 브리프·방향·통합 지시
+                for note in update.get("notes", []):
+                    yield "note", note
             elif node == "research":
                 if update.get("tool_results"):
                     yield "tools", update["tool_results"]
@@ -537,6 +741,7 @@ def stream_office(
     tool_inputs: dict | None = None,
     extra_validators: list[str] | None = None,
     harness_options: dict | None = None,
+    step_mode: bool = False,
 ) -> Iterator[tuple[str, object]]:
     """질문 → 브리프 → (데이터 툴·웹 검색) → 분배·초안·검토·통합 진행 이벤트.
 
@@ -546,6 +751,7 @@ def stream_office(
         tool_inputs:      팀 업무 양식 입력값 (데이터 툴이 사용)
         extra_validators: 업무 양식이 추가로 요구하는 하네스 검증기
         harness_options:  하네스 옵션 (예: required_terms)
+        step_mode:        🔀 단계마다 확인 — 브리프 뒤·팀장 분배 뒤·초안 뒤에 멈춘다 (체크포인터 필요, 기본 꺼짐)
 
     Yields:
         ("start",   {"node", "kind"})  — 어떤 에이전트가 어떤 일을 시작함 (brief/tools/research/plan/draft/review/integrate/critic)
@@ -571,8 +777,57 @@ def stream_office(
         "extra_validators": extra_validators or [],
         "harness_options": harness_options or {},
         "steps": [],
+        "step_mode": step_mode,
+        "root_plan": None,
     }
     yield from _events(graph, inputs, _config(org, thread_id))
+
+
+def resume_step(graph, org: OrgNode, answer: dict, thread_id: str) -> Iterator[tuple[str, object]]:
+    """🔀 단계 확인에서 멈춘 그래프를 사람의 답으로 이어 간다 (core/step_mode.py 의 apply_* 가 받는 모양)."""
+    # 빈 dict 는 LangGraph 가 'interrupt id → 값' 표로 읽어 재개되지 않는다 → 항상 action 을 넣는다
+    yield from _events(graph, Command(resume={"action": "approve", **(answer or {})}), _config(org, thread_id))
+
+
+RESTART_POINTS = {"brief": "처음부터 (요청 정리 다시)", "plan": "업무 분배부터 (자료 조사 결과 유지)"}
+
+
+def restart_from(
+    graph, org: OrgNode, thread_id: str, point: str, question: str | None = None,
+    brief: DesiredState | None = None, step_mode: bool | None = None,
+) -> Iterator[tuple[str, object]]:
+    """✏️ 질문·브리프를 고쳐 체크포인트에서 다시 — 같은 thread 안에서 갈래(fork)를 만든다.
+
+    point="brief": 처음 입력 체크포인트에 새 질문(·브리프 입력)을 넣고 요청 정리부터 다시
+    point="plan" : 자료 조사가 끝난 체크포인트에 새 브리프(·질문)를 넣고 업무 분배부터 다시 (웹·데이터 조사 결과 재사용)
+    예전 갈래의 체크포인트는 그대로 남는다 (LangGraph 기록). 화면은 예전 시도의 단계를 따로 보관해 비교한다.
+    """
+    config = _config(org, thread_id)
+    history = list(graph.get_state_history(config))  # 최신 → 오래된 순
+    wanted = ("brief",) if point == "brief" else (("work",), ("lead_plan",))
+    snap = next((h for h in history if h.next == wanted or h.next in wanted), None)
+    if snap is None:
+        raise ValueError(f"다시 시작할 체크포인트가 없습니다 ({RESTART_POINTS.get(point, point)})")
+    values = dict(snap.values)
+    update: dict = {}
+    if question is not None:
+        update["question"] = question
+    if step_mode is not None:
+        update["step_mode"] = step_mode
+    if point == "brief":
+        if brief is not None:
+            update["brief_input"] = brief
+        as_node = "__start__"
+    else:
+        new_brief = brief or values.get("brief")
+        if new_brief is None:
+            raise ValueError("브리프가 없는 체크포인트입니다")
+        update["brief"] = new_brief
+        update["tasks"] = {values["root_id"]: new_brief.goal or update.get("question", values.get("question", ""))}
+        update["root_plan"] = None
+        as_node = "research"
+    new_config = graph.update_state(snap.config, update, as_node=as_node)
+    yield from _events(graph, None, {**config, "configurable": new_config["configurable"]})
 
 
 def resume_with_decision(graph, org: OrgNode, decision: HumanDecision, thread_id: str) -> Iterator[tuple[str, object]]:

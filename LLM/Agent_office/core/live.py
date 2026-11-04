@@ -14,6 +14,9 @@ run(dict) 의 주요 키
   drafting   {에이전트 id: 지금 쓰고 있는 초안}  — 토큰 단위로 늘어남. 형제 실무자들이 동시에 쓰므로 에이전트별로 따로 모은다
   steps      완료된 단계(AgentAnswer) 목록      — 타임라인
   brief / tools / web / notes / error
+  checkpoint 🔀 단계마다 확인에서 멈춘 곳 (status=step_check 일 때 — core/step_mode.py 의 payload)
+  attempts   ✏️ 고쳐 다시 하기 전의 시도들 [{round, question, brief, steps, ended_at, why}] — 비교용
+  모델 호출 하나하나의 기록·개입 내역은 core/call_monitor.py (run_id 로 묶음)
 """
 
 import threading
@@ -22,7 +25,7 @@ import traceback
 from collections.abc import Callable, Iterator
 from datetime import datetime
 
-from core import usage
+from core import call_monitor, step_mode, usage
 from core.llm_factory import NoAvailableModelError
 from core.schemas import AgentAnswer
 
@@ -72,6 +75,7 @@ def new_run(run_id: str, question: str, root_id: str, team_id: str = "") -> dict
         "post_busy": False, "route": None, "route_error": None, "trip_start": None,
         "saved_files": [],  # 채택해서 저장한 결과 파일 경로
         "harness_options": {},  # 업무 양식의 검증 옵션 (주식 검산표 등)
+        "step_mode": False, "checkpoint": None, "attempts": [],
     }
 
 
@@ -136,7 +140,12 @@ def apply_event(run: dict, kind: str, payload) -> None:
     elif kind == "note":
         run["notes"].append(payload)
     elif kind == "interrupt":
-        run["status"] = "awaiting_human"
+        value = next((getattr(i, "value", None) for i in payload or ()), None) if isinstance(payload, (tuple, list)) else None
+        if step_mode.is_check(value):  # 🔀 단계마다 확인 — 사람의 선택을 기다림 (결정 대기와 다름)
+            run["status"], run["checkpoint"] = "step_check", value
+            statuses[run["root_id"]] = ("wait", "🔀 확인 대기")
+            return
+        run["status"], run["checkpoint"] = "awaiting_human", None
         statuses[run["root_id"]] = ("wait", "👤 결정 대기")
 
 
@@ -149,13 +158,36 @@ def consume(run: dict, events: Iterator[tuple[str, object]], on_step: Callable[[
                 on_step(run)
     except NoAvailableModelError as e:
         run["status"], run["error"] = "error", str(e)
+    except call_monitor.CallCancelled as e:
+        run["status"], run["error"] = "error", f"⏹ {e}"
     except Exception as e:  # noqa: BLE001 — 백그라운드 스레드의 예외는 화면에 보여 줘야 한다
         run["status"], run["error"] = "error", f"진행 중 오류: {type(e).__name__}: {e}"
         run["notes"].append(traceback.format_exc()[-1500:])
     finally:
         run["activity"].clear()
         run["drafting"] = {}
+        call_monitor.release(run["run_id"])  # 중단·건너뛰기는 이번 진행에만 — 결정 뒤 교훈 생성·재개는 정상으로
         run["done"] = True
+
+
+def prepare_resume(run: dict, label: str = "▶ 이어서 진행") -> None:
+    """멈춘 run(단계 확인·고쳐 다시)을 다시 '진행 중'으로 — start_run 으로 스레드를 띄우기 전에 부른다."""
+    run.update(done=False, status="reviewing", error=None, checkpoint=None)
+    run["statuses"][run["root_id"]] = ("working", label)
+    run["activity"][run["root_id"]] = label
+
+
+def archive_attempt(run: dict, why: str) -> dict:
+    """✏️ 고쳐 다시 — 지금까지의 시도를 run["attempts"] 에 보관하고 화면 상태를 비운다 (비교용으로 남김)."""
+    attempt = {
+        "round": len(run["attempts"]) + 1, "question": run["question"], "brief": run.get("brief"),
+        "steps": list(run["steps"]), "ended_at": time.time(), "why": why,
+    }
+    run["attempts"].append(attempt)
+    run.update(steps=[], drafting={}, decision=None, error=None, checkpoint=None)
+    run["statuses"] = {run["root_id"]: ("working", "✏️ 고쳐 다시")}
+    run["activity"] = {run["root_id"]: "✏️ 고쳐 다시"}
+    return attempt
 
 
 def start_run(run: dict, events_factory: Callable[[], Iterator], on_step=None, on_finish=None) -> threading.Thread:
