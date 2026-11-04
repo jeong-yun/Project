@@ -1,4 +1,4 @@
-"""🏠 메인 화면 — 🏙 픽셀 빌딩(층·부서·팀 방, building_ui.py), 🤖 자율 실행 상태(autonomy_ui.py),
+"""🏠 메인 화면 — 📮 접수 창구(🛎 인포메이션 센터 reception_ui.py · 👔 부서장) · 🏙 픽셀 빌딩(층·부서·팀 방) · 🗂 층별 부서 안내 (building_ui.py), 🤖 자율 실행 상태(autonomy_ui.py),
 그 아래 섹션 하나: 📰 AI 브리핑·💡 개선 아이디어 카드·🔥 주목 저장소 / 💰 모델별 토큰 사용량·추정 비용,
 API 키별 내역(이름 붙이기), 이전 키, 가격표. 고른 섹션만 그려서 화면을 다시 그리는 비용을 줄인다.
 
@@ -20,6 +20,7 @@ import streamlit as st
 import autonomy_ui
 import board_ui
 import building_ui
+import reception_ui
 from core import feeds, model_catalog, usage
 from core.storage import Storage
 
@@ -82,7 +83,10 @@ def render(storage: Storage, models, open_runs: list[dict], team_names: dict, go
 
     if teams is not None and ranks is not None:
         # 🏙 픽셀 빌딩 + 🧭 부서장 + 🎛 부서별 모델 (dept_models = dept_models_ui.Ctx)
-        building_ui.render(storage, teams, ranks, open_runs, go_to_team, models=models, dept_models=dept_models)
+        # 📮 접수 창구(🛎 인포메이션 센터 · 👔 부서장) + 🏙 픽셀 빌딩 + 🗂 층별 부서 안내 + 🎛 부서별 모델
+        info = (reception_ui.Ctx(teams=teams, ranks=ranks, models=models, data_dir=Path(data_dir), settings=settings)
+                if settings is not None and data_dir is not None else None)
+        building_ui.render(storage, teams, ranks, open_runs, go_to_team, models=models, dept_models=dept_models, reception=info)
     else:
         _team_shortcuts(open_runs, team_names, go_to_team)
     # 빌딩 아래에 볼 내용 — 고른 섹션 하나만 그린다 (📰 브리핑 / 💰 사용량)

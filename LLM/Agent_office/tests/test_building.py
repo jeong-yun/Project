@@ -283,7 +283,7 @@ def test_list_view_and_dept_head_fill_question(seeded):
     assert not at.exception, at.exception
     assert any(b.key == "home_team_travel_domestic" for b in at.button)
     assert any(m.value.startswith("##### 3층 — ✈️ 여행부") for m in at.markdown)
-    at.selectbox(key="dept_head_pick").set_value("travel").run()
+    at.radio(key="desk_pick").set_value("travel").run()
     at.text_area(key="dept_head_text").input("비자랑 환전 필요한 오사카 해외 여행").run()
     at.button(key="dept_head_go").click().run()
     assert not at.exception and "🌏 해외 여행팀" in at.success[0].value  # 키 없음 → 낱말 비교

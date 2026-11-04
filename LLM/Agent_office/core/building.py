@@ -24,7 +24,8 @@ HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 # 배치 (타일 단위, 1타일 = 16px) — 가로: 벽 | 층 번호판 | 팀 방 × rooms_per_floor | 엘리베이터 | 벽
 PLATE_W, ROOM_W, SHAFT_W = 6, 10, 3
-FLOOR_H = 5  # 한 층 높이 (맨 위 1줄은 부서 띠)
+FLOOR_H = 6  # 한 층 높이 (맨 위 1줄은 부서 띠) — 방 안에 팀원 자리가 두 줄 (뒷줄·앞줄)
+MAX_SEATS = 8  # 방 하나에 그리는 사람 수 (넘으면 '+N')
 SKY_H, ROOF_H, GROUND_H = 3, 2, 2
 
 TOOL_LABELS = {
@@ -129,16 +130,17 @@ def build_layout(floors: list[list[tuple[str, str]]], rooms_per_floor: int) -> d
                 slots.append({"team": "", "dept": "", "x": x, "y": y + 1, "w": ROOM_W, "h": FLOOR_H - 1})
         out_floors.append({"n": i + 2, "y": y, "rooms": slots, "banners": banners})
     span = rooms_per_floor * ROOM_W
-    q = span // 4
-    spots = [  # 로비: 누르면 메인 아래 섹션이 바뀐다 (building_ui.SECTIONS)
-        {"id": "brief", "kind": "reception", "label": "📰 안내 데스크", "x": rooms_x, "w": q},
+    q = span // 5
+    spots = [  # 로비: 🛎 인포메이션 센터 = 질문 접수 (building_ui), 나머지는 누르면 메인 아래 섹션이 바뀐다 (building_ui.SECTIONS)
+        {"id": "info", "kind": "info", "label": "🛎 인포메이션", "x": rooms_x, "w": q},
         {"id": "user", "kind": "entrance", "label": "👤 사용자", "x": rooms_x + q, "w": q},
-        {"id": "autonomy", "kind": "approval", "label": "🤖 승인 데스크", "x": rooms_x + 2 * q, "w": q},
-        {"id": "usage", "kind": "office", "label": "💰 관리실", "x": rooms_x + 3 * q, "w": span - 3 * q},
+        {"id": "brief", "kind": "reception", "label": "📰 신문 가판대", "x": rooms_x + 2 * q, "w": q},
+        {"id": "autonomy", "kind": "approval", "label": "🤖 승인 데스크", "x": rooms_x + 3 * q, "w": q},
+        {"id": "usage", "kind": "office", "label": "💰 관리실", "x": rooms_x + 4 * q, "w": span - 4 * q},
     ]
     return {
         "key": f"bld:{n}x{rooms_per_floor}:" + ",".join(r[1] for f in floors for r in f),
-        "w": W, "h": H, "floors": out_floors, "plate": {"x": 1, "w": PLATE_W},
+        "w": W, "h": H, "floorH": FLOOR_H, "floors": out_floors, "plate": {"x": 1, "w": PLATE_W},
         "shaft": {"x": shaft_x, "w": SHAFT_W, "y": top, "h": lobby_y + FLOOR_H - top},
         "roof": {"y": SKY_H, "h": ROOF_H}, "lobby": {"y": lobby_y, "h": FLOOR_H, "spots": spots},
         "ground": {"y": lobby_y + FLOOR_H, "h": GROUND_H},
@@ -235,13 +237,15 @@ def snapshot(teams: list[Team], orgs: dict[str, OrgNode], ranks: list[Rank], cfg
         status, working = team_status(tid, open_runs)
         card = team_card(team, org, ranks)
         rank_of = {n.id: n.rank for n in org.walk()}
-        people = [org, *org.children][:4]  # 방에 앉는 사람: 팀장 + 바로 아래 칸 (최대 4명)
+        everyone = org.walk()  # 방에 앉는 사람: 팀 전원 (팀장 먼저, 최대 MAX_SEATS 명 — 넘으면 '+N')
+        people = everyone[:MAX_SEATS]
         rooms[tid] = {
             "id": tid, "name": team.name, "dept": d.id, "deptName": f"{d.emoji} {d.name}", "color": d.color,
             "status": status, "statusText": STATUS_TEXT[status] + (f" (팀원 {working}명)" if working else ""),
             "working": working, "recent": recent.get(tid), "card": card,
             "cost": money(costs.get(tid, 0.0)) if costs is not None else "",
             "people": [{"id": n.id, "color": RANK_COLORS.get(rank_of[n.id], DEFAULT_COLOR)} for n in people],
+            "more": max(0, len(everyone) - len(people)),
         }
     floor_costs = []
     for f in layout["floors"]:
@@ -250,9 +254,26 @@ def snapshot(teams: list[Team], orgs: dict[str, OrgNode], ranks: list[Rank], cfg
         floor_costs.append(money(total) if total is not None else "")
     return {
         "kind": "building", "layout": layout, "rooms": rooms, "floorCosts": floor_costs, "costDays": cost_days,
-        "depts": {d.id: {"name": d.name, "emoji": d.emoji, "color": d.color, "description": d.description,
-                         "teams": [by_id[t].name for t in d.teams]} for d in depts},
+        "depts": {d.id: dept_summary(d, rooms) for d in depts},
         "live": any(r["status"] == "running" for r in rooms.values()),
+    }
+
+
+def dept_summary(d: Department, rooms: dict[str, dict]) -> dict:
+    """부서 띠·🗂 층별 부서 안내 — 소개 · 부서장 · 팀(대표 업무·인원) · 지금 상태."""
+    from core.dept_heads import head_of
+
+    mine = [rooms[t] for t in d.teams if t in rooms]
+    busy = sum(1 for r in mine if r["status"] == "running")
+    waiting = sum(1 for r in mine if r["status"] == "waiting")
+    state = (f"● {busy}팀 일하는 중" if busy else "") + (" · " if busy and waiting else "") + (f"❗ {waiting}팀 결정 대기" if waiting else "")
+    return {
+        "name": d.name, "emoji": d.emoji, "color": d.color, "description": d.description,
+        "head": head_of(d).name, "teams": [r["name"] for r in mine],
+        "teamCards": [{"id": r["id"], "name": r["name"], "headcount": r["card"]["headcount"], "tasks": r["card"]["tasks"][:3],
+                       "scope": r["card"]["scope"], "status": r["status"], "statusText": r["statusText"]} for r in mine],
+        "headcount": sum(r["card"]["headcount"] for r in mine), "busy": busy, "waiting": waiting,
+        "state": state or "○ 모두 쉬는 중",
     }
 
 
