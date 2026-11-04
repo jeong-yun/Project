@@ -112,7 +112,9 @@ def _list_view(snap: dict, go_to_team: Callable[..., None]) -> None:
                           args=(room["id"],), use_container_width=True)
                 st.caption(f"{room['deptName']} · {card['description']}")
                 st.caption(f"👤 {card['lead']} · 팀원 {card['headcount']}명 ({card['members']})  \n"
-                           f"📋 {' / '.join(card['tasks'])}" + (f"  \n🧰 {' · '.join(card['tools'])}" if card["tools"] else "")
+                           f"📋 {' / '.join(card['tasks'])}"
+                           + (f"  \n🧭 질문 범위: {card['scope']}" if card.get("scope") else "")
+                           + (f"  \n🧰 {' · '.join(card['tools'])}" if card["tools"] else "")
                            + (f"  \n🕘 {room['recent']['when']} {room['recent']['status']} — {room['recent']['text']}"
                               if room["recent"] else ""))
     st.caption("1층 로비 — 📰 안내 데스크(브리핑) · 🤖 승인 데스크(자율 실행) · 💰 관리실(사용량)은 아래에 있습니다.")

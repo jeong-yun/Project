@@ -343,6 +343,7 @@ function fillTip(h) {
     row(bd, "팀장", c.lead);
     row(bd, "팀원", `${c.headcount}명 — ${c.members}`);
     chips(bd, "주요 업무", c.tasks);
+    if (c.scope) row(bd, "질문 범위", c.scope);
     if (c.tools.length) chips(bd, "툴·기능", c.tools);
     const st = row(bd, "지금", ""); st.appendChild(el("span", "st", room.statusText)); st.lastChild.style.color = shade(LAMP[room.status], -0.3);
     if (room.recent) row(bd, "최근", `${room.recent.when} · ${room.recent.status} · ${room.recent.text}`);

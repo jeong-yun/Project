@@ -15,6 +15,44 @@
 name: 🏗️ 인프라 보안 팀
 description: Terraform·쿠버네티스 매니페스트·Dockerfile 을 코드 규칙으로 점검하고, 발견마다 설명과 수정안(diff)을 쓴다. 수정안은 코드가 사본에 적용해 다시 검사한다. 웹 검색 없음.
 
+# 자유 질문 범위 — 화면 안내 · '맡기기' 전 범위 확인 (core/scope.py). keywords 가 분명히 맞으면 모델 없이 통과
+scope:
+  summary: 인프라 코드(IaC) 보안 — Terraform·쿠버네티스·Dockerfile 위험 설명과 수정안
+  accepts:
+    - IaC 설정 위험 설명과 수정안(diff)
+    - 클라우드 리소스 보안 설정 (S3·보안 그룹·IAM)
+    - 컨테이너 이미지·매니페스트 하드닝
+  rejects:
+    - 인증 통제 항목·정책 문서 (→ 보안 거버넌스 팀)
+    - 일반 코드 작성 (→ 기본 팀) · 보안 용어 개념 설명만 (→ 개념 편집 팀)
+  keywords: [Terraform, 테라폼, 쿠버네티스, Kubernetes, k8s, Dockerfile, 도커, Docker, 컨테이너, IaC, Helm, S3, IAM, 보안 그룹, security group, AWS, GCP, Azure, 매니페스트, 파드, Pod, 하드닝, privileged, CIS]
+# 자유 질문 예시 — '💡 질문 예시'에 이 팀 것만 보인다
+free_examples:
+  - title: 위험 설명 — S3 버킷 공개
+    question: Terraform 으로 만든 S3 버킷이 공개될 수 있는 설정과 막는 방법을 알려줘
+    goal: 코드 리뷰 때 바로 쓸 점검 기준
+    success_criteria:
+      - 공개로 이어지는 설정(ACL·정책·퍼블릭 액세스 차단)을 나눠 쓴다
+      - 막는 HCL 예시를 코드 블록으로 쓴다
+    constraints: [AWS provider 5.x 기준]
+    output_format: 위험 설정 표 → 수정 예시 → 확인 방법
+  - title: 하드닝 — Dockerfile
+    question: 이 Dockerfile 을 보안 관점에서 점검하려면 무엇을 봐야 하는지 알려줘
+    goal: Dockerfile 하드닝 체크리스트
+    success_criteria:
+      - root 실행·태그 고정·비밀값 노출 등 항목마다 이유를 쓴다
+      - 고친 예시를 코드 블록으로 쓴다
+    constraints: [CIS Docker Benchmark 기준 인용]
+    output_format: 체크리스트 → 수정 예시
+  - title: 쿠버네티스 — privileged 파드
+    question: 쿠버네티스에서 privileged 파드가 왜 위험하고 어떻게 막는지 알려줘
+    goal: 클러스터 정책을 정할 때 쓸 설명 자료
+    success_criteria:
+      - 위험(노드 탈취 경로)을 구체적으로 쓴다
+      - Pod Security Admission 설정 예시를 쓴다
+    constraints: [쿠버네티스 1.29 이상]
+    output_format: 위험 → 막는 설정 예시 → 확인 명령
+
 personas:
   staff: 당신은 클라우드 보안 담당 신입입니다. 스캐너가 찾은 발견을 하나씩 읽고, 그 설정이 실제로 어떤 공격·사고로 이어지는지 쉬운 말로 설명합니다. 표에 없는 문제를 지어내지 않습니다.
   assistant_manager: 당신은 Terraform·쿠버네티스를 직접 운영해 본 엔지니어입니다. 원본 파일을 글자 그대로 복사한 문맥으로 최소한의 unified diff 를 쓰고, 리소스를 지우지 않고 설정 값만 바꿉니다.

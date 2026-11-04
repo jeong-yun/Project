@@ -52,7 +52,8 @@ from core import (
 )
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
-from core.brief import EXAMPLES, DesiredState
+from core import scope as team_scope
+from core.brief import DesiredState
 from core.config import (
     BASE_DIR,
     ConfigError,
@@ -1626,6 +1627,45 @@ def warn_chosen_off() -> None:
         st.warning("⛔ 고른 모델이 꺼져 있는 팀원이 있습니다.\n\n" + "\n".join(lines) + "\n\n" + hint)
 
 
+SCOPE_LOG = DATA_DIR / "scope_log.jsonl"  # 자유 질문 범위 판단 기록 (범위 기준을 다듬을 때 본다)
+
+
+def check_scope(question: str) -> dict:
+    """자유 질문이 이 팀 범위인지 (core/scope.py) — 낱말로 분명하면 바로, 애매하면 🧭 부서장 배정 1회. 판단은 기록한다."""
+    last = ""
+    if current and current["done"] and current["team_id"] == team_id:
+        final = final_answer(current)
+        last = current["question"] + "\n" + (final.content if final else "")  # 직전 결과에 대한 짧은 후속 질문은 봐 준다
+    with st.spinner("🧭 이 팀이 맡을 질문인지 확인하는 중…"):
+        decision = team_scope.check(question, team, teams, models, last_text=last)
+    team_scope.log_decision(SCOPE_LOG, team, question, decision)
+    return decision
+
+
+def go_to_scope_team(block_key: str) -> None:
+    """'◇◇팀으로 가서 질문하기' — 그 팀 화면으로 옮기고 자유 질문 칸에 같은 질문을 채운다 (콜백)."""
+    block = st.session_state.pop(block_key, None)
+    if block:
+        go_to_team(block["team_id"], block["question"])
+
+
+def render_scope_block(block_key: str) -> None:
+    """범위 밖 질문 안내 — 맞는 팀으로 가기 / 질문 고치기. ('그래도 실행'은 두지 않는다 — 각 팀은 자기 분야만)"""
+    block = st.session_state.get(block_key)
+    if not block:
+        return
+    other = next((t for t in teams if t.id == block["team_id"]), None)
+    if other is None:
+        st.session_state.pop(block_key, None)
+        return
+    st.error("🚫 " + team_scope.blocked_message(block, team, teams))
+    st.caption(f"이유: {block['reason']}" + (f" · {block['note']}" if block.get("note") else ""))
+    b1, b2 = st.columns(2)
+    b1.button(f"➡️ {other.name}으로 가서 질문하기", type="primary", key=f"scope_go_{team_id}",
+              on_click=go_to_scope_team, args=(block_key,))
+    b2.button("✏️ 질문 고치기", key=f"scope_edit_{team_id}", on_click=lambda: st.session_state.pop(block_key, None))
+
+
 def render_task_input() -> dict:
     """업무 입력칸을 그리고, '맡기기'를 누른 경우 워크플로우로 넘길 요청(dict)을 돌려준다 (안 누르면 빈 dict)."""
     request: dict = {}  # 업무 양식이든 자유 질문이든 여기에 모은다
@@ -1680,21 +1720,32 @@ def render_task_input() -> dict:
                         "extra_validators": built.validators, "harness_options": built.harness_options,
                     }
         else:
-            # ── 자유 질문 ──
+            # ── 자유 질문 (이 팀 분야만 — teams/<팀>/team.yaml 의 scope · free_examples, core/scope.py) ──
+            examples = team.free_examples
+            example_key = f"example_pick_{team_id}"
+
             def apply_example() -> None:
                 """예시를 고르면 질문·최종 상태 입력란을 채운다 (selectbox 의 on_change 콜백)."""
-                ex = next((e for e in EXAMPLES if e["title"] == st.session_state["example_pick"]), None)
+                ex = next((e for e in examples if e.title == st.session_state[example_key]), None)
                 if ex is None:
                     return
-                st.session_state["q_text"] = ex["question"]
-                st.session_state["b_goal"] = ex["goal"]
-                st.session_state["b_criteria"] = "\n".join(ex["success_criteria"])
-                st.session_state["b_constraints"] = "\n".join(ex["constraints"])
-                st.session_state["b_format"] = ex["output_format"]
+                st.session_state["q_text"] = ex.question
+                st.session_state["b_goal"] = ex.goal
+                st.session_state["b_criteria"] = "\n".join(ex.success_criteria)
+                st.session_state["b_constraints"] = "\n".join(ex.constraints)
+                st.session_state["b_format"] = ex.output_format
 
+            if team.scope:
+                scope_help = ("**다루는 것**\n" + "\n".join(f"- {x}" for x in team.scope.accepts)
+                              + ("\n\n**다루지 않는 것**\n" + "\n".join(f"- {x}" for x in team.scope.rejects) if team.scope.rejects else ""))
+                st.caption(f"🧭 이 팀이 다루는 질문: {team.scope.summary}"
+                           + ("  \n(범용 창구 — 어떤 질문이든 받습니다)" if team.scope.accept_all
+                              else "  \n다른 분야 질문은 맡기기 전에 알맞은 팀을 알려 드립니다."),
+                           help=scope_help)
             c1, c2 = st.columns([1, 1])
-            c1.selectbox("💡 질문 예시 (고르면 아래가 채워집니다)", ["(직접 입력)", *[e["title"] for e in EXAMPLES]],
-                         key="example_pick", on_change=apply_example)
+            if examples:
+                c1.selectbox("💡 질문 예시 (고르면 아래가 채워집니다)", ["(직접 입력)", *[e.title for e in examples]],
+                             key=example_key, on_change=apply_example)
             with c2.popover("📝 좋은 질문 쓰는 법"):
                 st.markdown(
                     """
@@ -1706,7 +1757,8 @@ def render_task_input() -> dict:
     """
                 )
             with st.form("ask_form", clear_on_submit=False):
-                question = st.text_area("질문", placeholder="무엇을 원하는지 한두 문장으로", height=90, key="q_text")
+                question = st.text_area("질문", placeholder="무엇을 원하는지 한두 문장으로", height=90, key="q_text",
+                                        help=f"이 팀이 다루는 질문: {team.scope.summary}" if team.scope else None)
                 with st.expander("🎯 원하는 최종 상태 (선택 — 비워 두면 AI 가 질문에서 정리합니다)", expanded=False):
                     goal = st.text_input("최종 목표 — 결과물과 용도", key="b_goal", placeholder="예: 팀 회의에서 공유할 1장짜리 설명 자료")
                     criteria = st.text_area("완료 기준 — 한 줄에 하나", key="b_criteria", height=90,
@@ -1721,9 +1773,17 @@ def render_task_input() -> dict:
             def lines(text: str) -> list[str]:
                 return [x.strip() for x in text.splitlines() if x.strip()]
 
+            block_key = f"scope_block_{team_id}"
+            decision = None
             if submitted and not question.strip():
                 st.warning("질문을 입력하세요.")
             elif submitted:
+                st.session_state.pop(block_key, None)
+                decision = check_scope(question.strip())
+                if not decision["in_scope"]:
+                    st.session_state[block_key] = {**decision, "question": question.strip()}
+            render_scope_block(block_key)
+            if submitted and question.strip() and decision and decision["in_scope"]:
                 brief_input = DesiredState(
                     goal=goal.strip(), context="", success_criteria=lines(criteria), constraints=lines(constraints),
                     output_format=output_format.strip(), assumptions=[],

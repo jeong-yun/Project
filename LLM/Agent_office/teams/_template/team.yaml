@@ -10,6 +10,25 @@ id: my_team
 name: 새 팀 이름
 description: "이 팀이 다루는 분야 한 줄 설명 (예: 보안 로그 분석)"
 
+# 자유 질문 범위 — 범위 밖 질문은 맡기기 전에 막고 알맞은 팀을 알려 준다 (core/scope.py)
+#   keywords 가 다른 팀보다 많이 맞으면 모델 없이 통과, 애매하면 🧭 부서장 배정 1회로 판단.
+#   accept_all: true 면 무엇이든 받는다 (기본 팀 = 범용 창구). scope 를 비우면 범위 확인 없이 받는다.
+scope:
+  summary: 보안 로그 분석 — 웹·방화벽 로그의 공격 탐지와 위험도 판단
+  accepts:
+    - 로그에서 공격 시도 찾기
+  rejects:
+    - 보안과 무관한 질문 (→ 알맞은 부서)
+  keywords: [로그, 공격, 탐지]
+# 자유 질문 예시 — '💡 질문 예시'에 이 팀 것만 보인다 (2~4개)
+free_examples:
+  - title: 로그 분석 — 의심 요청 찾기
+    question: 이 웹 로그에서 SQL 인젝션 시도로 보이는 요청을 찾아줘
+    goal: 바로 차단 여부를 정할 수 있는 의심 요청 목록
+    success_criteria: [요청마다 근거가 된 패턴을 쓴다]
+    constraints: []
+    output_format: 표 → 판단
+
 personas:
   staff: ""
   assistant_manager: ""
