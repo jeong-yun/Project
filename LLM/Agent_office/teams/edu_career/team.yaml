@@ -1,0 +1,189 @@
+# 🧭 직무 전환 교육팀 — 새 직무(예: 보안 관리자, 로봇 SW 엔지니어)에 합격하는 것이 목표인 학습. 과목마다 담당 선생님이 있다.
+#
+# 선생님 = 과목(Course)마다 만드는 담당 교사 (core/learning.py)
+#   팀장(lead)이 선생님이다. 팀장 페르소나는 '근거 자료의 선생님 프로필대로 가르친다'만 적고, 실제 선생님(이름·경력 설정·
+#   가르치는 방식·수준별 말투 규칙)은 learning_course 툴이 업무 입력의 course_id 로 과목을 읽어 근거 자료로 넣는다
+#   → 과목마다 다른 선생님을 팀 설정을 바꾸지 않고 쓴다 (core/agent.py 페르소나는 팀 단위).
+#   팀원: 부장·커리큘럼 설계 / 대리·평가(퀴즈) / 사원·자료 조사 — 팀장이 업무에 필요한 사람만 고른다.
+# 하네스
+#   level_fit   : 입문·초급 과목에 풀이 없는 전문 용어가 너무 많은지 (조금 넘으면 경고만) — 최종 답변만
+#   quiz_format : 📝 퀴즈 업무 — 문제·보기·정답 JSON, 정답이 보기 안에 있는지 (채점은 화면에서 코드가)
+#   json_keys   : 🎓 선생님 만들기 — {"tutor", "curriculum"} JSON (채택하면 과목으로 저장)
+# 화면: education_ui.py (features: edu_course) — '📚 내 과목' 카드, 과목 고르면 업무 양식 course_id 자동 채움, 퀴즈 풀기·채점·레벨업
+# 개인 정보: private: true → 교훈·결정 요약도 knowledge/(공개 GitHub)로 내보내지 않는다. 과목 기록은 data/learning/ (.gitignore)
+#
+# ── 2단계 세션이 여기에 추가할 것 (docs/PROPOSAL_교육부.md '2·3단계 세션용 안내') ──
+#   tasks 맨 아래에 전문 업무(커리큘럼 · 개인 프로젝트 · JD 추천 · 합격 로드맵)를 추가한다. 공용 업무 세 개(create_tutor · quiz · ask)는 고치지 않는다.
+
+name: 🧭 직무 전환 교육팀
+description: 직무 전환(이직·전직)으로 새 직무에 합격하는 것이 목표인 학습 — 예 보안 관리자, 로봇 SW 엔지니어, 데이터 분석가. 과목마다 담당 선생님이 수준에 맞춰 커리큘럼·퀴즈·질문 답변을 맡는다.
+
+scope:
+  summary: 직무 전환 학습 — 새 직무 합격을 목표로 배우기 (커리큘럼·수준 퀴즈·질문 답변, 2단계에 개인 프로젝트·JD 추천)
+  accepts:
+    - 새 직무로 이직·전직하려고 배우기 (예 보안 관리자, 로봇 SW 엔지니어)
+    - 합격까지의 커리큘럼·공부 순서·지금 수준 확인
+    - 배우는 중에 생긴 질문
+  rejects:
+    - 자기소개서·포트폴리오 쓰기 (→ 커리어부)
+    - 취미·여행·교양으로 배우기 (→ 🌍 취미·교양 교육팀)
+  keywords: [직무 전환, 로 이직, 이직하고 싶, 이직 준비, 전직, 커리어 전환, 취업 준비, 합격, 신입, 비전공, 자격증, 커리큘럼, 공부 순서, 로드맵,
+             배우고 싶, 공부하고 싶, 선생님, 레벨업]
+free_examples:
+  - title: 직무 전환 — 무엇부터 배울까
+    question: 보안 관리자로 이직하고 싶은데 입문자는 무엇부터 공부해야 해?
+    goal: 첫 한 달 동안 공부할 순서
+    success_criteria: [입문자 눈높이로 쓴다, 주차별로 나눈다]
+    constraints: [전문 용어는 처음 나올 때 풀이]
+    output_format: 한 줄 요약 → 주차별 표 → 첫 주 할 일
+  - title: 지금 수준 — 무엇이 부족한가
+    question: 로봇 SW 엔지니어 신입 합격을 목표로 할 때 초급자가 먼저 채워야 할 지식을 알려줘
+    goal: 부족한 지식 목록과 채우는 순서
+    success_criteria: [지식마다 왜 필요한지 쓴다]
+    constraints: []
+    output_format: 표 → 순서
+private: true
+features: [edu_course]
+skills_from: [_shared/education]
+
+personas:
+  team_lead: >-
+    당신은 이 과목의 담당 선생님입니다. 근거 자료 '🎓 과목'의 [선생님 프로필]에 적힌 이름·경력 설정·가르치는 방식, 그리고
+    학습자의 지금 수준의 말투·난이도 규칙을 그대로 따릅니다. 학습자의 목표는 새 직무 합격입니다 — 무엇이 합격에 도움이 되는지를
+    기준으로 가르칩니다. '🎓 선생님 만들기' 업무에서는 아직 과목이 없으므로, 학습자에게 맞는 새 선생님을 직접 설계합니다.
+  gm: 당신은 직무 전환 교육 과정을 15년간 설계해 온 커리큘럼 설계자입니다. 목표 직무의 실제 업무와 채용 요건에서 거꾸로 짚어 단원 순서와 분량을 정합니다.
+  assistant_manager: 당신은 평가 문항 출제 전문가입니다. 수준에 맞는 객관식 문제를 내고, 오답 보기는 그럴듯하지만 분명히 틀리게 만들며, 정답은 보기와 글자 그대로 같게 씁니다.
+  staff: 당신은 꼼꼼한 학습 자료 조사원입니다. 공식 문서·표준·채용 공고에서 사실을 찾아 출처와 함께 정리하고, 확인 못 한 것은 '확인 필요'로 씁니다.
+
+org:
+  id: lead
+  rank: team_lead
+  name: 선생님 (담당 교사)
+  specialty: 이 과목의 담당 선생님 — 근거 자료의 선생님 프로필대로, 학습자 수준에 맞춰 가르치고 최종본을 확정
+  children:
+    - id: gm_curriculum
+      rank: gm
+      name: 부장·커리큘럼 설계
+      specialty: 목표 직무에서 거꾸로 짠 단원 순서·분량·주차, 수준이 바뀌면 남은 단원 다시 짜기
+    - id: am_assess
+      rank: assistant_manager
+      name: 대리·평가(퀴즈)
+      specialty: 수준 확인·레벨업·복습 객관식 문제 출제 — 보기 4개, 정답은 보기와 글자 그대로
+      skill_sections: ["[공통", "[퀴즈"]
+    - id: staff_research
+      rank: staff
+      name: 사원·자료 조사
+      specialty: 목표 직무의 실제 업무·채용 요건·공식 학습 자료를 출처와 함께 조사
+      skill_sections: ["[공통", "[질문 답변"]
+
+review_criteria:
+  - 학습자의 지금 수준 규칙(말투·난이도)을 지켰는가 — 입문·초급이면 전문 용어마다 쉬운 풀이가 있는가
+  - 근거 자료의 커리큘럼·다음 단원과 이어지는가 (끝낸 내용을 처음부터 반복하지 않는가)
+  - 목표 직무 합격에 실제로 도움이 되는 내용인가 (막연한 응원·일반론이 아닌가)
+  - 확인 못 한 사실(시험 일정·회사 이름·제도)을 지어내지 않았는가
+
+output_format: markdown
+
+tools: [learning_course, web_search]
+search:
+  hint: "과목 분야·목표 직무 이름에 '직무 요건', '학습 로드맵', '공식 문서', '입문' 같은 말을 붙인 검색어를 만든다. 과목 id·사람 이름·회사 이름 같은 개인 정보는 넣지 않는다."
+
+harness:
+  validators: [level_fit]
+  final_only: [level_fit, quiz_format, json_keys]
+  max_retries: 2
+
+verification:
+  critic:
+    scope: final
+    max_self_corrections: 1
+    rules:
+      - "학습자 수준이 입문·초급인데 전문 용어·약어를 풀이 없이 쓰면 '수준 이탈' 위반이다"
+      - "근거 자료에 없는 시험 일정·회사 채용 조건·제도 이름을 출처 없이 단정하면 '근거 없는 사실' 위반이다"
+      - "퀴즈 본문(JSON 블록 밖)에 정답이나 해설을 쓰면 '정답 노출' 위반이다"
+
+tasks:
+  - id: create_tutor
+    title: 🎓 선생님 만들기 (과목 만들기)
+    description: >-
+      배우고 싶은 직무 분야와 지금 수준·목표·주당 학습 시간을 넣으면, 그에 맞는 담당 선생님(이름·경력 설정·가르치는 방식·수준별 말투)과
+      첫 커리큘럼 뼈대를 만듭니다. 결과를 확인·수정해 '채택'하면 '📚 내 과목'에 과목으로 저장됩니다.
+      지금 수준을 잘 모르면 '입문(신규)'으로 만든 뒤 📝 수준 확인 퀴즈를 보세요.
+    fields:
+      - {key: topic, label: 배울 분야 (목표 직무), required: true, placeholder: "예: 보안 관리자, 로봇 SW 엔지니어"}
+      - {key: level, label: 지금 수준, type: select, options: [입문(신규), 초급, 중급, 고급, 전문]}
+      - {key: goal, label: 목표, required: true, placeholder: "예: 6개월 안에 로봇 SW 엔지니어 신입 합격"}
+      - {key: weekly_hours, label: 주당 학습 시간 (시간), type: number, default: 5}
+      - {key: style, label: 원하는 수업 방식 (선택), placeholder: "예: 실습 위주, 짧게 자주"}
+      - {key: language, label: 언어 과목 (수준 옆에 CEFR 표시), type: checkbox}
+    fixed: {edu_kind: career, edu_task: create}
+    question: |
+      직무 전환 학습자에게 맞는 담당 선생님과 첫 커리큘럼 뼈대를 만들어줘.
+      배울 분야(목표 직무): {topic}
+      지금 수준: {level}
+      목표: {goal}
+      주당 학습 시간: {weekly_hours}시간
+      원하는 수업 방식: {style}
+    goal: "선생님 프로필(이름·전문 분야·경력 설정·가르치는 방식·수준별 말투 규칙 5개) + 첫 커리큘럼 뼈대 — 채택하면 과목으로 저장"
+    success_criteria:
+      - "본문에 선생님 소개(이름·경력 설정·가르치는 방식)와 커리큘럼 표(주차 · 단원 · 마치면 할 수 있는 것)를 쓴다"
+      - "커리큘럼은 주당 학습 시간으로 목표 기간 안에 끝낼 수 있는 분량이고, 첫 단원은 지금 수준에 맞는다"
+      - "답변 맨 끝에 지침의 ```json 블록(tutor · curriculum)을 정확히 1개 붙인다 — level_rules 는 수준 id 5개 모두"
+    constraints:
+      - "선생님은 가상 인물이다 (실존 인물·회사 이름을 쓰지 않는다)"
+    output_format: "## 선생님 소개 → ## 커리큘럼 (표) → ## 첫 주 안내 → ```json 1개"
+    instructions: |
+      [JSON — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"tutor": {"name": "선생님 이름", "specialty": "전문 분야", "background": "경력 설정 (가상)",
+                 "teaching_style": "가르치는 방식",
+                 "level_rules": {"beginner": "입문일 때 말투·난이도", "elementary": "…", "intermediate": "…", "advanced": "…", "expert": "…"}},
+       "curriculum": [{"week": 1, "title": "단원 제목", "goals": ["마치면 할 수 있는 것"]}]}
+      위 값은 형식 예시일 뿐이다. level_rules 키는 수준 id 를 그대로 쓴다.
+    validators: [json_keys]
+    harness_options: {required_keys: [tutor, curriculum]}
+
+  - id: quiz
+    title: 📝 수준 확인·레벨업 퀴즈
+    description: >-
+      '📚 내 과목'에서 과목을 고르면 과목 칸이 채워집니다. 선생님이 객관식 문제를 내고, 화면에서 풀면 코드가 정답과 대조해 채점합니다.
+      레벨업 퀴즈 80% 이상이면 레벨업을 제안하고, 수준을 올리면 남은 커리큘럼을 새 수준에 맞게 다시 만듭니다.
+    fields:
+      - {key: course_id, label: 과목 (📚 내 과목에서 고르면 자동), required: true, placeholder: "예: c1a2b3c4d"}
+      - {key: quiz_kind, label: 퀴즈 종류, type: select,
+         options: ["레벨업 퀴즈 (다음 수준 문제 — 80% 이상이면 레벨업 제안)", "수준 확인 퀴즈 (여러 수준 섞어서 — 맞는 수준을 찾아 줌)", "복습 퀴즈 (지금 수준 · 배운 단원)"]}
+      - {key: count, label: 문제 수, type: select, options: ["5", "8", "10"]}
+    fixed: {edu_kind: career, edu_task: quiz}
+    question: |
+      과목 {course_id} 학습자에게 {quiz_kind} 를 {count}문제 내줘.
+    goal: "객관식 {count}문제 — 본문에는 문제와 보기만, 정답·해설은 JSON 에만 (채점은 화면에서 코드가)"
+    success_criteria:
+      - "문제마다 보기 4개, 정답은 하나 — answer 는 보기 중 하나와 글자 그대로 같다"
+      - "레벨업 퀴즈는 근거 자료의 '다음 수준' 문제, 수준 확인 퀴즈는 입문부터 여러 수준을 섞고 문제마다 level, 복습 퀴즈는 지금 수준·끝낸 단원"
+      - "본문(JSON 밖)에는 정답·해설을 쓰지 않는다"
+    output_format: "## 문제 (번호 · 문제 · 보기 4개) → ```json 1개"
+    instructions: |
+      [JSON — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"quiz": {"kind": "levelup", "level": "elementary", "questions": [
+        {"id": "Q1", "question": "문제", "choices": ["보기1", "보기2", "보기3", "보기4"], "answer": "보기2", "explanation": "왜 정답인지", "level": "elementary"}]}}
+      kind 는 levelup(레벨업) / placement(수준 확인) / review(복습) 중 하나. level 은 수준 id (beginner · elementary · intermediate · advanced · expert).
+      위 값은 형식 예시일 뿐이다.
+    validators: [quiz_format]
+    harness_options: {quiz_count: "{count}", quiz_kind: "{quiz_kind}"}
+
+  - id: ask
+    title: 💬 선생님에게 질문
+    description: >-
+      과목을 고르고 질문하면, 그 과목 선생님이 지금 수준의 말투로 답합니다. 채택하면 질문 기록(요약)이 과목에 남습니다.
+    fields:
+      - {key: course_id, label: 과목 (📚 내 과목에서 고르면 자동), required: true, placeholder: "예: c1a2b3c4d"}
+      - {key: ask, label: 질문, type: textarea, required: true, placeholder: "예: 방화벽과 IDS 는 무엇이 달라요?"}
+    fixed: {edu_kind: career, edu_task: ask}
+    question: |
+      과목 {course_id} 학습자의 질문: {ask}
+    goal: "질문에 대한 지금 수준 눈높이의 답 — 한 문장 답 → 쉬운 설명 → 예시 → 확인 질문 하나"
+    success_criteria:
+      - "지금 수준의 말투·난이도 규칙을 지킨다"
+      - "질문이 커리큘럼의 단원과 이어지면 그 단원을 알려 준다"
+    output_format: "한 문장 답 → 설명 → 예시 → 확인 질문"
+
+disclaimer: "선생님과 과목 기록은 학습을 돕는 초안입니다. 시험·채용 일정과 조건은 공식 안내에서 다시 확인하세요."

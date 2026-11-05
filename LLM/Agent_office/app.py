@@ -46,6 +46,7 @@ import command_center_ui
 import concept_ui
 import design_ui
 import dept_models_ui
+import education_ui
 import home_ui
 import models_ui
 import office_ui
@@ -382,6 +383,8 @@ with st.sidebar:
     concept_ctx = concept_ui.sidebar(settings) if is_concept else None
     is_design = design_ui.FEATURE in team.features  # 설계 팀: 최종 JSON → 도면(+3D) (design_ui.py)
     is_career = career_ui.FEATURE in team.features  # 포트폴리오·자소서 팀: 최종 답변 → .md · .docx · .hwpx (career_ui.py)
+    is_edu = education_ui.FEATURE in team.features  # 교육부: 📚 내 과목 · 퀴즈 채점 · 과목 저장 (education_ui.py)
+    edu_ctx = education_ui.Ctx(DATA_DIR, models, teams_by_id, TASK_KEY, TEAM_KEY)
 
     # 결과 기록은 부서 단위로 모아 본다 — 팀 필터는 선택 (팀이 둘 이상인 부서만)
     HIST_FILTER_KEY = f"hist_team_{dept_id}"
@@ -1362,6 +1365,8 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
                 extra = None
                 run["save_error"] = f"Word·한글 문서를 만들지 못해 기록(.md)만 저장했습니다: {type(e).__name__}: {e}"
                 run["notes"].append(f"결과 파일 저장 일부 실패: {run['save_error']}")
+        if is_edu:  # 선생님 만들기 → 과목 저장 · 질문 → 질문 기록 (data/learning/)
+            education_ui.on_adopt(edu_ctx, run, decision)
         paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text, appendix,
                                audio_path=audio_path, appendix_title=title, extra_files=extra)
         return [str(p) for p in paths]
@@ -1398,7 +1403,7 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             concept_ui.result_tabs(final.content, run)  # 최종본·검증 로그·GitHub 요약·적용 계획
         else:
             with st.container(height=420, border=True):
-                st.markdown(final.content)
+                st.markdown(education_ui.result_text(run, final.content) if is_edu else final.content)  # 퀴즈 정답은 감춤
             st.download_button("⬇ 최종 결과 받기 (.md)", data=final.content, file_name=f"{team_id}_{run['run_id'][:8]}.md",
                                mime="text/markdown", key=f"dl_final_{run['run_id']}")
         if MUSIC_TRACK in team.features:
@@ -1417,6 +1422,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             design_ui.preview(run, final.content)  # 📐 층별 평면도·검증·3D 뷰어·내려받기
         if is_career:
             career_ui.preview(run, final.content)  # 📄 문항별 글자 수·사실 검사·.md/.docx/.hwpx 내려받기
+        if is_edu:
+            education_ui.preview(edu_ctx, run, final.content)  # 🎓 선생님 미리 보기 / 📝 퀴즈 풀기·채점·레벨업
         if team.disclaimer:
             st.caption(f"ℹ️ {team.disclaimer}")
 
@@ -1985,6 +1992,8 @@ def render_task_input() -> dict:
     그 아래 팀별로 묶은 팀 업무(양식)·자유 질문 → 고르면 그 팀으로 바로 (부서장을 거치지 않음)."""
     request: dict = {}  # 업무 양식이든 자유 질문이든 여기에 모은다
     st.markdown(f"#### 💬 {dept.emoji} {dept.name}에 업무 맡기기")
+    if education_ui.is_education(dept_id):
+        education_ui.courses_panel(edu_ctx)  # 📚 내 과목 — 고르면 아래 업무 양식의 과목 칸이 채워진다
     options = [HEAD_TASK] + [f"{tid}:{x}" for tid in dept.teams for x in [*(t.id for t in teams_by_id[tid].tasks), FREE_FORM]]
     pick = st.selectbox("📋 부서 업무 목록 (팀별로 묶여 있습니다 — 부서장에게 맡기거나 팀 업무를 직접 고르세요)", options,
                         format_func=task_label, key=TASK_KEY, on_change=on_task_pick)
@@ -2288,6 +2297,7 @@ if request:
         run["post_busy"] = ROUTE_MAP in features or design or (MUSIC_TRACK in features and MUSIC_CFG["auto_generate"])
         run["design_opts"] = design_ui.options_from_inputs(request["tool_inputs"]) if design else None
         run["career_inputs"] = request["tool_inputs"] if career_ui.FEATURE in features else None  # 받을 형식·업무 종류
+        run["edu_inputs"] = request["tool_inputs"] if education_ui.FEATURE in features else None  # 과목 id·업무 종류
         # 🔀 단계마다 확인 · ⏭ 다른 모델로 고를 때의 규칙(🆓 무료만·팀원 모델)은 맡기는 순간 값으로
         run["step_mode"] = bool(request.get("step_mode", st.session_state.get(run_control_ui.step_key(team_id))))
         run["free_only"] = bool(st.session_state.get("free_only"))

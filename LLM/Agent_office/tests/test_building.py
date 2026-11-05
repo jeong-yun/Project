@@ -33,7 +33,7 @@ def cfg_with(*depts: tuple[str, list[str]], per: int = 4) -> dict:
 def test_real_config_puts_every_team_in_a_department():
     teams = list_teams()
     depts = building.departments([t.id for t in teams], building.load_config())
-    assert [d.name for d in depts] == ["리서치·지식부", "투자부", "여행부", "크리에이티브부", "보안부", "커리어부"]  # '기타' 없음
+    assert [d.name for d in depts] == ["리서치·지식부", "투자부", "여행부", "크리에이티브부", "보안부", "커리어부", "교육부"]  # '기타' 없음
     assert next(d for d in depts if d.id == "travel").teams == ["travel_domestic", "travel_abroad"]
     assert sorted(t for d in depts for t in d.teams) == sorted(t.id for t in teams)
 
@@ -265,9 +265,9 @@ def test_home_shows_building_and_list_and_dept_head(seeded):
     at.run()
     assert not at.exception, at.exception
     snap = component_args(at)
-    assert snap["kind"] == "building" and len(snap["layout"]["floors"]) == 3
+    assert snap["kind"] == "building" and len(snap["layout"]["floors"]) == 4  # 교육부가 새 층
     assert snap["rooms"]["travel_abroad"]["recent"]["text"].startswith("2026-11-20 부터 2026-11-23")  # 옛 해외 업무
-    assert snap["floorCosts"] == ["$0", "$0.250", "$0"]  # 옛 travel 사용량 → 3층(여행부) 비용 미터
+    assert snap["floorCosts"] == ["$0", "$0.250", "$0", "$0"]  # 옛 travel 사용량 → 3층(여행부) 비용 미터
     assert snap["rooms"]["travel_abroad"]["cost"] == snap["rooms"]["travel_domestic"]["cost"] == "$0"  # 어느 팀 몫인지 모름
     assert at.radio(key="home_section").value == "brief"
     # 방을 누름 → 다음 실행 맨 앞에서 그 팀 화면으로
