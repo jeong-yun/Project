@@ -1,0 +1,123 @@
+# 검증 브랜치 → main 자동 반영.
+# 평소에는 main 대신 check/main 으로 push 한다 (바탕화면 Agent_Office_검사후_올리기.bat = git push origin main:check/main).
+# 여기서 기존 검사 두 개(agent-office-tests, secret-scan)를 그대로 불러 돌리고, 모두 통과하면 그 커밋을 main 에 '빨리 감기'로만 올린다.
+#   - 강제 push 는 하지 않는다. main 이 앞서 있으면(다른 곳에서 main 에 직접 올림) 반영하지 않고 실패로 표시한다.
+#   - 검사 범위는 'main 에 새로 들어갈 커밋'(main 과의 갈림점..check/main)이다. 직전 check/main push 이후 것만 보지 않는다
+#     (앞서 실패해 main 에 못 들어간 커밋이 다음 push 에 묻어 들어가지 않게).
+#   - Agent Office 가 바뀌지 않았으면 agent-office-tests 는 건너뛰고 통과로 본다 (그 워크플로의 paths 목록과 같은 기준).
+# main 에 직접 push 하는 것도 그대로 된다 (바로 고칠 때). 자세한 흐름: docs/올리기_전_검사.md
+name: promote-to-main
+
+on:
+  push:
+    branches: ["check/main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote-to-main
+  cancel-in-progress: true   # 새로 올린 것이 앞의 것을 포함하므로 앞의 실행은 그만둔다
+
+jobs:
+  plan:
+    name: 범위 정하기
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      base: ${{ steps.plan.outputs.base }}
+      agent_office: ${{ steps.plan.outputs.agent_office }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fast-forward check and changed paths
+        id: plan
+        run: |
+          set -euo pipefail
+          git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          main_sha=$(git rev-parse origin/main)
+          if git merge-base --is-ancestor "$GITHUB_SHA" "$main_sha"; then
+            echo "이 커밋은 이미 main 에 들어 있음 — 반영할 것 없음"
+          elif ! git merge-base --is-ancestor "$main_sha" "$GITHUB_SHA"; then
+            echo "::error title=main 이 앞서 있음::main 이 앞서 있음 — pull 후 다시 (main ${main_sha:0:8} 이 check/main ${GITHUB_SHA:0:8} 에 없음)"
+            exit 1
+          fi
+          base=$(git merge-base "$main_sha" "$GITHUB_SHA")
+          # agent-office-tests.yml 의 on.push.paths 와 같은 목록 — 그쪽을 바꾸면 여기도 바꾼다
+          if git diff --name-only "$base" "$GITHUB_SHA" -- \
+               'LLM/Agent_office/' \
+               '.github/workflows/agent-office-tests.yml' \
+               '.github/ci/agent-office-load-sensitive.txt' | grep -q .; then
+            agent_office=true
+          else
+            agent_office=false
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          echo "agent_office=$agent_office" >> "$GITHUB_OUTPUT"
+          echo "main 에 새로 들어갈 커밋: $(git rev-list --count "$base..$GITHUB_SHA")개 · Agent Office 바뀜: $agent_office"
+
+  secret-scan:
+    name: secret-scan
+    needs: plan
+    uses: ./.github/workflows/secret-scan.yml
+    with:
+      range: ${{ needs.plan.outputs.base }}..${{ github.sha }}
+
+  agent-office-tests:
+    name: agent-office-tests
+    needs: plan
+    if: needs.plan.outputs.agent_office == 'true'
+    uses: ./.github/workflows/agent-office-tests.yml
+
+  promote:
+    name: main 에 반영
+    needs: [plan, secret-scan, agent-office-tests]
+    # agent-office-tests 는 '안 돌아도 되는 경우(skipped)'를 통과로 본다. 그 밖(실패·취소)이면 반영하지 않는다.
+    if: >-
+      always()
+      && needs.plan.result == 'success'
+      && needs.secret-scan.result == 'success'
+      && (needs.agent-office-tests.result == 'success'
+          || (needs.agent-office-tests.result == 'skipped' && needs.plan.outputs.agent_office == 'false'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write   # main 에 올리는 이 job 만 쓰기 권한
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false   # 토큰은 아래 반영 단계의 git 명령 하나에만 넘긴다
+
+      - name: Fast-forward main
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git fetch --quiet --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          main_sha=$(git rev-parse origin/main)
+          if git merge-base --is-ancestor "$GITHUB_SHA" "$main_sha"; then
+            echo "이미 main 에 들어 있음 (${GITHUB_SHA:0:8}) — 할 일 없음"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor "$main_sha" "$GITHUB_SHA"; then
+            echo "::error title=main 이 앞서 있음::main 이 앞서 있음 — pull 후 다시"
+            exit 1
+          fi
+          auth=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          # 강제 push 아님: main 이 그 사이 바뀌었으면 GitHub 가 '빨리 감기 아님'으로 거절한다
+          if git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+               push origin "${GITHUB_SHA}:refs/heads/main"; then
+            echo "main ← ${GITHUB_SHA:0:8} 반영함 (${main_sha:0:8} 에서 빨리 감기)"
+            exit 0
+          fi
+          if ! git diff --quiet "$main_sha" "$GITHUB_SHA" -- .github/workflows/; then
+            echo "::error title=자동 반영 불가::이번 커밋들이 .github/workflows/ 를 바꿔서 GitHub 기본 토큰으로는 main 에 올릴 수 없습니다. 검사는 통과했으니 PC 에서 'git push origin main' 으로 직접 올리세요."
+          else
+            echo "::error title=main 반영 실패::main 이 앞서 있음 — pull 후 다시 (또는 main 브랜치 보호 규칙이 막음)"
+          fi
+          exit 1

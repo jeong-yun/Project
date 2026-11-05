@@ -1,0 +1,6 @@
+# 대표 묶음 — 넓게 영향을 주는 파일(app.py, tests/conftest.py·fakes.py·fixtures/, requirements*.txt)이 바뀌어
+# 고를 테스트를 좁힐 수 없을 때 돌린다. Agent Office(LLM/Agent_office) 기준 경로, 한 줄에 테스트 파일 또는 node id 하나.
+# 기준: 설정·팀 정의를 모두 읽는 빠른 테스트 + 앱이 첫 화면까지 뜨는지 보는 화면 테스트 하나. 전체는 GitHub check/main 검사가 돌린다.
+tests/test_config.py
+tests/test_teams.py
+tests/test_board.py::test_home_shows_headline_and_board_link

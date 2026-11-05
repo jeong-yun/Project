@@ -1,0 +1,4 @@
+# 줄 끝 고정 — Windows(core.autocrlf=true)에서 꺼내도 깨지지 않게
+# git 훅은 sh 가 읽으므로 LF, bat 은 cmd 가 읽으므로 CRLF
+.githooks/* text eol=lf
+tools/*.bat text eol=crlf

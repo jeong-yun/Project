@@ -11,6 +11,7 @@
 name: agent-office-tests
 
 # Agent Office 코드·이 워크플로·CI 목록이 바뀔 때만 돈다 (다른 프로젝트·문서만 바뀐 push 는 건너뛴다).
+# check/main(검증 브랜치)은 promote-to-main.yml 이 이 워크플로를 불러(workflow_call) 돌린다 — 같은 paths 기준으로 판단.
 on:
   push:
     branches: [main]
@@ -25,6 +26,7 @@ on:
       - ".github/workflows/agent-office-tests.yml"
       - ".github/ci/agent-office-load-sensitive.txt"
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
