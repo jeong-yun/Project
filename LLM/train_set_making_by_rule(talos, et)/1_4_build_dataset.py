@@ -23,6 +23,16 @@
   {sk: {"action": "edit", "label": ..., "http": ...}} = label·payload 를 바꿔서 씀 (label 파일의 edited 에 표시).
   LLM 출력(07)은 그대로이므로 edits.json 에서 지우면 원래대로 돌아온다.
 
+[생성 대상 범위] (2026-11-05~, 사용자 결정) 학습 로그 = 지금 생성 대상인 룰의 현재 버전 샘플만.
+  화면 1 진행 현황(3.5)이 세는 범위와 같다. 아래 샘플은 07 에 남아 있어도 08 에 넣지 않고,
+  rejected.jsonl 에 '생성 대상 아님: <사유>' 로 남긴다.
+  - 생성 제외 룰 (LLM_설정.md '생성 제외 룰' 표), 생성 제외 attack_type·생성 대상 side 밖 룰
+  - 기존 데이터 충분 룰 (기존 학습 데이터 건수 ≥ LLM_설정.md '기존 데이터 충분 기준')
+  - 최신 수집(05_llm_input 최신 rules_all.jsonl)에 없는 룰 (중복 판정 등으로 빠진 룰)
+  - 룰 개정 전 버전 (그 샘플의 요청 파일에 든 룰 원문 지문 ≠ 최신 수집의 지문, 3_0a_common.rule_hash)
+  범위가 바뀌면(룰 제외·개정·수집 변화) 그 날짜는 다음 1.4 때 다시 변환한다 (summary.json 의 scope_key).
+  --all-rules 로 끄면 예전처럼 07 의 모든 샘플을 넣는다 (비교·시험용).
+
 [method]  docs/코드참조/method_매핑.md 의 'IPS method 방식' / 'WAF method 방식'
   - mapping   : 공격 유형 → 장비 탐지 이름 (매핑 표)
   - rule_name : Snort 룰 이름 그대로 (예: ET WEB_SPECIFIC_APPS D-Link gena.cgi ... Command Injection Attempt)
@@ -50,6 +60,7 @@
     python 1_4_build_dataset.py --force               # 다시 변환
     python 1_4_build_dataset.py --date 2026-10-20 --force   # 그 날짜만 (화면의 '학습 로그에 반영')
     python 1_4_build_dataset.py --llm-output 폴더 --out 폴더   # 다른 위치 (테스트용)
+    python 1_4_build_dataset.py --all-rules           # 생성 대상 범위로 거르지 않음 (비교·시험용)
 """
 
 import argparse
@@ -281,13 +292,18 @@ _check = {}
 ADDR_RETRIES = 5        # 주소를 바꾼 normal 이 다른 공격 룰·흔적에 새로 걸리면 다른 씨앗으로 다시 뽑는 횟수
 
 
-def same_verdict(old, new, label, conditions):
-    """바꾸기 전후의 코드 검사(룰 조건 대조) 결과가 같은지 (3_0a_common.local_check)."""
+def _common():
+    """3_0a_common (코드 검사·LLM_설정.md 읽기·룰 지문), 처음 쓸 때 한 번 불러온다."""
     if "C" not in _check:
         spec = importlib.util.spec_from_file_location("llm_common_14", BASE_DIR / "3_0a_common.py")
         _check["C"] = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(_check["C"])
-    lc, rule = _check["C"].local_check, {"conditions": conditions}
+    return _check["C"]
+
+
+def same_verdict(old, new, label, conditions):
+    """바꾸기 전후의 코드 검사(룰 조건 대조) 결과가 같은지 (3_0a_common.local_check)."""
+    lc, rule = _common().local_check, {"conditions": conditions}
     return lc({"label": label, "http": old}, rule)["result"] == lc({"label": label, "http": new}, rule)["result"]
 
 
@@ -386,6 +402,90 @@ def input_rules():
     return out
 
 
+# ── 생성 대상 범위 (2026-11-05~) ─────────────────────────────────────────
+
+EMPTY_SCOPE_KEY = hashlib.sha1(b"[]").hexdigest()[:16]     # 그 날짜에서 뺄 샘플이 없을 때 (예전 summary 와 같게 봄)
+
+
+def current_scope():
+    """최신 수집의 룰 → {"input": 날짜, "hash": {룰 id: 지문}, "out": {룰 id: 범위 밖 사유}}.
+    3_5_progress.compute 와 같은 기준·순서 (생성 제외 유형·방향 → 생성 제외 룰 → 기존 데이터 충분). 입력이 없으면 None."""
+    C = _common()
+    in_dir = C.latest_input_dir()
+    if in_dir is None:
+        return None
+    _, _, run = C.load_settings()
+    skip = {t.strip() for t in run.get("생성 제외 attack_type", "").split(",") if t.strip() not in ("", "-")}
+    sides = {s.strip() for s in run.get("생성 대상 side", "request").split(",") if s.strip()}
+    excl = C.excluded_rules()
+    hi = C.run_int(run, "기존 데이터 충분 기준", 1000)
+    cov_src = next((b for b in [C.output_dir(in_dir.name)] + C.output_dates()[::-1]
+                    if (b / "_0_existing" / "coverage.json").exists()), None)
+    try:
+        cov = json.loads((cov_src / "_0_existing" / "coverage.json").read_text(encoding="utf-8")) if cov_src else {}
+    except (OSError, ValueError):
+        cov = {}
+    hashes, out = {}, {}
+    for r in C.read_jsonl(in_dir / "rules_all.jsonl"):
+        rid = r["id"]
+        hashes[rid] = C.rule_hash(r)
+        if r.get("attack_type") in skip:
+            out[rid] = f"생성 제외 유형 ({r.get('attack_type')})"
+        elif r.get("side", "request") not in sides:
+            out[rid] = f"생성 대상 방향 아님 ({r.get('side') or '?'})"
+        elif rid in excl:
+            out[rid] = "생성 제외 룰"
+        elif (cov.get(rid) or {}).get("count", 0) >= hi:
+            out[rid] = "기존 데이터 충분"
+    return {"input": in_dir.name, "hash": hashes, "out": out}
+
+
+def request_hashes(day_dir, names):
+    """그 날짜 출력 파일(이름 = 요청 이름)마다 요청 파일(_1_requests)에 든 룰 → {(파일 이름, 룰 id): 룰 원문 지문}.
+    3.5 가 남긴 _progress/req_index.json (수정 시각이 같을 때만)을 먼저 쓰고, 없으면 요청 파일을 읽는다."""
+    C = _common()
+    idx_file = day_dir.parent / "_progress" / "req_index.json"
+    cache = _check.setdefault("req_index", {})
+    if idx_file not in cache:
+        try:
+            cache[idx_file] = json.loads(idx_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            cache[idx_file] = {}
+    index, out = cache[idx_file], {}
+    for name in names:
+        path = day_dir / C.REQ_DIR / name
+        try:
+            mtime = path.stat().st_mtime_ns
+        except OSError:
+            continue                                        # 요청 파일이 없으면 지문을 모른다 → 버전은 보지 않음
+        hit = index.get(f"{day_dir.name}/{name[:-6]}")
+        rules = hit["r"] if hit and hit.get("m") == mtime else [[r["id"], C.rule_hash(r)] for r in C.read_jsonl(path)]
+        for rid, h in rules:
+            out[(name, rid)] = h
+    return out
+
+
+def scope_reason(scope, req_hash, fname, rid):
+    """이 샘플(출력 파일 fname 의 룰 rid)이 생성 대상 범위 밖이면 사유, 안이면 None (scope 가 None 이면 거르지 않음)."""
+    if scope is None:
+        return None
+    if rid in scope["out"]:
+        return scope["out"][rid]
+    h = scope["hash"].get(rid)
+    if h is None:
+        return "최신 수집에 없는 룰"
+    rh = req_hash.get((fname, rid))
+    if rh is not None and rh != h:
+        return "룰 개정 전 버전"
+    return None
+
+
+def scope_key(scope, req_hash):
+    """그 날짜에서 범위 밖으로 뺄 (파일, 룰, 사유)의 지문. 바뀌면 그 날짜를 다시 변환한다."""
+    drops = sorted([f, rid, why] for (f, rid) in req_hash if (why := scope_reason(scope, req_hash, f, rid)))
+    return hashlib.sha1(json.dumps(drops, ensure_ascii=False).encode("utf-8")).hexdigest()[:16] if drops else EMPTY_SCOPE_KEY
+
+
 # ── 변환 ────────────────────────────────────────────────────────────────
 
 def pick_method(mode, mapped, rule_name):
@@ -397,13 +497,15 @@ def pick_method(mode, mapped, rule_name):
     return mode
 
 
-def collect_events(results, rejected, st, mapping, rules, edits=None):
-    """LLM 결과 → 이벤트 목록. 잘못된 샘플은 rejected 에 이유와 함께 넣는다. edits = 화면에서 저장한 수정·삭제."""
+def collect_events(results, rejected, st, mapping, rules, edits=None, scope=None):
+    """LLM 결과 → 이벤트 목록. 잘못된 샘플은 rejected 에 이유와 함께 넣는다. edits = 화면에서 저장한 수정·삭제.
+    scope = (파일 이름, 룰 id) → 생성 대상 범위 밖 사유 | None 인 함수 (None 이면 거르지 않음, 2026-11-05~)."""
     events, edits = [], edits or {}
     for fname, lineno, obj in results:
         rid = obj.get("id", "")
         rule = rules.get(rid, {})
         rule_type = obj.get("attack_type") or rule.get("attack_type", "other")
+        out_of_scope = scope(fname, rid) if scope else None
         for k, smp in enumerate(obj.get("samples", [])):
             label = (smp.get("label") or "").strip()
             http = smp.get("http") or ""
@@ -411,6 +513,8 @@ def collect_events(results, rejected, st, mapping, rules, edits=None):
             seed = _h(rid, k, http)                     # 출발 IP·포트·주소 바꾸기의 씨앗 (LLM 출력 그대로 기준)
             sk = f"{seed:040x}"[:16]                    # 샘플 지문: 화면의 수정·삭제가 이것으로 샘플을 찾는다
             ref = {"file": fname, "line": lineno, "id": rid, "sample": k, "sk": sk}
+            if out_of_scope:                            # 생성 대상 범위 밖 (화면의 수정·삭제보다 먼저)
+                rejected.append(dict(ref, label=label, reason=f"생성 대상 아님: {out_of_scope}")); continue
             edit, edited = edits.get(sk) or {}, []
             if edit.get("action") == "delete":
                 rejected.append(dict(ref, reason="사용자 삭제" + (f": {edit['why']}" if edit.get("why") else ""))); continue
@@ -508,7 +612,8 @@ def waf_line(ev, ts, st):
     return check_fields(fields, "WAF")
 
 
-def build(day_dir, out_dir, st, mapping, rules):
+def build(day_dir, out_dir, st, mapping, rules, scope=None, req_hash=None):
+    """scope·req_hash: 생성 대상 범위 (current_scope · request_hashes). scope 가 None 이면 거르지 않는다."""
     results, rejected = read_llm_outputs(day_dir)
     edits, e_mtime = load_edits(out_dir), edits_mtime(out_dir)
     try:
@@ -516,7 +621,10 @@ def build(day_dir, out_dir, st, mapping, rules):
     except ValueError:
         day0 = dt.datetime.combine(dt.date.today(), dt.time())
     yymmdd = day0.strftime("%y%m%d")
-    events = collect_events(results, rejected, st, mapping, rules, edits)
+    req_hash = req_hash or {}
+    in_scope = (lambda f, rid: scope_reason(scope, req_hash, f, rid)) if scope else None
+    events = collect_events(results, rejected, st, mapping, rules, edits, in_scope)
+    dropped = [r for r in rejected if r.get("reason", "").startswith("생성 대상 아님")]
 
     n = max(len(events), 1)
     for i, ev in enumerate(events):
@@ -577,12 +685,18 @@ def build(day_dir, out_dir, st, mapping, rules):
         "reject_reasons": dict(Counter(r["reason"].split(":")[0] for r in rejected)),
         "addr_fixed": {"samples": sum(1 for e in events if e["addr_fixed"] > 0), "places": sum(max(0, e["addr_fixed"]) for e in events),
                        "kept_original": sum(1 for e in events if e["addr_fixed"] < 0)},
+        # 생성 대상 범위 밖으로 뺀 샘플 (2026-11-05~). scope_key 가 바뀌면 다음 1.4 때 이 날짜를 다시 변환
+        "scope_key": scope_key(scope, req_hash) if scope else EMPTY_SCOPE_KEY,
+        "scope": {"on": scope is not None, "input": (scope or {}).get("input"), "samples": len(dropped),
+                  "rules": len({r["id"] for r in dropped}),
+                  "label": dict(Counter(r.get("label", "") for r in dropped)),
+                  "by_reason": dict(Counter(r["reason"].split(": ", 1)[1] for r in dropped).most_common())},
         "files": names,
     }
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
-    log.info("[데이터셋] %s: 룰 %d개 → 이벤트 %d건 (anomalies %d, normal %d), 제외 %d건",
+    log.info("[데이터셋] %s: 룰 %d개 → 이벤트 %d건 (anomalies %d, normal %d), 제외 %d건 (그중 생성 대상 아님 %d건 · %d룰)",
              out_dir, len(results), len(events), summary["label"].get("anomalies", 0),
-             summary["label"].get("normal", 0), len(rejected))
+             summary["label"].get("normal", 0), len(rejected), len(dropped), summary["scope"]["rules"])
 
 
 def main(argv=None):
@@ -591,6 +705,8 @@ def main(argv=None):
     parser.add_argument("--llm-output", type=Path, default=LLM_OUTPUT_DIR, help="LLM 출력 폴더 (날짜 폴더들의 상위)")
     parser.add_argument("--out", type=Path, default=DATASET_DIR, help="데이터셋 출력 폴더")
     parser.add_argument("--date", help="이 날짜 폴더만 (예: 2026-10-20)")
+    parser.add_argument("--all-rules", action="store_true",
+                        help="생성 대상 범위(생성 제외·기존 충분·수집에 없음·개정 전 버전)로 거르지 않음 (비교·시험용)")
     args = parser.parse_args(argv)
     setup_logging()
 
@@ -608,18 +724,33 @@ def main(argv=None):
         log.info("LLM 출력 없음 (%s/<날짜>/*.jsonl) - 건너뜀", args.llm_output)
         return 0
     rules = input_rules()
+    scope = None
+    if not args.all_rules:
+        try:
+            scope = current_scope()
+        except (OSError, ValueError) as e:
+            log.error("생성 대상 범위(최신 수집·LLM_설정.md)를 읽지 못함 - 중단: %s", e)
+            return 1
+        if scope is None:
+            log.warning("[데이터셋] 05_llm_input 에 완성된 입력이 없어 생성 대상 범위로 거르지 않음")
     for day in day_dirs:
         out = args.out / day.name
         prev = {}
         if (out / "summary.json").exists():
             prev = json.loads((out / "summary.json").read_text(encoding="utf-8"))
+        names = sorted(p.name for p in day.glob("*.jsonl"))
+        req_hash = request_hashes(day, names) if scope else {}
+        key = scope_key(scope, req_hash) if scope else EMPTY_SCOPE_KEY
         latest = max(p.stat().st_mtime for p in day.glob("*.jsonl"))
         if (not args.force and prev.get("llm_output_mtime") == latest
                 and prev.get("mapping_mtime") == MAPPING_FILE.stat().st_mtime
-                and prev.get("format", 1) == FORMAT and prev.get("edits_mtime", 0) == edits_mtime(out)):
+                and prev.get("format", 1) == FORMAT and prev.get("edits_mtime", 0) == edits_mtime(out)
+                and prev.get("scope_key", EMPTY_SCOPE_KEY) == key):
             log.info("[데이터셋] %s 변경 없음 - 건너뜀", day.name)
             continue
-        build(day, out, st, mapping, rules)
+        if prev and prev.get("scope_key", EMPTY_SCOPE_KEY) != key:
+            log.info("[데이터셋] %s 생성 대상 범위가 바뀜 (룰 제외·개정·수집 변화) - 다시 변환", day.name)
+        build(day, out, st, mapping, rules, scope, req_hash)
     return 0
 
 
