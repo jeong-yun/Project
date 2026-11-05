@@ -206,3 +206,32 @@ education_ui.register_adopt("project_plan", on_project_adopt)       # 그 업무
   여행부(`이탈리아` 같은 지명)·커리어부(`자소서`·`JD`) 낱말과 겹치지 않게 '배우기' 쪽 낱말을 쓴다.
 - JD 추천(2단계)은 커리어부 '🎯 업무(JD) 추천'(`teams/career`, `core/career.py score_jds`)을 **불러 쓰고 고치지 않는다** — 그 팀은 다른 세션 담당이다.
 - 미리 보기는 8501 이 아닌 포트로. `streamlit.web.bootstrap` 으로 띄우면 `load_config_options(flag_options={"server_port": …})` 를 먼저 불러야 포트가 먹는다.
+
+---
+
+## 진행 기록
+
+### 3단계 — 🌍 취미·교양 교육팀 전문 업무 (2026-11-05, 브랜치 `claude/edu-hobby-814269`)
+
+| 업무 (`team.yaml` id = `fixed.edu_task`) | 채택하면 | 검증기 (`core/learning_hobby.py`) |
+|---|---|---|
+| 📅 커리큘럼 짜기 (`hobby_curriculum`) | 과목의 남은(안 끝낸) 단원을 교체 — 모델은 1주부터 쓰고 코드가 끝낸 주 다음으로 밂 | `hobby_curriculum` — 주차·단원 형식, 주마다 시간 합 ≤ 주당 시간(0.1시간 정수), 언어는 네 영역 |
+| 📖 필수 단어·용어장 (`vocab`) | `extras["vocab"]` 에 쌓음, 같은 단어는 합침 | `vocab_list` — 칸·중복, 수준 범위는 경고만 |
+| 🗣 일상·여행 상황별 표현 (`phrases`) | `extras["phrases"]` | `phrase_list` |
+| 🧭 더 배울 것 (`topics`) | `extras["topics"]` + ➕ 새 과목으로(공용 선생님 만들기 양식 미리 채움) | `topic_list` |
+| 🔁 복습 퀴즈 (`review`) | 채점할 때 바로 저장(퀴즈 기록 + 항목별 다음 복습일) | `review_quiz` — 공용 퀴즈 형식 + 문제마다 `ref` 가 과목에 있음 |
+
+- 파일: `teams/edu_hobby/team.yaml`(tasks 맨 아래 5개 + `harness.final_only` 에 검증기 5개) · `teams/edu_hobby/skills/hobby_teaching.md` · `core/learning_hobby.py` · `edu_hobby_ui.py` · `tests/test_edu_hobby.py`(17건).
+- extras 항목 모양은 learning.py 머리말의 키에 이 팀 칸을 더함 — vocab: `reading·pos·example_ko·related` + 복습 칸 `known·box·due·last_review·reviews·wrong`, phrases: `reading·dialogue·tip` + 복습 칸, topics: `first_unit·field·added_at`. `EXTRAS_KEYS` 는 고치지 않음(키 3개는 1단계에 이미 있음).
+- 📖 자세히 칸(`register_section`): 단어장 표('외움' 체크 = `st.data_editor`, 저장할 때마다 표 키를 바꿔 줄 순서가 어긋나지 않게) · 검색 · CSV(Anki)·.md · 표현 모음 · ⚡ 바로 복습(모델 없이) · 추가 주제.
+- **공용 파일 변경 1곳 (이유)**: `education_ui.result_text` 는 '📝 퀴즈' 결과만 정답 JSON 을 감춤 → 3단계 복습 퀴즈의 정답이 결과 상자에 그대로 보임.
+  `ANSWER_TASKS = {"quiz"}` + `register_answer_hidden(edu_task)` 로 바꾸고 `edu_hobby_ui` 가 `review` 를 등록 (공용 퀴즈 동작은 그대로, 머리말 확장 지점 목록에 한 줄).
+  2단계도 퀴즈형 업무가 있으면 `education_ui.register_answer_hidden("<업무>")` 한 줄이면 됨.
+- **2단계도 확인할 것 — `harness.final_only`**: 업무 `validators` 는 팀원 초안(자료 조사·커리큘럼 설계)마다 돌기 때문에 JSON 형식 검증기는 그대로 두면 팀원이 JSON 없다고 다시 쓰게 됨.
+  공용 `quiz_format`·`json_keys` 처럼 팀 `harness.final_only` 에도 이름을 적어 최종 답변에만 돌게 함 (`tests/test_education.py` 의 final_only 확인은 '포함'이라 통과).
+- **✈️ 여행부 연결 (제안만 — 여행팀 파일은 안 고침)**:
+  ① 🗣 표현 미리 보기에 '✈️ 이 나라 여행 계획 맡기기' 버튼 → `travel_abroad` 업무 `plan` 의 `destination` 칸을 과목 나라로 채워 엶 (교육부 `open_task` 와 같은 방식, 부서가 달라 `dept`·`team` 쿼리도 바꿔야 함).
+  ② 반대로 여행팀 결과 아래 '🗣 현지 표현 배우기' → 그 나라 말 취미 과목이 있으면 `phrases` 업무를 `situation` = 공항/호텔로 채워 엶, 없으면 선생님 만들기 양식을 채움.
+  ③ 여행 날짜(`travel_calendar` 의 출국일)를 커리큘럼 `weeks` 기본값으로 — '출국까지 N주' 에 맞춰 짜기. ①·② 는 여행팀 세션과 상의, ③ 은 여행팀 run 기록을 읽기만 하면 됨.
+- AppTest 주의: 채택 뒤 다시 그리기에서 결정 양식의 키 없는 칸(만족도 슬라이더)이 트리에 남아, 그 화면에서 더 누르면 KeyError — 새 AppTest 로 이어 확인했음 (실제 브라우저는 문제없음).
+

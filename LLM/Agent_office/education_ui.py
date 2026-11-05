@@ -16,6 +16,7 @@
   register_quick(kind, label, task_id) : 과목 카드에 업무 버튼 추가 — 누르면 그 업무를 고르고 course_id 를 채운다
   register_preview(edu_task, fn): 그 업무 결과 아래 상자 — fn(ctx, run, final_text)
   register_adopt(edu_task, fn)  : 그 업무를 채택할 때 과목에 기록 — fn(ctx, run, decision) -> 화면에 보일 한 줄 | None
+  register_answer_hidden(edu_task) : 그 업무 결과의 ```json(정답) 을 결과 상자에서 감춘다 (퀴즈형 업무 — 3단계 🔁 복습)
   edu_task = team.yaml 업무의 fixed.edu_task (공용: create · quiz · ask — 이 셋은 다시 등록하지 않는다)
 """
 
@@ -279,9 +280,17 @@ def edu_task(run: dict) -> str:
     return str((run.get("edu_inputs") or {}).get("edu_task") or "")
 
 
+ANSWER_TASKS = {"quiz"}  # 결과 상자에서 정답 JSON 을 감출 업무 — 2·3단계 퀴즈형 업무는 register_answer_hidden 으로 더한다
+
+
+def register_answer_hidden(edu_task_id: str) -> None:
+    """그 업무 결과의 ```json 블록(정답·해설)을 결과 상자에서 감춘다 (예: 3단계 🔁 복습 퀴즈)."""
+    ANSWER_TASKS.add(edu_task_id)
+
+
 def result_text(run: dict, text: str) -> str:
     """최종 결과 상자에 보일 글 — 퀴즈는 정답·해설이 든 JSON 을 감춘다 (아래 '📝 퀴즈 풀기'에서 풀고 채점 뒤에 보인다)."""
-    if edu_task(run) != "quiz":
+    if edu_task(run) not in ANSWER_TASKS:
         return text
     return re.sub(r"```[ \t]*json[ \t]*\n.*?```", "*(정답·해설은 감췄습니다 — 아래 '📝 퀴즈 풀기'에서 풀면 채점 뒤에 보입니다)*",
                   text, flags=re.DOTALL | re.IGNORECASE)
