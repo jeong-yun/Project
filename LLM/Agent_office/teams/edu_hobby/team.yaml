@@ -6,8 +6,10 @@
 # 언어 과목: '언어 과목' 칸을 켜면 수준 옆에 CEFR(A1~C1)이 보이고, level_fit 은 배우는 말(영문 낱말)을 세지 않는다.
 # 화면: education_ui.py (features: edu_course). 개인 정보: private: true, 과목 기록은 data/learning/ (.gitignore)
 #
-# ── 3단계 세션이 여기에 추가할 것 (docs/PROPOSAL_교육부.md '2·3단계 세션용 안내') ──
-#   tasks 맨 아래에 전문 업무(커리큘럼 · 단어·용어장 · 상황별 표현 · 추가 지식 · 복습 퀴즈)를 추가한다. 공용 업무 세 개는 고치지 않는다.
+# ── 3단계 (취미 전문 업무) — tasks 맨 아래 5개: 📅 커리큘럼 · 📖 단어·용어장 · 🗣 상황별 표현 · 🧭 추가 지식 · 🔁 복습 퀴즈 ──
+#   코드 계산·검증기·근거 자료 글: core/learning_hobby.py · 화면(미리 보기·채택 저장·단어장 표·복습): edu_hobby_ui.py
+#   기록: extras["vocab"] · extras["phrases"] · extras["topics"] (data/learning/) · 커리큘럼은 과목의 남은 단원을 바꾼다
+#   검증기 5개는 harness.final_only 에도 적었다 (팀원 초안이 아니라 최종 답변에만 돈다).
 
 name: 🌍 취미·교양 교육팀
 description: 일상·여행·교양을 위해 배우는 학습 — 예 이탈리아어·영어 회화, 유럽 역사, 한국사, 사진. 과목마다 담당 선생님이 수준에 맞춰 커리큘럼·퀴즈·질문 답변을 맡는다.
@@ -84,7 +86,7 @@ search:
 
 harness:
   validators: [level_fit]
-  final_only: [level_fit, quiz_format, json_keys]
+  final_only: [level_fit, quiz_format, json_keys, hobby_curriculum, vocab_list, phrase_list, topic_list, review_quiz]  # 3단계 업무 검증기도 최종 답변에만
   max_retries: 2
 
 verification:
@@ -179,5 +181,147 @@ tasks:
       - "지금 수준의 말투·난이도 규칙을 지킨다"
       - "외국어 표현이면 뜻과 읽는 법을 함께 쓴다"
     output_format: "한 문장 답 → 설명 → 예시 → 확인 질문"
+
+  # ─── 3단계: 취미·교양 전문 업무 (core/learning_hobby.py · edu_hobby_ui.py) ───────────────────
+
+  - id: hobby_curriculum
+    title: 📅 커리큘럼 짜기 (주차별)
+    description: >-
+      과목을 고르면 목표와 주당 학습 시간에 맞춰 주차별 단원을 짭니다. 언어 과목은 듣기·말하기·읽기·쓰기를 고루, 교양 과목은 시대·주제 흐름으로.
+      주마다 시간 합은 코드가 다시 더해 확인합니다. 채택하면 과목의 남은(안 끝낸) 커리큘럼이 이 안으로 바뀝니다 (끝낸 단원은 그대로).
+    fields:
+      - {key: course_id, label: 과목 (📚 내 과목에서 고르면 자동), required: true, placeholder: "예: c1a2b3c4d"}
+      - {key: weeks, label: 기간 (주), type: select, options: ["4", "8", "12"]}
+      - {key: weekly_hours, label: 주당 학습 시간 (비우면 과목 설정), type: number, placeholder: "예: 3"}
+      - {key: focus, label: 먼저 다루고 싶은 것 (선택), placeholder: "예: 식당·길 묻기 먼저 / 르네상스 위주"}
+    fixed: {edu_kind: hobby, edu_task: hobby_curriculum}
+    question: |
+      과목 {course_id} 학습자에게 앞으로 {weeks}주 커리큘럼을 짜줘.
+      주당 학습 시간: {weekly_hours}시간
+      먼저 다루고 싶은 것: {focus}
+    goal: "{weeks}주 커리큘럼 — 주차마다 단원(제목·마치면 할 수 있는 것·시간), 주마다 시간 합이 주당 학습 시간 안"
+    success_criteria:
+      - "근거 자료의 지금 수준·끝낸 단원 다음부터 이어진다 (끝낸 내용을 반복하지 않는다)"
+      - "언어 과목은 단원마다 skills(듣기·말하기·읽기·쓰기)를 적고 네 영역이 고루 들어간다. 교양 과목은 단원마다 theme(시대·주제)으로 흐름이 이어진다"
+      - "주마다 단원 hours 합이 주당 학습 시간을 넘지 않는다 (주당 시간이 없으면 근거 자료의 과목 주당 시간)"
+      - '답변 맨 끝에 ```json {"curriculum": [...]} 블록 1개 — week 는 1부터 (코드가 끝낸 단원 뒤로 이어 붙인다)'
+    output_format: "## 이렇게 짰어요 (한 문단) → ## 주차별 표 (주차 · 단원 · 영역/주제 · 시간 · 마치면 할 수 있는 것) → ```json 1개"
+    instructions: |
+      [JSON — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"curriculum": [{"week": 1, "title": "단원 제목", "goals": ["마치면 할 수 있는 것"], "hours": 1.5,
+                       "skills": ["듣기", "말하기"], "theme": "시대·주제 (교양 과목)"}]}
+      언어 과목은 skills(듣기·말하기·읽기·쓰기 중), 교양 과목은 theme 을 쓴다. 한 주에 단원이 여러 개여도 된다. 위 값은 형식 예시일 뿐이다.
+    validators: [hobby_curriculum]
+    harness_options: {weeks: "{weeks}", weekly_hours: "{weekly_hours}"}
+
+  - id: vocab
+    title: 📖 필수 단어·용어장
+    description: >-
+      과목 수준에 꼭 알아야 할 단어(언어: 뜻·발음·품사·예문·번역) 또는 용어(교양: 풀이·연도·인물)를 만듭니다.
+      채택하면 과목 단어장에 쌓이고 같은 단어는 합쳐집니다. '📖 자세히'에서 표로 보고, '외움' 체크·검색·CSV(Anki)·.md 로 내려받을 수 있습니다.
+    fields:
+      - {key: course_id, label: 과목 (📚 내 과목에서 고르면 자동), required: true, placeholder: "예: c1a2b3c4d"}
+      - {key: count, label: 단어 수, type: select, options: ["10", "20", "30"]}
+      - {key: theme, label: 주제 (선택), placeholder: "예: 음식·숫자 / 르네상스 인물"}
+    fixed: {edu_kind: hobby, edu_task: vocab}
+    question: |
+      과목 {course_id} 학습자의 지금 수준에 꼭 알아야 할 단어·용어 {count}개로 단어장을 만들어줘.
+      주제: {theme}
+    goal: "지금 수준에 꼭 필요한 단어·용어 {count}개 — 이미 단어장에 있는 것과 겹치지 않게"
+    success_criteria:
+      - "언어 과목: 단어마다 뜻 · 읽는 법(한글로) · 품사 · 짧은 예문 · 예문 번역"
+      - "교양 과목: 용어마다 쉬운 풀이 · 관련 연도·인물 (확인 못 한 연도는 '확인 필요')"
+      - "지금 수준에 맞는 단어 위주 (입문이면 일상·여행에 바로 쓰는 낱말). 근거 자료 단어장에 있는 단어는 다시 내지 않는다"
+      - '답변 맨 끝에 ```json {"vocab": [...]} 블록 1개 — 같은 단어 두 번 금지'
+    output_format: "## 단어장 (표) → ## 외우는 요령 한두 줄 → ```json 1개"
+    instructions: |
+      [JSON — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      언어 과목: {"vocab": [{"term": "il conto", "meaning": "계산서", "reading": "일 꼰또", "pos": "명사",
+                            "example": "Il conto, per favore.", "example_ko": "계산서 주세요.", "level": "beginner"}]}
+      교양 과목: {"vocab": [{"term": "르네상스", "meaning": "쉬운 풀이", "related": "14~16세기 · 관련 인물", "level": "beginner"}]}
+      level 은 그 단어의 수준 id (beginner · elementary · intermediate · advanced · expert). 위 값은 형식 예시일 뿐이다.
+    validators: [vocab_list]
+    harness_options: {vocab_count: "{count}"}
+
+  - id: phrases
+    title: 🗣 일상·여행 상황별 표현
+    description: >-
+      상황(공항·호텔·식당·길 묻기·쇼핑·응급·일상 대화 등)을 고르면 바로 쓸 표현과 뜻·발음·대화 예시·문화 팁을 줍니다.
+      채택하면 과목의 표현 모음에 저장되고, 단어장처럼 '외움' 체크와 🔁 복습에 쓰입니다. (여행 일정·숙소는 ✈️ 여행부)
+    fields:
+      - {key: course_id, label: 과목 (📚 내 과목에서 고르면 자동), required: true, placeholder: "예: c1a2b3c4d"}
+      - {key: situation, label: 상황, type: select,
+         options: ["✈️ 공항", "🏨 호텔", "🍝 식당·카페", "🧭 길 묻기·교통", "🛍 쇼핑", "🚑 응급·병원", "💬 일상 대화", "🙋 인사·자기소개", "✏️ 직접 입력"]}
+      - {key: custom, label: 직접 입력한 상황 (선택), placeholder: "예: 박물관 표 사기, 와이너리 투어"}
+      - {key: count, label: 표현 수, type: select, options: ["8", "12", "16"]}
+    fixed: {edu_kind: hobby, edu_task: phrases}
+    question: |
+      과목 {course_id} 학습자에게 '{situation}' 상황에서 쓸 표현 {count}개를 알려줘.
+      직접 입력한 상황: {custom}
+    goal: "그 상황에서 바로 쓸 표현 {count}개 — 표현·뜻·읽는 법·짧은 대화 예시·문화 팁"
+    success_criteria:
+      - "지금 수준에 맞는 길이 (입문이면 짧고 정중한 표현부터). 근거 자료의 표현 모음과 겹치지 않는다"
+      - "표현마다 뜻과 한글 읽는 법, 두세 줄짜리 대화 예시 1개, 현지에서 알아 두면 좋은 문화 팁"
+      - '답변 맨 끝에 ```json {"phrases": [...]} 블록 1개'
+    output_format: "## 상황 한 줄 → ## 표현 (표: 표현 · 읽는 법 · 뜻) → ## 대화 예시 → ## 문화 팁 → ```json 1개"
+    instructions: |
+      [JSON — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"phrases": [{"situation": "🍝 식당·카페", "phrase": "Il conto, per favore.", "reading": "일 꼰또, 뻬르 파보레",
+                    "meaning": "계산서 주세요.", "level": "beginner", "dialogue": ["A: …", "B: …"], "tip": "문화 팁"}]}
+      situation 은 고른 상황 이름을 그대로 쓴다 ('직접 입력'이면 직접 입력한 상황). 교양 과목이면 그 장소에서 알아 두면 좋은 말·설명을 phrase 로 쓴다.
+      위 값은 형식 예시일 뿐이다.
+    validators: [phrase_list]
+    harness_options: {situation: "{situation}"}
+
+  - id: topics
+    title: 🧭 더 배울 것 (추가 지식 제안)
+    description: >-
+      지금 과목과 수준에 이어 볼 주제(역사·문화·관련 분야)를 3~5개 제안합니다 — 예: 이탈리아어 → 로마사, 르네상스 미술 / 한국사 → 동아시아사.
+      주제마다 왜 도움이 되는지와 첫 단원을 붙입니다. 채택하면 과목에 저장되고, '➕ 새 과목으로'를 누르면 선생님 만들기 양식이 채워집니다.
+    fields:
+      - {key: course_id, label: 과목 (📚 내 과목에서 고르면 자동), required: true, placeholder: "예: c1a2b3c4d"}
+      - {key: interest, label: 관심 있는 쪽 (선택), placeholder: "예: 음식 문화, 미술, 근현대사"}
+    fixed: {edu_kind: hobby, edu_task: topics}
+    question: |
+      과목 {course_id} 학습자가 지금 과목·수준에 이어 볼 추가 지식 주제를 3~5개 제안해줘.
+      관심 있는 쪽: {interest}
+    goal: "이어 볼 주제 3~5개 — 주제마다 왜 지금 과목에 도움이 되는지 + 첫 단원 하나"
+    success_criteria:
+      - "지금 과목과 분명히 이어진다 (언어 → 그 나라 역사·문화·예술, 역사 → 이웃 지역·시대·관련 분야)"
+      - "지금 수준에서 시작할 수 있는 첫 단원을 쓴다. 근거 자료의 '이미 제안한 주제'는 다시 내지 않는다"
+      - "역사·문화 사실은 근거가 있을 때만 단정한다"
+      - '답변 맨 끝에 ```json {"topics": [...]} 블록 1개'
+    output_format: "## 추천 주제 (주제마다: 왜 도움이 되나 · 첫 단원) → ```json 1개"
+    instructions: |
+      [JSON — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"topics": [{"title": "로마사 첫걸음", "why": "왜 지금 과목에 도움이 되는지", "first_unit": "첫 단원 제목", "field": "역사"}]}
+      field 는 역사 · 문화 · 예술 · 언어 · 지리 같은 큰 분야. 위 값은 형식 예시일 뿐이다.
+    validators: [topic_list]
+
+  - id: review
+    title: 🔁 복습 퀴즈 (단어·표현)
+    description: >-
+      단어장·표현 가운데 '외움'이 아닌 것과 복습일이 지난(오래된) 것으로 객관식 복습 퀴즈를 냅니다. 화면에서 풀면 코드가 채점하고,
+      맞힌 것은 다음 복습일을 늦추고 틀린 것은 내일 다시 냅니다 (간격 반복). 모델 없이 바로 풀려면 '📖 자세히'의 ⚡ 바로 복습을 쓰세요.
+    fields:
+      - {key: course_id, label: 과목 (📚 내 과목에서 고르면 자동), required: true, placeholder: "예: c1a2b3c4d"}
+      - {key: count, label: 문제 수, type: select, options: ["5", "8", "10"]}
+    fixed: {edu_kind: hobby, edu_task: review}
+    question: |
+      과목 {course_id} 학습자에게 단어·표현 복습 퀴즈를 {count}문제 내줘.
+    goal: "근거 자료 '복습 대상'에서 고른 객관식 {count}문제 — 문제마다 ref, 정답·해설은 JSON 에만"
+    success_criteria:
+      - "근거 자료의 '🔁 복습 대상' 목록 위쪽(먼저 낼 것)부터 고른다. 뜻 고르기만이 아니라 예문 빈칸·상황에 맞는 표현 고르기를 섞는다"
+      - "문제마다 보기 4개, 정답 하나 — answer 는 보기와 글자 그대로. ref 는 그 문제가 복습하는 단어·표현을 '복습 대상' 글 그대로"
+      - "본문(JSON 밖)에는 정답·해설을 쓰지 않는다"
+    output_format: "## 문제 (번호 · 문제 · 보기 4개) → ```json 1개"
+    instructions: |
+      [JSON — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
+      {"quiz": {"kind": "review", "level": "beginner", "questions": [
+        {"id": "Q1", "question": "문제", "choices": ["보기1", "보기2", "보기3", "보기4"], "answer": "보기2",
+         "explanation": "왜 정답인지", "ref": "grazie"}]}}
+      ref 는 근거 자료 '복습 대상'의 단어·표현(앞쪽 글)을 글자 그대로 쓴다 — 코드가 이 글로 다음 복습일을 정한다. 위 값은 형식 예시일 뿐이다.
+    validators: [review_quiz]
+    harness_options: {quiz_count: "{count}"}
 
 disclaimer: "선생님과 과목 기록은 학습을 돕는 초안입니다. 역사·문화 사실과 현지 표현은 믿을 만한 자료로 한 번 더 확인하세요."
