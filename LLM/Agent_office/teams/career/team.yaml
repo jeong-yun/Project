@@ -223,6 +223,8 @@ tasks:
       - {key: docs, label: 요약 문서 (경력·프로젝트 정리), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
          help: "여러 개 올릴 수 있습니다. 한글은 .hwpx 가 가장 정확합니다 (.hwp 는 암호·배포용·문서보안(DRM) 문서를 읽지 못합니다). 그림·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전에 확인·수정한 그 글이 사실의 출처가 됩니다 (그림은 고른 모델 회사로 전송)"}
       - {key: fmt_md, label: Markdown(.md), type: checkbox, default: true}
+      - {key: format_refs, label: 형식 참고 파일 (선택 — 형식만 따름), type: file, multiple: true, options: [md, docx, hwpx, txt, pdf],
+         help: "결과를 이 파일들의 형식(절 제목·표·구분·순서·mermaid 흐름도 모양)과 같게 씁니다 (예: 기존 md 경력서). 사실·인용의 근거는 아니며, 숫자는 내 문서로 봅니다. 추가 요청에 '○○ 와 유사하게'라고 쓴 파일은 여기에 올려 주세요"}
       - {key: jd, label: JD (선택 — 붙여 넣으면 대응표도 만듭니다), type: textarea}
       - {key: jd_file, label: 또는 JD 파일·화면 캡처 (선택), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
          help: "여러 장이면 공고 순서대로 올려 주세요. 그림(png·jpg·webp)·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전에 확인·수정 단계가 있습니다 (그림은 고른 모델 회사로 전송)"}
@@ -233,6 +235,7 @@ tasks:
       직접 입력한 직무: {role_custom}
       분량: {length}
       올린 문서: {docs_name}
+      형식 참고 파일: {format_refs_name}
       가상 인물 샘플 사용: {use_sample}
       JD 파일: {jd_file_name}
       [JD 붙여 넣기] {jd}
@@ -324,6 +327,8 @@ tasks:
       - {key: fmt_md, label: Markdown(.md), type: checkbox, default: true}
       - {key: portfolio, label: 지금 포트폴리오, type: file, options: [md, docx, hwpx, hwp, pdf, txt],
          help: "고칠 포트폴리오 파일 하나. 한글은 .hwpx 가 가장 정확합니다"}
+      - {key: format_refs, label: 형식 참고 파일 (선택 — 형식만 따름), type: file, multiple: true, options: [md, docx, hwpx, txt, pdf],
+         help: "결과를 이 파일들의 형식(절 제목·표·구분·순서·mermaid 흐름도 모양)과 같게 씁니다 (예: 기존 md 경력서). 사실·인용의 근거는 아니며, 숫자는 내 문서로 봅니다. 추가 요청에 '○○ 와 유사하게'라고 쓴 파일은 여기에 올려 주세요"}
       - {key: docs, label: 최신 요약 문서 (경력·프로젝트 정리), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
          help: "여러 개 올릴 수 있습니다. 그림·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전에 확인·수정한 그 글이 사실의 출처가 됩니다 (그림은 고른 모델 회사로 전송)"}
     fixed: {career_kind: portfolio_update}
@@ -333,6 +338,7 @@ tasks:
       직접 입력한 직무: {role_custom}
       지금 포트폴리오: {portfolio_name}
       최신 요약 문서: {docs_name}
+      형식 참고 파일: {format_refs_name}
       가상 인물 샘플 사용: {use_sample}
       외부 자료 사용(승인한 검색어만): {web_on}
       GitHub 주소: {github_url}

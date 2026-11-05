@@ -470,7 +470,7 @@ def test_career_page_shows_both_new_forms(app):
     web = next(c for c in at.checkbox if c.label.startswith("🌐 외부 자료로"))
     assert web.value is False  # 기본 꺼짐
     assert any(t.label.startswith("GitHub 공개 저장소") for t in at.text_input)
-    assert len(at.get("file_uploader")) == 2  # 지금 포트폴리오 + 최신 요약 문서
+    assert len(at.get("file_uploader")) == 3  # 지금 포트폴리오 + 형식 참고 파일 + 최신 요약 문서
 
 
 # AppTest.from_function 은 함수 본문을 임시 파일로 써서 실행한다 — Windows 기본 인코딩 문제로 본문에는 ASCII 만 쓴다.

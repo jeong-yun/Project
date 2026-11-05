@@ -150,3 +150,53 @@ def test_docx_headings_and_table_heads_in_document_order():
     lines = doc.text.splitlines()
     assert lines.index("업무 명 | 기간 | 역할") < lines.index("2. 개인 프로젝트")  # 표가 문서 순서 자리에 (끝으로 밀리지 않음)
     assert "탐지 모델 (병합 칸) | 개발" in doc.text  # 병합 칸 글은 한 번만
+
+
+# ─── 4단계: '형식 참고 파일' 칸 ────────────────────────────────────────────
+
+REF_MD = """# 경력서 (가명)
+## 회사
+### 탐지 모델 고도화 (26.06 ~ 진행 중)
+- 고객사A, 처리 2,400건
+## 개인
+"""
+
+
+class Upload:
+    def __init__(self, name: str, data: bytes):
+        self.name, self._data = name, data
+
+    def getvalue(self) -> bytes:
+        return self._data
+
+
+def test_format_refs_field_is_optional_multiple_file_on_both_portfolio_tasks():
+    from core.config import load_team
+
+    team = load_team("career")
+    for task_id in ("portfolio", "portfolio_update"):
+        task = next(t for t in team.tasks if t.id == task_id)
+        f = next(f for f in task.fields if f.key == "format_refs")
+        assert f.type == "file" and f.multiple and not f.required and "md" in f.options and "docx" in f.options
+        assert "{format_refs_name}" in task.question
+
+
+def test_format_refs_are_format_only_not_quote_source(tmp_path):
+    from core.config import load_team
+    from core.tasks import build_request, store_uploads
+    from core.tools import career_docs
+
+    task = next(t for t in load_team("career").tasks if t.id == "portfolio_update")
+    values = store_uploads({"portfolio": Upload("old.md", OLD_MD.encode()), "docs": [Upload("new.md", NEW_DOC.encode())],
+                            "format_refs": [Upload("경력서.md", REF_MD.encode())]}, tmp_path)
+    req = build_request(task, values, "md 는 경력서.md 와 유사하게")
+    assert "형식 참고 파일: 경력서.md" in req.question and req.tool_inputs["extra_request"] == "md 는 경력서.md 와 유사하게"
+    res = career_docs.run(req.question, req.tool_inputs, None)
+    opts = res.harness_options
+    assert "📐 형식 참고 파일" in res.content and "처리 2,400건" in res.content
+    assert opts["career_format"]["sources"] == ["old.md", "경력서.md"]
+    assert "회사" in opts["career_format"]["headings"] and "1. 회사 업무" in opts["career_format"]["headings"]
+    assert "2,400" not in opts["career_source"]  # 인용 근거(원문)에는 넣지 않는다
+    assert "2400" in career.numbers_in(opts["career_reference"])  # 숫자는 내 문서로 허용
+    no_extra = career_docs.run("q", {k: v for k, v in req.tool_inputs.items() if k != "extra_request"}, None)
+    assert no_extra.harness_options["career_format"]["mode"] == "original"  # 참고 파일을 올렸으면 그 자체가 형식 지정
