@@ -101,7 +101,7 @@ def main() -> int:
             print(git("log", "--oneline", "-10", f"main..{check_sha}").stdout.rstrip())
             print("   다른 PC 에서 올려 아직 검사 중이거나 검사에 실패한 커밋, 또는 내가 고쳐 쓴(amend·rebase) 커밋입니다.")
             print("   다른 PC 것이면 'N' 을 누르고 그 PC 에서 결과를 확인하세요. 내가 버린 커밋이면 'y'.")
-            if not ask_yes(f"   {CHECK_BRANCH} 를 내 main 으로 덮어쓸까요? (main 은 건드리지 않습니다)"):
+            if not ask_yes(f"   {CHECK_BRANCH} 을 내 main 으로 덮어쓸까요? (main 은 건드리지 않습니다)"):
                 print("멈췄습니다.")
                 return 1
             # 방금 본 커밋일 때만 덮어쓴다 — 그 사이 누가 또 올렸으면 git 이 거절한다
