@@ -625,6 +625,22 @@ def dump(run_id: str) -> dict:
     return {"calls": [c.to_dict() for c in calls(run_id)], "interventions": interventions(run_id)}
 
 
+def merge_saved(saved: dict | None, now: dict) -> dict:
+    """저장된 기록 + 지금 메모리의 기록. 서버를 다시 켠 뒤(💬 추가 질문 등) 저장하면 메모리에는 새 호출만 있으므로
+    예전 호출을 지우지 않게 합친다 — 같은 호출은 (줄 선 시각·누가·일)로 알아본다 (id 는 서버마다 다시 1부터)."""
+    saved = saved or {}
+
+    def key(c: dict) -> tuple:
+        return c.get("queued_at"), c.get("who"), c.get("kind")
+
+    fresh = {key(c) for c in now.get("calls") or []}
+    calls = [c for c in saved.get("calls") or [] if key(c) not in fresh] + list(now.get("calls") or [])
+    seen = {(e.get("ts"), e.get("what")) for e in now.get("interventions") or []}
+    entries = [e for e in saved.get("interventions") or [] if (e.get("ts"), e.get("what")) not in seen]
+    return {**now, "calls": sorted(calls, key=lambda c: c.get("queued_at") or 0),
+            "interventions": sorted([*entries, *(now.get("interventions") or [])], key=lambda e: e.get("ts") or 0)}
+
+
 def load(data: dict | None) -> tuple[list[CallRecord], list[dict]]:
     data = data or {}
     return [record_from(c) for c in data.get("calls") or []], list(data.get("interventions") or [])

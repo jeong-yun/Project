@@ -18,6 +18,11 @@
     유료 API·구독으로 넘어가지 않고 '무료 서버 꺼짐'으로 실패한다 (특정 API 를 많이 쓰지 않으려고 고른 것이므로).
   - 본인과 상사 중 아무도 고르지 않았으면 지금과 완전히 같다 (직급 설정 그대로).
 
+부서 부장 (맨 위)
+  - 👔 부장(⚖️ 비평가 · 🧭 팀 배정)은 팀 조직도 밖, 팀장보다 위다. 기본 부장 모델(models.yaml critic)은 팀장과 같거나 더 강하다.
+  - 부장을 팀장보다 약한 모델로 고르거나 팀장을 부장보다 강한 모델로 골라도 막지 않는다 — ⚠️ 경고만 (head_warning).
+    (비평가는 글을 쓰지 않고 채점만 하므로 비용·한도 때문에 가벼운 모델을 일부러 고를 수 있다)
+
 저장: 데이터 폴더(AGENT_OFFICE_DATA_DIR)의 member_models.json — {팀 id: {에이전트 id: "provider:model"}}.
 config/*.yaml 은 바꾸지 않는다. 바꾼 선택은 다음에 맡기는 업무부터 쓰인다 (진행 중인 업무는 시작할 때의 모델 그대로).
 """
@@ -81,6 +86,20 @@ def strongest_allowed(models: ModelsConfig, chain: RankModels, floor: int) -> st
     ]
     usable = [k for k in ordered if split_key(k)[0] not in models.disabled_providers]
     return (usable or ordered or [models.model_tiers[-1][0]])[0]
+
+
+def weaker(models: ModelsConfig, key: str, than: str) -> bool:
+    """key 가 than 보다 약한 줄인가 (강도 순서에 없는 모델은 가장 약하게 본다)."""
+    tiers = tier_map(models)
+    return tiers.get(key, len(tiers)) > tiers.get(than, len(tiers))
+
+
+def head_warning(models: ModelsConfig, head_key: str, lead_key: str, lead_name: str = "팀장") -> str:
+    """부장(맨 위)이 팀장보다 약한 모델이면 경고 한 줄, 아니면 ''. 막지는 않는다."""
+    if not head_key or not lead_key or not weaker(models, head_key, lead_key):
+        return ""
+    return (f"부장 모델 {split_key(head_key)[1]} 가 {lead_name} 모델({split_key(lead_key)[1]})보다 약합니다 — "
+            "부장은 조직의 맨 위(⚖️ 비평가)라 약한 모델은 팀장의 실수를 놓치기 쉽습니다.")
 
 
 @dataclass

@@ -235,6 +235,24 @@ class Storage:
         rows = self._execute("SELECT data FROM run_monitor WHERE run_id=?", (run_id,))
         return json.loads(rows[0]["data"]) if rows else None
 
+    def set_status(self, run_id: str, status: str) -> None:
+        """상태만 바꾼다 (💬 추가 질문 중 followup_running ↔ awaiting_human — 서버를 다시 켜면 끊긴 질문을 알아채려고)."""
+        self._execute("UPDATE runs SET status=? WHERE id=?", (status, run_id))
+
+    def monitor_history(self, team_id: str, limit: int = 10) -> list[dict]:
+        """이 팀 최근 실행들의 ⏱ 호출 기록 (호출 dict 목록) — 📊 남은 시간 추정용 (core/progress.py)."""
+        ids = self._team_ids(team_id)
+        rows = self._execute(
+            f"SELECT m.data FROM run_monitor m JOIN runs r ON r.id = m.run_id WHERE r.{self._in(ids)} "
+            "ORDER BY r.created_at DESC LIMIT ?", (*ids, limit))
+        out: list[dict] = []
+        for row in rows:
+            try:
+                out.extend(c for c in (json.loads(row["data"]).get("calls") or []) if isinstance(c, dict))
+            except (ValueError, AttributeError):
+                continue
+        return out
+
     def purge_undecided(self, older_than_hours: float) -> list[str]:
         """결정 없이 남은 오래된 실행을 삭제하고, 삭제한 id 목록을 반환 (체크포인트도 지우도록)."""
         cutoff = (datetime.now() - timedelta(hours=older_than_hours)).isoformat(timespec="seconds")

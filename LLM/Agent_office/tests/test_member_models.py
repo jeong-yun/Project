@@ -26,7 +26,10 @@ def keys(chain):
 def test_shipped_tiers_cover_every_model(ranks, models):
     validate_config(ranks, models, list_teams())
     tiers = member_models.tier_map(models)
-    assert tiers[OPUS] == tiers[OPUS_API] == 0  # 구독·API 의 Opus 는 같은 강도, 가장 강함
+    assert tiers["claude_cli:claude-fable-5-1"] == 0  # Fable 5.1 = 가장 강함 (공식 모델표)
+    assert tiers[OPUS] == tiers[OPUS_API] == tiers["claude_cli:opus"] == 1  # 구독·API·별칭의 Opus 는 같은 강도
+    assert tiers["claude_cli:sonnet"] == tiers["claude_cli:claude-sonnet-5-5"] == tiers["anthropic:claude-sonnet-5-5"]
+    assert tiers[OPUS] < tiers["claude_cli:claude-sonnet-5-5"] < tiers["claude_cli:claude-haiku-5-5"] == tiers["claude_cli:haiku"]
     assert tiers[OPUS] < tiers["openai:gpt-5.5"] < tiers["openai:gpt-5.4"] < tiers["google:gemini-3.8-flash"]
     assert tiers["google:gemini-3.8-flash"] < tiers["openai:gpt-5.4-mini"] < tiers["google:gemini-3.5-flash"]
     paid = [t for k, t in tiers.items() if not k.startswith("freellm:")]

@@ -51,7 +51,7 @@ import office_ui
 import run_control_ui
 from core import (
     audio_edit, building, call_monitor, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_caps,
-    model_catalog, music, office, stock_calc, usage, verification,
+    model_catalog, music, office, progress, stock_calc, usage, verification,
 )
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -76,7 +76,10 @@ from core.config import (
 )
 from core.harness import REGISTRY as HARNESS_REGISTRY
 from core.llm_factory import NoAvailableModelError
-from core.live import KIND_LABELS, STAGES, archive_attempt, new_run, prepare_resume, restore_run, stage_of, start_run
+from core.live import (
+    FOLLOWUP_RUNNING, KIND_LABELS, STAGES, archive_attempt, new_run, prepare_resume, recover_followup, restore_run, stage_of,
+    start_followup, start_run,
+)
 from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTemplate, ToolResult
 from core.search import WebContext
 from core.storage import Storage
@@ -193,13 +196,18 @@ def shared_runs() -> dict:
     """
     runs = {}
     for row in storage.list_runs(limit=200):  # 최신 순 → 같은 칸이면 최신 것만
-        if row["status"] == "awaiting_human":
+        if row["status"] in ("awaiting_human", FOLLOWUP_RUNNING):  # 💬 추가 질문 중에 꺼졌으면 결정 대기로 되돌린다
+            if row["status"] == FOLLOWUP_RUNNING:
+                storage.set_status(row["id"], "awaiting_human")
             row = {**row, "team_id": storage.team_for(row["team_id"], row["question"])}  # 옛 팀 id → 지금 팀
             runs.setdefault((row["team_id"], row["root_id"]), restore_run(row))
     return runs
 
 
 runs = shared_runs()
+for _r in list(runs.values()):  # 답하던 스레드가 사라진 💬 추가 질문 (끊긴 상태로 남지 않게)
+    if recover_followup(_r):
+        storage.set_status(_r["run_id"], "awaiting_human")
 
 
 def is_running(run: dict | None) -> bool:
@@ -354,7 +362,7 @@ with st.sidebar:
     if open_runs:
         st.markdown("### 🔔 진행 중인 업무")
         for r in sorted(open_runs, key=lambda r: r["started_at"], reverse=True):
-            state = "⏳ 진행 중" if not r["done"] else ("⚠️ 오류" if r["error"] else
+            state = "💬 추가 질문 중" if r["status"] == FOLLOWUP_RUNNING else "⏳ 진행 중" if not r["done"] else ("⚠️ 오류" if r["error"] else
                                                        "🔀 확인 대기" if r["status"] == "step_check" else "👤 결정 대기")
             where = dept_by_id[dept_of_team[r["team_id"]]]
             st.button(f"{state} · {where.emoji} {team_names[r['team_id']]}\n\n{short(run_title(r))}", key=f"go_{r['run_id']}",
@@ -543,11 +551,40 @@ rc_ctx = run_control_ui.Ctx(
 )
 
 
+# 📊 진행률·남은 시간 (core/progress.py) — 조직도·설정·지난 기록으로 추정
+PROGRESS_CRITIC = verification.critic_settings(verification_cfg, team.verification)
+PROGRESS_CRITIC_MODEL = member_models.model_key(
+    dept_heads.critic_plan(models, team, member_chains, org.id, dept_head, dept_store.get(dept.id)).chain.primary)
+
+
+def run_progress(run: dict | None) -> progress.Estimate | None:
+    """이번 실행(또는 💬 추가 질문)의 진행률·남은 시간 추정. 진행 중이 아니면 None."""
+    if not run or run["done"]:
+        return None
+    rid = run["run_id"]
+    round_ = call_monitor.control(rid).round
+    recs = [r for r in call_monitor.calls(rid) if r.round == round_]
+    hints = run.get("progress_hints") or {}
+    plan = progress.Plan(
+        org=org, root_id=run["root_id"], node_models={nid: p.effective for nid, p in member_plans.items()},
+        critic_model=PROGRESS_CRITIC_MODEL, utility_model=member_models.model_key(models.utility.primary),
+        critic_enabled=bool(PROGRESS_CRITIC.get("enabled")), critic_scope=PROGRESS_CRITIC.get("scope", "final"),
+        max_self_corrections=int(PROGRESS_CRITIC.get("max_self_corrections") or 0),
+        harness=bool(team.harness.validators or run.get("extra_validators")), max_retries=team.harness.max_retries,
+        brief=hints.get("brief", run.get("brief") is None), web=hints.get("web", False), step_mode=bool(run.get("step_mode")),
+        concurrency=settings.get("llm_concurrency") or {},
+    )
+    return progress.estimate(plan, run, recs, progress.history(team_id, storage.monitor_history))
+
+
+rc_ctx.progress = run_progress
+
+
 def save_monitor(run: dict) -> None:
     """⏱ 호출 기록·개입 기록·이전 시도를 실행과 함께 저장 (🕘 지난 업무에서 다시 봄). 실패해도 업무는 계속."""
     try:
-        storage.save_monitor(run["run_id"], {**call_monitor.dump(run["run_id"]),
-                                             "attempts": run_control_ui.serialize_attempts(run)})
+        data = call_monitor.merge_saved(storage.get_monitor(run["run_id"]), call_monitor.dump(run["run_id"]))
+        storage.save_monitor(run["run_id"], {**data, "attempts": run_control_ui.serialize_attempts(run)})
     except Exception:  # noqa: BLE001
         pass
 
@@ -1235,32 +1272,50 @@ def render_followup(run: dict) -> None:
                 st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
             meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
             st.caption(meta + "".join(f" · {x}" for x in t.log))
+    pending = run.get("followup_pending")
+    if pending:  # 💬 백그라운드에서 답하는 중 — 사무실·⏱ 호출 모니터가 계속 움직인다 (바꾸기·중단도 거기서)
+        with st.chat_message("user"):
+            st.markdown(pending["request"])
+        with st.chat_message("assistant", avatar=avatar_for_chat(root, working=True)):
+            st.markdown(f"**{name_of(root)}** · 💬 추가 질문 답하는 중…")
+            st.caption("위 진행 막대와 **⏱ 호출 모니터**에서 진행을 보고, 느리면 다른 모델로 바꾸거나 중단할 수 있습니다. "
+                       "답이 오면 이 화면이 저절로 바뀝니다.")
+        return
+    if run.get("followup_error"):
+        st.warning(run["followup_error"])
     with st.form(f"followup_{run['run_id']}", clear_on_submit=True):
         text = st.text_area("요청", height=80, label_visibility="collapsed",
                             placeholder="예: 3번 근거가 뭐야? / 정의를 두 문장으로 줄여줘 / 비교 표에 항목 하나 추가해줘")
         send = st.form_submit_button("💬 보내기")
     if not (send and text.strip()):
         return
+    start_background_followup(run, text.strip())
+    st.rerun()
+
+
+def start_background_followup(run: dict, request: str) -> None:
+    """💬 추가 질문·수정 요청을 본 업무처럼 백그라운드 스레드로 (core/live.start_followup). 값은 지금 미리 잡아 둔다."""
+    root = run["root_id"]
     node = nodes[root]
     agent = OrgAgent(node, ranks_by_id[node.rank], team, models, names={n: name_of(n) for n in nodes},
                      skills=load_skills(team_id), chain=member_chains[root])
     current, _ = current_result(run)
+    turns = list(run.get("followups") or [])
     validators = list(dict.fromkeys([*team.harness.validators, *(run.get("extra_validators") or [])]))
-    try:
-        with st.spinner(f"{name_of(root)}이(가) 답하는 중… (수정이면 30초~1분)"),                 usage.scope(team_id=team_id, run_id=run["run_id"], purpose="결정 전 문의·수정"):
-            turn = followup.respond(
-                agent, run["question"], current.content, text.strip(), turns, followup_evidence(run),
-                storage.recent_lessons(team_id, root, settings.get("feedback", {}).get("max_lessons_in_prompt", 5)),
-                validators, {**team.harness.options, **check_options(run)}, team.harness.max_retries,
-            )
-    except NoAvailableModelError as e:
-        st.error(f"답할 수 있는 모델이 없습니다: {e}")
-        return
-    except Exception as e:  # noqa: BLE001
-        st.error(f"답변 중 오류: {type(e).__name__}: {e}")
-        return
-    turns.append(turn)
-    st.rerun()
+    evidence = followup_evidence(run)
+    lessons = storage.recent_lessons(team_id, root, settings.get("feedback", {}).get("max_lessons_in_prompt", 5))
+    options = {**team.harness.options, **check_options(run)}
+
+    def work():
+        return followup.respond(agent, run["question"], current.content, request, turns, evidence, lessons,
+                                validators, options, team.harness.max_retries)
+
+    def on_finish(r: dict) -> None:
+        storage.set_status(r["run_id"], "awaiting_human")
+        save_monitor(r)  # 💬 문의 호출까지 포함한 ⏱ 호출 기록
+
+    storage.set_status(run["run_id"], FOLLOWUP_RUNNING)
+    start_followup(run, request, work, on_finish=on_finish, agent_id=root)
 
 
 def check_options(run: dict) -> dict:
@@ -1358,10 +1413,13 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         if team.disclaimer:
             st.caption(f"ℹ️ {team.disclaimer}")
 
-    if run["status"] == "awaiting_human":
+    if run["status"] in ("awaiting_human", FOLLOWUP_RUNNING):
         render_followup(run)
 
     st.markdown("#### 👤 최종 결정")
+    if run["status"] == FOLLOWUP_RUNNING:
+        st.info(f"💬 {name_of(run['root_id'])}이(가) 추가 질문에 답하는 중입니다 — 답이 오면 채택·반려할 수 있습니다.")
+        return
     if run["status"] == "awaiting_human":
         options = decision_candidates(run)
         candidates = [a for _, a in options]
@@ -1547,7 +1605,8 @@ if len(dept.teams) > 1:
     team_cols = st.columns(len(dept.teams))
     for col, tid in zip(team_cols, dept.teams):
         r = open_run_of(tid)
-        state = ("○ 쉬는 중" if not r else "⏳ 진행 중" if not r["done"] else "⚠️ 오류" if r["error"]
+        state = ("○ 쉬는 중" if not r else "💬 추가 질문 중" if r["status"] == FOLLOWUP_RUNNING
+                 else "⏳ 진행 중" if not r["done"] else "⚠️ 오류" if r["error"]
                  else "🔀 확인 대기" if r["status"] == "step_check" else "👤 결정 대기" if r["status"] == "awaiting_human"
                  else "✅ 결정함")
         col.button(f"{'👁 ' if tid == team_id else ''}{team_names[tid]} · {state}", key=f"see_team_{tid}",
@@ -1631,6 +1690,12 @@ def render_head_panel() -> None:
 
 def render_live() -> None:
     run = runs.get(run_key)
+    try:
+        est = run_progress(run)
+    except Exception:  # noqa: BLE001 — 추정이 화면을 막지 않게
+        est = None
+    if est is not None:  # 사무실·조직도 위에 짧게 — '62% · 약 3분 남음'
+        st.caption(f"📊 {team.name} — {'💬 추가 질문 ' if est.phase == 'followup' else ''}{est.short()}")
 
     if office_ui.view_picker() == office_ui.OFFICE:
         # 🏢 부서 사무실 (부서원 전원) + 🖥️ 커맨드 센터 — 캐릭터를 누르면 그 에이전트로 (다른 팀이면 그 팀 업무로)
@@ -1667,9 +1732,11 @@ def render_live() -> None:
                          format_func=lambda n: "— 고르지 않음 (질문만 보기) —" if n == NO_FOCUS else name_of(n), key=FOCUS_KEY)
 
     if run:
-        elapsed = int(time.time() - run["started_at"])
+        pending = run.get("followup_pending") or {}
+        elapsed = int(time.time() - pending.get("started_at", run["started_at"]))
+        doing = "💬 추가 질문 답하는 중" if pending else "⏳ 진행 중"
         if not run["done"]:
-            progress = f"⏳ 진행 중 {elapsed // 60}분 {elapsed % 60}초" if elapsed >= 60 else f"⏳ 진행 중 {elapsed}초"
+            progress = f"{doing} {elapsed // 60}분 {elapsed % 60}초" if elapsed >= 60 else f"{doing} {elapsed}초"
         else:
             progress = "⚠️ 오류로 멈춤" if run["error"] else ("👤 결정을 기다리는 중" if run["status"] == "awaiting_human" else "✅ 완료")
         if run.get("restored"):
@@ -1685,6 +1752,8 @@ def render_live() -> None:
         with st.container(border=True):
             st.markdown(f"**Q.** {question}")
             render_stages(run)
+            if est is not None:  # 📊 진행률·남은 시간 (추정 — 재시도·비평 반려로 단계가 늘면 다시 계산)
+                run_control_ui.render_progress(est)
             st.caption(f"{progress} · 완료된 단계 {done_steps}개 — 조직도에서 에이전트를 누르면 그 에이전트가 한 일과 지금 작성 중인 내용을 볼 수 있습니다."
                        + (" 새로 고침하거나 다른 팀을 봐도 작업은 계속됩니다." if not run["done"] else ""))
             run_control_ui.render_summary(rc_ctx, run)  # ⏱ 모델 호출 한 줄 요약 + ⚠️ 응답 없음
@@ -2035,7 +2104,10 @@ for done_id in st.session_state.pop(NOTICE_KEY, []):
     done_run = next((r for r in runs.values() if r["run_id"] == done_id), None)
     if done_run:
         where = team_names.get(done_run["team_id"], done_run["team_id"])
-        if done_run["error"]:
+        if done_run.pop("notice", None) == "followup":
+            st.toast(f"💬 {where} 추가 질문에 답이 왔습니다" + (" (오류 — 화면 확인)" if done_run.get("followup_error") else "")
+                     + f": {short(run_title(done_run), 24)}", icon="💬")
+        elif done_run["error"]:
             st.toast(f"⚠️ {where} 업무가 오류로 멈췄습니다: {short(run_title(done_run), 24)}", icon="⚠️")
         elif done_run["status"] == "step_check":
             st.toast(f"🔀 {where} 업무가 단계 확인을 기다립니다 — 확인하고 '▶ 이대로 진행'을 눌러 주세요: "
@@ -2142,7 +2214,7 @@ def restart_run(run: dict, req: dict) -> str | None:
     return None
 
 
-if current and current["done"]:
+if current and (current["done"] or current["status"] == FOLLOWUP_RUNNING):
     if current["error"]:
         st.error(current["error"])
     elif current["status"] == "step_check":
@@ -2153,7 +2225,8 @@ if current and current["done"]:
     elif current["steps"]:
         render_final_and_decision(current, run_key)
 
-if current and not current["error"] and current["status"] not in DECIDED and not current.get("restored"):
+if (current and not current["error"] and current["status"] not in (*DECIDED, FOLLOWUP_RUNNING)
+        and not current.get("restored")):
     final_now = final_answer(current) if current["done"] and current["status"] == "awaiting_human" else None
     run_control_ui.render_attempts(rc_ctx, current, final_now.content if final_now else None)  # 🆚 이전 시도와 비교
     restart_req = run_control_ui.render_restart(rc_ctx, current)  # ✏️ 질문·브리프 고쳐 다시
@@ -2199,6 +2272,12 @@ if request:
         run["step_mode"] = bool(request.get("step_mode", st.session_state.get(run_control_ui.step_key(team_id))))
         run["free_only"] = bool(st.session_state.get("free_only"))
         run["member_choices"] = member_store.load(team_id, LEGACY_ID)
+        given = request.get("brief")  # 📊 진행률: 요청 정리(브리프)를 AI 가 하는지 · 웹 검색을 하는지
+        run["progress_hints"] = {
+            "brief": bool(request.get("auto_brief", True))
+            and not (given is not None and getattr(given, "goal", "").strip() and getattr(given, "success_criteria", None)),
+            "web": bool(request.get("use_web")) and WEB_SEARCH_TOOL in team.tools,
+        }
         runs[run_key] = run
         st.session_state[PENDING_FOCUS_KEY] = NO_FOCUS  # 새 업무는 조직도·질문만 보이는 상태로 시작 (에이전트를 누르면 펼침)
         storage.create_run(run["run_id"], team_id, target, run["question"])

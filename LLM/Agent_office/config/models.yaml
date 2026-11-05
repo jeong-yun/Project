@@ -45,13 +45,17 @@ disabled_providers: [anthropic]
 #   (빠지면 앱 시작 시 오류). 무료(freellm) 모델은 하루 한도·속도 때문에 같은 이름의 유료 모델보다 아래에 둔다.
 #   규칙: 팀원은 상사보다 강한 모델을 쓸 수 없고, 상사의 모델을 화면에서 직접 고른 경우 그 아래는 '더 낮은' 줄의 모델만 쓴다.
 model_tiers:
-  - [claude_cli:claude-opus-5-5, anthropic:claude-opus-5-5]     # Claude Opus 5.5 (구독 / API)
+  # Claude 5 계열 순서·가격은 Anthropic 공식 모델표(2026-10-06 기준)로 확인: Fable 5.1(가장 강함, API $10/$50) > Opus 5.5($4/$20)
+  #   > Sonnet 5.5($2/$10) > Haiku 5.5($0.10/$0.50, 100만 토큰당 입력/출력). 별칭(opus·sonnet·haiku = 그 계열 최신)은 정식 이름과 같은 줄.
+  #   다른 회사 모델과의 강도 비교는 공식 자료가 없어 가격·크기 등급으로 맞춘 것이다 (Sonnet = gpt-5.4 줄, Haiku = nano 줄 — 낮게 둘수록 상하 규칙에 안전).
+  - [claude_cli:claude-fable-5-1]                                # Claude Fable 5.1 (구독) — 구독 한도를 가장 빨리 씀
+  - [claude_cli:claude-opus-5-5, claude_cli:opus, anthropic:claude-opus-5-5]     # Claude Opus 5.5 (구독 / API)
   - [openai:gpt-5.5]
-  - [openai:gpt-5.4, anthropic:claude-sonnet-5-5]
+  - [openai:gpt-5.4, anthropic:claude-sonnet-5-5, claude_cli:claude-sonnet-5-5, claude_cli:sonnet]
   - [google:gemini-3.8-flash]
   - [openai:gpt-5.4-mini]
   - [google:gemini-3.5-flash, upstage:solar-pro2]
-  - [google:gemini-3.5-flash-lite, openai:gpt-5.4-nano, upstage:solar-mini]
+  - [google:gemini-3.5-flash-lite, openai:gpt-5.4-nano, upstage:solar-mini, claude_cli:claude-haiku-5-5, claude_cli:haiku]
   - [freellm:gemini-3.8-flash, freellm:gemini-3.7-flash]
   - [freellm:gemini-3.6-flash]
   - [freellm:gemini-3.5-flash, freellm:gpt-oss-120b]
@@ -116,13 +120,19 @@ utility:
     - { provider: freellm, model: gpt-oss-120b, temperature: 0.0 }
     - { provider: freellm, model: gemini-3.1-flash-lite, temperature: 0.0 }
 
-# 비평가(⚖️) 전용 모델 (선택 항목) — 비평가는 각 부서의 👔 부장이다 (core/dept_heads.py, config/departments.yaml head).
+# 👔 부장(⚖️ 비평가 · 🧭 팀 배정) 기본 모델 — 부장은 조직의 맨 위라 팀장(team_lead)과 같거나 더 강한 모델로 둔다.
 # 정하는 순서: ① 화면 '🎛 부서별 모델 선택'에서 고른 부장 모델 → ② 비공개 팀(private: true)은 팀장 모델
-#             → ③ 아래 critic → ④ 위 utility (critic 이 없으면 예전과 같다)
-# 고른 부장 모델이 안 될 때의 대안도 이 목록(없으면 utility)에서, 고른 모델보다 강하지 않은 것만 쓴다.
-# claude_cli 를 넣으면 비평마다 구독 한도를 함께 쓴다 (사람이 쓰는 Claude 와 공유). 예:
-# critic:
-#   primary:  { provider: openai, model: gpt-5.4 }
-#   fallback:
-#     - { provider: google, model: gemini-3.8-flash, temperature: 0.0 }
-#     - { provider: freellm, model: gpt-oss-120b, temperature: 0.0 }
+#             → ③ 아래 critic (부장 기본) → ④ utility (critic 을 지웠을 때만)
+# 고른 부장 모델이 안 될 때의 대안도 이 목록(+ utility)에서, 고른 모델보다 강하지 않은 것만 쓴다.
+# 비용·한도: claude_cli 는 청구는 없지만 구독 사용 한도를 쓴다 (사람이 쓰는 Claude·Claude Code 와 공유, 동시 호출 1개).
+#   업무 하나에 비평 1번 + 불합격이면 (자가 교정 + 다시 비평) × 최대 max_self_corrections 번, 그리고 팀이 둘 이상인 부서는
+#   🧭 팀 배정 1번 (모델 1회 호출 — 실패할 때만 낱말 비교). 한도가 걱정되면 화면에서 부장 모델을 gpt-5.4 등으로 고르면 된다.
+critic:
+  primary:  { provider: claude_cli, model: claude-opus-5-5 }
+  fallback:
+    - { provider: openai, model: gpt-5.5 }
+    - { provider: openai, model: gpt-5.4 }
+    - { provider: anthropic, model: claude-opus-5-5 }     # 크레딧 충전 후 사용
+    - { provider: google, model: gemini-3.8-flash, temperature: 0.0 }
+    - { provider: freellm, model: gemini-3.7-flash, temperature: 0.0 }
+    - { provider: freellm, model: gpt-oss-120b, temperature: 0.0 }

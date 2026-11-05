@@ -8,15 +8,21 @@
 비평가 모델 정하는 순서 (critic_plan)
   1. 부장 모델을 화면에서 골랐으면 그 모델
   2. 비공개 팀(team.yaml private: true)이면 팀장 모델 후보 그대로 — 문서가 팀원이 쓰는 제공처 밖으로 나가지 않게
-  3. config/models.yaml 의 critic: (선택 항목)
-  4. utility (예전 동작)
+  3. config/models.yaml 의 critic: = 부장 기본 (팀장과 같거나 더 강한 모델 — 지금은 Claude 구독 Opus 5.5 → gpt-5.5 → … → 무료)
+  4. utility (critic 을 지웠을 때만 — 예전 동작)
   고른 모델의 대안(fallback) = 3·4 의 후보 중 고른 모델보다 강하지 않은 것 (대안으로 넘어가도 더 비싼 모델로 올라가지 않음).
   무료(freellm) 모델을 골랐으면 대안도 무료만 (팀원 모델 선택과 같은 규칙). '🆓 무료 모델만 사용'이면 유료가 꺼지므로
   후보 중 무료 모델이 쓰인다 — 후보에 무료 모델이 하나도 없으면 utility 의 무료 모델을 끝에 붙인다.
 
 강도 규칙 (결정)
-  부장 모델은 위아래 제한을 두지 않는다 — 비평가는 글을 쓰지 않고 채점만 하므로 비용·속도를 고려해 가벼운 모델도 고를 수 있다.
-  대신 비평가가 채점 대상(팀장)보다 약한 모델이면 화면과 검증 기록에 경고한다 (약한 모델은 강한 모델의 실수를 놓치기 쉽다).
+  부장은 조직의 맨 위다 — 기본 모델은 팀장과 같거나 더 강하게 둔다 (2026-11-05: 예전 기본 utility(gemini-3.5-flash)가
+  팀장(Opus 5.5)보다 약했던 문제를 고침). 화면에서 고를 때는 위아래 제한을 두지 않는다 — 비용·한도 때문에 가벼운 모델도 고를 수 있다.
+  대신 비평가가 채점 대상(팀장)보다 약한 모델이면 화면과 검증 기록에 경고한다 (member_models.head_warning).
+
+비용·한도 (기본 = claude_cli Opus 5.5)
+  비평: 업무 하나에 1번 + 불합격이면 (자가 교정 + 다시 비평) × 최대 max_self_corrections 번 — 모두 구독 한도를 쓴다.
+  🧭 팀 배정(route_request): 팀이 둘 이상인 부서에서 맡길 때마다 모델 1번 (낱말 비교는 모델이 실패할 때만). claude -p 는 한 번에
+  약 8초의 시작 시간이 더해진다. 🛎 인포메이션 센터(core/reception.py)는 이 기본을 쓰지 않고 가벼운 assist_chain 을 쓴다.
 
 비공개 팀 (결정)
   부장 모델을 고르지 않았으면 팀장 모델로 비평한다 (위 2). 골랐는데 그 제공처가 팀원들이 쓰는 제공처에 없으면 경고한다.
@@ -37,8 +43,8 @@ FREE = member_models.FREE_PROVIDER
 SOURCE_LABELS = {
     "chosen": "부장 모델 (화면에서 고름)",
     "private": "팀장 모델 (비공개 팀 — 팀 밖 제공처로 보내지 않음)",
-    "critic": "models.yaml critic",
-    "utility": "models.yaml utility (기본)",
+    "critic": "부장 기본 — models.yaml critic",
+    "utility": "models.yaml utility (critic 없음)",
 }
 
 
@@ -74,6 +80,12 @@ def head_of(dept) -> DeptHead:
 def base_chain(models: ModelsConfig) -> tuple[RankModels, str]:
     """고르지 않았을 때의 비평가·부서장 모델 — models.yaml critic → utility."""
     return (models.critic, "critic") if models.critic else (models.utility, "utility")
+
+
+def assist_chain(models: ModelsConfig, choice: str = "") -> RankModels:
+    """🛎 인포메이션 센터처럼 부서장이 아닌 가벼운 안내 호출 — 고른 모델이 있으면 그것, 없으면 utility (부장 기본을 쓰지 않음)."""
+    choice = valid_choice(choice, models)
+    return _with_free_tail(chosen_chain(choice, models), models) if choice else models.utility
 
 
 def valid_choice(key: str, models: ModelsConfig) -> str:
@@ -152,11 +164,10 @@ def _name(key: str) -> str:
 def critic_warnings(models: ModelsConfig, team: Team | None, critic_key: str, lead_key: str,
                     member_providers: set[str]) -> list[str]:
     """비평가가 채점 대상(팀장)보다 약한가 · 비공개 팀인데 비평가 제공처가 팀원 제공처 밖인가."""
-    tiers = member_models.tier_map(models)
     out = []
-    if lead_key and tiers.get(critic_key, len(tiers)) > tiers.get(lead_key, len(tiers)):
-        out.append(f"비평가 {_name(critic_key)} 가 채점 대상 팀장 모델({_name(lead_key)})보다 약합니다 — "
-                   "약한 모델은 강한 모델의 실수를 놓치기 쉽습니다.")
+    weak = member_models.head_warning(models, critic_key, lead_key, "채점 대상 팀장")
+    if weak:
+        out.append(weak)
     provider = member_models.split_key(critic_key)[0]
     if team is not None and team.private and member_providers and provider not in member_providers:
         out.append(f"🔒 비공개 팀: 비평가 제공처({provider})가 팀원 제공처({' · '.join(sorted(member_providers))})에 없어 "

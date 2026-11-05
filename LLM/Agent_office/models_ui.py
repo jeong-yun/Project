@@ -206,6 +206,11 @@ def _custom_form(ctx: Ctx, where: str) -> None:
         if not r else f"{_tier_label(r, ctx)} 와 같은 급",
         help="상하 관계 규칙(부하는 상사보다 약한 모델)에 쓰는 강도입니다. 모르면 자동 추정 그대로 두세요.",
     )
+    if provider == "claude_cli":
+        st.caption("ℹ️ Claude 구독(claude_cli)은 목록 API 가 없어 정해 둔 이름(Fable 5.1 · Opus · Sonnet · Haiku 5.5 와 별칭)만 늘 보입니다. "
+                   "다른 이름은 여기에 넣고 **🧪 연결 시험**을 누르세요 — 실제로 `claude -p --model <이름>` 을 한 번 불러 봅니다. "
+                   "✅ 면 이 PC 의 구독에서 그 모델을 쓸 수 있고, ❌ 'model … not found/not available' 이면 이름이 틀렸거나 "
+                   "요금제에서 쓸 수 없는 모델입니다. 청구는 없지만 구독 한도를 조금 씁니다.")
     if name:
         st.caption(f"🧪 연결 시험 예상 비용: {_cost_text(model_catalog.estimate_test_cost(provider, name), provider)} "
                    f"(짧은 호출 2번, 토큰 약 {sum(model_catalog.TEST_TOKENS)}개)")

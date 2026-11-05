@@ -38,7 +38,11 @@ def chains_of(team, ranks, models, choices=None):
 def test_critic_resolution_order(org, team, models):
     chains = team_rank_models(org, models, team, {})
     head = dept_heads.head_of(dept("research", ["general", "concept"]))
-    # 4) 아무것도 없으면 utility (예전 동작)
+    # 기본 설정: models.yaml critic = 부장 기본 (팀장과 같은 Opus 5.5 구독이 맨 앞)
+    plan = dept_heads.critic_plan(models, team, chains, org.id, head)
+    assert plan.source == "critic" and keys(plan.chain)[0] == OPUS
+    # 4) critic 을 지우면 utility (예전 동작)
+    models = models.model_copy(update={"critic": None})
     plan = dept_heads.critic_plan(models, team, chains, org.id, head)
     assert plan.source == "utility" and plan.chain.primary == models.utility.primary
     # 3) models.yaml critic 이 있으면 그것
@@ -149,8 +153,9 @@ def test_router_uses_department_head_model(use_script, monkeypatch):
     assert picked["how"] == "llm" and picked["model"] == "openai · gpt-5.4" and used == ["openai:gpt-5.4"]
     assert "여행부 부장" in script.prompts("TeamPick")[0] and "운영 시간" in script.prompts("TeamPick")[0]  # 부장 관점
     used.clear()
-    building.route_request("오사카", travel, [dom, abr], models)  # 고르지 않으면 utility 그대로
-    assert used == [member_models.model_key(models.utility.primary)]
+    building.route_request("오사카", travel, [dom, abr], models)  # 고르지 않으면 부장 기본(models.yaml critic)
+    # claude_cli 는 테스트 PC 에 없으므로(꺼짐) 부장 기본의 다음 후보 — 팀 배정은 모델 1번 (낱말 비교는 실패할 때만)
+    assert len(used) == 1 and used[0] in keys(models.critic) and used[0] != member_models.model_key(models.utility.primary)
 
 
 def building_models():
@@ -181,11 +186,17 @@ def test_workflow_critic_is_department_head_with_chosen_model(org, ranks, team, 
     assert critic_prompt.startswith("너는 리서치·지식부 부장이다.") and "원전" in critic_prompt
 
 
-def test_workflow_without_head_keeps_old_utility_critic(org, ranks, team, models, use_script):
+def test_workflow_without_head_uses_default_head_chain(org, ranks, team, models, use_script):
     use_script(full_script(CriticResult=make_critic(5)))
     graph = build_office_graph(org, ranks, team, models, SETTINGS, CRITIC_ON)
     final = [p for k, p in stream_office(graph, org, "질문", "am_action", brief=BRIEF) if k == "step"][-1]
-    assert final.critic_model == models.utility.primary and final.critic_by == "⚖️ 비평가"
+    assert final.critic_model in models.critic.candidates and final.critic_by == "⚖️ 비평가"
+    # critic 을 지운 설정이면 예전처럼 utility
+    no_critic = models.model_copy(update={"critic": None})
+    use_script(full_script(CriticResult=make_critic(5)))
+    graph = build_office_graph(org, ranks, team, no_critic, SETTINGS, CRITIC_ON)
+    final = [p for k, p in stream_office(graph, org, "질문", "am_action", brief=BRIEF) if k == "step"][-1]
+    assert final.critic_model == models.utility.primary
 
 
 def test_large_input_is_trimmed_before_the_critic(org, ranks, team, models, use_script):
@@ -317,7 +328,7 @@ def test_team_screen_groups_models_by_department(app_env):
     assert not at.exception, at.exception
     assert any(e.label == "🎛 부서별 모델 선택 — 🔬 리서치·지식부" for e in at.expander)
     head = at.selectbox(key="dept_head_model_team_research")
-    assert head.value == "" and head.format_func("").startswith("기본 · gemini-3.5-flash")
+    assert head.value == "" and head.format_func("").startswith("기본 = claude-opus-5-5")
     assert at.radio(key="dept_team_pick_team_research").value == "general"  # 지금 팀부터
     at = head.set_value("openai:gpt-5.4").run()
     assert not at.exception, at.exception

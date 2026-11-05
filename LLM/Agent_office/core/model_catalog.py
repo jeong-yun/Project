@@ -47,8 +47,12 @@ GOOGLE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 ANTHROPIC_URL = "https://api.anthropic.com/v1/models"
 UPSTAGE_URL = "https://api.upstage.ai/v1/models"
 # claude -p --model 이 받는 이름 — 별칭(opus·sonnet·haiku = 그 계열의 최신)과 정식 이름 (Claude Code 문서의 model 설정)
+# 정식 이름은 Anthropic 공식 모델표(2026-10-06 기준)의 Claude 5 계열. 목록 API 가 없으므로 '목록 새로 받기'를 하지 않아도
+# merge() 가 늘 선택지에 넣는다 (FIXED_MODELS). 구독 요금제에 따라 CLI 가 받지 않는 모델이 있을 수 있다 → 🧪 연결 시험으로 확인.
+# 여기 없는 이름(예: 일부 프로그램 전용 모델)은 '➕ 직접 입력'으로 넣고 🧪 연결 시험을 한다.
 CLAUDE_CLI_MODELS = [
     ("opus", "Opus (최신 별칭)"), ("sonnet", "Sonnet (최신 별칭)"), ("haiku", "Haiku (최신 별칭)"),
+    ("claude-fable-5-1", "Claude Fable 5.1"),
     ("claude-opus-5-5", "Claude Opus 5.5"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"), ("claude-haiku-5-5", "Claude Haiku 5.5"),
 ]
 
@@ -234,6 +238,7 @@ FETCHERS: dict[str, Callable[[str], tuple[list[Found], list[str]]]] = {
     "upstage": fetch_upstage, "freellm": fetch_freellm, "claude_cli": fetch_claude_cli,
 }
 FIXED_LIST = {"claude_cli"}  # 목록 API 가 없어 고정 목록 — '목록에서 사라짐' 판단에 쓰지 않는다
+FIXED_MODELS = {"claude_cli": CLAUDE_CLI_MODELS}  # 목록을 받지 않아도(model_catalog.json 없음) 늘 선택지에 넣는 모델
 # 찾은 모델을 '🎛 팀원 모델 선택' 선택지에 바로 넣는 provider. FreeLLMAPI 는 등록한 무료 키에 따라 수백 개라(2026-11-02 실측 266개)
 # 선택지에 다 넣지 않는다 — '직접 입력'의 '찾은 모델에서 고르기'로 하나씩 넣는다. settings.yaml model_catalog.selector_providers 로 바꿀 수 있다.
 SELECTOR_PROVIDERS = ("openai", "google", "anthropic", "upstage", "claude_cli")
@@ -606,6 +611,14 @@ def merge(models: ModelsConfig, data_dir: Path | str | None, teams: list[Team] =
         for key in [k for k in listed if k.startswith(provider + ":")]:
             if key.partition(":")[2] not in all_ids:
                 info[key].missing, info[key].suggest = True, _suggest(key, found)
+    # 목록 API 가 없는 provider(claude_cli)의 고정 목록 — 목록을 한 번도 받지 않은 PC·실행 폴더에서도 늘 고를 수 있게
+    for provider, fixed in FIXED_MODELS.items():
+        if provider not in models.providers:
+            continue
+        for model_id, display in fixed:
+            key = f"{provider}:{model_id}"
+            if key not in info and key not in extra:  # yaml 에 있는 모델은 yaml 그대로 (표시 이름 안 바꿈)
+                extra[key] = ModelInfo(key, "discovered", "guess", display, selectable=provider in selector_providers)
     for m in store.models() if store else []:
         key = f"{m['provider']}:{m['model']}"
         if m["provider"] not in models.providers:
