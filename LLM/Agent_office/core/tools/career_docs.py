@@ -143,17 +143,35 @@ class FileTranscript:
         return None if any(c is None for c in costs) else round(sum(costs), 6)
 
 
-def transcribe_file(path: str, name: str, rank_models: RankModels, models: ModelsConfig) -> FileTranscript:
+def _cached_transcribe(tiles: list[bytes], rank_models: RankModels, models: ModelsConfig, hint: str,
+                       cache: dict | None) -> vision.TranscribeResult:
+    """그림(조각 묶음) 하나 읽기 — cache 가 있으면 (그림 내용 해시 + 고른 모델) 이 같을 때 다시 부르지 않는다.
+
+    2026-11-05 문의 '그림 JD 를 계속 읽는다': 그림을 차례로 읽는 동안 화면이 다시 그려지면(버튼·다른 업무의 자동 새로 고침)
+    Streamlit 이 그 실행을 끊고, 읽은 결과가 남지 않아 다음 실행이 첫 그림부터 다시 읽었다 → 그림마다 끝나는 즉시 cache 에 남긴다.
+    """
+    key = hashlib.sha1(b"".join(tiles)).hexdigest() + "|" + rank_models.primary.label
+    if cache is not None and key in cache:
+        return cache[key]
+    read = vision.transcribe(tiles, rank_models, models, hint=hint)
+    if cache is not None:
+        cache[key] = read
+    return read
+
+
+def transcribe_file(path: str, name: str, rank_models: RankModels, models: ModelsConfig,
+                    cache: dict | None = None) -> FileTranscript:
     """파일 하나 → 글자.
 
     그림은 비전 모델, PDF 는 쪽마다 (글자 층이 있으면 그대로, 없으면 쪽을 그림으로 바꿔 비전 모델),
     그 밖의 글 파일은 코드로 읽는다. 쓸 수 있는 비전 모델이 없으면 llm_factory.NoAvailableModelError.
+    cache = {(그림 해시|모델): 읽은 결과} — 같은 그림을 같은 모델로 다시 읽지 않는다 (화면 세션마다, career_ui.read_items).
     """
     suffix = Path(path).suffix.lower()
     data = Path(path).read_bytes()
     if suffix in IMAGE_SUFFIXES:
         tiles = vision.prepare_image(data)
-        read = vision.transcribe(tiles, rank_models, models, hint=name)
+        read = _cached_transcribe(tiles, rank_models, models, name, cache)
         how = f"그림 → 비전 모델 {read.model}" + (f" (긴 그림이라 {len(tiles)}조각으로 나눠 읽음)" if len(tiles) > 1 else "")
         return FileTranscript(name, read.text, [read], how)
     if suffix == ".pdf":
@@ -163,8 +181,8 @@ def transcribe_file(path: str, name: str, rank_models: RankModels, models: Model
             if page_text.strip():
                 texts.append(page_text.strip())
                 continue
-            read = vision.transcribe(vision.prepare_image(vision.pdf_page_png(data, i)), rank_models, models,
-                                     hint=f"{name} {i + 1}쪽")
+            read = _cached_transcribe(vision.prepare_image(vision.pdf_page_png(data, i)), rank_models, models,
+                                      f"{name} {i + 1}쪽", cache)
             reads.append(read)
             texts.append(read.text)
         how = (f"PDF {len(pages)}쪽 중 글자 층 없는 {len(reads)}쪽 → 비전 모델 {reads[0].model}" if reads

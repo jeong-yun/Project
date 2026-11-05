@@ -69,15 +69,29 @@ def no_model_reason(pool: list[ModelSpec], models: ModelsConfig) -> str:
 
 
 def read_items(items: dict[str, list], spec: ModelSpec, pool: list[ModelSpec], models: ModelsConfig,
-               team_id: str = "") -> dict[str, list[career_docs.FileTranscript]]:
-    """확인이 필요한 칸의 파일을 모두 글자로 옮긴다 — 고른 모델이 primary, 안 되면 나머지 그림 모델로 (llm_factory 재시도·대안)."""
+               team_id: str = "", cache: dict | None = None, progress=None) -> dict[str, list[career_docs.FileTranscript]]:
+    """확인이 필요한 칸의 파일을 모두 글자로 옮긴다 — 고른 모델이 primary, 안 되면 나머지 그림 모델로 (llm_factory 재시도·대안).
+
+    cache: 같은 그림(내용 해시)·같은 모델은 다시 읽지 않는다 (화면이 다시 그려져 읽기가 끊겨도 읽은 그림은 남는다).
+    progress(i, n, name): 파일마다 '그림 i/n 읽는 중' 표시 (여러 장을 차례로 읽는 것이 반복처럼 보이지 않게).
+    """
     others = [s for s in vision.usable_vision_models(models, pool) if s.label != spec.label]
     rank_models = RankModels(primary=spec, fallback=others[:3])
     out: dict[str, list[career_docs.FileTranscript]] = {}
+    total = sum(len(files) for files in items.values())
+    done = 0
     with usage.scope(team_id=team_id, purpose="그림 글자 읽기"):
         for fld, files in items.items():
-            out[fld] = [career_docs.transcribe_file(f.path, f.name, rank_models, models) for f in files]
+            out[fld] = []
+            for f in files:
+                done += 1
+                if progress:
+                    progress(done, total, f.name)
+                out[fld].append(career_docs.transcribe_file(f.path, f.name, rank_models, models, cache))
     return out
+
+
+CACHE_KEY = "career_vision_cache"  # 세션 안 그림 읽기 결과 — (그림 해시|모델) → 읽은 결과
 
 
 def apply_confirmed(request: dict, items: dict[str, list], texts: dict[str, object], summary: str) -> dict:
@@ -145,13 +159,24 @@ def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig,
             st.session_state.pop(key, None)
             st.rerun()
         if pending["reads"] is None and not pending["error"] or reread:
+            cache = st.session_state.setdefault(CACHE_KEY, {})
+            if reread:  # '다시 읽기'는 고른 모델로 새로 — 이 파일들의 지난 결과를 쓰지 않는다
+                cache = {}
+            bar = st.progress(0.0, text=f"{spec.label} 로 그림 글자를 읽는 중…")
+
+            def progress(i: int, n: int, name: str) -> None:
+                bar.progress((i - 1) / n, text=f"🖼 그림 {i}/{n} 읽는 중 — {name} ({spec.label}) · 읽은 그림은 다시 읽지 않습니다")
+
             with st.spinner(f"{spec.label} 로 그림 글자를 읽는 중…"):
                 try:
-                    pending["reads"], pending["error"] = read_items(items, spec, pool, models, team_id), ""
+                    pending["reads"], pending["error"] = read_items(items, spec, pool, models, team_id, cache, progress), ""
+                    if reread:
+                        st.session_state[CACHE_KEY].update(cache)
                 except llm_factory.NoAvailableModelError as e:
                     pending["reads"], pending["error"] = None, f"{vision.NO_VISION_MODEL}\n\n{e}"
                 except Exception as e:  # noqa: BLE001 — 그림 깨짐 등
                     pending["reads"], pending["error"] = None, f"그림을 읽지 못했습니다: {type(e).__name__}: {str(e)[:300]}"
+            bar.empty()
             reads = pending["reads"] or {}
             for fld, files in reads.items():  # 새로 읽은 글로 입력칸을 채운다
                 if fld == "jd":
