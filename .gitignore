@@ -25,6 +25,7 @@ service-account*.json
 LLM/Agent_office/teams/stock/avatars/
 
 # ─── 파이썬·도구 부산물 ───
+.claude/
 __pycache__/
 *.pyc
 .venv/
