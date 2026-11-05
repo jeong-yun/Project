@@ -133,10 +133,13 @@ def build_request(task: TaskTemplate, values: dict, extra_request: str = "") -> 
     if "days" in full:
         harness_options.setdefault("trip_days", full["days"])
         harness_options.setdefault("trip_start", str(full["start_date"]))
+    tool_inputs = {k: v for k, v in full.items() if not _is_empty(v)}
+    if extra_request.strip():  # 툴이 추가 요청을 볼 수 있게 (예: 커리어 팀 — '기존 형식과 유사하게' → 원본 형식 검사)
+        tool_inputs.setdefault("extra_request", extra_request.strip())
     return TaskRequest(
         question=question,
         brief=brief,
-        tool_inputs={k: v for k, v in full.items() if not _is_empty(v)},
+        tool_inputs=tool_inputs,
         validators=list(task.validators),
         harness_options=harness_options,
     )

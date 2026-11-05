@@ -293,9 +293,77 @@ def _items(data: dict | None, key: str) -> list[dict]:
     return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
 
 
+CODE_BLOCK = re.compile(r"```[ \t]*([\w+-]*)[^\n]*\n?(.*?)```", re.S)
+KEEP_CODE = ("mermaid",)  # 본문에 남기는 코드 블록 (흐름도) — 결과 .md 에 그대로, Word 에는 코드 상자 + 안내
+
+
 def body_text(answer: str) -> str:
-    """JSON·코드 블록을 뺀 본문."""
-    return re.sub(r"```.*?```", "", answer, flags=re.S).strip()
+    """JSON 요약 블록(```json, 언어 표시 없는 끝 JSON)과 그 밖의 코드 블록을 뺀 본문. ```mermaid 흐름도는 남긴다.
+
+    (2026-11-04: 예전에는 모든 코드 블록을 지워 모델이 쓴 mermaid 흐름도가 결과 파일에서 사라졌다)
+    mermaid 노드 글의 숫자도 본문이므로 사실 검사(check_facts)를 받는다.
+    """
+    def keep(m: re.Match) -> str:
+        return m.group(0) if m.group(1).lower() in KEEP_CODE else ""
+
+    return CODE_BLOCK.sub(keep, answer).strip()
+
+
+# ─── 형식별 본문 (Word 용 · md 용) ─────────────────────────────────────────
+# 출력 형식마다 원본 형식이 다를 때(예: Word = 기존 Word 표 형식, md = 기존 md 경력서 형식) 답변을 구간으로 나눈다.
+#   <!-- format:docx -->  … Word·한글(.docx · .hwpx) 용 본문
+#   <!-- format:md -->    … Markdown(.md) 용 본문
+# 첫 표시 앞의 글(제목 등)은 두 구간에 함께 붙는다. 표시가 없으면 본문 하나를 모든 형식에 쓴다 (지금과 같음).
+FORMAT_MARK = re.compile(r"^[ \t]*<!--\s*format\s*:\s*(docx|word|hwpx|md|markdown)\s*-->[ \t]*$", re.M | re.I)
+FORMAT_KEY = {"docx": "docx", "word": "docx", "hwpx": "docx", "md": "md", "markdown": "md"}
+
+
+def format_sections(body: str) -> dict[str, str]:
+    """본문 → {'docx': Word 용, 'md': md 용} (구간 표시가 없으면 빈 dict)."""
+    marks = list(FORMAT_MARK.finditer(body or ""))
+    if not marks:
+        return {}
+    head = body[: marks[0].start()].strip()
+    out: dict[str, str] = {}
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(body)
+        key = FORMAT_KEY[m.group(1).lower()]
+        text = body[m.end():end].strip()
+        out[key] = (out[key] + "\n\n" + text).strip() if key in out else text
+    return {k: (head + "\n\n" + v).strip() if head else v for k, v in out.items()}
+
+
+def body_for(answer: str, target: str) -> str:
+    """내보낼 형식(md · docx · hwpx)에 쓸 본문 — 형식 구간이 있으면 그 구간, 없으면 본문 전체."""
+    body = body_text(answer)
+    sections = format_sections(body)
+    if not sections:
+        return body
+    key = "docx" if target in ("docx", "hwpx") else "md"
+    return sections.get(key) or next(iter(sections.values()))
+
+
+def section_problems(answer: str) -> list[str]:
+    """형식 구간을 썼다면 두 구간이 모두 있고 비어 있지 않은가."""
+    body = body_text(answer)
+    if not FORMAT_MARK.search(body):
+        return []
+    sections = format_sections(body)
+    head = body[: FORMAT_MARK.search(body).start()].strip()
+    missing = [k for k in ("docx", "md") if not sections.get(k) or sections[k].strip() == head]
+    return [f"형식 구간 <!-- format:{k} --> 의 본문이 없다 — 형식 구간을 쓰면 docx·md 두 구간을 모두 쓰고, 형식이 하나면 표시를 쓰지 않는다"
+            for k in missing]
+
+
+def figure_marks(text: str) -> set[int]:
+    """글 속 '[그림 N]' 번호들."""
+    return {int(n) for n in re.findall(r"\[그림\s*(\d{1,3})\]", text or "")}
+
+
+def missing_figures(answer: str, count: int) -> list[int]:
+    """원본 그림 1~count 중 결과 본문에 '[그림 N]' 표시가 없는 번호."""
+    have = figure_marks(body_text(answer))
+    return [n for n in range(1, count + 1) if n not in have]
 
 
 # ─── 지어낸 사실 막기 ──────────────────────────────────────────────────
@@ -345,6 +413,41 @@ def numbers_in(text: str) -> set[str]:
             found.add(_norm_number(m.group(2), None))
     for m in re.finditer(r"\d+", text):  # 날짜·기간 '2021~2024', '2023-03' 의 조각
         found.add(str(int(m.group())))
+    found |= date_variants(norm)
+    return found
+
+
+# ─── 날짜 표기 바꾸기 (같은 날짜 · 다른 표기) ──────────────────────────────
+# 2026-11-04 실측: 수정 요청으로 '2026-06-01' → '26.06' 처럼 표기만 바꾼 것을 '문서에 없는 숫자 20개'로 실패 처리 → 재작성.
+# 원문의 날짜(연·월)마다 같은 날짜의 다른 표기를 허용 숫자에 넣는다. 원문에 없는 다른 달(26.07)은 여전히 실패.
+#   원문 2026-06-01 · 2026.06 · 2026/06 · 2026년 6월 → 26.06 · 26.6 · 2026.06 · 2026.6 · 26
+#   원문 26.06 · 26년 6월 (연 두 자리, 20xx 로 본다)   → 2026 · 2026.06 · 2026.6
+# '26.06%' · '26.06배' 처럼 단위가 붙은 수, 월이 1~12 가 아닌 수는 날짜로 보지 않는다.
+DATE_LONG = re.compile(r"(?<![\d.])((?:19|20)\d{2})\s*(?:[-./]\s*|년\s*)(\d{1,2})(?!\d)(?:\s*월)?")
+DATE_SHORT = re.compile(r"(?<![\d.,])(\d{2})(?:\.(\d{1,2})(?![\d%])|\s*년\s*(\d{1,2})\s*월)")
+
+
+def _date_tokens(year: int, month: int) -> set[str]:
+    yy = year % 100
+    out = {str(year), str(yy)}
+    for y in (str(year), f"{yy:02d}"):
+        for mm in (f"{month:02d}", str(month)):
+            out.add(_norm_number(y, mm))
+    return out
+
+
+def date_variants(text: str) -> set[str]:
+    """글 속 날짜(연·월)마다 같은 날짜의 다른 표기 (비교용 숫자 모양 — numbers_in 과 같은 정규화)."""
+    found: set[str] = set()
+    for m in DATE_LONG.finditer(text):
+        month = int(m.group(2))
+        if 1 <= month <= 12:
+            found |= _date_tokens(int(m.group(1)), month)
+    for m in DATE_SHORT.finditer(text):
+        month = int(m.group(2) or m.group(3))
+        if not 1 <= month <= 12 or (m.group(2) and _unit(text[m.end():])):
+            continue
+        found |= _date_tokens(2000 + int(m.group(1)), month)
     return found
 
 
@@ -487,6 +590,65 @@ def check_portfolio(answer: str) -> list[str]:
             problems.append(f"프로젝트 '{title[:30]}' 카드에 빠진 항목: {', '.join(missing)} (항목마다 '- **문제**: …' 형식)")
     if not re.search(r"^\|.*\|\s*$", body, re.M):
         problems.append("기술 매트릭스 표(| 영역 | 기술·도구 | 근거 |)가 없다")
+    return problems
+
+
+# ─── 요청 형식 (원본 형식 유지) ─────────────────────────────────────────
+# 2026-11-04 실측: 추가 요청 'Word 는 기존 Word 형식, md 는 기존 md 형식과 유사하게'를 표준 형식 검사(check_portfolio)가 덮어써
+# 원본 표·구분이 사라지고 요청 형식은 부록으로 밀렸다 → 형식 지정이 있으면 표준 절 대신 '원본 절 제목·표 머리글이 그대로 있는지'를 본다.
+
+FORMAT_WORDS = re.compile(r"형식|포맷|포멧|양식|서식|레이아웃|틀\s*(?:을|를|은|는|대로|에|그대로)|템플릿|template|format|layout|"
+                          r"(?:기존|원본|원래|지금)\s*(?:문서|파일|포트폴리오|경력서|경력\s*기술서|이력서)?\s*(?:과|와|처럼|대로|그대로)",
+                          re.I)
+OMIT_PHRASES = re.compile(r"나머지(?:는|도)?\s*(?:원문|기존|이전)?\s*(?:그대로|동일|생략)|이하\s*(?:동일|생략)|\((?:중략|생략|이하 생략)\)|"
+                          r"(?:변경|바뀐)\s*(?:없는|없음|사항\s*없는)\s*(?:항목|부분|프로젝트)?(?:은|는)?\s*(?:생략|그대로\s*둡니다)")
+
+
+def format_requested(text: str) -> bool:
+    """추가 요청 글에 형식 지정이 있는가 ('기존 Word 형식과 유사하게', '경력서.md 처럼', '원본 표 그대로' …)."""
+    return bool(FORMAT_WORDS.search(text or ""))
+
+
+def _flat(text: str) -> str:
+    """비교용 — 마크다운 표시·공백·문장 부호를 뺀 글 (원본 제목이 결과에 '그대로' 있는지 볼 때)."""
+    text = normalize_text(text).lower()
+    return re.sub(r"[\s*_#`|>\-·.,:：()\[\]【】<>「」'\"~]+", "", text)
+
+
+def _bare_heading(text: str) -> str:
+    """절 제목의 번호(1. · Ⅰ. · 가. · (1) · 1-1.)를 뗀 이름."""
+    return re.sub(r"^\s*(?:[\dⅠ-Ⅻⅰ-ⅻ]+(?:[-.]\d+)*[.)]?|[가-하][.)]|\(\d+\)|[①-⑳])\s*", "", str(text or "")).strip()
+
+
+def original_format_problems(answer: str, fmt: dict) -> list[str]:
+    """요청 형식 검사 — 원본(지금 포트폴리오·형식 참고 파일)의 절 제목·표 머리글이 결과 본문에 그대로 있는지 + 생략 문구가 없는지.
+
+    fmt = {"headings": [...], "table_heads": [[칸, …], …], "sources": [파일 이름]}  (core/tools/career_docs.py 가 만든다)
+    """
+    body = body_text(answer)
+    sections = format_sections(body)
+    if fmt.get("targets") and sections:  # 형식 구간마다 그 출력의 원본(Word판 → docx 구간, md판 → md 구간)과 대조
+        problems = []
+        for key, target in fmt["targets"].items():
+            part = sections.get(key)
+            if part is None:
+                continue
+            sub = original_format_problems(f"{part}", {"headings": target.get("headings"), "table_heads": target.get("table_heads")})
+            problems += [f"[{key} 구간 · 원본 {', '.join(target.get('sources') or [])}] {x}" for x in sub]
+        return problems
+    flat = _flat(body)
+    problems = []
+    missing = [h for h in dict.fromkeys(fmt.get("headings") or []) if _flat(_bare_heading(h)) and _flat(_bare_heading(h)) not in flat]
+    if missing:
+        problems.append(f"원본 절 제목 {len(missing)}개가 결과에 없다: " + ", ".join(f"'{h[:30]}'" for h in missing[:8]))
+    for head in fmt.get("table_heads") or []:
+        cells = [c for c in head if _flat(c)]
+        lost = [c for c in cells if _flat(c) not in flat]
+        if lost:
+            problems.append(f"원본 표 머리글 '{' | '.join(c[:15] for c in cells[:8])}' 중 결과에 없는 칸: " + ", ".join(f"'{c[:20]}'" for c in lost[:6]))
+    omitted = OMIT_PHRASES.search(body)
+    if omitted:
+        problems.append(f"'{omitted.group(0)}' 처럼 항목을 생략했다 — 바뀌지 않은 표·항목도 빠짐없이 쓴다")
     return problems
 
 
@@ -841,14 +1003,15 @@ def check_changes(answer: str, old: str, source: str, urls: list[str], web_count
 
 def render_document(answer: str, kind: str, questions: list[Question] | None = None, title: str = "",
                     requirements: dict[str, str] | None = None, jds: list[dict] | None = None, source: str | None = None,
-                    web: list[dict] | None = None) -> str:
+                    web: list[dict] | None = None, target: str = "md") -> str:
     """최종 답변 → 내려받기용 마크다운.
 
     본문(JSON 빼고) + 자소서면 문항마다 코드가 센 글자 수 + 부록(JD 대응표 · 확인 필요 · 근거 인용 — JSON 에서 코드가 만든 표).
     JD 추천(jd_recommend)은 맨 앞에 코드가 계산한 순위·점수·요구사항 대응표 (jds = 툴이 뽑은 JD·요구사항, source = 문서 원문).
     포트폴리오 최신화(portfolio_update)는 부록에 바뀐 점(이전 → 이후 · 이유 · 출처)과 외부 자료 목록(web).
+    target = 내보낼 형식 (md · docx · hwpx) — 답변에 형식 구간(<!-- format:docx --> · <!-- format:md -->)이 있으면 그 구간만.
     """
-    body = body_text(answer)
+    body = body_for(answer, target)
     if kind == "jd_recommend" and jds:
         explained = "\n\n---\n\n## 설명 (작성: 팀)\n\n" + body if body else ""
         body = recommend_markdown(answer, jds, source) + explained

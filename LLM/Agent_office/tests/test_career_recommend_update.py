@@ -353,7 +353,7 @@ def test_team_yaml_defines_both_tasks_without_web_search_tool():
     assert team.harness.also_at["jd_recommend"] == ["am_writer", "gm_role"]
     web = next(f for f in upd.fields if f.key == "web_on")
     assert web.type == "checkbox" and web.default is False  # 기본 꺼짐
-    assert next(f for f in upd.fields if f.key == "portfolio").multiple is False
+    assert next(f for f in upd.fields if f.key == "portfolio").multiple is True  # 여러 판 (Word판·md판)
     assert any("JD" in x and "추천" in x for x in team.scope.accepts) and any("최신화" in x for x in team.scope.accepts)
     assert 2 <= len(team.free_examples) <= 4
     req = build_request(rec, {"use_sample": True, "direction": "AI 거버넌스"})
@@ -470,7 +470,7 @@ def test_career_page_shows_both_new_forms(app):
     web = next(c for c in at.checkbox if c.label.startswith("🌐 외부 자료로"))
     assert web.value is False  # 기본 꺼짐
     assert any(t.label.startswith("GitHub 공개 저장소") for t in at.text_input)
-    assert len(at.get("file_uploader")) == 2  # 지금 포트폴리오 + 최신 요약 문서
+    assert len(at.get("file_uploader")) == 4  # 지금 포트폴리오 + 형식 참고 파일 + 최신 요약 문서 + JD 파일
 
 
 # AppTest.from_function 은 함수 본문을 임시 파일로 써서 실행한다 — Windows 기본 인코딩 문제로 본문에는 ASCII 만 쓴다.

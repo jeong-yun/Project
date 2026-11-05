@@ -38,6 +38,7 @@ import streamlit.components.v1 as components
 from pydantic import ValidationError
 from st_click_detector import click_detector
 
+import ask_first_ui
 import board_ui
 import building_ui
 import career_ui
@@ -1300,11 +1301,17 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
             audio_path, appendix, title = run["music"]["history"].now.path, music_report(run), "음원 (Gemini Lyria)"
         extra = design_ui.adopted_files(run, decision) if is_design else None  # 레이아웃 JSON·DXF·PNG·3D
         if is_career:  # 자소서·포트폴리오 문서 (.md · .docx · .hwpx) — 채택한(고친) 내용으로 다시 만든다
-            extra = career_ui.adopted_files(run, decision)
+            try:
+                extra = career_ui.adopted_files(run, decision)
+            except Exception as e:  # noqa: BLE001 — 문서 만들기가 실패해도 채택 기록(.md)은 저장한다
+                extra = None
+                run["save_error"] = f"Word·한글 문서를 만들지 못해 기록(.md)만 저장했습니다: {type(e).__name__}: {e}"
+                run["notes"].append(f"결과 파일 저장 일부 실패: {run['save_error']}")
         paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text, appendix,
                                audio_path=audio_path, appendix_title=title, extra_files=extra)
         return [str(p) for p in paths]
     except Exception as e:  # noqa: BLE001
+        run["save_error"] = f"결과 파일을 저장하지 못했습니다: {type(e).__name__}: {e}"
         run["notes"].append(f"결과 파일 저장 실패: {type(e).__name__}: {e}")
         return []
 
@@ -1442,7 +1449,18 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         st.warning(f"❌ 전체 반려 · 만족도 {decision.score}/5 · 저장됨")
     if decision.comment:
         st.caption(f"코멘트: {decision.comment}")
-    for file in run.get("saved_files") or []:
+    saved_files = run.get("saved_files") or []
+    if decision.action == "adopt":
+        # 저장 결과를 분명히 — 어디에 무엇을 저장했는지, 실패했으면 경고 상자 (예전에는 실패가 '참고 기록'에만 조용히 남았다)
+        if run.get("save_error"):
+            st.warning(f"⚠️ {run['save_error']}  \n아래 내려받기 버튼이나 결과 상자의 ⬇ 버튼으로 받아 두세요.")
+        if saved_files:
+            folder = Path(saved_files[0]).parent
+            shown = folder.relative_to(BASE_DIR) if folder.is_relative_to(BASE_DIR) else folder
+            st.info(f"💾 결과 파일 {len(saved_files)}개를 `{shown}` 에 저장했습니다 — 사이드바 '📂 저장된 결과 파일'에서도 받을 수 있습니다.")
+        elif not run.get("save_error"):
+            st.warning("⚠️ 저장한 결과 파일이 없습니다 — '참고 기록'을 확인하세요.")
+    for file in saved_files:
         path = Path(file)
         c1, c2 = st.columns([4, 1])
         c1.caption(f"📁 저장됨: `{path.relative_to(BASE_DIR) if path.is_relative_to(BASE_DIR) else path}`")
@@ -1950,6 +1968,8 @@ def render_task_input() -> dict:
             if is_career:  # 그림·스캔 PDF → 비전 모델로 글자를 옮기고 사람이 확인한 뒤에 시작 (career_ui.py)
                 request = career_ui.confirm_step(request, team_id, task.id, models,
                                                  [member_chains[n.id] for n in reversed(list(subtree(org, target).walk()))])
+            if team.ask_first is not None:  # ❓ 질문 먼저 — 팀 설정이 있는 팀만 (없으면 지금처럼 바로 시작, ask_first_ui.py)
+                request = ask_first_ui.step(request, team, task.id)
         else:
             # ── 자유 질문 (이 팀 분야만 — teams/<팀>/team.yaml 의 scope · free_examples, core/scope.py) ──
             examples = team.free_examples
