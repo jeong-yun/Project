@@ -255,10 +255,10 @@ def needs_web(inputs: dict) -> bool:
 def private_text(inputs: dict) -> str:
     """검색어 검사에 쓰는 '내 글' — 요약 문서·지금 포트폴리오 원문 + 올린 파일 이름 (이 글의 낱말이 검색어로 나가지 않게)."""
     docs, _ = career_docs.read_docs(inputs)
-    old, _ = career_docs.read_portfolio(inputs)
+    olds, _ = career_docs.read_portfolios(inputs)
     refs, _ = career_docs.read_format_refs(inputs)
     names = [str(inputs.get(k) or "") for k in ("docs_name", "portfolio_name", "format_refs_name")]
-    return "\n".join([d.text for d in docs] + ([old.text] if old else []) + [d.text for d in refs] + names)
+    return "\n".join([d.text for d in docs] + [d.text for d in olds] + [d.text for d in refs] + names)
 
 
 def approved_request(request: dict, queries: list[str], results: list[dict], github: tuple[str, str] | None,

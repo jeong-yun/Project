@@ -194,7 +194,7 @@ def test_format_refs_are_format_only_not_quote_source(tmp_path):
     res = career_docs.run(req.question, req.tool_inputs, None)
     opts = res.harness_options
     assert "📐 형식 참고 파일" in res.content and "처리 2,400건" in res.content
-    assert opts["career_format"]["sources"] == ["old.md", "경력서.md"]
+    assert opts["career_format"]["sources"] == ["old.md", "[형식 참고] 경력서.md"]
     assert "회사" in opts["career_format"]["headings"] and "1. 회사 업무" in opts["career_format"]["headings"]
     assert "2,400" not in opts["career_source"]  # 인용 근거(원문)에는 넣지 않는다
     assert "2400" in career.numbers_in(opts["career_reference"])  # 숫자는 내 문서로 허용

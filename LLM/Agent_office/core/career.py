@@ -626,6 +626,16 @@ def original_format_problems(answer: str, fmt: dict) -> list[str]:
     fmt = {"headings": [...], "table_heads": [[칸, …], …], "sources": [파일 이름]}  (core/tools/career_docs.py 가 만든다)
     """
     body = body_text(answer)
+    sections = format_sections(body)
+    if fmt.get("targets") and sections:  # 형식 구간마다 그 출력의 원본(Word판 → docx 구간, md판 → md 구간)과 대조
+        problems = []
+        for key, target in fmt["targets"].items():
+            part = sections.get(key)
+            if part is None:
+                continue
+            sub = original_format_problems(f"{part}", {"headings": target.get("headings"), "table_heads": target.get("table_heads")})
+            problems += [f"[{key} 구간 · 원본 {', '.join(target.get('sources') or [])}] {x}" for x in sub]
+        return problems
     flat = _flat(body)
     problems = []
     missing = [h for h in dict.fromkeys(fmt.get("headings") or []) if _flat(_bare_heading(h)) and _flat(_bare_heading(h)) not in flat]
