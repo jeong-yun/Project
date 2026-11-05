@@ -59,8 +59,8 @@ def ask_yes(question: str) -> bool:
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
-        except AttributeError:
+            stream.reconfigure(errors="replace", **({} if stream.isatty() else {"encoding": "utf-8"}))
+        except (AttributeError, ValueError):
             pass
     print(f"저장소: {REPO}")
     hooks = git("config", "--get", "core.hooksPath", check=False).stdout.strip()

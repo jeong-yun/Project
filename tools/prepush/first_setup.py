@@ -39,8 +39,8 @@ def missing_packages() -> list[str]:
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
-        except AttributeError:
+            stream.reconfigure(errors="replace", **({} if stream.isatty() else {"encoding": "utf-8"}))
+        except (AttributeError, ValueError):
             pass
     print(f"저장소: {REPO}")
     print(f"파이썬: {sys.executable}")
