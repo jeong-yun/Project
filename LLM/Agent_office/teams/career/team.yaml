@@ -274,8 +274,8 @@ tasks:
       - {key: profile_text, label: 또는 요약 문서 붙여 넣기, type: textarea, placeholder: "경력·프로젝트·기술·숫자를 정리한 글을 그대로 붙여 넣으세요"}
       - {key: jd, label: "JD 붙여 넣기 (여러 개는 '---' 만 있는 줄로 나눔)", type: textarea,
          placeholder: "[가 회사 보안 분석가]\n[자격 요건]\n- …\n---\n[나 회사 데이터 엔지니어]\n[자격 요건]\n- …"}
-      - {key: jd_file, label: JD 파일·화면 캡처 (파일 하나 = JD 하나), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
-         help: "파일마다 JD 하나로 봅니다. 그림(png·jpg·webp)·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전에 파일마다 확인·수정 단계가 있습니다 (그림은 고른 모델 회사로 전송)"}
+      - {key: jd_file, label: JD 파일·화면 캡처 (기본 파일 하나 = JD 하나), type: file, multiple: true, options: [docx, pdf, hwp, hwpx, md, txt, png, jpg, jpeg, webp],
+         help: "글 파일은 파일마다 JD 하나로 봅니다. 그림(png·jpg·webp)·스캔 PDF 는 비전 모델이 글자로 옮기고, 맡기기 전 확인 단계에서 캡처 여러 장을 'JD 묶음'으로 합치거나, 한 장에 든 여러 JD 를 '---' 줄로 나눌 수 있습니다 (그림은 고른 모델 회사로 전송)"}
     fixed: {career_kind: jd_recommend, fmt_md: "예"}
     question: |
       올린 요약 문서만 근거로 아래 JD 들이 나에게 얼마나 맞는지 요구사항마다 판정하고 추천 순위를 매겨줘.

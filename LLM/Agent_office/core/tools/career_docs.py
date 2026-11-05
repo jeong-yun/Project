@@ -237,10 +237,16 @@ def read_jds(inputs: dict) -> tuple[list[tuple[str, str]], list[str]]:
     jds += [(f"붙여 넣은 JD {i}" if len(pasted) > 1 else "붙여 넣은 JD", t) for i, t in enumerate(pasted, 1)]
     paths = _paths(inputs.get("jd_file"))
     confirmed = inputs.get("jds_confirmed") or {}
+    groups = inputs.get("jds_group") or {}  # 확인 단계에서 고른 'JD 묶음' 번호 — 같은 번호의 그림은 올린 순서대로 이어 붙여 JD 하나
+    grouped: dict[str, list[tuple[str, str]]] = {}
     for path, name in zip(paths, _names(inputs.get("jd_file_names") or inputs.get("jd_file_name"), len(paths))):
         name = _shown(path, name)
         if path in confirmed:
-            jds.append((name, str(confirmed[path]).strip()))
+            group = str(groups.get(path) or path)
+            if group not in grouped:
+                grouped[group] = []
+                jds.append(("\x00group", group))  # 자리 표시 — 묶음의 첫 파일 자리에 JD 가 들어간다
+            grouped[group].append((name, str(confirmed[path]).strip()))
             continue
         if Path(path).suffix.lower() in IMAGE_SUFFIXES:
             notes.append(f"JD 파일 '{name}': {NEEDS_CONFIRM}")
@@ -252,9 +258,30 @@ def read_jds(inputs: dict) -> tuple[list[tuple[str, str]], list[str]]:
             continue
         if text:
             jds.append((name, text))
+    out = []
+    for name, text in jds:
+        if name != "\x00group":
+            out.append((name, text))
+            continue
+        members = grouped[text]
+        joined = " + ".join(n for n, _ in members)
+        # 그림 한 장에 짧은 JD 여러 개 → 확인한 글 안의 '---' 줄로 나눈다
+        parts = career.split_jds("\n\n".join(t for _, t in members if t))
+        out += [(joined if len(parts) == 1 else f"{joined} ({k}/{len(parts)})", p) for k, p in enumerate(parts, 1)]
+    jds = out
     if inputs.get("use_sample") and not jds:
         jds += [(f"[샘플] {n}", (SAMPLES_DIR / n).read_text(encoding="utf-8")) for n in SAMPLE_JDS]
     return [(n, t) for n, t in jds if t], notes
+
+
+def jd_list_preview(inputs: dict) -> str:
+    """확인 단계 화면 — 지금 묶음으로 만들어질 최종 JD 목록 (J번호 · 첫 줄 · 원본 파일)."""
+    pairs, _ = read_jds(inputs)
+    if not pairs:
+        return "JD 가 없습니다."
+    lines = ["| JD | 첫 줄 | 원본 |", "|---|---|---|"]
+    lines += [f"| J{i} | {career._cell(career.jd_title(text, '-'))} | {career._cell(name)} |" for i, (name, text) in enumerate(pairs, 1)]
+    return "\n".join(lines)
 
 
 def read_portfolio(inputs: dict) -> tuple[DocText | None, list[str]]:

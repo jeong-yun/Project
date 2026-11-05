@@ -21,6 +21,62 @@ def two_images(tmp_path) -> list:
     return out
 
 
+# ─── B2: JD 묶음 바꾸기 ──────────────────────────────────────────────────────
+
+JD_X = "[가 회사 보안 분석가 (가명)]\n[자격 요건]\n- 로그 분석 경험"
+JD_Y = "[나 회사 데이터 엔지니어 (가명)]\n[자격 요건]\n- 파이프라인 운영 경험"
+JD_Z = "[다 회사 클라우드 보안 (가명)]\n[자격 요건]\n- IAM 정책 관리 경험"
+
+
+def test_read_jds_merges_same_group_and_splits_on_dash_lines():
+    from core.tools import career_docs
+
+    inputs = {"career_kind": "jd_recommend", "jd": JD_Z, "jd_file": ["a.png", "b.png", "c.png"],
+              "jd_file_names": ["공고1.png", "공고2.png", "공고3.png"],
+              "jds_confirmed": {"a.png": JD_X, "b.png": "- 우대: 침해사고 대응", "c.png": JD_Y + "\n---\n" + JD_Z},
+              "jds_group": {"a.png": "G1", "b.png": "G1", "c.png": "G3"}}
+    pairs, _ = career_docs.read_jds(inputs)
+    assert [n for n, _ in pairs] == ["붙여 넣은 JD", "공고1.png + 공고2.png", "공고3.png (1/2)", "공고3.png (2/2)"]
+    assert pairs[1][1] == JD_X + "\n\n- 우대: 침해사고 대응"  # 캡처 두 장 → JD 하나 (올린 순서)
+    preview = career_docs.jd_list_preview(inputs)
+    assert "| J2 | 가 회사 보안 분석가 (가명) | 공고1.png + 공고2.png |" in preview and "| J4 |" in preview
+    no_groups = {k: v for k, v in inputs.items() if k != "jds_group"}
+    assert len(career_docs.read_jds(no_groups)[0]) == 5  # 묶음을 고르지 않으면 지금처럼 파일 하나 = JD 하나 (+ '---' 나누기)
+
+
+def test_confirm_box_lets_user_regroup_jds_and_shows_final_list(fake_vision, models, tmp_path):
+    from streamlit.testing.v1 import AppTest
+
+    from core.tools import career_docs
+    from tests.test_career_images import ROOT
+
+    calls, texts = fake_vision
+    texts.update({"공고1": JD_X, "공고2": "- 우대: 침해사고 대응", "공고3": JD_Y + "\n---\n" + JD_Z})
+    paths = []
+    for i in (1, 2, 3):
+        path = tmp_path / f"ab12cd3{i}_공고{i}.png"
+        path.write_bytes(image_bytes(text=f"가상 채용 공고 {i}"))
+        paths.append(str(path))
+    request = {"question": "q", "tool_inputs": {"career_kind": "jd_recommend", "jd_file": paths,
+                                                "jd_file_names": ["공고1.png", "공고2.png", "공고3.png"]}}
+    at = AppTest.from_function(confirm_page, kwargs={"root": str(ROOT), "request": request, "models_cfg": models,
+                                                     "chains": career_chains(models)}, default_timeout=30).run()
+    assert not at.exception, at.exception
+    table = next(m.value for m in at.markdown if "최종 JD 목록" in m.value)
+    assert "| J1 | 가 회사 보안 분석가 (가명) | 공고1.png |" in table and "| J4 |" in table  # 처음엔 파일마다 + '---' 나누기
+    at.selectbox(key=next(s.key for s in at.selectbox if s.label.startswith("공고2.png"))).set_value(1)
+    at = at.run()
+    table = next(m.value for m in at.markdown if "최종 JD 목록" in m.value)
+    assert "| J1 | 가 회사 보안 분석가 (가명) | 공고1.png + 공고2.png |" in table
+    assert "| J2 | 나 회사 데이터 엔지니어 (가명) | 공고3.png (1/2) |" in table and "| J3 | 다 회사" in table and "| J4 |" not in table
+    at = at.button[[b.label for b in at.button].index("✅ 이 내용으로 진행")].click().run()
+    assert not at.exception, at.exception
+    res = career_docs.run("q", at.session_state["result"]["tool_inputs"], None)
+    jds = res.harness_options["career_jds"]
+    assert [(j["id"], j["name"]) for j in jds] == [("J1", "공고1.png + 공고2.png"), ("J2", "공고3.png (1/2)"), ("J3", "공고3.png (2/2)")]
+    assert len(calls) == 3
+
+
 # ─── B1: 한 번만 읽기 ────────────────────────────────────────────────────────
 
 

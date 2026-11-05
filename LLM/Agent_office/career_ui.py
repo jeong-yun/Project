@@ -94,8 +94,12 @@ def read_items(items: dict[str, list], spec: ModelSpec, pool: list[ModelSpec], m
 CACHE_KEY = "career_vision_cache"  # 세션 안 그림 읽기 결과 — (그림 해시|모델) → 읽은 결과
 
 
-def apply_confirmed(request: dict, items: dict[str, list], texts: dict[str, object], summary: str) -> dict:
-    """확인한 글을 업무 입력에 넣는다 → career_docs 툴이 파일 대신 이 글을 JD·사실의 출처로 쓴다."""
+def apply_confirmed(request: dict, items: dict[str, list], texts: dict[str, object], summary: str,
+                    groups: dict[str, int] | None = None) -> dict:
+    """확인한 글을 업무 입력에 넣는다 → career_docs 툴이 파일 대신 이 글을 JD·사실의 출처로 쓴다.
+
+    groups = {파일 경로: JD 묶음 번호} (JD 추천) — 같은 번호의 그림은 이어 붙여 JD 하나 (career_docs.read_jds).
+    """
     inputs = dict(request["tool_inputs"])
     if "jd" in items:
         inputs["jd_confirmed"] = str(texts.get("jd") or "")
@@ -104,6 +108,8 @@ def apply_confirmed(request: dict, items: dict[str, list], texts: dict[str, obje
             confirmed = dict(inputs.get(f"{fld}_confirmed") or {})
             confirmed.update({f.path: str(t) for f, t in zip(items[fld], texts.get(fld) or [])})
             inputs[f"{fld}_confirmed"] = confirmed
+    if groups:
+        inputs["jds_group"] = {**(inputs.get("jds_group") or {}), **{path: f"G{g}" for path, g in groups.items()}}
     inputs["vision_summary"] = summary
     return {**request, "tool_inputs": inputs}
 
@@ -197,6 +203,7 @@ def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig,
         st.info(f"🤖 읽은 모델: {', '.join(used) or '-'} · 호출 {len(all_reads)}회 · 토큰 입력 {tokens_in:,} / 출력 {tokens_out:,} · "
                 f"{_cost_text(total)}")
         texts: dict[str, object] = {}
+        groups: dict[str, int] = {}
         if "jd" in reads:
             st.markdown("**JD (채용 공고)** — 이 글이 JD 로 쓰입니다 (JD 의 숫자는 답변에 써도 되는 출처가 됩니다)")
             for f in reads["jd"]:
@@ -207,10 +214,20 @@ def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig,
             if fld not in reads:
                 continue
             st.markdown(intro)
+            if fld == "jds":
+                st.caption("📎 긴 JD 가 캡처 여러 장이면 같은 'JD 묶음' 번호를 고르세요 (올린 순서대로 이어 붙여 JD 하나). "
+                           "캡처 한 장에 JD 가 여러 개면 글 안에서 JD 사이에 '---' 만 있는 줄을 넣어 나누세요.")
             texts[fld] = []
+            n_files = len(reads[fld])
             for i, f in enumerate(reads[fld]):
                 st.caption(f"· {f.name}: {f.how}" + "".join(f" — ⚠️ 흐림: {u}" for r in f.reads for u in r.unclear[:3]))
+                if fld == "jds" and n_files > 1:
+                    groups[items[fld][i].path] = st.selectbox(f"{f.name} — JD 묶음", list(range(1, n_files + 1)), index=i,
+                                                              key=f"{wkey}_group_{i}", format_func=lambda g: f"JD 묶음 {g}")
                 texts[fld].append(st.text_area(f"{f.name} (고칠 수 있음)", key=f"{wkey}_text_{fld}_{i}", height=220))
+            if fld == "jds":  # 지금 묶음·'---' 나누기로 만들어질 최종 JD 목록 (붙여 넣은 JD 가 있으면 그것이 먼저)
+                draft = apply_confirmed(pending["request"], items, texts, "", groups)["tool_inputs"]
+                st.markdown("**최종 JD 목록 (이대로 진행하면 J 번호가 이렇게 매겨집니다)**\n\n" + career_docs.jd_list_preview(draft))
         if st.button("✅ 이 내용으로 진행", type="primary", key=f"{wkey}_go"):
             if "jd" in texts and not str(texts["jd"]).strip() or any(not str(t).strip() for t in texts.get("jds") or []):
                 st.warning("JD 글이 비어 있습니다. 내용을 넣거나 취소하세요.")
@@ -218,7 +235,7 @@ def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig,
             summary = (f"그림·스캔 PDF 는 비전 모델({', '.join(used)})이 옮기고 사람이 확인·수정한 글입니다 "
                        f"({' · '.join(FIELD_TITLES[f] for f in reads)})")
             st.session_state.pop(key, None)
-            return apply_confirmed(pending["request"], items, texts, summary)
+            return apply_confirmed(pending["request"], items, texts, summary, groups)
     return {}
 
 
