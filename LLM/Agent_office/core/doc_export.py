@@ -175,11 +175,12 @@ def _font(run_or_style, size: float | None = None, bold: bool | None = None) -> 
         fonts.set(qn(attr), FONT)
 
 
-def _add_runs(paragraph, text: str, bold_all: bool = False) -> None:
+def _add_runs(paragraph, text: str, bold_all: bool = False, keep_font: bool = False) -> None:
     for chunk, bold in inline_runs(text):
         run = paragraph.add_run(chunk)
         run.bold = bold or bold_all
-        _font(run)
+        if not keep_font:  # 틀(원본 docx)을 쓰면 틀의 글꼴을 그대로
+            _font(run)
 
 
 def _shade(cell, color: str) -> None:
@@ -240,23 +241,76 @@ def _shade_paragraph(paragraph, color: str) -> None:
     ppr.append(ppr.makeelement(qn("w:shd"), {qn("w:val"): "clear", qn("w:color"): "auto", qn("w:fill"): color}))
 
 
-def to_docx(markdown: str, title: str = "", figures: list[str] | None = None) -> bytes:
+def _clear_body(document) -> str | None:
+    """틀(원본 docx)의 본문을 비운다 — 용지·여백·머리글/바닥글(구역 설정)과 스타일은 남긴다. 원본 표의 스타일 이름을 돌려준다."""
+    from docx.oxml.ns import qn
+
+    table_style = None
+    for table in document.tables:
+        if table.style is not None:
+            table_style = table.style.name
+            break
+    body = document.element.body
+    for child in list(body):
+        if child.tag != qn("w:sectPr"):
+            body.remove(child)
+    part = document.part  # 지운 본문이 쓰던 그림은 파일 안에 숨어 남지 않게 연결을 끊는다 (머리글·바닥글 그림은 그대로)
+    for rid, rel in list(part.rels.items()):
+        if rel.reltype.endswith("/image"):
+            part.drop_rel(rid)
+    return table_style
+
+
+def to_docx(markdown: str, title: str = "", figures: list[str] | None = None, template: str | None = None) -> bytes:
     """마크다운 → Word. figures = 원본 그림 경로 ([그림 1] = 0번) — 글의 '[그림 N]' 자리(문단·글머리·표 칸 아래)에 원본 그림을 넣는다.
 
     그림 파일이 없거나 Word 가 못 읽는 형식이면 '[그림 N]' 글자를 그대로 둔다. ```mermaid 는 회색 코드 상자 + 이미지로 바꾸라는 안내.
+    template = 원본 docx (형식 지정이 있을 때) — 그 파일의 스타일·용지·여백·머리글/바닥글·표 스타일을 틀로 쓰고 본문만 새로 쓴다
+    (원본 본문은 지운다. 원본 표 칸을 제자리에서 채우지는 않는다 — 표 대응은 다음 단계). 틀을 열지 못하면 기본 양식.
     """
     import docx
     from docx.shared import Pt, RGBColor
 
-    document = docx.Document()
+    document, table_style = None, None
+    if template:
+        try:
+            document = docx.Document(template)
+            table_style = _clear_body(document)
+        except Exception:  # noqa: BLE001 — 깨진 틀은 기본 양식으로
+            document, table_style = None, None
+    styled = document is not None  # 틀의 글꼴·색을 그대로 둔다
+    if document is None:
+        document = docx.Document()
+        _font(document.styles["Normal"], 10.5)
+        for level, size in ((1, 18), (2, 14), (3, 12), (4, 11)):
+            style = document.styles[f"Heading {level}"]
+            _font(style, size, True)
+            style.font.color.rgb = RGBColor(0x1F, 0x3A, 0x5F)
     if title:
         document.core_properties.title = title
     document.core_properties.author = ""  # 개인 정보(작성자 이름)를 파일 속성에 남기지 않는다
-    _font(document.styles["Normal"], 10.5)
-    for level, size in ((1, 18), (2, 14), (3, 12), (4, 11)):
-        style = document.styles[f"Heading {level}"]
-        _font(style, size, True)
-        style.font.color.rgb = RGBColor(0x1F, 0x3A, 0x5F)
+    document.core_properties.last_modified_by = ""
+
+    def add_runs(paragraph, text: str, bold_all: bool = False) -> None:
+        _add_runs(paragraph, text, bold_all, keep_font=styled)
+
+    def add_heading(level: int):
+        try:
+            return document.add_heading(level=level)
+        except KeyError:  # 틀에 제목 스타일이 없음 → 굵은 문단
+            p = document.add_paragraph()
+            p.paragraph_format.space_before = Pt(10)
+            return p
+
+    def add_bullet(level: int):
+        try:
+            return document.add_paragraph(style="List Bullet 2" if level else "List Bullet")
+        except KeyError:  # 틀에 글머리 스타일이 없음 → 들여쓴 '•' 문단
+            p = document.add_paragraph()
+            p.paragraph_format.left_indent = Pt(12 + 12 * level)
+            p.add_run("◦ " if level else "• ")
+            return p
+
     def pictures(numbers: list[int], new_paragraph, max_cm: float, indent: float = 0) -> None:
         """그림 번호마다 새 문단에 원본 그림 (없으면 '[그림 N]' 글자)."""
         for n in numbers:
@@ -265,27 +319,27 @@ def to_docx(markdown: str, title: str = "", figures: list[str] | None = None) ->
                 p.paragraph_format.left_indent = Pt(indent)
             path = _figure_path(n, figures)
             if not (path and _add_picture(p, path, max_cm)):
-                _add_runs(p, f"[그림 {n}]")
+                add_runs(p, f"[그림 {n}]")
 
     for block in parse_markdown(markdown):
         text, numbers = split_figures(block.text) if figures and block.kind in ("p", "li") else (block.text, [])
         if block.kind == "h":
-            heading = document.add_heading(level=block.level)
-            _add_runs(heading, block.text)
+            heading = add_heading(block.level)
+            add_runs(heading, block.text, bold_all=heading.style is None or not heading.style.name.lower().startswith("heading"))
         elif block.kind == "p":
             if text or not numbers:
-                _add_runs(document.add_paragraph(), text)
+                add_runs(document.add_paragraph(), text)
             pictures(numbers, document.add_paragraph, BODY_WIDTH_CM)
         elif block.kind == "li" and block.ordered:
             # Word 의 'List Number' 는 문서 전체가 번호 하나를 이어 쓴다 → 목록마다 다시 센 번호를 글자로 쓰고 내어쓰기
             p = document.add_paragraph()
             p.paragraph_format.left_indent = Pt(18 + 18 * block.level)
             p.paragraph_format.first_line_indent = Pt(-18)
-            _add_runs(p, f"{block.ordered}\t{text}")
+            add_runs(p, f"{block.ordered}\t{text}")
             p.paragraph_format.tab_stops.add_tab_stop(Pt(18 + 18 * block.level))
             pictures(numbers, document.add_paragraph, BODY_WIDTH_CM - 1, 18 + 18 * block.level)
         elif block.kind == "li":
-            _add_runs(document.add_paragraph(style="List Bullet 2" if block.level else "List Bullet"), text)
+            add_runs(add_bullet(block.level), text)
             pictures(numbers, document.add_paragraph, BODY_WIDTH_CM - 1, 18 + 18 * block.level)
         elif block.kind == "code":
             p = document.add_paragraph()
@@ -311,19 +365,25 @@ def to_docx(markdown: str, title: str = "", figures: list[str] | None = None) ->
             document.add_paragraph("")
         elif block.kind == "table":
             table = document.add_table(rows=len(block.rows), cols=len(block.rows[0]))
-            table.style = "Table Grid"
+            for name in (table_style, "Table Grid"):  # 틀의 원본 표 스타일 → 없으면 격자
+                try:
+                    if name:
+                        table.style = name
+                        break
+                except (KeyError, ValueError):
+                    continue
             cell_cm = max(3.0, BODY_WIDTH_CM / len(block.rows[0]) - 0.4)
             for r, row in enumerate(block.rows):
                 for c, value in enumerate(row):
                     cell = table.cell(r, c)
                     cell.text = ""
                     value, numbers = split_figures(value) if figures else (value, [])
-                    _add_runs(cell.paragraphs[0], value, bold_all=r == 0)
+                    add_runs(cell.paragraphs[0], value, bold_all=r == 0)
                     for run in cell.paragraphs[0].runs:
                         run.font.size = Pt(9.5)
                     # 표 칸의 그림 — 칸 폭에 맞춰 줄인다 (원본 기술경력서는 흐름도가 모두 표 칸 안에 있었다)
                     pictures(numbers, _cell_paragraphs(cell, reuse_first=not value), cell_cm)
-                    if r == 0:
+                    if r == 0 and not table_style:  # 틀의 표 스타일이 있으면 그 머리 줄 모양을 따른다
                         _shade(cell, "E8EEF7")
             document.add_paragraph("")
     out = io.BytesIO()

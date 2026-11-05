@@ -154,6 +154,57 @@ def test_hwpx_export_keeps_figure_marks_as_text_and_mermaid_lines():
     assert "flowchart LR" in section and "&lt;br/&gt;• 하루 1,200건" in section
 
 
+# ─── 형식 피드백 5단계: 형식별 출력 두 개 · 원본 docx 를 틀로 ──────────────────
+
+SPLIT = ("# 경력서 (가명)\n<!-- format:docx -->\n## 1. 회사 업무\n| 업무 명 | 기간 |\n|---|---|\n| 탐지 모델 고도화 | 26.06 ~ 26.10 |\n"
+         "<!-- format:md -->\n## 회사\n### 탐지 모델 고도화 (26.06 ~ 26.10)\n" + MERMAID + "\n")
+
+
+def test_format_sections_pick_body_per_output():
+    answer = SPLIT + summary([("자동 분류", "하루 1,200건을 자동 분류했다.")])
+    secs = career.format_sections(career.body_text(answer))
+    assert set(secs) == {"docx", "md"} and secs["docx"].startswith("# 경력서 (가명)") and secs["md"].startswith("# 경력서 (가명)")
+    assert "| 업무 명 | 기간 |" in career.body_for(answer, "docx") and "### 탐지 모델" not in career.body_for(answer, "hwpx")
+    assert "```mermaid" in career.body_for(answer, "md") and "| 업무 명" not in career.body_for(answer, "md")
+    assert career.body_for("# 하나\n본문", "docx") == "# 하나\n본문"  # 구간이 없으면 지금처럼 본문 하나
+    md, word = (career.render_document(answer, "portfolio", title="포트폴리오", target=t) for t in ("md", "docx"))
+    assert "format:" not in md + word and "## 회사" in md and "## 1. 회사 업무" in word
+    assert md.count("# 부록") == word.count("# 부록") == 1  # 부록(근거 인용)은 두 형식 모두
+    assert career.section_problems(answer) == []
+    half = answer.replace("<!-- format:md -->\n## 회사\n### 탐지 모델 고도화 (26.06 ~ 26.10)\n" + MERMAID, "<!-- format:md -->\n")
+    assert career.section_problems(half) and "format:md" in career.section_problems(half)[0]
+    res = check("portfolio_format", half, career_format={"mode": "original", "headings": [], "table_heads": []})
+    assert not res.passed and "format:md" in res.log
+
+
+def test_docx_template_keeps_original_styles_margins_header_but_not_old_body(tmp_path):
+    import docx
+    from docx.shared import Cm
+
+    t = docx.Document()
+    t.sections[0].left_margin = Cm(1.5)
+    t.sections[0].header.paragraphs[0].text = "머리글 (가명)"
+    t.styles["Normal"].font.name = "Batang"
+    t.add_paragraph("옛 본문 (지워져야 함)")
+    old_table = t.add_table(rows=1, cols=2)
+    old_table.style = "Light Grid Accent 1"
+    path = tmp_path / "틀.docx"
+    t.save(str(path))
+    data = doc_export.to_docx("# 경력서\n## 1. 회사 업무\n| 업무 명 | 기간 |\n|---|---|\n| 탐지 모델 | 26.06 |\n\n- 글머리", "경력서",
+                              template=str(path))
+    d = docx.Document(io.BytesIO(data))
+    text = "\n".join(p.text for p in d.paragraphs)
+    assert "옛 본문" not in text and "1. 회사 업무" in text
+    assert abs(d.sections[0].left_margin - Cm(1.5)) < Cm(0.01)  # Word 는 여백을 트윕 단위로 저장 (반올림)
+    assert d.sections[0].header.paragraphs[0].text == "머리글 (가명)"
+    assert d.styles["Normal"].font.name == "Batang" and len(d.tables) == 1 and d.tables[0].style.name == "Light Grid Accent 1"
+    assert all(r.font.name is None for p in d.paragraphs for r in p.runs)  # 틀의 글꼴을 덮어쓰지 않는다
+    assert d.core_properties.author == ""
+    broken = tmp_path / "깨짐.docx"
+    broken.write_bytes(b"not a docx")
+    assert docx.Document(io.BytesIO(doc_export.to_docx("# 제목", "t", template=str(broken)))).paragraphs  # 깨진 틀 → 기본 양식
+
+
 # ─── 5단계: 가짜 docx + 가짜 모델로 포트폴리오 최신화 끝까지 ────────────────────
 
 NEW_MD = "최신 요약 (가명)\n탐지 모델 고도화 (2026-06-01 ~ 2026-10-31)\n하루 1,200건을 자동 분류했다.\n"
@@ -212,3 +263,7 @@ def test_fake_model_portfolio_update_keeps_original_figures_in_word(tmp_path, ra
     assert len(word.inline_shapes) == 2  # 원본 그림 2개가 Word 의 같은 자리(표 칸)에
     md = out["files"]["포트폴리오(최신화).md"].decode("utf-8")
     assert "[그림 1]" in md and "[그림 2]" in md and "```mermaid" in md and "flowchart LR" in md
+    assert out["template"] and tools[0].harness_options["career_format"]["template"] == values["portfolio"]  # 원본 Word 를 틀로
+    assert "탐지 모델 고도화 | 2026-06-01" not in "\n".join(c.text for t in word.tables for row in t.rows for c in row.cells)  # 옛 본문은 지움
+    media = [n for n in zipfile.ZipFile(io.BytesIO(out["files"]["포트폴리오(최신화).docx"])).namelist() if n.startswith("word/media/")]
+    assert len(media) == 2  # 넣은 그림 2개만 — 틀(원본)의 옛 본문 그림이 숨어 남지 않는다

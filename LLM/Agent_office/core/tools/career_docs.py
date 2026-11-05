@@ -376,7 +376,10 @@ def format_spec(inputs: dict, originals: list[DocText | None]) -> dict | None:
             if tuple(row) not in seen:
                 seen.add(tuple(row))
                 heads.append(list(row))
-    return {"mode": "original", "headings": headings, "table_heads": heads[:20], "sources": [d.name for d in refs]}
+    # Word 틀 — 원본 중 첫 docx (스타일·용지·여백·머리글/바닥글·표 스타일을 결과 Word 에 그대로, core/doc_export.to_docx template)
+    template = next((d.path for d in refs if d.kind == "docx" and d.path), "")
+    return {"mode": "original", "headings": headings, "table_heads": heads[:20], "sources": [d.name for d in refs],
+            **({"template": template} if template else {})}
 
 
 def format_block(fmt: dict) -> str:
@@ -384,6 +387,10 @@ def format_block(fmt: dict) -> str:
     lines = ["### 📐 요청 형식 — 원본 형식 유지 (표준 형식 '요약·핵심 역량·카드'보다 우선)",
              "추가 요청·형식 참고 파일에 형식 지정이 있다. 원본의 절 제목·표 머리글·구분·순서를 그대로 쓰고, 바뀌지 않은 항목도 빠짐없이 쓴다. "
              "요청 형식을 부록으로 미루지 않는다. 코드가 아래 절 제목·표 머리글이 결과에 그대로 있는지 확인한다."]
+    lines.append("- Word 와 md 의 원본 형식이 서로 다르면(예: Word = 기존 Word 표 형식, md = 형식 참고 md) 본문을 '<!-- format:docx -->' · "
+                 "'<!-- format:md -->' 구간으로 나눠 형식마다 하나씩 쓴다 (지침 '형식별 본문'). 코드가 .docx·.hwpx 에는 docx 구간, .md 에는 md 구간을 쓴다.")
+    if fmt.get("template"):
+        lines.append("- Word 는 원본 Word 파일을 틀로 만든다 (스타일·여백·머리글/바닥글·표 스타일은 코드가 원본 그대로 둔다 — 본문 글만 쓴다).")
     if fmt.get("sources"):
         lines.append(f"- 원본: {', '.join(fmt['sources'])}")
     if fmt.get("headings"):

@@ -309,6 +309,52 @@ def body_text(answer: str) -> str:
     return CODE_BLOCK.sub(keep, answer).strip()
 
 
+# ─── 형식별 본문 (Word 용 · md 용) ─────────────────────────────────────────
+# 출력 형식마다 원본 형식이 다를 때(예: Word = 기존 Word 표 형식, md = 기존 md 경력서 형식) 답변을 구간으로 나눈다.
+#   <!-- format:docx -->  … Word·한글(.docx · .hwpx) 용 본문
+#   <!-- format:md -->    … Markdown(.md) 용 본문
+# 첫 표시 앞의 글(제목 등)은 두 구간에 함께 붙는다. 표시가 없으면 본문 하나를 모든 형식에 쓴다 (지금과 같음).
+FORMAT_MARK = re.compile(r"^[ \t]*<!--\s*format\s*:\s*(docx|word|hwpx|md|markdown)\s*-->[ \t]*$", re.M | re.I)
+FORMAT_KEY = {"docx": "docx", "word": "docx", "hwpx": "docx", "md": "md", "markdown": "md"}
+
+
+def format_sections(body: str) -> dict[str, str]:
+    """본문 → {'docx': Word 용, 'md': md 용} (구간 표시가 없으면 빈 dict)."""
+    marks = list(FORMAT_MARK.finditer(body or ""))
+    if not marks:
+        return {}
+    head = body[: marks[0].start()].strip()
+    out: dict[str, str] = {}
+    for i, m in enumerate(marks):
+        end = marks[i + 1].start() if i + 1 < len(marks) else len(body)
+        key = FORMAT_KEY[m.group(1).lower()]
+        text = body[m.end():end].strip()
+        out[key] = (out[key] + "\n\n" + text).strip() if key in out else text
+    return {k: (head + "\n\n" + v).strip() if head else v for k, v in out.items()}
+
+
+def body_for(answer: str, target: str) -> str:
+    """내보낼 형식(md · docx · hwpx)에 쓸 본문 — 형식 구간이 있으면 그 구간, 없으면 본문 전체."""
+    body = body_text(answer)
+    sections = format_sections(body)
+    if not sections:
+        return body
+    key = "docx" if target in ("docx", "hwpx") else "md"
+    return sections.get(key) or next(iter(sections.values()))
+
+
+def section_problems(answer: str) -> list[str]:
+    """형식 구간을 썼다면 두 구간이 모두 있고 비어 있지 않은가."""
+    body = body_text(answer)
+    if not FORMAT_MARK.search(body):
+        return []
+    sections = format_sections(body)
+    head = body[: FORMAT_MARK.search(body).start()].strip()
+    missing = [k for k in ("docx", "md") if not sections.get(k) or sections[k].strip() == head]
+    return [f"형식 구간 <!-- format:{k} --> 의 본문이 없다 — 형식 구간을 쓰면 docx·md 두 구간을 모두 쓰고, 형식이 하나면 표시를 쓰지 않는다"
+            for k in missing]
+
+
 def figure_marks(text: str) -> set[int]:
     """글 속 '[그림 N]' 번호들."""
     return {int(n) for n in re.findall(r"\[그림\s*(\d{1,3})\]", text or "")}
@@ -947,14 +993,15 @@ def check_changes(answer: str, old: str, source: str, urls: list[str], web_count
 
 def render_document(answer: str, kind: str, questions: list[Question] | None = None, title: str = "",
                     requirements: dict[str, str] | None = None, jds: list[dict] | None = None, source: str | None = None,
-                    web: list[dict] | None = None) -> str:
+                    web: list[dict] | None = None, target: str = "md") -> str:
     """최종 답변 → 내려받기용 마크다운.
 
     본문(JSON 빼고) + 자소서면 문항마다 코드가 센 글자 수 + 부록(JD 대응표 · 확인 필요 · 근거 인용 — JSON 에서 코드가 만든 표).
     JD 추천(jd_recommend)은 맨 앞에 코드가 계산한 순위·점수·요구사항 대응표 (jds = 툴이 뽑은 JD·요구사항, source = 문서 원문).
     포트폴리오 최신화(portfolio_update)는 부록에 바뀐 점(이전 → 이후 · 이유 · 출처)과 외부 자료 목록(web).
+    target = 내보낼 형식 (md · docx · hwpx) — 답변에 형식 구간(<!-- format:docx --> · <!-- format:md -->)이 있으면 그 구간만.
     """
-    body = body_text(answer)
+    body = body_for(answer, target)
     if kind == "jd_recommend" and jds:
         explained = "\n\n---\n\n## 설명 (작성: 팀)\n\n" + body if body else ""
         body = recommend_markdown(answer, jds, source) + explained

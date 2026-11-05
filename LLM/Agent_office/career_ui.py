@@ -349,21 +349,27 @@ def build(run: dict, text: str) -> dict:
     title = TITLES.get(kind, "포트폴리오")
     source = str(opts["career_source"]) if "career_source" in opts else None
     jds = opts.get("career_jds") or []
-    markdown = career.render_document(text, kind, questions, title, opts.get("career_requirement_text"), jds=jds, source=source,
-                                      web=opts["web"])
+    def render(target: str) -> str:  # 형식 구간(<!-- format:docx --> · <!-- format:md -->)이 있으면 형식마다 그 구간
+        return career.render_document(text, kind, questions, title, opts.get("career_requirement_text"), jds=jds, source=source,
+                                      web=opts["web"], target=target)
+
+    markdown = render("md")
+    word = render("docx")
+    fmt_opts = opts.get("career_format") if isinstance(opts.get("career_format"), dict) else {}
     files: dict[str, bytes] = {}
     for fmt in opts["formats"]:
         if fmt == "md":
             files[f"{title}.md"] = markdown.encode("utf-8")
-        elif fmt == "docx":  # '[그림 N]' 자리에 원본 그림 (툴이 보관한 경로 — 되살린 업무는 없어서 글자 표시만)
-            files[f"{title}.docx"] = to_docx(markdown, title, figures=opts.get("career_figures"))
+        elif fmt == "docx":  # '[그림 N]' 자리에 원본 그림 (툴이 보관한 경로 — 되살린 업무는 없어서 글자 표시만), 원본 docx 가 있으면 틀로
+            files[f"{title}.docx"] = to_docx(word, title, figures=opts.get("career_figures"), template=fmt_opts.get("template"))
         elif fmt == "hwpx":
-            files[f"{title}.hwpx"] = to_hwpx(markdown, title)
+            files[f"{title}.hwpx"] = to_hwpx(word, title)
     facts = career.check_facts(text, source or "", str(opts.get("career_reference") or "")) if source is not None else None
     marks = sorted(career.figure_marks(career.body_text(text)))
     figures = list(opts.get("career_figures") or [])
     out = {"key": key, "markdown": markdown, "files": files, "rows": career.limit_rows(text, questions), "facts": facts,
            "title": title, "kind": kind, "figure_marks": marks, "figures": len(figures),
+           "split": word != markdown, "template": bool(fmt_opts.get("template")),
            "missing_figures": career.missing_figures(text, len(figures)) if figures else [],
            "ranking": career.ranked(career.score_jds(text, jds, source)) if kind == "jd_recommend" and jds else [],
            "changes": career._items(career.answer_json(text), "changes") if kind == "portfolio_update" else [],
@@ -449,6 +455,10 @@ def preview(run: dict, final_text: str) -> None:
                     problems.append("근거 인용(evidence)이 없습니다")
                 st.error("🔎 사실 검사 — 제출 전에 확인하세요\n\n" + "\n".join(f"- {p}" for p in problems[:12]))
         _figures_box(out)
+        if out.get("split"):
+            st.caption("📐 형식별 본문: 미리보기·.md 는 md 형식 구간, Word(.docx)·한글(.hwpx) 은 Word 형식 구간으로 만들었습니다.")
+        if out.get("template"):
+            st.caption("📐 Word(.docx) 는 원본 Word 파일을 틀로 썼습니다 (스타일·여백·머리글/바닥글·표 스타일 유지, 본문은 새로 씀).")
         with st.expander("문서 미리보기 (내려받을 내용)"):
             st.markdown(out["markdown"])
         cols = st.columns(max(len(out["files"]), 1))

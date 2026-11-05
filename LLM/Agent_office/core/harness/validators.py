@@ -394,6 +394,7 @@ class PortfolioFormatValidator(Validator):
         figure_problem = ([f"원본 그림 {', '.join(f'[그림 {n}]' for n in lost)} 이 빠졌다 — 그 그림이 있던 항목(예: 흐름도 칸) 아래에 "
                            "'[그림 N]' 한 줄을 글자 그대로 남겨라 (Word 로 내보낼 때 코드가 그 자리에 원본 그림을 넣는다)"] if lost else [])
         figure_note = f" · 그림 표시 {len(figures)}개 모두 남음" if figures and not lost else ""
+        figure_problem += career.section_problems(answer)  # 형식 구간(docx·md)을 썼으면 두 구간 모두
         fmt = options.get("career_format")
         if isinstance(fmt, dict) and fmt.get("mode") == "original":
             sources = ", ".join(fmt.get("sources") or []) or "원본"
