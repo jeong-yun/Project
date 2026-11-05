@@ -127,6 +127,7 @@ def fmt_secs(s: float) -> str:
 class Result:
     failures: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    secret_found: bool = False
 
 
 # ─────────────────────────── 1. gitleaks ───────────────────────────
@@ -150,11 +151,12 @@ def run_gitleaks(root: Path, revs_list: list[list[str]], tip: str, res: Result) 
             cmd_cfg = ["--config", str(config)]
         found = False
         for revs in revs_list:
-            cmd = [str(exe), "git", str(root), *cmd_cfg, "--redact", "--no-banner", "--verbose", "--log-opts", " ".join(revs)]
+            cmd = [str(exe), "git", str(root), *cmd_cfg, "--redact", "--no-banner", "--no-color", "--verbose", "--log-opts", " ".join(revs)]
             code, out = run_streamed(cmd, cwd=root)
             if code != 0:
                 found = True
                 if "leaks found" in out:
+                    res.secret_found = True
                     n = re.search(r"leaks found:\s*(\d+)", out)
                     res.failures.append(
                         f"비밀 검사: 키·토큰처럼 보이는 값 {n.group(1) if n else ''}개 (위 Finding·File·Line 참고, 값은 가림). "
@@ -437,7 +439,10 @@ def main(argv: list[str], stdin_text: str) -> int:
         say(f"❌ push 를 막았습니다 ({took}). 고친 뒤 다시 push 하세요.")
         for f in res.failures:
             say(f"  - {f}")
-        say("  급하면: SKIP_PREPUSH=1 git push … (GitHub 의 검사는 그대로 돕니다)")
+        if res.secret_found:
+            say("  ⚠ 비밀 검사에 걸린 것은 건너뛰지 마세요 — 공개 저장소에 올라가면 지워도 이미 복사된 것으로 봅니다.")
+        else:
+            say("  급하면: SKIP_PREPUSH=1 git push … (GitHub 의 검사는 그대로 돕니다)")
         return 1
     say(f"✅ 통과 ({took})" + (f" — 경고 {len(res.warnings)}개" if res.warnings else ""))
     return 0
