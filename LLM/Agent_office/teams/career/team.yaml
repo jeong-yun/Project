@@ -367,3 +367,10 @@ tasks:
     validators: [portfolio_format, portfolio_changes]
 
 disclaimer: "올린 문서에 있는 사실만으로 쓴 초안입니다. 제출 전에 [확인 필요] 표시와 숫자·기간·회사 이름을 직접 확인하세요."
+
+# ❓ 질문 먼저 (core/ask_first.py · ask_first_ui.py) — 포트폴리오 업무를 맡기면 시작 전에 결과 모양을 크게 바꾸는 판단을 1~3개 묻는다
+#   (추가 요청이 말한 파일이 없음 · Word/md 형식을 따로 쓸지 · 원본 그림 · 같은 흐름 업무 합치기). 질문은 코드가 만든다 (모델 호출 없음).
+#   이 설정이 없는 팀은 지금처럼 바로 시작한다.
+ask_first:
+  tasks: [portfolio, portfolio_update]
+  max_questions: 3

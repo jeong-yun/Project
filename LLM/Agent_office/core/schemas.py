@@ -182,6 +182,17 @@ class FreeExample(BaseModel):
     output_format: str = ""
 
 
+class AskFirst(BaseModel):
+    """질문 먼저 (team.yaml 의 ask_first) — 업무 양식으로 맡길 때, 시작 전에 결과 모양을 크게 바꾸는 판단을 1~3개 묻는다.
+
+    질문은 팀 툴이 코드로 만든다 (core/ask_first.py — 모델 호출·문서 전송 없음). 질문이 없으면 묻지 않고 바로 시작한다.
+    이 설정이 없는 팀은 지금과 똑같이 바로 시작한다.
+    """
+
+    tasks: list[str] = Field(default_factory=list)  # 묻는 업무 id (비우면 이 팀의 모든 업무 양식)
+    max_questions: int = Field(default=3, ge=1, le=3)
+
+
 class Team(BaseModel):
     """팀 (teams/<id>/team.yaml). 팀마다 조직도·검토 기준·툴·하네스를 따로 가진다."""
 
@@ -213,6 +224,7 @@ class Team(BaseModel):
     legacy: LegacyLink | None = None  # 나뉘기 전 옛 팀의 지난 업무·교훈·팀원 모델 선택·저장 파일을 이어 받기
     # 개인 문서(이력·경력)를 다루는 팀 — 교훈·결정 요약도 knowledge/(공개 저장소)로 내보내지 않는다 (core/feedback_sync.py)
     private: bool = False
+    ask_first: AskFirst | None = None  # 질문 먼저 (없으면 바로 시작 — 지금과 같음)
 
 
 # ════════════════════════════════════════════════════════════════════

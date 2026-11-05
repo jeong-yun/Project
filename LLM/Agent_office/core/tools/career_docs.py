@@ -38,6 +38,7 @@ jd_confirmed · docs_confirmed 로 들어온다. 그 글이 JD·사실의 출처
 """
 
 import hashlib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -402,6 +403,63 @@ def format_block(fmt: dict) -> str:
     return "\n".join(lines)
 
 
+# ─── 질문 먼저 (core/ask_first.py — team.yaml ask_first) ───────────────────
+
+FILE_NAME = re.compile(r"[\w가-힣().\-]+\.(?:md|docx|hwpx|hwp|pdf|txt)\b", re.I)
+
+
+def ask_first_questions(inputs: dict) -> list:
+    """시작 전에 물을 질문 — 결과 모양을 크게 바꾸는 판단만, 코드 규칙으로 (모델 호출 없음). 순서 = 중요한 것부터.
+
+      missing_ref   : 추가 요청이 말한 파일이 올라오지 않음 → 무엇을 따를지
+      split_formats : 형식 지정 + Word·md 둘 다 받음 + 원본 형식이 둘 → 형식별 본문 두 개로 쓸지
+      figures       : 지금 포트폴리오(docx)에 그림이 있음 → 원본 그림만 둘지, md 에 mermaid 도 그릴지
+      merge         : 포트폴리오 최신화 — 같은 흐름의 업무를 합칠지 (2026-11-04: 묻지 않고 합쳤다)
+    """
+    from core.ask_first import AskItem
+
+    kind = str(inputs.get("career_kind") or "")
+    if kind not in ("portfolio", "portfolio_update"):
+        return []
+    extra = str(inputs.get("extra_request") or "")
+    uploaded = {str(n).strip().lower() for key in ("docs_names", "format_refs_names") for n in (inputs.get(key) or [])}
+    uploaded |= {str(inputs.get(k) or "").strip().lower() for k in ("portfolio_name", "docs_name", "format_refs_name")}
+    items = []
+    named = [n for n in dict.fromkeys(FILE_NAME.findall(extra)) if n.lower() not in uploaded
+             and not any(n.lower() in u for u in uploaded)]
+    if named:
+        items.append(AskItem("missing_ref", f"추가 요청에 적은 {', '.join(repr(n) for n in named[:3])} 파일이 올라온 자료에 없습니다. 형식은 무엇을 따를까요?",
+                             ["지금 포트폴리오(원본) 형식을 따른다", "표준 형식(요약·핵심 역량·프로젝트 카드)으로 쓴다"],
+                             "그 파일을 형식 참고로 쓰려면 '취소'하고 '형식 참고 파일' 칸에 올려 다시 맡기세요.", {"files": named}))
+    old, _ = read_portfolio({k: v for k, v in inputs.items() if k != "use_sample"}) if inputs.get("portfolio") else (None, [])
+    refs, _ = read_format_refs(inputs)
+    kinds = {d.kind for d in [old, *refs] if d is not None}
+    wants_both = bool(inputs.get("fmt_docx")) and bool(inputs.get("fmt_md"))
+    mentions_both = bool(re.search(r"word|워드|docx", extra, re.I)) and bool(re.search(r"\bmd\b|마크다운|markdown", extra, re.I))
+    if career.format_requested(extra) and wants_both and ({"docx", "md"} <= kinds or mentions_both):
+        items.append(AskItem("split_formats", "Word 와 md 를 서로 다른 원본 형식으로 따로 쓸까요?",
+                             ["형식별로 따로 쓴다 (Word = 원본 Word 형식, md = 원본 md 형식)", "한 가지 형식으로 둘 다 쓴다"],
+                             "따로 쓰면 결과 본문이 두 구간이 되고, 내려받을 때 형식마다 맞는 구간이 들어갑니다."))
+    if old is not None and old.images:
+        items.append(AskItem("figures", f"지금 포트폴리오의 그림(흐름도 등) {len(old.images)}개를 어떻게 할까요?",
+                             ["원본 그림을 같은 자리에 그대로 둔다 (Word 에 원본 그림)",
+                              "원본 그림은 그대로 두고, md 에는 같은 내용의 mermaid 흐름도도 그린다"],
+                             "원본 그림은 다시 그리지 않고 Word 의 같은 자리에 옮깁니다. mermaid 는 글(코드)이라 Word 에서는 이미지로 바꿔야 합니다."))
+    if kind == "portfolio_update":
+        items.append(AskItem("merge", "같은 흐름의 업무(예: 반기별 개선 버전 · 학습 데이터 생성)를 하나로 합칠까요?",
+                             ["합치지 않는다 — 원래 항목 그대로", "합친다 — 하위 항목마다 원래 이름·기간을 남긴다"],
+                             "합치면 항목 수가 줄어 읽기 쉽지만, 원본과 구분·순서가 달라집니다."))
+    return items
+
+
+def answers_block(inputs: dict) -> str:
+    answers = [a for a in inputs.get("ask_answers") or [] if isinstance(a, dict) and str(a.get("answer") or "").strip()]
+    if not answers:
+        return ""
+    return ("### ✅ 먼저 답한 질문 — 사람이 시작 전에 정한 답이다. 이 답을 따른다 (지침 '결정이 필요한 질문')\n"
+            + "\n".join(f"- {a.get('question')} → **{a.get('answer')}**" for a in answers))
+
+
 def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     kind = str(inputs.get("career_kind") or "cover_letter")
     docs, notes = read_docs(inputs)
@@ -441,6 +499,8 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
             parts.append(format_block(fmt))
         if refs:
             parts.append(format_refs_block(refs))
+    if answers_block(inputs):
+        parts.insert(0, answers_block(inputs))
 
     reference = "\n".join(str(inputs.get(k) or "") for k in ("questions", "company", "tone", "role", "role_custom", "extra_request")) + "\n" + jd
     reference += "".join("\n" + d.text for d in refs)  # 형식 참고 파일도 내 문서 — 숫자는 허용 (인용 근거는 아님)
@@ -537,6 +597,8 @@ def _run_update(inputs: dict, docs: list[DocText], notes: list[str]) -> ToolResu
         parts.append(format_block(fmt))
     if refs:
         parts.append(format_refs_block(refs))
+    if answers_block(inputs):
+        parts.insert(0, answers_block(inputs))
 
     web = [w for w in inputs.get("web_results") or [] if isinstance(w, dict) and w.get("url")]
     urls = [w["url"] for w in web]

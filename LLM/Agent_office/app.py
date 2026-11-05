@@ -38,6 +38,7 @@ import streamlit.components.v1 as components
 from pydantic import ValidationError
 from st_click_detector import click_detector
 
+import ask_first_ui
 import board_ui
 import building_ui
 import career_ui
@@ -1950,6 +1951,8 @@ def render_task_input() -> dict:
             if is_career:  # 그림·스캔 PDF → 비전 모델로 글자를 옮기고 사람이 확인한 뒤에 시작 (career_ui.py)
                 request = career_ui.confirm_step(request, team_id, task.id, models,
                                                  [member_chains[n.id] for n in reversed(list(subtree(org, target).walk()))])
+            if team.ask_first is not None:  # ❓ 질문 먼저 — 팀 설정이 있는 팀만 (없으면 지금처럼 바로 시작, ask_first_ui.py)
+                request = ask_first_ui.step(request, team, task.id)
         else:
             # ── 자유 질문 (이 팀 분야만 — teams/<팀>/team.yaml 의 scope · free_examples, core/scope.py) ──
             examples = team.free_examples
