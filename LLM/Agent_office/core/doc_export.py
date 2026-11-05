@@ -48,9 +48,20 @@ def _cells(line: str) -> list[str]:
     return [c.strip() for c in re.split(r"(?<!\\)\|", line)]
 
 
+XML_BAD = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+
+
+def xml_safe(text: str) -> str:
+    """Word·한글 XML 에 쓸 수 없는 제어 문자를 뺀다 (쪽 나눔 \\x0c · 세로 탭 \\x0b 은 줄바꿈으로).
+
+    PDF 글자 층·옛 문서에서 온 글에 섞이면 python-docx 는 예외로 멈추고(.docx 를 못 만듦), .hwpx 는 열리지 않는 파일이 된다.
+    """
+    return XML_BAD.sub("", str(text or "").replace("\x0c", "\n").replace("\x0b", "\n"))
+
+
 def parse_markdown(text: str) -> list[Block]:
     blocks: list[Block] = []
-    lines = text.replace("\r\n", "\n").split("\n")
+    lines = xml_safe(text).replace("\r\n", "\n").split("\n")
     i, para = 0, []
 
     def flush() -> None:
@@ -287,7 +298,7 @@ def to_docx(markdown: str, title: str = "", figures: list[str] | None = None, te
             _font(style, size, True)
             style.font.color.rgb = RGBColor(0x1F, 0x3A, 0x5F)
     if title:
-        document.core_properties.title = title
+        document.core_properties.title = xml_safe(title)
     document.core_properties.author = ""  # 개인 정보(작성자 이름)를 파일 속성에 남기지 않는다
     document.core_properties.last_modified_by = ""
 
@@ -612,7 +623,7 @@ def to_hwpx(markdown: str, title: str = "") -> bytes:
                                    'media-type="application/hwpml-package+xml"/></ocf:rootfiles></ocf:container>'),
         "META-INF/manifest.xml": f'{DECL}<odf:manifest xmlns:odf="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"/>',
         "Contents/content.hpf": (f'{DECL}<opf:package {XMLNS} version="" unique-identifier="" id=""><opf:metadata>'
-                                 f'<opf:title>{escape(title)}</opf:title><opf:language>ko</opf:language></opf:metadata>'
+                                 f'<opf:title>{escape(xml_safe(title))}</opf:title><opf:language>ko</opf:language></opf:metadata>'
                                  '<opf:manifest><opf:item id="header" href="Contents/header.xml" media-type="application/xml"/>'
                                  '<opf:item id="section0" href="Contents/section0.xml" media-type="application/xml"/>'
                                  '<opf:item id="settings" href="settings.xml" media-type="application/xml"/></opf:manifest>'

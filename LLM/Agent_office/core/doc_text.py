@@ -52,8 +52,14 @@ class DocText:
         return len(self.text)
 
 
+# XML(Word·한글 파일)에 쓸 수 없는 제어 문자 — PDF 글자 층(하이픈 표시 \x02 · 쪽 나눔 \x0c)·옛 문서(\x0b)에 섞여 들어온다.
+# 그대로 두면 python-docx 가 'All strings must be XML compatible' 로 멈춰 Word 를 못 만들고 채택 저장까지 실패했다 (2026-11-05).
+XML_BAD = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
+
+
 def _clean(text: str) -> str:
-    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\x0c", "\n").replace("\x0b", "\n")
+    text = XML_BAD.sub("", text)
     text = re.sub(r"[ \t ]+\n", "\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
