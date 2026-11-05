@@ -271,7 +271,7 @@ def run_agent_office(root: Path, changed: list[str], res: Result, env: dict) -> 
         return
     if collection_error(out):
         lines = failed_lines(out)
-        res.failures.append("Agent Office 테스트 모으기(import) 오류 — 실행하지 않는 파일이라도 import 가 깨지면 막습니다:\n"
+        res.failures.append("Agent Office 테스트 파일을 불러오다(import) 오류 — 위 'ERROR collecting' 아래에 깨진 파일·줄이 나옵니다:\n"
                             + "\n".join(f"      {ln}" for ln in lines[:15]))
     else:
         lines = failed_lines(out) or [f"pytest 종료 코드 {code}"]
