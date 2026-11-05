@@ -1,0 +1,15 @@
+#!/bin/sh
+# 올리기 전 검사 (git pre-push 훅) — 실제 검사는 tools/prepush/prepush.py 가 한다. 설정: tools/setup_prepush.bat
+# 건너뛰기(급할 때만): SKIP_PREPUSH=1 git push …   (PowerShell: $env:SKIP_PREPUSH=1; git push …)
+if [ "${SKIP_PREPUSH:-}" = "1" ]; then
+  echo "⚠ SKIP_PREPUSH=1 — 올리기 전 검사를 건너뜁니다. GitHub 의 검사(secret-scan·agent-office-tests)는 그대로 돕니다." >&2
+  exit 0
+fi
+root=$(git rev-parse --show-toplevel) || exit 1
+for py in python python3 py; do
+  if command -v "$py" >/dev/null 2>&1; then
+    exec "$py" "$root/tools/prepush/prepush.py" "$@"
+  fi
+done
+echo "❌ 올리기 전 검사: python 을 찾지 못해 push 를 멈췄습니다 (설치 후 다시, 급하면 SKIP_PREPUSH=1)." >&2
+exit 1
