@@ -243,10 +243,14 @@ def _info_desk(depts: list[building.Department], reception, go_to_dept: Callable
 # ─── 👔 부서장 창구 (🏢 부서 업무 화면) ───────────────────────────────────
 
 
-def head_model(models, dept_store, dept_id: str) -> tuple[str, str]:
-    """(지금 부서장이 쓸 모델, 출처 설명) — '🎛 부서별 모델 선택'에서 고른 것 → 없으면 models.yaml critic → utility."""
+def head_model(models, dept_store, dept_id: str, private: bool = False) -> tuple[str, str]:
+    """(지금 부서장이 쓸 모델, 출처 설명) — '🎛 부서별 모델 선택'에서 고른 것 → ⭐ 추천 → models.yaml critic → utility.
+    private = 이 부서에 비공개 팀이 있음 (추천에서 무료 모델을 뺀다)."""
     choice = dept_store.get(dept_id) if dept_store is not None else ""
-    chain, source = dept_heads.head_chain(models, choice)
+    chain, source = dept_heads.head_chain(models, choice, dept_id, private)
+    if source == "recommended":
+        why = dept_heads.head_why(dept_id, models, private)
+        return chain.primary.label, "⭐ 추천" + (f" — {why}" if why else "")
     return chain.primary.label, dept_heads.SOURCE_LABELS.get(source, source)
 
 
@@ -276,7 +280,7 @@ def head_desk(dept: building.Department, by_id: dict[str, Team], models, dept_st
               go_to_dept: Callable[..., None]) -> None:
     """👔 부서장 창구 — 요청을 읽고 하위 팀 하나를 고른다 → 이유·모델 → 다른 팀으로 바꾸기 → 바로 맡기기/다듬기."""
     head = dept_heads.head_of(dept)
-    model, source = head_model(models, dept_store, dept.id)
+    model, source = head_model(models, dept_store, dept.id, dept_heads.dept_private(dept, by_id))
     st.caption("👔 부서장이 요청을 읽고 이 부서의 팀 하나를 골라 넘깁니다 — "
                + " · ".join(f"{by_id[t].name}" + (f" ({by_id[t].scope.summary})" if by_id[t].scope else "") for t in dept.teams)
                + f"  \n🎛 부서장 모델: {model} — {source} (아래 '🎛 부서별 모델 선택'에서 바꿉니다)")

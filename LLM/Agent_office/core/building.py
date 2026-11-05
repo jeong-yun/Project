@@ -330,13 +330,13 @@ def route_messages(text: str, dept: Department, candidates: list[Team]):
 def route_request(text: str, dept: Department, candidates: list[Team], models, choice: str = "") -> dict:
     """{team_id, reason, how: one|llm|keyword, model, note} — 팀이 하나면 바로, 아니면 부장 모델 1회, 실패하면 낱말 비교.
 
-    choice = 화면에서 고른 부장 모델 ("provider:model", 없으면 models.yaml critic → utility — core/dept_heads.py)."""
+    choice = 화면에서 고른 부장 모델 ("provider:model", 없으면 ⭐ 추천 → models.yaml critic → utility — core/dept_heads.py)."""
     if len(candidates) == 1:
         return {"team_id": candidates[0].id, "reason": "이 부서의 팀은 하나뿐입니다.", "how": "one", "model": "", "note": ""}
     from core import dept_heads, llm_factory, usage  # 순환·무거운 import 방지
 
     note = ""
-    chain, _ = dept_heads.head_chain(models, choice)
+    chain, _ = dept_heads.head_chain(models, choice, dept.id, any(t.private for t in candidates))
     try:
         with usage.scope(purpose="부서장 배정"):
             call = llm_factory.invoke_structured(chain, models, TeamPick, route_messages(text, dept, candidates),

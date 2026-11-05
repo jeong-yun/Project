@@ -39,7 +39,7 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
-from core import call_monitor, dept_heads, harness, llm_factory, search, step_mode, usage, verification
+from core import call_monitor, dept_heads, harness, llm_factory, model_recs, search, step_mode, usage, verification
 from core.agent import OrgAgent, chunk_text, with_feedback
 from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
@@ -133,7 +133,9 @@ def build_office_graph(
     skills = load_skills(team.id)  # teams/<팀>/skills/*.md
     nodes = {n.id: n for n in org.walk()}
     names = {n.id: n.name or ranks_by_id[n.rank].name for n in nodes.values()}
-    chains = team_rank_models(org, models, team, member_models)  # 아무도 안 골랐으면 직급 설정 그대로
+    # 아무도 안 골랐으면 ⭐ 추천 → 직급 설정. 추천은 '지금 쓸 수 있는 첫 모델' 기준으로 상하 규칙을 맞춘다 (core/model_recs.py)
+    status = llm_factory.provider_status(models) if model_recs.load().teams.get(team.id) else None
+    chains = team_rank_models(org, models, team, member_models, status)
     agents = {
         n.id: OrgAgent(n, ranks_by_id[n.rank], team, models, rubric=rubric, names=names, skills=skills, chain=chains[n.id])
         for n in nodes.values()

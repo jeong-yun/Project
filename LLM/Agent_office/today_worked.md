@@ -983,6 +983,24 @@
 - 다음 할 일: 같은 개인 문서로 다시 실행해 형식 유지·재작성 횟수·전체 시간 비교(방법은 `docs/TODO_커리어팀_형식_피드백.md` 8단계),
   원본 표 칸을 제자리에서 채우는 Word 틀 방식, hwpx·PDF 그림, 모델이 문서 내용을 보고 질문을 만드는 방식(보낼 모델 결정 필요).
 
+**⭐ 역할별 추천 모델 — 직급 하나가 아니라 부서·역할에 맞춘 기본 모델**
+- 작업:
+  - 새 `config/model_recommendations.yaml`: 역할 종류 14개(부서장 강/약, 팀장 강/약, 관리자 강/글쓰기/약, 긴 자료 대조, 형식 출력, diff, 초안 Google/OpenAI, 글쓰기, 그림 읽기) →
+    부서장 7명 · 12개 팀 61명마다 `{role, why}`. 각 조직도의 역할 설명·persona 와 부서 성격(개념 편집 = 원전 대조, 주식 = 숫자·형식, 여행 = 검색 위주라 가볍게,
+    보안 = 근거 인용, 커리어·교육 = 🔒 비공개, 설계 = 도면 그림, 교육 = 선생님 설명력·퀴즈 형식)으로 정함.
+  - 적용 순서 = 사람이 고른 모델 > 추천 > 직급 기본. `member_models.plan` 이 추천 목록을 기본으로 쓰고(`default_chain`), `dept_heads.head_chain/critic_plan` 이 부서장 추천을 씀.
+    저장된 사람 선택은 그대로 (추천은 고르지 않은 사람에게만).
+  - 규칙: 상하 규칙을 '지금 쓸 수 있는 첫 모델' 기준으로 맞춤(`plan(status=…)` — 팀장 Opus 구독이 안 되면 그 아래 추천도 낮춤), 팀 업무 못 하는·사라진 모델 건너뜀,
+    비공개 팀은 무료 모델(FreeLLMAPI 제3자 경유) 자동 제외, 🆓 무료만이면 무료 모델 — 비공개 팀은 직급 기본으로 돌아가고 ⚠️.
+  - 앱 시작 점검 `model_recs.check` → 사이드바 '⚠️ ⭐ 추천 모델 점검 N건'.
+  - 화면: 선택 상자 기본 칸 `⭐ 추천: 모델 → 지금 ○○ — 이유` + 이유 한 줄, 추천과 다른 선택 ✋ + '⭐ 추천으로'(한 명)·'⭐ 부서 전체 추천으로',
+    팀 요약마다 `💰 1회 예상 $ (≈원) · 구독 호출 · Gemini 호출 · 직급 기본이었다면 …`, 조직도·사무실 모델 앞 ⭐.
+- 기술: YAML 역할 템플릿 + 사람별 이유, 조직도 트리 상한 전파(availability-aware floor), 결과 캐시(파일 확인이 느려 30초 TTL — 점검 1.7초 → 0.1초), Streamlit AppTest
+- 성과: 가정치 기준 12개 팀 1회 합계 $1.82 → $1.17 (−36%), 구독 호출 36 → 41회(개념 편집 통합·음악 작사·자소서 작성에 구독 Sonnet). 실제 업무 측정은 아직.
+  새 테스트 20건(`tests/test_model_recs.py`), 기존 테스트는 conftest 가 추천을 꺼서 예전 직급 기본 그대로 확인.
+  미리 보기(8541, 가짜 키·모델 호출 차단)에서 ⭐ 표시·✋·한 명/부서 전체 되돌리기 → 저장 파일 비워짐 확인. 찾은 것: 비용 줄의 `$…$` 가 수식으로 그려짐 → `\$`.
+- 다음 할 일: 같은 질문으로 직급 기본 vs 추천을 실제 모델로 나란히 돌려 비용·시간·비평 점수 비교, 구독 Sonnet 3자리(개념 통합·작사·자소서)가 한도에 주는 영향 확인.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

@@ -1,0 +1,192 @@
+# ⭐ 역할별 추천 모델 — 부서장·팀장·팀원 '기본 모델'을 직급 하나가 아니라 부서와 그 사람의 역할에 맞게 정한다 (core/model_recs.py)
+#
+# 적용 순서 (위가 우선)
+#   1) 사람이 화면 '🎛 부서별 모델 선택'에서 고른 모델 (데이터 폴더 member_models.json · department_models.json — 지우지 않는다)
+#   2) 이 파일의 추천          ← 고르지 않은 사람에게만
+#   3) config/models.yaml 의 직급 기본(ranks) · 부장 기본(critic) ← 이 파일에 없는 사람·팀 (새 팀 등)
+#
+# 추천도 다음 규칙을 모두 지킨다 (어긋나면 앱 시작 때 '⭐ 추천 모델 점검'에 ⚠️, tests/test_model_recs.py 도 실패)
+#   - 상하 규칙: 부서장 ≥ 팀장 ≥ 부장 ≥ 차장 ≥ 대리 ≥ 사원 (models.yaml model_tiers 의 강도 순서. 같은 강도는 허용)
+#     실행 때도 지킨다 — 상사의 추천 모델이 지금 안 되면(키 없음·CLI 없음·꺼짐) 상사가 실제로 쓸 모델 아래로 팀원을 낮춘다.
+#   - 모델 능력: 팀 업무(형식 출력)를 못 하는 모델·제공처에서 사라진 모델은 건너뛴다. needs: image 인 역할은 맨 앞 모델이 그림을 읽어야 한다.
+#   - 지금 쓸 수 있는 provider: 맨 앞 모델이 안 되면(비활성·키 없음·꺼짐) 목록의 다음 모델 (llm_factory 와 같은 순서).
+#   - '🆓 무료 모델만 사용': 목록의 무료(freellm) 모델을 쓴다. 목록에 무료 모델이 없으면(비공개 팀) 직급 기본 목록으로 돌아가고 ⚠️ 로 알린다.
+#   - 비공개 팀(team.yaml private: true — 커리어·교육부): 무료 모델(FreeLLMAPI = 제3자 무료 티어 경유)을 추천 목록에서 자동으로 뺀다.
+#     구독(Claude)·OpenAI API 를 먼저 쓰고 Google 은 뒤에 둔다 (Gemini 무료 등급 키는 입력이 학습에 쓰일 수 있음).
+#
+# 비용·한도를 고려한 원칙
+#   - 한 번만 부르는 통합·비평(부서장·팀장)은 강한 모델 — 대부분 Claude 구독(claude_cli, 청구 0)이지만 구독 사용 한도를 쓴다
+#     (사람이 쓰는 Claude 대화·Claude Code 와 공유, 동시 1개). 웹 검색 위주인 여행부는 한도를 덜 쓰는 Sonnet.
+#   - 초안을 쓰는 사원·대리가 여러 명이면 싼 모델 — 같은 Gemini 모델만 몰리지 않게 Google·OpenAI 를 섞는다 (Gemini 무료 등급은 모델마다 하루 한도).
+#   - gemini-3.8-flash 는 gemini-3.5-flash 보다 강하고 싸다 (pricing.yaml) → 긴 자료를 읽는 조사·대조 역할에 쓴다.
+#
+# 쓰는 법
+#   roles:    역할 종류 — 모델 목록(chain, 앞이 우선)과 설명. 사람마다 role 을 고른다.
+#             chain 의 항목은 "provider:model" (models.yaml model_tiers 에 있어야 함). temperature 등은 models.yaml 직급 설정에서 가져온다.
+#   heads:    부서 id(departments.yaml) → 👔 부서장(⚖️ 비평 · 🧭 팀 배정) 추천
+#   teams:    팀 id → 조직도 에이전트 id(team.yaml org) → 추천
+#   한 사람: {role: <역할>, why: <이유 한 줄 — 화면 '⭐ 추천: ○○ — 이유'에 그대로 보인다>}
+#            chain 을 직접 적으면 역할의 chain 대신 쓴다. needs: [image] = 그림을 읽는 역할.
+#   estimate: 화면의 '1회 실행 예상 비용·구독 호출' 계산용 (지난 사용 기록이 없을 때의 토큰 수 가정)
+#   이 파일을 지우거나 enabled: false 면 예전처럼 직급 기본만 쓴다.
+
+enabled: true
+
+private_exclude: [freellm]   # 비공개 팀 추천에서 뺄 provider
+
+roles:
+  head_strong:
+    about: 부서장 — 이 부서 모든 팀의 최종 답변을 한 번 비평하고 요청을 팀에 배정. 호출 수가 적고 실수를 잡아야 하므로 가장 강한 모델
+    chain: [claude_cli:claude-opus-5-5, openai:gpt-5.5, openai:gpt-5.4, google:gemini-3.8-flash, freellm:gemini-3.7-flash, freellm:gpt-oss-120b]
+  head_light:
+    about: 부서장(가벼움) — 웹 검색 결과를 모은 계획을 비평. 구독 한도를 덜 쓰는 Sonnet
+    chain: [claude_cli:claude-sonnet-5-5, openai:gpt-5.4, google:gemini-3.8-flash, freellm:gemini-3.7-flash, freellm:gpt-oss-120b]
+  lead_strong:
+    about: 팀장 — 업무 분배와 통합·최종 답변. 한 업무에 2번쯤 부르고 결과 품질을 정한다
+    chain: [claude_cli:claude-opus-5-5, openai:gpt-5.5, openai:gpt-5.4, freellm:gemini-3.7-flash, freellm:gemini-3.8-flash, freellm:gemini-3.6-flash, freellm:gpt-oss-120b]
+  lead_light:
+    about: 팀장(가벼움) — 웹 검색 결과를 계획서로 묶음. 구독 Sonnet, 한도면 gpt-5.4
+    chain: [claude_cli:claude-sonnet-5-5, openai:gpt-5.4, google:gemini-3.8-flash, freellm:gemini-3.7-flash, freellm:gemini-3.6-flash, freellm:gpt-oss-120b]
+  manager_strong:
+    about: 관리자(부장급) — 하위 결과를 검토·통합. 정확성이 중요한 검토
+    chain: [openai:gpt-5.4, google:gemini-3.8-flash, freellm:gemini-3.6-flash, freellm:gemini-3.5-flash, freellm:gpt-oss-120b]
+  manager_writer:
+    about: 관리자·글쓰기 — 긴 최종본을 쓰거나 통합. 구독 Sonnet(청구 0), 한도면 gpt-5.4
+    chain: [claude_cli:claude-sonnet-5-5, openai:gpt-5.4, google:gemini-3.8-flash, freellm:gemini-3.6-flash, freellm:gpt-oss-120b]
+  manager_light:
+    about: 관리자(가벼움) — 웹 검색 결과 정리·분배·검토
+    chain: [google:gemini-3.8-flash, openai:gpt-5.4-mini, freellm:gemini-3.6-flash, freellm:gpt-oss-120b, freellm:gemini-3.5-flash]
+  reader_long:
+    about: 긴 자료 대조·조사 — 원문(증적·원전·뉴스)을 통째로 읽고 인용. 100만 토큰 문맥, 강도 대비 저렴
+    chain: [google:gemini-3.8-flash, openai:gpt-5.4-mini, freellm:gemini-3.6-flash, freellm:gpt-oss-120b, freellm:gemini-3.1-flash-lite]
+  format_precise:
+    about: 형식 출력·숫자 — JSON·표·보기 4개 퀴즈·계산처럼 형식이 틀리면 재시도가 늘어나는 일. strict JSON 스키마가 안정적인 OpenAI
+    chain: [openai:gpt-5.4-mini, google:gemini-3.8-flash, upstage:solar-pro2, freellm:gpt-oss-120b, freellm:gemini-3.5-flash]
+  diff_precise:
+    about: 코드 수정안(unified diff) — 원본 글자 그대로의 문맥이 한 글자라도 틀리면 적용 실패. 형식 정확도가 높은 모델
+    chain: [openai:gpt-5.4, openai:gpt-5.4-mini, google:gemini-3.8-flash, freellm:gpt-oss-120b, freellm:gemini-3.5-flash]
+  drafter_google:
+    about: 초안(여러 명) — 싸고 빠른 모델. 같은 모델에 몰리지 않게 Google 먼저
+    chain: [google:gemini-3.5-flash-lite, openai:gpt-5.4-nano, upstage:solar-mini, freellm:gpt-oss-20b, freellm:gemini-3.1-flash-lite]
+  drafter_openai:
+    about: 초안(여러 명) — 싸고 빠른 모델. Gemini 하루 한도를 나누려고 OpenAI 먼저
+    chain: [openai:gpt-5.4-nano, google:gemini-3.5-flash-lite, upstage:solar-mini, freellm:gpt-oss-20b, freellm:gemini-3.1-flash-lite]
+  writer_mid:
+    about: 초안·글쓰기(한 명) — 결과물 글의 품질이 중요한 실무자
+    chain: [claude_cli:claude-sonnet-5-5, openai:gpt-5.4-mini, google:gemini-3.8-flash, freellm:gemini-3.5-flash, freellm:gpt-oss-120b]
+  vision_reader:
+    about: 그림 읽기 — 도면·JD 이미지·스캔 문서를 받을 수 있는 역할. 그림을 읽는 OpenAI·Google 모델 (무료·구독 모델은 그림을 넘기지 않음)
+    needs: [image]
+    chain: [openai:gpt-5.4-mini, google:gemini-3.8-flash, google:gemini-3.5-flash-lite, openai:gpt-5.4-nano, freellm:gpt-oss-120b]
+
+heads:
+  research:  {role: head_strong, why: 원전·출처와 어긋난 설명을 잡는 비평이라 가장 강한 모델 (업무마다 1번)}
+  invest:    {role: head_strong, why: 숫자 출처·계산·위험 누락을 잡는 비평 — 틀리면 손실로 이어져 가장 강한 모델}
+  travel:    {role: head_light, why: 날짜·이동 시간 확인 위주라 Sonnet 이면 충분 — 구독 한도 절약}
+  creative:  {role: head_strong, why: 곡 형식·설계 면적 조건을 모두 확인하는 비평 — 팀장(Opus)과 같은 강도}
+  security:  {role: head_strong, why: 통제 번호·표준 조항을 지어낸 인용을 잡아야 해 가장 강한 모델}
+  career:    {role: head_strong, why: 개인 문서 — 믿을 수 있는 구독 Opus 로 지어낸 경력을 잡음 (무료 모델 제외)}
+  education: {role: head_strong, why: 학습자 수준·퀴즈 정답 노출을 보는 비평 — 선생님(Opus)과 같은 강도 (무료 모델 제외)}
+
+teams:
+  # ── 🔬 리서치·지식부 ──
+  general:
+    lead:         {role: lead_strong,    why: 질문 의도 파악과 최종 결론 — 한 업무에 2번만 불러 가장 강한 모델}
+    gm_research:  {role: manager_strong, why: 사실관계 검토·통합 — 틀린 사실이 결론으로 가지 않게 강한 모델}
+    dgm_research: {role: reader_long,    why: 자료 분석 — 긴 검색 결과를 읽어 정리, gpt-5.4-mini 보다 강하고 쌈}
+    am_fact:      {role: format_precise, why: 출처·수치·용어 검증 — 숫자와 표기 정확성}
+    staff_draft:  {role: drafter_google, why: 기본 개념 초안 — 가볍고 빠른 모델}
+    gm_action:    {role: manager_light,  why: 활용 방안·우선순위 정리 — 사실 검증보다 가벼운 검토}
+    am_action:    {role: drafter_openai, why: 실천 방법 정리 초안 — 싼 모델, Gemini 한도 분산}
+    staff_case:   {role: drafter_google, why: 사례·예시 조사 초안 — 싼 모델}
+  concept:
+    lead:        {role: lead_strong,    why: 분류·통합 판정의 일관성 최종 점검 — 가장 강한 모델}
+    gm_editor:   {role: manager_writer, why: 원전 대조 결과를 1만 자 카탈로그 최종본으로 통합 — 강한 글쓰기 모델(구독 Sonnet)}
+    am_fact:     {role: reader_long,    why: 원전 식별·주장별 사실 판정 — 원전을 길게 읽고 인용해야 해 긴 문맥 모델}
+    dgm_lineage: {role: format_precise, why: 기존 용어 비교표·병합 판정 — 표 형식과 판정 일관성}
+
+  # ── 💹 투자부 ──
+  stock:
+    lead:            {role: lead_strong,    why: 투자 결론·행동 지침 — 위험한 단정을 막는 가장 강한 모델}
+    gm_research:     {role: manager_strong, why: 공시·리포트·시세 분석 통합 — 숫자 대조가 많은 검토}
+    dgm_news:        {role: reader_long,    why: 공시·리포트·뉴스 원문을 길게 읽고 요약 — 긴 문맥 모델}
+    am_data:         {role: format_precise, why: 주가·밸류에이션 지표 해석 — 숫자와 표 형식 정확성}
+    gm_risk:         {role: manager_strong, why: 매매 계획·포지션 비중 — 계산 실수가 손실로 이어짐}
+    dgm_scenario:    {role: format_precise, why: 시나리오별 가격대·손절가 — 숫자와 형식 출력}
+    staff_portfolio: {role: format_precise, why: 비중·한도 계산 초안 — 계산 정확도 때문에 사원이지만 한 단계 위 모델}
+
+  # ── ✈️ 여행부 (웹 검색 위주 → 가볍게) ──
+  travel_domestic:
+    lead:          {role: lead_light,     why: 검색 결과를 계획서로 묶는 일 — Sonnet 이면 충분, 구독 한도 절약}
+    gm_itinerary:  {role: manager_light,  why: 일자별 동선 — 검색 결과 정리 위주라 가볍고 빠른 모델}
+    am_spots:      {role: drafter_google, why: 명소·운영시간 검색 정리 — 싼 모델}
+    staff_food:    {role: drafter_openai, why: 맛집 검색 정리 — 싼 모델, Gemini 한도 분산}
+    gm_logistics:  {role: manager_light,  why: 교통·숙소·예산 검토 — 가볍고 빠른 모델}
+    am_transport:  {role: drafter_google, why: 교통편·숙소 가격대 정리 — 싼 모델}
+    staff_prep:    {role: drafter_openai, why: 날씨·준비물 정리 — 싼 모델, Gemini 한도 분산}
+  travel_abroad:
+    lead:          {role: lead_light,     why: 검색 결과를 계획서로 묶는 일 — Sonnet 이면 충분, 구독 한도 절약}
+    gm_itinerary:  {role: manager_light,  why: 시차·도착 시간을 반영한 동선 — 가볍고 빠른 모델}
+    am_spots:      {role: drafter_google, why: 명소·예약 정보 검색 정리 — 싼 모델}
+    staff_food:    {role: drafter_openai, why: 현지 맛집 검색 정리 — 싼 모델, Gemini 한도 분산}
+    gm_logistics:  {role: manager_light,  why: 항공·환율·예산 검토 — 가볍고 빠른 모델}
+    am_transport:  {role: drafter_google, why: 항공편·교통 패스 정리 — 싼 모델}
+    staff_prep:    {role: drafter_openai, why: 비자·전압·보험 체크리스트 — 싼 모델, Gemini 한도 분산}
+
+  # ── 🎨 크리에이티브부 ──
+  music:
+    lead:       {role: lead_strong,    why: 최종 가사·Lyria 프롬프트 확정 — 결과 품질을 정하는 가장 강한 모델}
+    gm_review:  {role: manager_strong, why: 길이·구성·저작권 위험 검수 — 놓치면 곡을 다시 만들어야 함}
+    lyricist:   {role: writer_mid,     why: 한국어 가사 — 글 품질이 중요해 구독 Sonnet(청구 0)}
+    composer:   {role: reader_long,    why: Lyria 스타일 프롬프트·시간표 — Lyria 와 같은 Google 계열, 싸고 형식 출력 안정}
+  design:
+    lead:       {role: lead_strong,    why: 요구사항 정리·최종안 — 빠진 정보를 가정으로 채우는 판단이 필요}
+    gm_review:  {role: manager_strong, why: 구역·동선·채광 지표 검토 — 조건 위반을 잡는 검토}
+    dgm_layout: {role: reader_long,    why: 방 프로그램 → 레이아웃 JSON — 형식 출력이 안정적이고 gpt-5.4-mini 보다 강하고 쌈}
+    am_program: {role: vision_reader,  why: 도면 그림을 함께 받는 역할 — 그림을 읽는 모델 (무료·구독 모델은 그림을 못 받음)}
+
+  # ── 🛡️ 보안부 (근거 인용·정확성) ──
+  security_governance:
+    lead:        {role: lead_strong,    why: 위험도 순 최종 보고서 — 통제 인용 정확성을 마지막으로 책임짐}
+    gm_mapping:  {role: manager_strong, why: 증적 → 통제 번호 매핑 — 근거 목록 밖 번호를 지어내지 않게 강한 모델}
+    am_evidence: {role: reader_long,    why: 증적 원문과 요구사항 한 줄씩 대조·인용 — 긴 문맥 모델}
+    staff_gap:   {role: format_precise, why: 미비점 개선안(설정 값·문서 문장) — 정확한 표기}
+  infra_security:
+    lead:          {role: lead_strong,    why: IaC 점검 최종 보고서·diff·JSON 확정 — 가장 강한 모델}
+    gm_review:     {role: manager_strong, why: 수정안의 서비스 영향 검토 — 위험을 낮춰 쓴 수정안을 잡음}
+    staff_analyst: {role: reader_long,    why: 발견마다 위험 설명 — IaC 원문을 길게 읽음, 싸고 강도 충분}
+    am_fixer:      {role: diff_precise,   why: 최소 수정 unified diff — 원본 문맥이 한 글자라도 틀리면 적용 실패, 재시도 줄임}
+
+  # ── 👔 커리어부 (🔒 비공개 — 무료 모델 제외, 믿을 수 있는 모델 위주) ──
+  career:
+    lead:        {role: lead_strong,    why: 채용 담당자 관점 최종본 — 개인 문서라 믿을 수 있는 구독 Opus}
+    gm_role:     {role: manager_strong, why: 목표 직무 관점 검토 — OpenAI API(학습에 쓰지 않음) 강한 모델}
+    am_writer:   {role: writer_mid,     why: 자소서·포트폴리오 문장 — 글 품질이 중요해 구독 Sonnet}
+    staff_facts: {role: vision_reader,  why: 올린 문서·JD 이미지에서 사실 추출 — 그림을 읽는 OpenAI 모델 먼저 (무료 모델 제외)}
+
+  # ── 🎓 교육부 (🔒 비공개 — 무료 모델 제외) ──
+  edu_career:
+    lead:           {role: lead_strong,    why: 선생님 — 학습자 수준에 맞춘 설명력이 가장 중요해 가장 강한 모델}
+    gm_curriculum:  {role: manager_strong, why: 목표 직무에서 거꾸로 짠 커리큘럼 — 단원 순서·분량 판단}
+    am_assess:      {role: format_precise, why: 퀴즈 출제 — 보기 4개·정답 글자 그대로의 형식 출력이 안정적인 모델}
+    staff_research: {role: drafter_openai, why: 채용 요건·공식 자료 조사 — 싼 모델 (무료 모델 제외)}
+  edu_hobby:
+    lead:           {role: lead_strong,    why: 선생님 — 학습자 수준에 맞춘 설명력이 가장 중요해 가장 강한 모델}
+    gm_curriculum:  {role: manager_strong, why: 쓰려는 상황에서 거꾸로 짠 커리큘럼 — 단원 순서·분량 판단}
+    am_assess:      {role: format_precise, why: 퀴즈 출제 — 보기 4개·정답 글자 그대로의 형식 출력이 안정적인 모델}
+    staff_research: {role: drafter_openai, why: 현지 표현·문화 자료 조사 — 싼 모델 (무료 모델 제외)}
+
+# 화면 '1회 실행 예상'의 가정 — 그 팀원의 지난 7일 사용 기록이 있으면 기록의 평균 토큰을 쓴다
+estimate:
+  krw_per_usd: 1400          # 원화 환산 (대략 — 실제 청구는 각 사 콘솔)
+  output_share: 0.25          # 기록의 토큰 합계 중 출력 비율 가정
+  calls:                      # 업무 1번에 부르는 횟수 (불합격 시 자가 교정·재비평은 빼고)
+    lead: 2                   # 분배 1 + 통합·최종 1
+    manager: 2                # 분배 1 + 검토 1
+    drafter: 1                # 초안 1
+    head: 1                   # 비평 1 (팀이 둘 이상인 부서에서 부서에 맡기면 🧭 팀 배정 1번 더)
+  tokens:                     # [입력, 출력] — 기록이 없을 때
+    lead: [9000, 2500]
+    manager: [7000, 1800]
+    drafter: [4000, 1500]
+    head: [8000, 900]

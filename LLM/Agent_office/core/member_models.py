@@ -16,7 +16,10 @@
     → 대안 모델로 넘어가도 규칙을 넘지 않는다. 사용 불가(키 없음·비활성·무료만)·쿨다운·동시 호출 제한은 llm_factory 가 그대로 맡는다.
   - 무료(freellm) 모델을 쓰게 된 팀원(직접 고름·자동으로 낮춰짐)은 대안도 무료 모델만 — 무료 서버가 꺼져 있어도
     유료 API·구독으로 넘어가지 않고 '무료 서버 꺼짐'으로 실패한다 (특정 API 를 많이 쓰지 않으려고 고른 것이므로).
-  - 본인과 상사 중 아무도 고르지 않았으면 지금과 완전히 같다 (직급 설정 그대로).
+  - 본인과 상사 중 아무도 고르지 않았으면 기본 = ⭐ 추천 모델(config/model_recommendations.yaml, core/model_recs.py)
+    → 추천이 없는 사람은 직급 설정 그대로. 적용 순서: 사람이 고른 모델 > 추천 > 직급 기본.
+  - 추천 기본도 상하 규칙을 지킨다: 추천 모델이 상사가 실제로 쓸 모델보다 강하면 (상사의 추천 모델이 지금 안 돼서 다음 후보로
+    넘어간 경우 포함 — plan(status=...)) 추천 목록에서 허용되는 첫 모델로 낮춘다 (저장하지 않음).
 
 부서 부장 (맨 위)
   - 👔 부장(⚖️ 비평가 · 🧭 팀 배정)은 팀 조직도 밖, 팀장보다 위다. 기본 부장 모델(models.yaml critic)은 팀장과 같거나 더 강하다.
@@ -33,6 +36,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+from core import model_recs
 from core.config import rank_models
 from core.schemas import ModelsConfig, ModelSpec, OrgNode, RankModels, Team
 
@@ -108,15 +112,36 @@ class MemberPlan:
 
     node_id: str
     rank_id: str
-    choice: str  # 사람이 고른 모델 ("" = 기본(직급 설정))
+    choice: str  # 사람이 고른 모델 ("" = 기본 — ⭐ 추천 또는 직급 설정)
     effective: str  # 실제로 쓸 primary 모델
     floor: int  # 쓸 수 있는 가장 강한 줄 번호 (이 값 이상 = 같거나 약한 모델만)
     limited: bool  # 고른 모델·기본 모델이 상사 규칙에 걸려 자동으로 낮춰짐
-    chosen_on_chain: bool  # 본인이나 상사 중 누군가 직접 골랐는가 (아니면 직급 설정 그대로)
+    chosen_on_chain: bool  # 본인이나 상사 중 누군가 직접 골랐는가 (아니면 기본 그대로)
+    source: str = "rank"  # 기본 목록의 출처: rec(⭐ 추천) | rank(직급 설정)
+    why: str = ""  # 추천 이유 (source == rec)
+    chain: RankModels | None = None  # 기본 목록 (추천 또는 직급 설정)
+    wanted: str = ""  # 상하 규칙으로 낮추기 전의 모델 (고른 모델 또는 기본의 지금 쓸 첫 모델)
+
+    @property
+    def recommended(self) -> str:
+        """⭐ 추천 기본 모델 (추천이 없으면 '')."""
+        return model_key(self.chain.primary) if self.source == "rec" and self.chain else ""
 
 
-def plan(org: OrgNode, models: ModelsConfig, team: Team | None, choices: dict[str, str]) -> dict[str, MemberPlan]:
-    """조직도 전체의 모델 결정 (위 → 아래 순서의 dict)."""
+def default_chain(node: OrgNode, models: ModelsConfig, team: Team | None) -> tuple[RankModels, str, str]:
+    """고르지 않았을 때의 모델 목록 (목록, 출처 rec|rank, 이유) — ⭐ 추천 > 직급 설정 (core/model_recs.py)."""
+    rec = model_recs.member_rec(team, node, models)
+    if rec is not None:
+        return rec.chain, "rec", rec.why
+    return rank_models(node.rank, models, team), "rank", ""
+
+
+def plan(org: OrgNode, models: ModelsConfig, team: Team | None, choices: dict[str, str],
+         status: dict[str, str] | None = None) -> dict[str, MemberPlan]:
+    """조직도 전체의 모델 결정 (위 → 아래 순서의 dict).
+
+    status = llm_factory.provider_status (선택) — 주면 ⭐ 추천 기본은 '지금 쓸 수 있는 첫 모델'로 보고 상하 규칙을 맞춘다.
+    """
     tiers = tier_map(models)
     out: dict[str, MemberPlan] = {}
 
@@ -124,14 +149,23 @@ def plan(org: OrgNode, models: ModelsConfig, team: Team | None, choices: dict[st
         choice = choices.get(node.id, "")
         if choice not in tiers:
             choice = ""  # 설정에서 빠진 모델이 저장돼 있으면 기본으로
-        chain = rank_models(node.rank, models, team)
-        wanted = choice or model_key(chain.primary)
+        chain, source, why = default_chain(node, models, team)
+        rec_default = source == "rec" and not choice
+        if rec_default:  # 추천 = 목록에서 지금 쓸 수 있는 첫 모델 (비활성·'무료만'·키 없음이면 다음 후보)
+            wanted = model_recs.first_usable(chain, models, status)
+        else:
+            wanted = choice or model_key(chain.primary)
         on_chain = chosen_above or bool(choice)
-        if not on_chain or tiers.get(wanted, len(tiers)) >= floor:
+        if not (on_chain or rec_default) or tiers.get(wanted, len(tiers)) >= floor:
             effective, limited = wanted, False
+        elif rec_default:  # 추천이 상사보다 강하면 추천 목록에서 허용되는 첫 모델 (없으면 강도 순서에서)
+            allowed = [model_key(s) for s in chain.candidates
+                       if tiers.get(model_key(s), len(tiers)) >= floor and s.provider not in models.disabled_providers]
+            effective, limited = (allowed[0] if allowed else strongest_allowed(models, chain, floor)), True
         else:
             effective, limited = strongest_allowed(models, chain, floor), True
-        out[node.id] = MemberPlan(node.id, node.rank, choice, effective, floor, limited, on_chain)
+        out[node.id] = MemberPlan(node.id, node.rank, choice, effective, floor, limited, on_chain,
+                                  source, why, chain, wanted)
         # 아래로 내려가는 한도: 직접 고른 상사보다는 한 줄 아래부터, 기본 상사와는 같은 줄까지
         child_floor = max(floor, tiers.get(effective, 0) + (1 if choice else 0))
         for child in node.children:
@@ -156,21 +190,25 @@ def free_locked(member: MemberPlan) -> bool:
 def member_rank_models(member: MemberPlan, models: ModelsConfig, team: Team | None) -> RankModels:
     """실행 때 쓸 모델 후보 — 고른(또는 낮춰진) 모델이 primary, 대안은 직급 목록에서 상사 규칙에 걸리는 것을 뺀 것.
     무료 모델을 쓰게 된 팀원은 대안도 무료 모델만 남긴다 (유료 API·구독으로 넘어가지 않음)."""
-    base = rank_models(member.rank_id, models, team)
-    if not member.chosen_on_chain:
-        return base  # 본인·상사 모두 기본 → 지금과 같다
+    base = member.chain or rank_models(member.rank_id, models, team)
+    if not member.chosen_on_chain and not member.limited:
+        return base  # 본인·상사 모두 기본 → 기본 목록(⭐ 추천 또는 직급 설정) 그대로
     tiers = tier_map(models)
+    pool = base.candidates
+    if free_locked(member) and not any(s.provider == FREE_PROVIDER for s in pool):
+        pool = [*pool, *[s for s in rank_models(member.rank_id, models, team).candidates if s.provider == FREE_PROVIDER]]
     fallback = [
-        s for s in base.candidates
+        s for s in pool
         if model_key(s) != member.effective and tiers.get(model_key(s), len(tiers)) >= member.floor
         and (not free_locked(member) or s.provider == FREE_PROVIDER)
     ]
     return RankModels(primary=spec_for(member.effective, models, team, member.rank_id), fallback=fallback)
 
 
-def team_rank_models(org: OrgNode, models: ModelsConfig, team: Team | None, choices: dict[str, str] | None) -> dict[str, RankModels]:
+def team_rank_models(org: OrgNode, models: ModelsConfig, team: Team | None, choices: dict[str, str] | None,
+                     status: dict[str, str] | None = None) -> dict[str, RankModels]:
     """{에이전트 id: 모델 후보} — 워크플로우를 만들 때 한 번 계산한다."""
-    plans = plan(org, models, team, choices or {})
+    plans = plan(org, models, team, choices or {}, status)
     return {node_id: member_rank_models(p, models, team) for node_id, p in plans.items()}
 
 

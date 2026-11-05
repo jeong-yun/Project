@@ -3,8 +3,12 @@
 어디서 여나
   - 🏠 메인: 빌딩 아래 '🎛 부서별 모델 선택' (빌딩의 부서 띠를 누르면 그 부서로 펼쳐진다)
   - 🏢 팀 화면: '🎛 부서별 모델 선택 — <부서>' (지금 팀이 속한 부서, 팀원 표는 지금 팀부터)
-로직은 core/dept_heads.py(부장·비평가) · core/member_models.py(팀원 상하 관계 규칙), 저장은 데이터 폴더의
-department_models.json · member_models.json (config/*.yaml 은 안 고침). 바꾼 선택은 다음에 맡기는 업무부터.
+로직은 core/dept_heads.py(부장·비평가) · core/member_models.py(팀원 상하 관계 규칙) · core/model_recs.py(⭐ 역할별 추천),
+저장은 데이터 폴더의 department_models.json · member_models.json (config/*.yaml 은 안 고침). 바꾼 선택은 다음에 맡기는 업무부터.
+
+⭐ 추천 (config/model_recommendations.yaml): 고르지 않은 사람의 기본 = 부서·역할에 맞는 추천 모델. 선택 상자의 기본 칸에
+'⭐ 추천: 모델 — 이유'. 사람이 고른 값이 추천과 다르면 ✋ 표시와 '⭐ 추천으로' 버튼 (한 명 · 부서 전체).
+팀마다 '1회 실행 예상 비용 · 구독 호출' 한 줄 (지난 7일 사용 기록의 평균 토큰 + 가격표 — core/model_recs.estimate_team).
 
 화면을 가볍게: 부장 칸과 팀 요약 한 줄씩은 늘 그리고, 팀원 표는 고른 팀 하나만 그린다 (PC 가 자주 CPU 100%).
 """
@@ -16,7 +20,7 @@ from pathlib import Path
 import streamlit as st
 
 import models_ui
-from core import building, dept_heads, llm_factory, member_models, model_caps, model_catalog
+from core import building, dept_heads, llm_factory, member_models, model_caps, model_catalog, model_recs
 from core.config import team_org
 from core.schemas import ModelsConfig, OrgNode, Rank, Team
 
@@ -64,10 +68,24 @@ def _short(ctx: Ctx, key: str) -> str:
     return models_ui.model_name(key, ctx.merged)
 
 
+def _states(ctx: Ctx) -> dict:
+    return llm_factory.provider_status(ctx.models)
+
+
 def team_chains(ctx: Ctx, team: Team, org: OrgNode | None = None):
     org = org or team_org(team, ctx.ranks)
     choices = ctx.member_store.load(team.id, _legacy(team))
-    return org, choices, member_models.team_rank_models(org, ctx.models, team, choices)
+    return org, choices, member_models.team_rank_models(org, ctx.models, team, choices, _states(ctx))
+
+
+def _private(ctx: Ctx, dept: building.Department) -> bool:
+    return dept_heads.dept_private(dept, {t.id: t for t in ctx.teams})
+
+
+def rec_label(ctx: Ctx, rec_key: str, effective: str, why: str, states: dict) -> str:
+    """'⭐ 추천: Opus 5.5 → 지금 gpt-5.5 — 이유' (지금 쓸 첫 모델이 추천 맨 앞과 다르면 화살표)."""
+    now = "" if effective == rec_key else f" → 지금 {_short(ctx, effective)}"
+    return f"⭐ 추천: {_label(ctx, rec_key, states)}{now}" + (f" — {why}" if why else "")
 
 
 # ─── 👔 부장 ──────────────────────────────────────────────────────────
@@ -76,17 +94,27 @@ def team_chains(ctx: Ctx, team: Team, org: OrgNode | None = None):
 def _on_head_change(ctx: Ctx, dept_id: str, widget: str) -> None:
     key = st.session_state.get(widget) or ""
     ctx.dept_store.set(dept_id, key)
-    st.session_state[HEAD_NOTE_KEY] = (dept_id, f"👔 부장 모델을 {'기본으로 되돌렸' if not key else _short(ctx, key) + ' 로 바꿨'}습니다 — "
+    st.session_state[HEAD_NOTE_KEY] = (dept_id, f"👔 부장 모델을 {'기본(⭐ 추천)으로 되돌렸' if not key else _short(ctx, key) + ' 로 바꿨'}습니다 — "
                                                 "다음에 맡기는 업무의 비평가·🧭 팀 배정부터 씁니다.")
+
+
+def _revert_head(ctx: Ctx, dept_id: str) -> None:
+    ctx.dept_store.set(dept_id, "")
+    st.session_state[HEAD_NOTE_KEY] = (dept_id, "👔 부장 모델을 ⭐ 추천으로 되돌렸습니다 — 다음에 맡기는 업무부터 씁니다.")
 
 
 def render_head(ctx: Ctx, dept: building.Department, where: str) -> None:
     head = dept_heads.head_of(dept)
-    states = llm_factory.provider_status(ctx.models)
+    states = _states(ctx)
+    private = _private(ctx, dept)
     choice = dept_heads.valid_choice(ctx.dept_store.get(dept.id), ctx.models)
-    base, source = dept_heads.head_chain(ctx.models)  # 고르지 않았을 때 실제로 쓰는 모델
+    base, source = dept_heads.head_chain(ctx.models, "", dept.id, private)  # 고르지 않았을 때 실제로 쓰는 모델
     base_key = member_models.model_key(base.primary)
-    default = f"기본 = {_label(ctx, base_key, states)} ({dept_heads.SOURCE_LABELS[source]})"
+    if source == "recommended":
+        now = model_recs.first_usable(base, ctx.runtime, states)
+        default = rec_label(ctx, base_key, now, dept_heads.head_why(dept.id, ctx.models, private), states)
+    else:
+        default = f"기본 = {_label(ctx, base_key, states)} ({dept_heads.SOURCE_LABELS[source]})"
     widget = f"dept_head_model_{where}_{dept.id}"
     st.session_state[widget] = choice  # 저장값이 기준 (다른 화면에서 바꿔도 맞게)
     c1, c2 = st.columns([3, 5])
@@ -102,6 +130,12 @@ def render_head(ctx: Ctx, dept: building.Department, where: str) -> None:
     if choice and choice not in shown:
         c2.markdown(f":orange[⚠️ **고른 모델 {member_models.split_key(choice)[1]}**] — 지금 쓸 수 없는 모델입니다 (사라짐·능력 부족). "
                     "비평은 기본 순서의 다음 모델로 합니다.")
+    if not choice and source == "recommended":  # 선택 상자에서 잘려 보이는 추천 이유를 한 줄로
+        c2.caption(f"⭐ {dept_heads.head_why(dept.id, ctx.models, private)}")
+    if choice and source == "recommended" and choice != base_key:  # 사람이 고른 값이 추천과 다름
+        c2.markdown(f"✋ **직접 고름** — ⭐ 추천은 {_short(ctx, base_key)}")
+        c2.button("⭐ 추천으로", key=f"dept_head_rec_{where}_{dept.id}", on_click=_revert_head, args=(ctx, dept.id),
+                  help="부장 선택을 지우고 ⭐ 추천 모델을 기본으로 씁니다.")
     models_ui.hidden_note(hidden, ctx.merged)
     for w in head_lead_warnings(ctx, dept, choice or base_key):
         c2.markdown(f":orange[⚠️ {w}]")
@@ -135,18 +169,55 @@ def head_lead_warnings(ctx: Ctx, dept: building.Department, head_key: str) -> li
 
 def render_team_summaries(ctx: Ctx, dept: building.Department) -> None:
     """팀마다 한 줄 — 팀장 모델 · 이 팀의 비평가 모델(출처) · 경고."""
+    states = _states(ctx)
+    estimates = []
     for tid in dept.teams:
         team = _team(ctx, tid)
         org, choices, chains = team_chains(ctx, team)
         plan = dept_heads.critic_plan(ctx.models, team, chains, org.id, dept_heads.head_of(dept), ctx.dept_store.get(dept.id))
-        lead = member_models.model_key(chains[org.id].primary)
-        critic = member_models.model_key(plan.chain.primary)
+        plans = member_models.plan(org, ctx.models, team, choices, states)
+        lead = plans[org.id].effective
+        critic = model_recs.first_usable(plan.chain, ctx.runtime, states)
         lock = " 🔒" if team.private else ""
         picked = f" · 팀원 {len(choices)}명 직접 선택" if choices else ""
-        st.markdown(f"- **{team.name}**{lock} — 팀장 {_short(ctx, lead)} · ⚖️ 비평 **{_short(ctx, critic)}** "
+        star = "⭐ " if plans[org.id].recommended and not plans[org.id].chosen_on_chain else ""
+        st.markdown(f"- **{team.name}**{lock} — 팀장 {star}{_short(ctx, lead)} · ⚖️ 비평 **{_short(ctx, critic)}** "
                     f"<small>({plan.source_label})</small>{picked}", unsafe_allow_html=True)
+        est, before = team_estimate(ctx, team, org, plans, critic, states)
+        estimates.append(est)
+        change = "" if abs(before.usd - est.usd) < 0.0005 and before.subscription_calls == est.subscription_calls else (
+            f" · 직급 기본이었다면 ${before.usd:,.3f} · 구독 {before.subscription_calls}회")
+        st.caption(_dollars(f"&emsp;💰 {model_recs.estimate_text(est)}{change}"))
         for w in plan.warnings:
             st.caption(f"&emsp;⚠️ {w}")
+        if any(model_recs.private_free_fallback(team, node, ctx.runtime) for node in org.walk()):
+            st.caption("&emsp;⚠️ 🔒 비공개 팀인데 지금 추천 모델을 모두 쓸 수 없어(🆓 무료 모델만 등) 직급 기본(무료 모델 포함)으로 돌아갔습니다.")
+    if len(estimates) > 1:
+        lo, hi = min(e.usd for e in estimates), max(e.usd for e in estimates)
+        calls = sorted(e.subscription_calls for e in estimates)
+        st.caption(_dollars(f"💰 이 부서 1회 실행 예상 ${lo:,.3f}~${hi:,.3f} · 구독 호출 {calls[0]}~{calls[-1]}회 (맡는 팀에 따라) "
+                            "— 부서장에게 맡기면 🧭 팀 배정 1번이 더해집니다. 지난 7일 평균 토큰·가격표 기준 추정."))
+    else:
+        st.caption("💰 예상은 지난 7일 평균 토큰(없으면 가정치)·가격표 기준이며 불합격 시 자가 교정·재비평은 뺍니다.")
+
+
+def _dollars(text: str) -> str:
+    """Streamlit 글에서 $…$ 가 수식으로 바뀌지 않게."""
+    return text.replace("$", "\\$")
+
+
+def team_estimate(ctx: Ctx, team: Team, org: OrgNode, plans: dict, critic: str, states: dict):
+    """(지금 기본·선택으로 1회 실행 예상, 직급 기본이었다면) — 부서장 비평 1번 포함 (core/model_recs.estimate_team)."""
+    history = {}
+    if ctx.storage is not None:
+        try:
+            history = ctx.storage.usage_by_agent(team.id, since=time.time() - USAGE_DAYS * 86400)
+        except Exception:  # noqa: BLE001 — 기록을 못 읽어도 가정치로
+            history = {}
+    now = model_recs.estimate_team(org, {nid: p.effective for nid, p in plans.items()}, critic, history)
+    old_critic = model_recs.first_usable(dept_heads.base_chain(ctx.models)[0], ctx.runtime, states)
+    before = model_recs.estimate_team(org, model_recs.rank_effective(org, ctx.runtime, team, states), old_critic, history)
+    return now, before
 
 
 # ─── 팀원 ─────────────────────────────────────────────────────────────
@@ -179,7 +250,37 @@ def _on_member_change(ctx: Ctx, team: Team, org: OrgNode, node_id: str) -> None:
 
 def _reset_members(ctx: Ctx, team: Team) -> None:
     ctx.member_store.save(team.id, {}, _legacy(team))
-    st.session_state.setdefault(NOTE_KEY, {})[team.id] = "모든 팀원을 기본(직급 설정)으로 되돌렸습니다."
+    st.session_state.setdefault(NOTE_KEY, {})[team.id] = "모든 팀원을 기본(⭐ 추천 · 추천이 없으면 직급 설정)으로 되돌렸습니다."
+
+
+def _revert_member(ctx: Ctx, team: Team, org: OrgNode, node_id: str, name: str) -> None:
+    """한 명을 ⭐ 추천(기본)으로 — 그 사람의 선택만 지운다."""
+    legacy = _legacy(team)
+    choices, _ = member_models.apply_choice(org, ctx.models, team, ctx.member_store.load(team.id, legacy), node_id, "")
+    ctx.member_store.save(team.id, choices, legacy)
+    st.session_state.setdefault(NOTE_KEY, {})[team.id] = f"⭐ {name}의 모델을 추천으로 되돌렸습니다."
+
+
+def _revert_dept(ctx: Ctx, dept: building.Department) -> None:
+    """부서 전체(부장 + 모든 팀 팀원)를 ⭐ 추천으로 — 이 부서의 선택만 지운다 (다른 부서는 그대로)."""
+    ctx.dept_store.set(dept.id, "")
+    for tid in dept.teams:
+        ctx.member_store.save(tid, {}, _legacy(_team(ctx, tid)))
+    st.session_state[HEAD_NOTE_KEY] = (dept.id, f"⭐ {dept.name}의 부장과 모든 팀원을 추천 모델로 되돌렸습니다.")
+
+
+def dept_differs(ctx: Ctx, dept: building.Department) -> int:
+    """이 부서에서 ⭐ 추천과 다르게 고른 사람 수 (부장 포함)."""
+    n = 0
+    head_choice = dept_heads.valid_choice(ctx.dept_store.get(dept.id), ctx.models)
+    if head_choice:
+        base, source = dept_heads.head_chain(ctx.models, "", dept.id, _private(ctx, dept))
+        n += source == "recommended" and head_choice != member_models.model_key(base.primary)
+    for tid in dept.teams:
+        team = _team(ctx, tid)
+        plans = member_models.plan(team_org(team, ctx.ranks), ctx.models, team, ctx.member_store.load(tid, _legacy(team)))
+        n += sum(1 for p in plans.values() if p.choice and p.recommended and p.choice != p.recommended)
+    return n
 
 
 def usage_text(rows: list[dict]) -> str:
@@ -210,18 +311,18 @@ def render_members(ctx: Ctx, team: Team) -> None:
     issue_of = {i.node_id: i for i in issues}
     hidden_all: dict[str, model_caps.Hidden] = {}
     st.caption(
-        ("지금: 모두 기본(직급 설정). " if not choices else f"지금: {len(choices)}명 직접 선택. ")
-        + "**기본** = config/models.yaml 의 직급 모델. 규칙: 팀원은 상사보다 강한 모델을 쓸 수 없고, 상사의 모델을 **직접 고르면** "
+        ("지금: 모두 기본. " if not choices else f"지금: {len(choices)}명 직접 선택. ")
+        + "**기본** = ⭐ 추천 모델 (config/model_recommendations.yaml — 부서·역할에 맞춤, 없으면 models.yaml 의 직급 모델). 규칙: 팀원은 상사보다 강한 모델을 쓸 수 없고, 상사의 모델을 **직접 고르면** "
         "그 아래 팀원은 **더 낮은** 모델만 쓸 수 있습니다. 팀장이 기본이면(Opus 5.5) 부장도 Opus 까지 고를 수 있습니다. "
         "상사를 바꿔 규칙에 걸린 팀원은 자동으로 낮춰집니다. 모델이 안 되면 직급의 대안 모델로 넘어가되, 상사 규칙을 넘는 대안은 쓰지 않습니다."
     )
     note = (st.session_state.get(NOTE_KEY) or {}).pop(team.id, None)
     if note:
         st.info(note)
-    plans = member_models.plan(org, ctx.models, team, choices)
-    runtime_plans = member_models.plan(org, ctx.runtime, team, choices) if ctx.runtime_models else plans
-    states = llm_factory.provider_status(ctx.models)
+    states = _states(ctx)
     runtime_states = llm_factory.provider_status(ctx.runtime) if ctx.runtime_models else states
+    plans = member_models.plan(org, ctx.models, team, choices, states)
+    runtime_plans = member_models.plan(org, ctx.runtime, team, choices, runtime_states) if ctx.runtime_models else plans
     used = ctx.storage.usage_by_agent(team.id, since=time.time() - USAGE_DAYS * 86400)
     depth = {org.id: 0}
     for node in org.walk():
@@ -239,8 +340,12 @@ def render_members(ctx: Ctx, team: Team) -> None:
         options = ["", *shown]
         # '기본'을 고르면 쓸 모델 (본인 선택만 뺀 결과 — 상사 규칙에 걸리면 자동으로 낮춘 모델)
         as_default = p if not p.choice else member_models.plan(
-            org, ctx.models, team, {k: v for k, v in choices.items() if k != node.id})[node.id]
-        default_label = ("🔽 기본(자동 제한) · " if as_default.limited else "기본 · ") + _label(ctx, as_default.effective, states)
+            org, ctx.models, team, {k: v for k, v in choices.items() if k != node.id}, states)[node.id]
+        if as_default.recommended:
+            default_label = ("🔽 " if as_default.limited else "") + rec_label(
+                ctx, as_default.recommended, as_default.effective, as_default.why, states)
+        else:
+            default_label = ("🔽 기본(자동 제한) · " if as_default.limited else "기본 · ") + _label(ctx, as_default.effective, states)
         key = member_widget_key(team.id, node.id)
         st.session_state[key] = p.choice if p.choice in options else ""  # 저장값이 기준 (자동으로 낮춘 값 반영)
         c_name, c_pick, c_use = st.columns([3, 5, 3])
@@ -252,7 +357,13 @@ def render_members(ctx: Ctx, team: Team) -> None:
             format_func=lambda k, d=default_label: d if not k else _label(ctx, k, states),
             on_change=_on_member_change, args=(ctx, team, org, node.id),
         )
+        if not p.choice and p.recommended and p.why:  # 선택 상자에서 잘려 보이는 추천 이유를 한 줄로
+            c_pick.caption(f"⭐ {p.why}")
         c_use.caption(usage_text(used.get(node.id, [])))
+        if p.choice and p.recommended and p.choice != p.recommended:  # 사람이 고른 값이 추천과 다름
+            c_use.markdown(f"✋ 추천과 다름 (⭐ {_short(ctx, p.recommended)})")
+            c_use.button("⭐ 추천으로", key=f"member_rec_{team.id}_{node.id}", on_click=_revert_member,
+                         args=(ctx, team, org, node.id, name), help="이 사람의 선택을 지우고 ⭐ 추천 모델을 씁니다.")
         off = chosen_off(runtime_plans[node.id], runtime_states)
         if off:
             c_use.markdown(f":red[⛔ **고른 모델 꺼짐**] — {off[1]}")  # 무료 서버면 'Docker Desktop 실행 후 FreeLLMAPI 켜기'까지
@@ -272,6 +383,12 @@ def render_dept(ctx: Ctx, dept: building.Department, where: str, team_id: str | 
     """부서 → 부장 → 팀 요약 → 팀원 표(고른 팀 하나). team_id = 처음에 펼칠 팀 (팀 화면 = 지금 팀, 메인 = 없음)."""
     if ctx.running:
         st.info("진행 중인 업무는 시작할 때의 모델을 그대로 씁니다. 바꾼 선택은 다음에 맡기는 업무부터 적용됩니다.")
+    differs = dept_differs(ctx, dept)
+    if differs:
+        c1, c2 = st.columns([5, 2])
+        c1.caption(f"✋ 이 부서에 ⭐ 추천과 다르게 고른 사람이 {differs}명 있습니다.")
+        c2.button("⭐ 부서 전체 추천으로", key=f"dept_rec_all_{where}_{dept.id}", on_click=_revert_dept, args=(ctx, dept),
+                  help="이 부서의 부장·모든 팀원 선택을 지우고 ⭐ 추천 모델을 기본으로 씁니다 (다른 부서는 그대로).")
     render_head(ctx, dept, where)
     st.markdown(f"**{dept.emoji} {dept.name}의 팀** — 팀장 모델과 이 팀을 비평할 모델")
     render_team_summaries(ctx, dept)
