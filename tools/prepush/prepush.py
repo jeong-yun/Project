@@ -181,6 +181,9 @@ def test_env(root: Path) -> dict:
                 names.add(m.group(1))
     for name in names:
         env[name] = ""
+    # git 이 훅에 넘기는 저장소 위치 변수 — 임시 폴더에서 돌리는 테스트가 원래 폴더를 보지 않게 뺀다
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"):
+        env.pop(name, None)
     env.update(LANGSMITH_TRACING="false", LANGCHAIN_TRACING_V2="false", PYTHONIOENCODING="utf-8", MPLBACKEND="Agg")
     return env
 

@@ -123,6 +123,13 @@ def test_test_env_blanks_keys_and_reads_env_example(tmp_path, monkeypatch):
     assert env["LANGSMITH_TRACING"] == "false"
 
 
+def test_test_env_drops_git_location_vars(tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_DIR", "C:/elsewhere/.git")
+    monkeypatch.setenv("GIT_WORK_TREE", "C:/elsewhere")
+    env = prepush.test_env(tmp_path)
+    assert "GIT_DIR" not in env and "GIT_WORK_TREE" not in env
+
+
 def test_output_parsing():
     out = "....\nFAILED tests/test_a.py::test_x - assert 1 == 2\nERROR tests/test_b.py - ModuleNotFoundError\n"
     assert prepush.failed_lines(out) == ["FAILED tests/test_a.py::test_x - assert 1 == 2",

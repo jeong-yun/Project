@@ -6,10 +6,17 @@ if [ "${SKIP_PREPUSH:-}" = "1" ]; then
   exit 0
 fi
 root=$(git rev-parse --show-toplevel) || exit 1
+script="$root/tools/prepush/prepush.py"
+# 설정(first_setup.py)이 적어 둔 파이썬을 먼저 쓴다 — pytest·Agent Office 패키지가 깔린 그 파이썬
+py=$(git config --get prepush.python)
+if [ -n "$py" ] && [ -x "$py" ]; then
+  exec "$py" "$script" "$@"
+fi
 for py in python python3 py; do
-  if command -v "$py" >/dev/null 2>&1; then
-    exec "$py" "$root/tools/prepush/prepush.py" "$@"
+  # 'python' 이 Microsoft Store 안내용 껍데기일 수 있어 실제로 실행되는지 본다
+  if command -v "$py" >/dev/null 2>&1 && "$py" -c "import sys" >/dev/null 2>&1; then
+    exec "$py" "$script" "$@"
   fi
 done
-echo "❌ 올리기 전 검사: python 을 찾지 못해 push 를 멈췄습니다 (설치 후 다시, 급하면 SKIP_PREPUSH=1)." >&2
+echo "❌ 올리기 전 검사: python 을 찾지 못해 push 를 멈췄습니다 (tools/setup_prepush.bat 실행 후 다시, 급하면 SKIP_PREPUSH=1)." >&2
 exit 1

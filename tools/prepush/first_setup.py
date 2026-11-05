@@ -1,6 +1,7 @@
 """올리기 전 검사 처음 설정 — PC 마다 한 번 (tools/setup_prepush.bat 이 부른다).
 
 1. git config core.hooksPath .githooks   → push 때 .githooks/pre-push 가 돈다 (이 저장소에만, 다시 해도 같음)
+   git config prepush.python <이 파이썬>  → 훅이 이 파이썬으로 검사한다
 2. gitleaks 8.30.1 내려받기 (공식 릴리스 zip, SHA256 확인) → %LOCALAPPDATA%\\agent-office-tools\\
 3. 테스트 도구 확인 (pytest·Agent Office 패키지) — 없으면 설치 명령을 알려 준다 (직접 설치하지 않음)
 """
@@ -32,6 +33,13 @@ def configure_hooks(repo: Path = REPO) -> None:
     print("1) git 훅 폴더: .githooks 로 설정함 (이제 push 할 때마다 검사가 돕니다)")
 
 
+def remember_python(repo: Path = REPO) -> None:
+    """훅이 이 파이썬(pytest·Agent Office 패키지가 있는 것)을 쓰게 저장소 설정에 적어 둔다."""
+    exe = sys.executable.replace("\\", "/")
+    subprocess.run(["git", "config", "prepush.python", exe], cwd=repo, check=True)
+    print(f"   검사에 쓸 파이썬: {exe}")
+
+
 def missing_packages() -> list[str]:
     return [m for m in NEEDED if importlib.util.find_spec(m) is None]
 
@@ -45,6 +53,7 @@ def main() -> int:
     print(f"저장소: {REPO}")
     print(f"파이썬: {sys.executable}")
     configure_hooks()
+    remember_python()
     print("2) gitleaks:")
     try:
         gitleaks_tool.install()
