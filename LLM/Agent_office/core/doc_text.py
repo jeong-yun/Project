@@ -1,6 +1,6 @@
 """문서 → 글자 (외부 호출 없음) — 포트폴리오·자소서 팀이 올린 요약 문서를 읽는다.
 
-  .docx      : python-docx (문단 + 표 칸)
+  .docx      : python-docx (문단과 표 칸을 문서 순서대로 + 절 제목·표 머리글 + 그림 — 그림 자리에 '[그림 N]', 원본 그림은 images)
   .pdf       : pypdfium2 (쪽마다 글자 층 — 스캔 그림만 있는 PDF 는 글자가 없다)
   .hwpx      : zip 안 Contents/section*.xml 의 <hp:t> (순수 파이썬)
   .hwp       : 한글 5.x 바이너리 — olefile 로 BodyText/Section* 를 열고 zlib 로 풀어 문단 글자(PARA_TEXT)만 꺼낸다
@@ -41,6 +41,9 @@ class DocText:
     text: str
     units: str = ""  # 읽은 범위 (예: '3쪽', '구역 2개', '문단 41개')
     notes: list[str] = field(default_factory=list)
+    headings: list[str] = field(default_factory=list)  # 절 제목 (docx 제목 스타일 · md '#') — 원본 형식 검사용
+    table_heads: list[list[str]] = field(default_factory=list)  # 표마다 첫 줄 칸 글 (docx 표 · md 표 머리글)
+    images: list["DocImage"] = field(default_factory=list)  # docx 그림 (글의 [그림 N] 순서 — N 은 이 문서 안 번호)
 
     @property
     def chars(self) -> int:
@@ -63,19 +66,119 @@ def _limit(doc: DocText) -> DocText:
 # ─── 형식별 ──────────────────────────────────────────────────────────
 
 
-def read_docx(data: bytes) -> tuple[str, str]:
+@dataclass
+class DocImage:
+    """문서 안 그림 하나 (원본 그대로 — 다시 그리지 않고 결과 Word 에 옮긴다)."""
+    data: bytes
+    ext: str  # png / jpeg / gif / bmp / emf …
+
+
+FIGURE_MARK = "[그림 {n}]"
+FIGURE_RX = re.compile(r"\[그림\s*(\d{1,3})\]")
+
+
+@dataclass
+class DocxRead:
+    text: str
+    units: str
+    headings: list[str] = field(default_factory=list)
+    table_heads: list[list[str]] = field(default_factory=list)
+    images: list[DocImage] = field(default_factory=list)
+
+
+HEADING_STYLES = ("heading", "title", "제목")  # Word 기본 제목 스타일 이름 (영문·한글 Word)
+_A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_R = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+_V = "{urn:schemas-microsoft-com:vml}"
+
+
+def _row_cells(row) -> list:
+    """표 한 줄의 칸 — 병합 칸은 row.cells 에 같은 칸(_tc)이 되풀이되므로 한 번만."""
+    seen, out = set(), []
+    for cell in row.cells:
+        if id(cell._tc) in seen:
+            continue
+        seen.add(id(cell._tc))
+        out.append(cell)
+    return out
+
+
+def _pictures(element, part) -> list[DocImage]:
+    """요소 안의 그림 (DrawingML a:blip · 옛 VML v:imagedata) — 문서 순서대로, 원본 바이트 그대로."""
+    out = []
+    for node in element.iter(f"{_A}blip", f"{_V}imagedata"):
+        rid = node.get(f"{_R}embed") or node.get(f"{_R}id")
+        target = part.related_parts.get(rid) if rid else None
+        blob = getattr(target, "blob", None)
+        if blob:
+            ext = str(getattr(target, "partname", "")).rsplit(".", 1)[-1].lower() or "png"
+            out.append(DocImage(blob, "jpeg" if ext == "jpg" else ext))
+    return out
+
+
+def read_docx_full(data: bytes) -> DocxRead:
+    """Word → 글 (문단과 표를 문서 순서대로) + 절 제목 + 표 머리글 + 그림.
+
+    표는 줄마다 칸을 ' | ' 로 이어 붙인다. 병합 칸은 한 번만 (같은 글·그림이 되풀이되지 않게).
+    그림이 있던 자리(문단 끝·표 칸 끝)에 '[그림 N]' (이 문서 안 번호)을 남기고, 그림은 images 에 순서대로 모은다.
+    """
     import docx  # python-docx
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
 
     try:
         document = docx.Document(io.BytesIO(data))
     except Exception as e:  # noqa: BLE001 — 깨진 파일·다른 형식
         raise DocReadError(f"Word(.docx) 파일을 열지 못했습니다 ({type(e).__name__}). 파일이 손상되지 않았는지 확인하세요.") from e
-    lines = [p.text for p in document.paragraphs]
-    for table in document.tables:  # 표는 줄마다 칸을 ' | ' 로 이어 붙인다
-        for row in table.rows:
-            cells = list(dict.fromkeys(c.text.strip() for c in row.cells))  # 병합 칸은 같은 글이 되풀이된다
-            lines.append(" | ".join(c for c in cells if c))
-    return "\n".join(lines), f"문단 {len(document.paragraphs)}개 · 표 {len(document.tables)}개"
+    out = DocxRead("", "")
+    part = document.part
+
+    def with_figures(text: str, element) -> str:
+        marks = []
+        for image in _pictures(element, part):
+            out.images.append(image)
+            marks.append(FIGURE_MARK.format(n=len(out.images)))
+        return " ".join([text, *marks]).strip() if marks else text
+
+    lines: list[str] = []
+    n_para = n_table = 0
+    for child in document.element.body.iterchildren():
+        tag = child.tag.rsplit("}", 1)[-1]
+        if tag == "p":
+            para = Paragraph(child, document)
+            n_para += 1
+            lines.append(with_figures(para.text, child))
+            style = (para.style.name if para.style is not None else "") or ""
+            if para.text.strip() and style.lower().startswith(HEADING_STYLES):
+                out.headings.append(para.text.strip())
+        elif tag == "tbl":
+            table = Table(child, document)
+            n_table += 1
+            for r, row in enumerate(table.rows):
+                cells = [with_figures(c.text.strip(), c._tc) for c in _row_cells(row)]
+                if r == 0 and any(cells):
+                    out.table_heads.append([FIGURE_RX.sub("", c).strip() for c in cells if FIGURE_RX.sub("", c).strip()])
+                lines.append(" | ".join(c for c in cells if c))
+    out.text = "\n".join(lines)
+    out.units = f"문단 {n_para}개 · 표 {n_table}개" + (f" · 그림 {len(out.images)}개" if out.images else "")
+    return out
+
+
+def read_docx(data: bytes) -> tuple[str, str]:
+    doc = read_docx_full(data)
+    return doc.text, doc.units
+
+
+MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.M)
+MD_TABLE_HEAD = re.compile(r"^\s*\|(.+)\|\s*\n\s*\|?\s*:?-{3,}", re.M)
+
+
+def md_structure(text: str) -> tuple[list[str], list[list[str]]]:
+    """마크다운 → (절 제목, 표 머리글). 코드 블록 안은 보지 않는다."""
+    text = re.sub(r"```.*?```", "", text or "", flags=re.S)
+    heads = [m.group(1).strip() for m in MD_HEADING.finditer(text)]
+    tables = [[c.strip() for c in m.group(1).split("|") if c.strip()] for m in MD_TABLE_HEAD.finditer(text)]
+    return heads, [t for t in tables if t]
 
 
 def pdf_page_texts(data: bytes) -> tuple[list[str], int]:
@@ -231,8 +334,12 @@ def read_bytes(name: str, data: bytes) -> DocText:
     notes: list[str] = []
     if data.startswith(DRM_MARKS):
         raise DocReadError(DRM_ADVICE)
+    headings: list[str] = []
+    table_heads: list[list[str]] = []
+    images: list[DocImage] = []
     if kind == "docx":
-        text, units = read_docx(data)
+        full = read_docx_full(data)
+        text, units, headings, table_heads, images = full.text, full.units, full.headings, full.table_heads, full.images
     elif kind == "pdf":
         text, units, notes = read_pdf(data)
     elif kind == "hwpx":
@@ -242,11 +349,14 @@ def read_bytes(name: str, data: bytes) -> DocText:
     elif kind in ("md", "txt"):
         text = read_plain(data)
         units = f"{text.count(chr(10)) + 1}줄"
+        if kind == "md":
+            headings, table_heads = md_structure(text)
     elif kind == "doc":
         raise DocReadError("옛 Word(.doc) 는 읽지 못합니다. Word 에서 .docx 로 저장해 올려 주세요.")
     else:
         raise DocReadError(f"지원하지 않는 형식입니다: .{kind} (지원: {', '.join('.' + s for s in SUFFIXES)})")
-    doc = DocText(name=name, kind=kind, text=_clean(text), units=units, notes=notes)
+    doc = DocText(name=name, kind=kind, text=_clean(text), units=units, notes=notes, headings=headings, table_heads=table_heads,
+                  images=images)
     if not doc.text and not notes:
         doc.notes.append("읽은 글자가 없습니다.")
     return _limit(doc)

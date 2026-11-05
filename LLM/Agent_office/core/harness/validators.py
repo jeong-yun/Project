@@ -381,11 +381,25 @@ class JdCoverageValidator(Validator):
 @register
 class PortfolioFormatValidator(Validator):
     name = "portfolio_format"
-    description = "포트폴리오 형식 — 요약·핵심 역량(표)·프로젝트 절, 프로젝트 카드마다 문제·역할·기술·결과·배운 점"
+    description = ("포트폴리오 형식 — 형식 지정이 없으면 요약·핵심 역량(표)·프로젝트 절과 카드 다섯 항목(문제·역할·기술·결과·배운 점), "
+                   "형식 지정(추가 요청·형식 참고 파일)이 있으면 원본 절 제목·표 머리글이 결과에 그대로 있는지")
 
     def check(self, answer: str, options: dict):
         from core import career
 
+        fmt = options.get("career_format")
+        if isinstance(fmt, dict) and fmt.get("mode") == "original":
+            sources = ", ".join(fmt.get("sources") or []) or "원본"
+            if not (fmt.get("headings") or fmt.get("table_heads")):
+                problems = career.original_format_problems(answer, {})
+                if problems:
+                    return self.fail("포트폴리오 형식 오류: " + " / ".join(problems))
+                return self.ok(f"요청 형식 — 비교할 원본 절 제목·표가 없어({sources}) 생략 문구만 확인 (표준 형식 검사는 하지 않음)")
+            problems = career.original_format_problems(answer, fmt)
+            if problems:
+                return self.fail("요청 형식 오류: " + " / ".join(problems) + f" — 추가 요청대로 원본({sources})의 절 제목·표 머리글·구분·순서를 "
+                                 "그대로 쓴다. 표준 형식(요약·핵심 역량·카드)으로 바꾸거나 요청 형식을 부록으로 미루지 않는다.")
+            return self.ok(f"요청 형식 통과 — 원본({sources}) 절 제목 {len(fmt.get('headings') or [])}개 · 표 {len(fmt.get('table_heads') or [])}개가 결과에 있음")
         problems = career.check_portfolio(answer)
         if problems:
             return self.fail("포트폴리오 형식 오류: " + " / ".join(problems) + " — 팀 업무 지침의 포트폴리오 형식대로 다시 써라.")

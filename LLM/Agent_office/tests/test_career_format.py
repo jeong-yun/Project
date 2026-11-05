@@ -62,3 +62,91 @@ def test_table_row_numbers_are_not_facts_but_other_cells_are():
     table = "| # | 프로젝트 | 건수 |\n|---|---|---|\n| 13 | 고객사A 모델 | 1,200건 |\n| 14 | 제품X 수집 | 3,400건 |"
     out = career.unsourced_numbers(table, allowed)
     assert len(out) == 1 and out[0].startswith("3,400")  # 행 번호 13·14 는 건너뛰고, 다른 칸의 지어낸 숫자는 잡는다
+
+
+# ─── 3단계: 형식 지정이 있으면 원본 형식 검사 ────────────────────────────────
+
+OLD_MD = """# 기술 경력서 (가명)
+## 1. 회사 업무
+| 업무 명 | 기간 | 고객사 | 역할 |
+|---|---|---|---|
+| 탐지 모델 고도화 | 2026-06-01 ~ 현재 | 고객사A | 모델 개발 |
+## 2. 개인 프로젝트
+- 로그 요약 도구 (2025.03 ~ 2025.12)
+"""
+NEW_DOC = "최신 요약 (가명)\n탐지 모델 고도화 (2026-06-01 ~ 2026-10-31) — 고객사A, 모델 개발\n하루 1,200건을 자동 분류했다."
+
+
+def write(tmp_path, name: str, text: str) -> str:
+    path = tmp_path / name
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
+
+def test_format_request_words():
+    assert career.format_requested("Word 는 기술경력서 포맷과 유사하게, md 는 경력서.md 와 유사하게")
+    assert career.format_requested("기존 문서처럼 표 형식으로")
+    assert career.format_requested("원본 그대로 두고 숫자만 고쳐줘")
+    assert not career.format_requested("데이터 분석 경험을 앞에 두고 차분하게")
+    assert not career.format_requested("")
+
+
+def test_update_tool_reads_original_structure_only_when_format_requested(tmp_path):
+    from core.tools import career_docs
+
+    inputs = {"career_kind": "portfolio_update", "portfolio": write(tmp_path, "old.md", OLD_MD), "portfolio_name": "old.md",
+              "docs": [write(tmp_path, "new.md", NEW_DOC)], "docs_names": ["new.md"]}
+    plain = career_docs.run("q", inputs, None)
+    assert "career_format" not in plain.harness_options  # 형식 지정 없음 → 표준 형식 검사
+    asked = career_docs.run("q", {**inputs, "extra_request": "Word 는 기존 포트폴리오 형식과 유사하게"}, None)
+    fmt = asked.harness_options["career_format"]
+    assert fmt["mode"] == "original" and fmt["sources"] == ["old.md"]
+    assert "1. 회사 업무" in fmt["headings"] and ["업무 명", "기간", "고객사", "역할"] in fmt["table_heads"]
+    assert "📐 요청 형식" in asked.content and "| 업무 명 | 기간 | 고객사 | 역할 |" in asked.content
+    assert "기존 포트폴리오 형식" in asked.harness_options["career_reference"]
+
+
+def test_portfolio_format_checks_original_structure_instead_of_standard():
+    fmt = {"mode": "original", "headings": ["기술 경력서 (가명)", "1. 회사 업무", "2. 개인 프로젝트"],
+           "table_heads": [["업무 명", "기간", "고객사", "역할"]], "sources": ["old.md"]}
+    ev = summary([("자동 분류", "하루 1,200건을 자동 분류했다.")])
+    kept = ("# 기술 경력서 (가명)\n## 1. 회사 업무\n| 업무 명 | 기간 | 고객사 | 역할 |\n|---|---|---|---|\n"
+            "| 탐지 모델 고도화 | 26.06 ~ 26.10 | 고객사A | 모델 개발 |\n## 2. 개인 프로젝트\n- 로그 요약 도구 (25.03 ~ 25.12)" + ev)
+    res = check("portfolio_format", kept, career_format=fmt)
+    assert res.passed and "요청 형식 통과" in res.log
+    standard = ("# 포트폴리오\n## 요약\n요약\n## 핵심 역량\n| 영역 | 기술 | 근거 |\n|---|---|---|\n| a | b | c |\n## 프로젝트\n"
+                "### 1. 탐지 모델\n- **문제**: a\n- **역할**: b\n- **기술**: c\n- **결과**: d\n- **배운 점**: e" + ev)
+    assert check("portfolio_format", standard).passed  # 형식 지정이 없으면 지금처럼 표준 형식
+    res = check("portfolio_format", standard, career_format=fmt)
+    assert not res.passed and "1. 회사 업무" in res.log and "고객사" in res.log
+    omitted = kept.replace("- 로그 요약 도구 (25.03 ~ 25.12)", "나머지는 원문 그대로 둡니다.")
+    res = check("portfolio_format", omitted, career_format=fmt)
+    assert not res.passed and "생략" in res.log
+    nothing = {"mode": "original", "headings": [], "table_heads": [], "sources": []}
+    assert check("portfolio_format", "# 아무 형식\n본문" + ev, career_format=nothing).passed  # 원본을 못 읽으면 표준 검사도 안 함
+
+
+def test_docx_headings_and_table_heads_in_document_order():
+    import io
+
+    import docx
+
+    from core.doc_text import read_bytes
+
+    d = docx.Document()
+    d.add_heading("1. 회사 업무", level=1)
+    t = d.add_table(rows=2, cols=3)
+    for c, v in enumerate(["업무 명", "기간", "역할"]):
+        t.cell(0, c).text = v
+    t.cell(1, 0).merge(t.cell(1, 1)).text = "탐지 모델 (병합 칸)"
+    t.cell(1, 2).text = "개발"
+    d.add_heading("2. 개인 프로젝트", level=1)
+    d.add_paragraph("로그 요약 도구")
+    buf = io.BytesIO()
+    d.save(buf)
+    doc = read_bytes("경력서.docx", buf.getvalue())
+    assert doc.headings == ["1. 회사 업무", "2. 개인 프로젝트"]
+    assert doc.table_heads == [["업무 명", "기간", "역할"]]
+    lines = doc.text.splitlines()
+    assert lines.index("업무 명 | 기간 | 역할") < lines.index("2. 개인 프로젝트")  # 표가 문서 순서 자리에 (끝으로 밀리지 않음)
+    assert "탐지 모델 (병합 칸) | 개발" in doc.text  # 병합 칸 글은 한 번만

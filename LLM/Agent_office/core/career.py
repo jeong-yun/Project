@@ -525,6 +525,55 @@ def check_portfolio(answer: str) -> list[str]:
     return problems
 
 
+# ─── 요청 형식 (원본 형식 유지) ─────────────────────────────────────────
+# 2026-11-04 실측: 추가 요청 'Word 는 기존 Word 형식, md 는 기존 md 형식과 유사하게'를 표준 형식 검사(check_portfolio)가 덮어써
+# 원본 표·구분이 사라지고 요청 형식은 부록으로 밀렸다 → 형식 지정이 있으면 표준 절 대신 '원본 절 제목·표 머리글이 그대로 있는지'를 본다.
+
+FORMAT_WORDS = re.compile(r"형식|포맷|포멧|양식|서식|레이아웃|틀\s*(?:을|를|은|는|대로|에|그대로)|템플릿|template|format|layout|"
+                          r"(?:기존|원본|원래|지금)\s*(?:문서|파일|포트폴리오|경력서|경력\s*기술서|이력서)?\s*(?:과|와|처럼|대로|그대로)",
+                          re.I)
+OMIT_PHRASES = re.compile(r"나머지(?:는|도)?\s*(?:원문|기존|이전)?\s*(?:그대로|동일|생략)|이하\s*(?:동일|생략)|\((?:중략|생략|이하 생략)\)|"
+                          r"(?:변경|바뀐)\s*(?:없는|없음|사항\s*없는)\s*(?:항목|부분|프로젝트)?(?:은|는)?\s*(?:생략|그대로\s*둡니다)")
+
+
+def format_requested(text: str) -> bool:
+    """추가 요청 글에 형식 지정이 있는가 ('기존 Word 형식과 유사하게', '경력서.md 처럼', '원본 표 그대로' …)."""
+    return bool(FORMAT_WORDS.search(text or ""))
+
+
+def _flat(text: str) -> str:
+    """비교용 — 마크다운 표시·공백·문장 부호를 뺀 글 (원본 제목이 결과에 '그대로' 있는지 볼 때)."""
+    text = normalize_text(text).lower()
+    return re.sub(r"[\s*_#`|>\-·.,:：()\[\]【】<>「」'\"~]+", "", text)
+
+
+def _bare_heading(text: str) -> str:
+    """절 제목의 번호(1. · Ⅰ. · 가. · (1) · 1-1.)를 뗀 이름."""
+    return re.sub(r"^\s*(?:[\dⅠ-Ⅻⅰ-ⅻ]+(?:[-.]\d+)*[.)]?|[가-하][.)]|\(\d+\)|[①-⑳])\s*", "", str(text or "")).strip()
+
+
+def original_format_problems(answer: str, fmt: dict) -> list[str]:
+    """요청 형식 검사 — 원본(지금 포트폴리오·형식 참고 파일)의 절 제목·표 머리글이 결과 본문에 그대로 있는지 + 생략 문구가 없는지.
+
+    fmt = {"headings": [...], "table_heads": [[칸, …], …], "sources": [파일 이름]}  (core/tools/career_docs.py 가 만든다)
+    """
+    body = body_text(answer)
+    flat = _flat(body)
+    problems = []
+    missing = [h for h in dict.fromkeys(fmt.get("headings") or []) if _flat(_bare_heading(h)) and _flat(_bare_heading(h)) not in flat]
+    if missing:
+        problems.append(f"원본 절 제목 {len(missing)}개가 결과에 없다: " + ", ".join(f"'{h[:30]}'" for h in missing[:8]))
+    for head in fmt.get("table_heads") or []:
+        cells = [c for c in head if _flat(c)]
+        lost = [c for c in cells if _flat(c) not in flat]
+        if lost:
+            problems.append(f"원본 표 머리글 '{' | '.join(c[:15] for c in cells[:8])}' 중 결과에 없는 칸: " + ", ".join(f"'{c[:20]}'" for c in lost[:6]))
+    omitted = OMIT_PHRASES.search(body)
+    if omitted:
+        problems.append(f"'{omitted.group(0)}' 처럼 항목을 생략했다 — 바뀌지 않은 표·항목도 빠짐없이 쓴다")
+    return problems
+
+
 # ─── 🎯 업무(JD) 추천 — 모델은 판정만, 점수·순위는 코드가 ───────────────────
 
 STATUS_VALUE = {"근거 있음": 1.0, "부분": 0.5, "공백": 0.0}

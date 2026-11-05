@@ -29,6 +29,8 @@ jd_confirmed · docs_confirmed 로 들어온다. 그 글이 JD·사실의 출처
   career_requirements : JD 요구사항 id 목록 R1…  (JD 대응 검증기)
   career_jds          : JD 추천 — [{id: J1, name, title, reqs: [{id: J1-R1, section, text}]}]  (jd_recommend 검증기 · 점수)
   career_old_portfolio / career_web_urls / career_web_count : 포트폴리오 최신화  (portfolio_changes 검증기)
+  career_format       : 형식 지정(추가 요청 extra_request · 형식 참고 파일)이 있을 때만 — 원본 절 제목·표 머리글 (portfolio_format 검증기가
+                        표준 형식 대신 이것을 확인한다)
 """
 
 from dataclasses import dataclass, field
@@ -289,6 +291,43 @@ def _doc_parts(docs: list[DocText], notes: list[str], inputs: dict, heading: str
     return parts
 
 
+# ─── 요청 형식 (원본 형식 유지) ───────────────────────────────────────────
+
+
+def format_spec(inputs: dict, originals: list[DocText | None]) -> dict | None:
+    """추가 요청에 형식 지정이 있거나 형식 참고 파일을 올렸으면 '원본 형식' 검사 정보, 아니면 None (표준 형식 검사).
+
+    originals = 형식을 따를 원본 문서 (지금 포트폴리오 · 형식 참고 파일) — 절 제목·표 머리글을 코드가 읽어 둔다.
+    """
+    refs = [d for d in originals if d is not None]
+    if not (career.format_requested(str(inputs.get("extra_request") or "")) or inputs.get("format_refs")):
+        return None
+    headings = list(dict.fromkeys(h for d in refs for h in d.headings))[:40]
+    heads, seen = [], set()
+    for d in refs:
+        for row in d.table_heads:
+            if tuple(row) not in seen:
+                seen.add(tuple(row))
+                heads.append(list(row))
+    return {"mode": "original", "headings": headings, "table_heads": heads[:20], "sources": [d.name for d in refs]}
+
+
+def format_block(fmt: dict) -> str:
+    """근거 자료에 넣는 '요청 형식' 절 — 코드가 무엇을 확인하는지 모델이 알게."""
+    lines = ["### 📐 요청 형식 — 원본 형식 유지 (표준 형식 '요약·핵심 역량·카드'보다 우선)",
+             "추가 요청·형식 참고 파일에 형식 지정이 있다. 원본의 절 제목·표 머리글·구분·순서를 그대로 쓰고, 바뀌지 않은 항목도 빠짐없이 쓴다. "
+             "요청 형식을 부록으로 미루지 않는다. 코드가 아래 절 제목·표 머리글이 결과에 그대로 있는지 확인한다."]
+    if fmt.get("sources"):
+        lines.append(f"- 원본: {', '.join(fmt['sources'])}")
+    if fmt.get("headings"):
+        lines.append("- 절 제목: " + " / ".join(fmt["headings"]))
+    lines += [f"- 표 머리글: | {' | '.join(h)} |" for h in fmt.get("table_heads") or []]
+    if not (fmt.get("headings") or fmt.get("table_heads")):
+        lines.append("- 원본 형식 파일의 절 제목·표를 읽지 못했다 (파일이 없거나 제목 스타일·표가 없음). 요청 글이 말한 파일이 근거 자료에 없으면 "
+                     "reply 첫 줄과 needs_check 맨 위에 그 파일을 '형식 참고 파일' 칸에 올려 달라고 적는다.")
+    return "\n".join(lines)
+
+
 def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     kind = str(inputs.get("career_kind") or "cover_letter")
     docs, notes = read_docs(inputs)
@@ -315,10 +354,14 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
         rows = ["| 문항 | 질문 | 글자 수 제한 |", "|---|---|---|"]
         rows += [f"| {q.no} | {q.text} | {q.label()} |" for q in questions]
         parts.append("### 📝 자소서 문항 (코드가 읽음) — 답변마다 '## 문항 N. 질문' 제목, 글자 수는 코드가 센다\n" + "\n".join(rows))
+    fmt = None
     if kind == "portfolio":
         parts.append(f"### 🧭 목표 직무: {target_role(inputs) or '(입력 없음 — 문서에서 가장 맞는 직무)'}")
+        fmt = format_spec(inputs, [])
+        if fmt:
+            parts.append(format_block(fmt))
 
-    reference = "\n".join(str(inputs.get(k) or "") for k in ("questions", "company", "tone", "role", "role_custom")) + "\n" + jd
+    reference = "\n".join(str(inputs.get(k) or "") for k in ("questions", "company", "tone", "role", "role_custom", "extra_request")) + "\n" + jd
     title = "✍️ 자소서 자료" if kind == "cover_letter" else "📁 포트폴리오 자료"
     return ToolResult(
         tool="career_docs",
@@ -331,6 +374,7 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
             "career_questions": [q.__dict__ for q in questions],
             "career_requirements": [r.id for r in reqs],
             "career_requirement_text": {r.id: r.text for r in reqs},
+            **({"career_format": fmt} if fmt else {}),
         },
     )
 
@@ -399,6 +443,9 @@ def _run_update(inputs: dict, docs: list[DocText], notes: list[str]) -> ToolResu
         lines.append(f"- {label}: " + (" / ".join(diff[key]) if diff[key] else "없음"))
     parts.append("\n".join(lines))
     parts.append(f"### 🧭 목표 직무: {target_role(inputs) or '(입력 없음 — 지금 포트폴리오의 직무)'}")
+    fmt = format_spec(inputs, [old])
+    if fmt:
+        parts.append(format_block(fmt))
 
     web = [w for w in inputs.get("web_results") or [] if isinstance(w, dict) and w.get("url")]
     urls = [w["url"] for w in web]
@@ -423,11 +470,12 @@ def _run_update(inputs: dict, docs: list[DocText], notes: list[str]) -> ToolResu
         notes=notes,
         harness_options={
             "career_source": "\n\n".join([*sources, latest]),  # 지금 포트폴리오도 내 문서 — 사실의 출처
-            "career_reference": "\n".join(str(inputs.get(k) or "") for k in ("role", "role_custom")),
+            "career_reference": "\n".join(str(inputs.get(k) or "") for k in ("role", "role_custom", "extra_request")),
             "career_questions": [],
             "career_requirements": [],
             "career_old_portfolio": old.text if old else "",
             "career_web_urls": [u for u in urls if u],
             "career_web_count": len(web),
+            **({"career_format": fmt} if fmt else {}),
         },
     )
