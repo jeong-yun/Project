@@ -961,9 +961,19 @@ def check_targets(targets, res, exp=None):
     return {"complete": complete, "met": complete and met, "exp": exp, "dev": out}
 
 
+def _server_gate(name, rev):
+    """서버 반영 조건 (5_8_server.gate - 로컬 전용 서버 레시피 파일 5_8a 가 있을 때만 켜짐): 장비마다 서버 혼동행렬 4지표 95% 이상 +
+    디코딩 입력·원본 입력 예측 일치 98% 이상. 꺼져 있으면 None (예전과 같은 승인)."""
+    if not (BASE / "5_8_server.py").exists():
+        return None
+    g = _load("sup_server_v", "5_8_server.py").gate(name, int(rev))
+    return g if g.get("active") else None
+
+
 def approve(name, rev, reason="", exp=None):
     """최종 승인 → 확정 (잠금, 다음 버전의 기준). 최신 rev 의 두 장비 테스트가 목표를 넘어야 하고, 못 넘으면 사유가 있어야 한다.
-    승인 기록(시각·rev·실험·지표·기준 지표·목표·사유)을 manifest.json 과 versions.json 에 남긴다."""
+    서버 반영 (2026-11-04~, 5_8): 서버 결과가 기준(4지표 95%·예측 일치 98%)에 못 미치거나 없어도 사유가 있어야 한다.
+    승인 기록(시각·rev·실험·지표·기준 지표·목표·사유·서버 반영)을 manifest.json 과 versions.json 에 남긴다."""
     v = C.load_versions()
     ver = _candidate(v, name)
     if int(rev) != ver.get("rev"):
@@ -976,12 +986,19 @@ def approve(name, rev, reason="", exp=None):
     if not chk["met"] and not reason:
         raise ValueError("목표에 못 미칩니다 - 그래도 승인하려면 사유를 적으세요: " +
                          "; ".join(f"{d.upper()} {', '.join(x['fails'])}" for d, x in chk["dev"].items() if x["fails"]))
+    srv = _server_gate(name, rev)                       # 서버 반영 (2026-11-04~): 못 넘거나 결과가 없으면 사유 필요
+    if srv and not srv["met"] and not reason:
+        raise ValueError("서버 반영 기준(혼동행렬 4지표 95%·예측 일치 98%)에 못 미치거나 서버 결과가 없습니다 - 그래도 승인하려면 "
+                         "사유를 적으세요: " + "; ".join(f"{d.upper()} {', '.join(x['fails'])}" for d, x in srv["dev"].items() if x["fails"]))
     if ver.get("spec_changed_at") and ver["spec_changed_at"] > (ver.get("exported_at") or ""):
         raise ValueError("선별을 다시 담은 뒤 내보내지 않았습니다 - 다시 내보내기(rev+1)·테스트 뒤 승인하세요")
     now = C.now_iso()
-    rec = {"at": now, "rev": int(rev), "exp": chk["exp"], "targets": targets, "met": chk["met"], "reason": reason[:1000],
+    rec = {"at": now, "rev": int(rev), "exp": chk["exp"], "targets": targets, "met": chk["met"] and (not srv or srv["met"]),
+           "reason": reason[:1000],
            "metrics": {d: x.get("metrics") for d, x in chk["dev"].items()}, "base": {d: x.get("base") for d, x in chk["dev"].items()},
            "fails": {d: x["fails"] for d, x in chk["dev"].items()}}
+    if srv:                                             # met = 피처 테스트 목표 + 서버 반영, targets_met = 피처 테스트 목표만
+        rec.update(targets_met=chk["met"], server=srv)
     mp = C.VERDIR / name / "manifest.json"
     m = C.read_json(mp, None)
     if not m or m.get("rev") != int(rev):

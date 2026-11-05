@@ -11,6 +11,8 @@
 09_features/
 10_review/
 11_supervised/
+12_server/
+5_8a_server_local.py
 logs/
 .run/
 __pycache__/

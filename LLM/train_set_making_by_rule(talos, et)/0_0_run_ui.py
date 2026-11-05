@@ -71,6 +71,7 @@ JOBS = {   # 이름: (스크립트, 잠금 이름)
     "recheck": ("3_6_recheck_labels.py", "recheck"),   # 4. '불일치' 줄 LLM 재확인 (3_6, 별도 프로세스)
     "features": ("4_1_build_features.py", "features_view"),   # 5. 피처 '켜진 줄 수 다시 계산' (4_1 --view, 표준·신규 피처 표시 캐시)
     "evalver": ("5_4_feature_experiment.py", "eval_version"),  # 6. 후보 버전 '피처 테스트' (5_4 eval-version, 장비마다 한 번씩)
+    "server": ("5_8_server.py", "server_check"),   # 6. 후보 '서버 반영' 로컬 사전 점검 (5_8 check, 95%·98% 미리 보기)
 }
 START_WAIT = {"redo": 600}      # 다시 만들기는 다시 검토할 요청을 찾은 뒤(1분쯤) 잠금을 잡는다 → 그동안도 '시작하는 중'
 PROGRESS_FILE = BASE / "07_llm_output" / "_progress" / "progress.json"
@@ -935,7 +936,7 @@ def matching(date, dev, label, rule, text, cons="", hold="", llm=""):
     if not (label or rule or text or cons or llm):
         return None
     key = (str(path), path.stat().st_mtime, label, rule, text, cons, hold, llm,
-           (recheck_stamp(), _dec_stamp()) if llm else None)
+           (recheck_stamp(), _dec_stamp()) if llm else None, _edits_mtime(date) if cons in ("BAD", "VOTED") else None)
     if key in _filters:
         return _filters[key]
     n = len(line_index(path))
@@ -944,9 +945,16 @@ def matching(date, dev, label, rule, text, cons="", hold="", llm=""):
         v = verify_state(date, dev)
         if v.get("status") != "done":                   # 까닭(검증 안 함·낡음·검증 중)과 할 일 - '전체' 보기는 select_rows 가 그 날짜를 뺌
             raise NoVerify(verify_gap(date, dev))
-    if cons:
+    if cons == "VOTED":                                 # 합의로 label 바꿈 (검증 '불일치' 중 LLM 재확인으로 label 을 바꿔 반영한 줄)
+        vl = voted_lines(date, dev)
+        keep = [i for i in keep if i in vl]
+    elif cons:
         want = CODE_NUM[cons]
         keep = [i for i in keep if i < len(v["codes"]) and v["codes"][i] == want]
+        if cons == "BAD":                               # '불일치'에서 합의로 label 바꿈은 뺀다
+            vl = voted_lines(date, dev)
+            if vl:
+                keep = [i for i in keep if i not in vl]
     if llm:                                             # 줄별 결과의 내용 지문(k)으로 그 줄의 가장 최근 재확인을 찾는다
         cand = (CODE_NUM["BAD"],) if llm == "todo" else (CODE_NUM["BAD"], CODE_NUM["RULE"])
         bad = [i for i in keep if i < len(v["codes"]) and v["codes"][i] in cand]
@@ -1047,7 +1055,8 @@ TRACE_NAMES = {"sql": "SQL 인젝션 흔적", "xss": "XSS 흔적", "cmd": "명�
                "inclusion": "파일 포함 흔적", "template": "템플릿·EL 주입 흔적", "xxe": "XXE 흔적", "deserial": "역직렬화 흔적",
                "shellshock": "Shellshock 흔적", "sensitive": "민감 파일 접근", "double_enc": "기호 이중 URL 인코딩",
                "unicode_enc": "%u 인코딩", "ctrl_bytes": "제어문자·NULL 바이트", "scanner_ua": "스캐너·공격 도구 UA"}
-CONS = {"OK": "정합", "RULE": "정합 (룰 기준)", "CHECK": "확인 필요", "BAD": "불일치"}
+CONS = {"OK": "정합", "RULE": "정합 (룰 기준)", "CHECK": "확인 필요", "BAD": "불일치",
+        "VOTED": "합의로 label 바꿈"}   # VOTED: 검증은 '불일치'지만 LLM 재확인 합의로 label 을 바꿔 반영한 줄 (voted_lines, 2026-11-04~)
 HOLD = {"rule": "'정합 (룰 기준)' 공격", "pyua": "python-requests UA 정상"}     # 6. 선별의 보류 옵션 대상
 PY_UA_RE = re.compile(rb"\\nuser-agent:[ \t]*python-requests", re.I)          # 5.5 와 같은 기준 (헤더 줄 시작)
 
@@ -2131,6 +2140,47 @@ def frame_cache(date, dev):
     return p if len(line_index(p)) == v.get("total") else None
 
 
+# 합의로 label 바꿈 (2026-11-04~): LLM 재확인(투표 합의·사람 판단)으로 label 을 바꿔 학습 로그에 반영한 줄은 룰 기준 label 과
+# 달라져 코드 검증이 '불일치'로 보지만 의도한 것이라 '불일치'와 따로 센다 (VOTED - 요약·필터·표·CSV, '불일치 모두 삭제'에서 뺌).
+# edits.json 의 'LLM 재확인' label 수정(RECHECK_WHY) + label 파일의 edited 에 label (1.4 가 반영) + 지금 label 이 바꾼 label.
+_voted = {}
+
+
+def _edits_mtime(date):
+    try:
+        return _edits_file(date).stat().st_mtime
+    except OSError:
+        return 0
+
+
+def voted_lines(date, dev):
+    """그 날짜·장비에서 검증이 '불일치'인데 LLM 재확인으로 바꾼 label 이 반영된 줄 번호 집합 (검증·수정이 그대로면 지난 결과)."""
+    v = verify_state(date, dev)
+    if v.get("status") != "done":
+        return set()
+    key = (v.get("mtime"), v.get("size"), _edits_mtime(date))
+    hit = _voted.get((date, dev))
+    if hit and hit[0] == key:
+        return hit[1]
+    flips = {sk: e.get("label") for sk, e in read_edits(date).items()
+             if e.get("action") == "edit" and e.get("label") and _rc_target(e)}
+    out = set()
+    bad = [i for i, c in enumerate(v.get("codes", "")) if c == CODE_NUM["BAD"]] if flips else []
+    li = label_info(_log_path(date, dev)) if bad else None
+    if li:
+        for i, m in zip(bad, read_label_lines(li[4], bad)):
+            if flips.get(m.get("sk")) == m.get("label") and "label" in str(m.get("edited") or ""):
+                out.add(i)
+    _voted[(date, dev)] = (key, out)
+    return out
+
+
+def _voted_row(a):
+    """줄 결과(analyze 모양)를 '합의로 label 바꿈'으로 (코드 판정은 사유에 남김)."""
+    return dict(a, cons="VOTED", cons_text=CONS["VOTED"],
+                cons_reason=f"LLM 재확인 합의로 label 을 바꿔 반영함 - 코드 검증은 {a.get('cons_text', '')}: {a.get('cons_reason', '')}")
+
+
 def cached_rows(cache, idx):
     """줄 번호들의 저장된 확인 결과 (analyze 와 같은 모양)."""
     rows = [json.loads(x) for x in read_lines(cache, idx)]
@@ -2191,6 +2241,10 @@ def verify_summary(date, dev, conv=False):
             out["reused"] += v.get("reused", 0)
             for k, c in v.get("summary", {}).items():
                 out["summary"][k] = out["summary"].get(k, 0) + c
+            vt = len(voted_lines(d, dev))               # '불일치' 중 합의로 label 바꿈은 따로
+            if vt:
+                out["summary"]["BAD"] = out["summary"].get("BAD", 0) - vt
+                out["summary"]["VOTED"] = out["summary"].get("VOTED", 0) + vt
             out["finished_at"] = max(out["finished_at"], v.get("finished_at", ""))
             ri = v.get("rule_inputs") or ({v["frame_in_dir"]: n} if v.get("frame_in_dir") else {})
             for k, c in ri.items():                     # 줄마다 확인한 룰 입력 날짜
@@ -2322,11 +2376,12 @@ def save_edit(b):
 
 
 def delete_bad(date, dev):
-    """검증에서 '불일치' 인 줄을 모두 삭제로 저장 (사유 = 불일치 사유)."""
+    """검증에서 '불일치' 인 줄을 모두 삭제로 저장 (사유 = 불일치 사유). 합의로 label 바꿈(voted_lines)은 뺀다."""
     n = 0
     for d in ([x["date"] for x in dataset_dates()] if date == "all" else [date]):
         v = verify_state(d, dev)
-        idx = [i for i, c in enumerate(v.get("codes", "")) if c == CODE_NUM["BAD"]] if v.get("status") == "done" else []
+        vl = voted_lines(d, dev)
+        idx = [i for i, c in enumerate(v.get("codes", "")) if c == CODE_NUM["BAD"] and i not in vl] if v.get("status") == "done" else []
         if not idx:
             continue
         path = _log_path(d, dev)
@@ -2336,6 +2391,9 @@ def delete_bad(date, dev):
         with _edit_lock:
             edits = read_edits(d)
             for meta, w in zip(metas, why):
+                e0 = edits.get(meta.get("sk")) or {}
+                if e0.get("action") == "edit" and e0.get("label") and _rc_target(e0):
+                    continue                            # LLM 재확인(투표·사람)으로 label 을 바꾸기로 한 샘플은 반영 전이어도 그대로
                 if meta.get("sk"):
                     edits[meta["sk"]] = {"action": "delete", "id": meta.get("id", ""), "orig_label": meta.get("label", ""),
                                          "why": ("불일치: " + w)[:300], "at": RT.now_iso()}
@@ -2522,9 +2580,12 @@ def _rc_args(b):
         model = model or M.CROSS_DEFAULT                # 2번째 모델을 비우면 기본 제안 (검토 모델은 보통 1번째와 같음)
         M.check_cross(cross, model)
     pick = _rc_pick(b.get("pick")) if cross else None   # 애매한 룰만 (교차 확인일 때만)
+    tiebreak = bool(b.get("tiebreak")) and not cross    # 3차 모델 투표 (합의가 '투표 갈림'인 줄만, 2026-11-04~)
+    if tiebreak and not hasattr(recheck_mod(), "vote_text"):
+        raise ValueError("지금 불러온 3_6_recheck_labels.py 가 3차 모델 투표를 모르는 예전 판입니다 - 화면을 다시 켜세요")
     return {"model": model, "effort": eff or None, "dates": None if (b.get("date") or "all") == "all" else dates,
             "target": target, "devs": ("ips", "waf") if devs == "all" else (devs,), "per_rule": per_rule,
-            "llm_only": b.get("llm_only", True) is not False, "cross": cross or None, "pick": pick}
+            "llm_only": b.get("llm_only", True) is not False, "cross": cross or None, "pick": pick, "tiebreak": tiebreak}
 
 
 def _rc_pick(p):
@@ -2568,7 +2629,7 @@ def recheck_plan(b):
     else:
         out = M.estimate(a["model"], a["effort"], a["dates"], target=a["target"], devs=a["devs"], per_rule=a["per_rule"],
                          llm_only=a["llm_only"], **({"cross": a["cross"]} if a["cross"] else {}),
-                         **({"pick": a["pick"]} if a["pick"] else {}))
+                         **({"pick": a["pick"]} if a["pick"] else {}), **({"tiebreak": True} if a["tiebreak"] else {}))
     return dict(out, key_problem=_rc_key_problem(a["model"]))
 
 
@@ -2587,6 +2648,8 @@ def recheck_start(b):
             p = a["pick"]
             args += ["--rules-from-ratio", str(p["lo"]), str(p["hi"]), "--min-rows", str(p["min_rows"]),
                      "--small-rules", p["small"]]
+    elif a["tiebreak"]:                                 # 3차 모델 투표: '투표 갈림' 줄을 그 줄을 아직 판정하지 않은 이 모델로
+        args += ["--tiebreak"] + (["--target", "rule"] if a["target"] == "rule" else [])
     elif a["target"] == "rule":
         args += ["--target", "rule", "--per-rule", str(a["per_rule"])] + ([] if a["llm_only"] else ["--with-augmented"])
     if len(a["devs"]) == 1:
@@ -2625,12 +2688,14 @@ def recheck_rules(q):
 
 
 def recheck_review(q):
-    """'추가 분석' 목록 (합의가 review 인 줄, 2026-11-02~): why = mixed (판단 불가가 섞임, 기본) · pending (한 모델만 판정 -
-    교차 확인 전) · all. '불일치'는 지금 장비, '정합 (룰 기준)'은 두 장비 (내용 기준 한 번).
+    """'추가 분석' 목록 (합의가 review 인 줄, 2026-11-02~): why = split (투표 갈림 - 두 모델 이상인데 다수 없음, 3차 투표 뒤에도
+    남으면 사람이 정함, 기본) · pending (한 모델만 판정 - 교차 확인 전) · all. 예전 3_6 의 mixed 는 split 으로 본다.
+    '불일치'는 지금 장비, '정합 (룰 기준)'은 두 장비 (내용 기준 한 번).
     → {total, offset, rows: [{k, date, dev, line, rule_id, label, payload, reason, votes: [[모델, 판정, 근거, 시각]], why}], counts}"""
     M, target = recheck_mod(), _q(q, "target") or "bad"
-    dev, why = _q(q, "dev", "ips"), _q(q, "why") or "mixed"
-    if target not in ("bad", "rule") or dev not in ("ips", "waf") or why not in ("mixed", "pending", "all"):
+    dev, why = _q(q, "dev", "ips"), _q(q, "why") or "split"
+    why = "split" if why == "mixed" else why
+    if target not in ("bad", "rule") or dev not in ("ips", "waf") or why not in ("split", "pending", "all"):
         raise ValueError("target/dev/why")
     if not hasattr(M, "consensus_map"):
         return {"total": 0, "offset": 0, "rows": [], "counts": {}}
@@ -2638,14 +2703,15 @@ def recheck_review(q):
     offset, limit = page_args(q, 100)
     cm = recheck_cons(target)
     src = (r for d in scope for r in M.bad_rows(d, dev)) if target == "bad" else iter(M.rule_rows(scope).values())
-    pick, seen, cnt = [], set(), {"mixed": 0, "pending": 0}
+    pick, seen, cnt = [], set(), {"split": 0, "pending": 0}
     for r in src:
         c = cm.get(r["k"])
         if not c or c[0] != "review" or r["k"] in seen:
             continue
         seen.add(r["k"])
-        cnt[c[1]] += 1
-        if why in ("all", c[1]):
+        w = "split" if c[1] in ("split", "mixed") else c[1]
+        cnt[w] = cnt.get(w, 0) + 1
+        if why in ("all", w):
             pick.append(r)
     page = pick[offset:offset + limit]
     if target == "rule":
@@ -2654,6 +2720,97 @@ def recheck_review(q):
              "payload": r["payload"][:3000], "reason": r.get("reason", ""), "votes": _votes_list(cm[r["k"]][2]),
              "why": cm[r["k"]][1]} for r in page]
     return {"total": len(pick), "offset": offset, "rows": rows, "counts": cnt}
+
+
+OLD_DEL = " 합의: 삭제"     # LLM 재확인 합의로 저장한 삭제의 사유 (옛 규칙·새 규칙 모두 - 사람 판단은 '사람 (추가 분석)')
+OLD_STATE = {"delete": "삭제 유지 (부적합)", "keep": "확인됨", "flip": "label 반대", "pending": "추가 분석 - 2번째 모델 대기",
+             "split": "추가 분석 - 투표 갈림", "none": "판정 기록 없음"}
+
+
+def _old_rule_rows():
+    """LLM 재확인 합의로 저장한 삭제 (모든 날짜, 옛 규칙 '하나라도 반대·부적합 → 삭제'로 저장한 것 포함) → [(날짜, sk, 수정, 대상, 새 규칙 칸)].
+    새 규칙 칸 = 결과의 sk → k 로 찾은 지금 합의 (OLD_STATE 의 키)."""
+    M, rows = recheck_mod(), []
+    for d in (x["date"] for x in dataset_dates()):
+        for sk, e in read_edits(d).items():
+            t = _rc_target(e)
+            if t and e.get("action") == "delete" and OLD_DEL in str(e.get("why", "")):
+                rows.append((d, sk, e, t))
+    if not rows:
+        return []
+    sk2k = {}
+    for r in M.read_results():
+        if r.get("sk") and r.get("k"):
+            sk2k.setdefault((r.get("target") or "bad", r["sk"]), r["k"])
+    cms, out = {t: recheck_cons(t) for t in ("bad", "rule")}, []
+    for d, sk, e, t in rows:
+        c = cms[t].get(sk2k.get((t, sk)))
+        out.append((d, sk, e, t, "none" if not c else c[1] if c[0] == "review" and c[1] in ("pending", "split")
+                    else "split" if c[0] == "review" else c[0]))
+    return out
+
+
+def recheck_oldrule(q=None, b=None):
+    """'옛 규칙으로 지운 줄 다시 보기' (2026-11-04~, 사용자가 누를 때만 바꿈): LLM 재확인 합의로 저장한 삭제를 새 규칙(부적합 삭제 +
+    다수결 투표)으로 다시 센다. 보기(q): 저장 시각(분)·대상별 새 규칙 칸 수 + 되돌린 기록. action=revert: 새 규칙으로 삭제가 아닌 줄의
+    삭제를 지운다 (부적합 삭제는 그대로, 지운 것은 _recheck/old_rule_revert_<시각>.json) → '학습 로그에 반영' 뒤 다시 검증하면 합의 줄에
+    다시 보인다. action=restore: 가장 최근 되돌림을 다시 삭제로 (그 샘플에 그 뒤 다른 수정·삭제가 생겼으면 건너뜀)."""
+    if not hasattr(recheck_mod(), "vote_text"):
+        raise ValueError("지금 불러온 3_6_recheck_labels.py 가 새 합의 규칙(투표)을 모르는 예전 판입니다 - 화면을 다시 켜세요")
+    outdir, act = recheck_mod().OUT_DIR, (b or {}).get("action")
+    backups = sorted(p for p in outdir.glob("old_rule_revert_*.json") if not p.name.endswith(".restored.json"))   # 취소한 것은 뺌
+    if act == "restore":
+        if not backups:
+            raise ValueError("되돌린 기록이 없습니다")
+        p, n, skipped = backups[-1], 0, 0
+        saved = json.loads(p.read_text(encoding="utf-8"))
+        for d, items in saved["edits"].items():
+            with _edit_lock:
+                edits = read_edits(d)
+                for sk, e in items.items():
+                    if sk in edits:
+                        skipped += 1
+                        continue
+                    edits[sk] = e
+                    n += 1
+                _write_edits(d, edits)
+        p.replace(p.with_name(p.stem + ".restored.json"))
+        return {"restored": n, "skipped": skipped}
+    rows = _old_rule_rows()
+    if act == "revert":
+        drop = {}
+        for d, sk, e, t, s in rows:
+            if s not in ("delete", "none"):
+                drop.setdefault(d, {})[sk] = e
+        if not drop:
+            return {"reverted": 0}
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        outdir.mkdir(parents=True, exist_ok=True)
+        (outdir / f"old_rule_revert_{stamp}.json").write_text(json.dumps(
+            {"at": RT.now_iso(), "why": "옛 규칙으로 지운 줄 중 새 규칙으로 삭제가 아닌 줄의 삭제를 지움", "edits": drop},
+            ensure_ascii=False), encoding="utf-8")
+        n = 0
+        for d, items in drop.items():
+            with _edit_lock:
+                edits = read_edits(d)
+                for sk, e in items.items():
+                    if edits.get(sk) == e:              # 그사이 바뀌지 않은 것만
+                        edits.pop(sk)
+                        n += 1
+                _write_edits(d, edits)
+        return {"reverted": n, "backup": f"old_rule_revert_{stamp}.json"}
+    groups = {}
+    for d, sk, e, t, s in rows:
+        g = groups.setdefault((str(e.get("at", ""))[:16], t), {k: 0 for k in OLD_STATE})
+        g[s] += 1
+    last = None
+    if backups:
+        try:
+            x = json.loads(backups[-1].read_text(encoding="utf-8"))
+            last = {"file": backups[-1].name, "at": x.get("at", ""), "n": sum(len(v) for v in x.get("edits", {}).values())}
+        except (OSError, ValueError):
+            last = None
+    return {"groups": [[at, t, c] for (at, t), c in sorted(groups.items())], "states": OLD_STATE, "last": last}
 
 
 def recheck_stop(b):
@@ -2682,13 +2839,15 @@ def recheck_apply(b):
     """LLM 재확인 판정을 수정·삭제로 저장 ('학습 로그에 반영' 때 적용·되돌릴 수 있음). 대상 target:
     bad = 지금 날짜·장비의 '불일치' 줄, rule = 지금 날짜(두 장비)의 '정합 (룰 기준)' 줄 중 재확인한 줄.
     delete = label 반대·학습에 부적합 → 삭제, flip = label 반대 → label 바꾸기 (가장 최근 판정 하나로 - 예전 방식),
-    xdelete = 합의가 삭제인 줄 → 삭제 (2026-11-02~, 반대도 label 을 바꾸지 않고 삭제), xkeep = 합의가 확인됨인 줄에 유지 표시,
+    xdelete = 합의가 삭제인 줄 → 삭제 (2026-11-04~ 부적합이 하나라도 있는 줄), xflip = 합의가 label 반대(투표 다수)인 줄 → label 바꾸기
+    (사유 = 투표 결과·모델 근거, 2026-11-04~), xkeep = 합의가 확인됨인 줄에 유지 표시,
     decide = 고른 줄(ks)에 사람 판단 decision (keep 유지·delete 삭제·flip label 반대 - 삭제·label 반대는 수정·삭제로도 저장,
     유지는 그 샘플에 LLM 재확인으로 저장한 수정·삭제를 지움), undo = 그 대상에서 LLM 재확인으로 저장한 수정·삭제를 되돌리고
     유지 표시·사람 판단도 지움. 유지 표시·사람 판단은 decisions.jsonl (합의가 그것을 따름).
     사람이 직접 저장한 수정·삭제가 있는 샘플은 건드리지 않는다 (건너뛴 수로 알림)."""
     act, dev, target = b.get("action"), b.get("dev", "ips"), b.get("target") or "bad"
-    if act not in ("delete", "flip", "undo", "xdelete", "xkeep", "decide") or dev not in ("ips", "waf") or target not in ("bad", "rule"):
+    if act not in ("delete", "flip", "undo", "xdelete", "xflip", "xkeep", "decide") or dev not in ("ips", "waf") \
+            or target not in ("bad", "rule"):
         raise ValueError("action/dev/target")
     decision, ks = b.get("decision"), set(b.get("ks") or [])
     if act == "decide" and (decision not in ("keep", "delete", "flip") or not ks):
@@ -2696,9 +2855,10 @@ def recheck_apply(b):
     M, latest, out = recheck_mod(), recheck_latest(), {"saved": 0, "skipped": 0, "undone": 0, "marked": 0}
     if target == "rule" and not _rc_new(M):
         raise ValueError("지금 불러온 3_6_recheck_labels.py 가 '정합 (룰 기준)' 대상을 모르는 예전 판입니다")
-    cons = act in ("xdelete", "xkeep", "decide")
+    cons = act in ("xdelete", "xflip", "xkeep", "decide")
     if cons and not hasattr(M, "consensus_map"):
         raise ValueError("지금 불러온 3_6_recheck_labels.py 가 교차 확인·합의를 모르는 예전 판입니다 - 화면을 다시 켜세요")
+    vtext = getattr(M, "vote_text", None) or _votes_text   # 사유: 투표 결과 (예: 반대 2 : 맞음 1)와 모델 근거
     cm, why0 = recheck_cons(target) if cons else {}, RECHECK_RULE_WHY if target == "rule" else RECHECK_WHY
     now, decs, marked = RT.now_iso(), [], set()
     for d in _rc_scope(b.get("date") or "all"):
@@ -2720,8 +2880,8 @@ def recheck_apply(b):
                             decs.append({"k": r["k"], "ck": r.get("ck", ""), "sk": r["sk"], "target": target, "decision": "keep",
                                          "by": "합의", "at": now, "votes": {m: x.get("verdict") for m, x in c[2].items()}})
                         continue
-                    if act == "xdelete" and (c[0] != "delete" or c[1] == "decided"):
-                        continue
+                    if act in ("xdelete", "xflip") and (c[0] != act[1:] or c[1] == "decided"):
+                        continue                        # 합의가 삭제(부적합)·label 반대(투표)인 줄만 (사람 판단은 이미 저장)
                     if act == "decide":
                         if r["k"] not in ks:
                             continue
@@ -2738,13 +2898,13 @@ def recheck_apply(b):
                             edits.pop(r["sk"])
                             out["undone"] += 1
                         continue
-                    if act == "xdelete" and e0:
+                    if act in ("xdelete", "xflip") and e0:
                         out["skipped"] += 1
                         continue
-                    dec = "delete" if act == "xdelete" else decision
-                    who = "합의" if act == "xdelete" else "사람 (추가 분석)"
+                    dec = act[1:] if act in ("xdelete", "xflip") else decision
+                    who = "합의" if act in ("xdelete", "xflip") else "사람 (추가 분석)"
                     e = {"action": "delete" if dec == "delete" else "edit", "id": r["rule_id"], "orig_label": r["label"],
-                         "why": f"{why0} {who}: {RECHECK_X[dec]} - {_votes_text(c[2])}"[:300], "at": now}
+                         "why": f"{why0} {who}: {RECHECK_X[dec]} - {vtext(c[2])}"[:300], "at": now}
                     if dec == "flip":
                         e["label"] = "normal" if r["label"] == "anomalies" else "anomalies"
                     edits[r["sk"]] = e
@@ -2845,7 +3005,8 @@ FRAME_COLS = ["index", "payload", "method", "label", "label 사유", "검증 결
               "탐지 피처", "라벨 검증용 피처", "rule_id", "date", "LLM 재확인", "LLM 재확인 근거", "LLM 재확인 모델",
               "LLM 합의", "LLM 판정 (모델별)"]
 CHECK_MARK = {"ok": "✔", "warn": "△", "bad": "✘"}
-REVIEW_WHY = {"pending": "2번째 모델 대기", "mixed": "판단 불가가 섞임", "decided": "표시함", "vote": ""}
+REVIEW_WHY = {"pending": "2번째 모델 대기", "split": "투표 갈림", "mixed": "판단 불가가 섞임", "unfit": "부적합", "decided": "표시함",
+              "vote": "투표"}   # 합의 까닭 (3_6 consensus_state, 2026-11-04~ split·unfit - mixed 는 예전 판)
 
 
 def _cons_maps():
@@ -2911,6 +3072,7 @@ def frame_csv(q):
             path = _log_path(d, dev)
             li = label_info(path)
             cache = frame_cache(d, dev)
+            vl = voted_lines(d, dev) if cache else set()   # 합의로 label 바꿈
             for s in range(0, n, 200):
                 idx = list(range(s, min(n, s + 200))) if m is None else m[s:s + 200]
                 metas = read_label_lines(li[4], idx) if li else [{}] * len(idx)
@@ -2927,6 +3089,8 @@ def frame_csv(q):
                     except Exception as e:              # 한 줄이 실패해도 파일은 끝까지
                         a = {"reason": "", "checks": [("bad", f"확인 실패: {type(e).__name__}: {e}")], "cons_text": "",
                              "cons_reason": "", "features": []}
+                    if idx[k] in vl:
+                        a = _voted_row(a)
                     key = _row_key(payload, lab, meta)
                     rc = latest.get(key) if latest else None    # LLM 재확인 (줄 내용 지문)
                     cx = cms.get(a.get("cons"), {}).get(key)    # 합의 (교차 확인)
@@ -2963,11 +3127,13 @@ def data_rows(q):
         metas = read_label_lines(li[4], [i for i, _ in items]) if li else [{}] * len(items)
         cache = frame_cache(d, dev)
         saved = cached_rows(cache, [i for i, _ in items]) if cache else None    # '전체 검증' 결과가 있으면 그대로
-        edits = read_edits(d)
+        edits, vl = read_edits(d), (voted_lines(d, dev) if cache else set())   # vl = 합의로 label 바꿈
         for k, ((i, g), line, meta) in enumerate(zip(items, lines, metas)):
             f = split_log(line)
             payload, method, lab = (f[6], f[5], f[7]) if len(f) == 8 else (line, "", "")
             a = saved[k] if saved else analyze(payload, lab, meta)
+            if i in vl:
+                a = _voted_row(a)
             e = edits.get(meta.get("sk")) or {}
             key = _row_key(payload, lab, meta)
             rc = latest.get(key) if latest else None    # LLM 재확인 (3_6, 줄 내용 지문)
@@ -3297,6 +3463,8 @@ def sup_start(kind, b):
             raise ValueError("초안이나 후보만 내보냅니다 (최종 승인한 버전은 고칠 수 없음)")
         if job_state("evalver")["running"]:
             raise ValueError("피처 테스트가 도는 중입니다 - 끝난 뒤 내보내세요")
+        if job_state("server")["running"]:              # 서버 사전 점검이 학습 파일을 읽는 중
+            raise ValueError("서버 반영 사전 점검이 도는 중입니다 - 끝난 뒤 내보내세요")
         args = ["export", "--version", name]
     RT.clear_stop("supervised")
     return {"pid": spawn("supervised", args), "args": args}
@@ -3311,6 +3479,8 @@ def _sup_busy(what):
         raise ValueError(f"비교·1차 확정이 도는 중입니다 - 끝난 뒤 {what}")
     if job_state("evalver")["running"] or _evq["todo"]:
         raise ValueError(f"피처 테스트가 도는 중입니다 - 끝난 뒤 {what}")
+    if job_state("server")["running"]:
+        raise ValueError(f"서버 반영 사전 점검이 도는 중입니다 - 끝난 뒤 {what}")
 
 
 def sup_experiments():
@@ -3362,11 +3532,15 @@ def sup_eval_state(q):
     ver = C.get_version(C.load_versions(), name)
     res = V.eval_results(name)
     rev = ver.get("rev")
+    try:                                                # 서버 반영 승인 조건 (5_8 gate, 로컬 전용 5_8a 가 있을 때만 켜짐)
+        server = sup_srv().gate(name, rev) if rev else None
+    except Exception as e:
+        server = {"active": False, "error": str(e)[:300]}
     return {"results": {str(k): x for k, x in res.items()}, "rev": rev,
             "check": V.check_targets(ver.get("targets") or {}, res.get(rev) or {}) if rev else None,
             "job": job_state("evalver"), "status": RT.read_status("eval_version"),
             "queue": {"name": _evq["name"], "rev": _evq["rev"], "todo": list(_evq["todo"]), "last": _evq["last"]},
-            "experiments": sup_experiments(), "default_exp": V.DEFAULT_EXP, "kinds": V.ADD_KINDS}
+            "experiments": sup_experiments(), "default_exp": V.DEFAULT_EXP, "kinds": V.ADD_KINDS, "server": server}
 
 
 def sup_cand_action(path, b):
@@ -3394,6 +3568,70 @@ def sup_cand_action(path, b):
     if path == "/api/sup/manual/remove":
         return V.remove_manual(name, b.get("file", ""))
     raise ValueError("path")
+
+
+# 후보 '서버 반영' (2026-11-04~, 5_8_server.py): 올릴 파일·레시피 사본(로컬 전용 5_8a)·로컬 사전 점검(job server)·서버 결과·체크리스트
+_srv = {"S": None}
+
+
+def sup_srv():
+    with _lock:
+        if _srv["S"] is None:
+            _srv["S"] = _load("sup_server_ui", "5_8_server.py")
+    return _srv["S"]
+
+
+def sup_server_state(q):
+    out = sup_srv().state(_q(q, "name"))
+    out["job"] = job_state("server")
+    out["run"] = RT.read_status("server_check")
+    return out
+
+
+def sup_server_action(path, b):
+    """서버 반영: 파일·사본 만들기, 사전 점검 시작·중지, 서버 결과·체크리스트 기록 (내보내기가 돌 때는 막음)."""
+    S = sup_srv()
+    name = b.get("name", "")
+    if path == "/api/sup/server/check/stop":
+        if job_state("server")["running"]:
+            RT.request_stop("server_check")
+        return {"stop_requested": True}
+    if job_state("supervised")["running"]:
+        raise ValueError("비교·1차 확정이 도는 중입니다 - 끝난 뒤 하세요")
+    if path == "/api/sup/server/check":
+        if job_state("server")["running"]:
+            raise ValueError("서버 반영 사전 점검이 이미 도는 중입니다")
+        _, _, rev, _ = S._ver(name)
+        devs = [d for d in (b.get("devs") or ["ips", "waf"]) if d in ("ips", "waf")]
+        if not devs:
+            raise ValueError("장비를 고르세요")
+        ver = S._check_ver(S.local(), str(b.get("ver") or S.STD))        # 피처 정의 판 (두 장비 모두 있어야)
+        try:                                            # 그리드 (서버 Train 처럼 트리 수 × 깊이): 그리드 행 표본 (0 = 전체), 끄면 RF 100 트리
+            grows = max(0, int(b.get("grid_rows", S.GRID_ROWS)))
+        except (TypeError, ValueError):
+            raise ValueError("그리드 행은 0 이상 정수")
+        args = ["check", "--version", name, "--rev", str(rev), "--dev", *devs, "--ver", ver] + \
+            (["--grid-rows", str(grows)] if b.get("grid", True) else ["--no-grid"])
+        RT.clear_stop("server_check")
+        return {"pid": spawn("server", args), "args": args}
+    if path == "/api/sup/server/prepare":
+        if job_state("server")["running"]:
+            raise ValueError("서버 반영 사전 점검이 도는 중입니다 - 끝난 뒤 다시 만드세요")
+        return S.prepare(name, b.get("tag", ""), b.get("nul", "drop"), b.get("labels", "keep"), str(b.get("ver") or S.STD))
+    if path == "/api/sup/server/result":
+        return S.record(name, b.get("dev", ""), b.get("kind", ""), b)
+    if path == "/api/sup/server/step":
+        return S.set_step(name, b.get("dev", ""), b.get("key", ""), b.get("done", True), b.get("memo", ""))
+    raise ValueError("path")
+
+
+def sup_server_file(q):
+    """서버 반영 파일 내려받기 (최신 rev 폴더 바로 아래 파일만, 이름으로)."""
+    d, files = sup_srv().files_of(_q(q, "name"))
+    fn = _q(q, "file")
+    if fn not in files:
+        raise ValueError("파일이 없습니다")
+    return d / fn
 
 
 def sup_candidates():
@@ -4170,6 +4408,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, recheck_state(q))
             if u.path == "/api/data/recheck/rules":
                 return self._send(200, recheck_rules(q))
+            if u.path == "/api/data/recheck/oldrule":        # '옛 규칙으로 지운 줄 다시 보기' (세기만)
+                return self._send(200, recheck_oldrule(q))
             if u.path == "/api/data/recheck/review":         # 합의 '추가 분석' 목록 (교차 확인)
                 return self._send(200, recheck_review(q))
             if u.path == "/api/data/conv/save":
@@ -4191,6 +4431,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, sup_eval_state(q))
             if u.path == "/api/sup/candidates":
                 return self._send(200, {"candidates": sup_candidates()})
+            if u.path == "/api/sup/server":                 # 후보 '서버 반영' 칸 (5_8)
+                return self._send(200, sup_server_state(q))
+            if u.path in ("/download/sup/server", "/download/sup/server/bundle"):   # bundle = 넘겨줄 묶음 (그때 만듦)
+                from urllib.parse import quote
+                if u.path.endswith("/bundle"):
+                    if job_state("server")["running"]:
+                        return self._send(409, {"error": "서버 반영 사전 점검이 도는 중입니다 - 끝난 뒤 받으세요"})
+                    q = dict(q, file=[sup_srv().bundle(_q(q, "name"))])
+                p = sup_server_file(q)
+                ctype = {".zip": "application/zip", ".csv": "text/csv; charset=utf-8", ".json": "application/json"}.get(
+                    p.suffix.lower(), "text/plain; charset=utf-8")
+                return self._send(200, p.read_bytes(), ctype, {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(p.name)}"})
             if u.path == "/download/sup/report":
                 C, _ = sup_mods()
                 _, _, base = _sup_base(_q(q, "base"))
@@ -4245,6 +4497,10 @@ class Handler(BaseHTTPRequestHandler):
             return 200, save_edit(b)
         if path == "/api/data/check":
             return 200, check_edit(b)
+        if path == "/api/data/recheck/oldrule":          # 옛 규칙으로 지운 줄: revert(바뀌는 줄 삭제 되돌리기)·restore(되돌림 취소)
+            if b.get("action") not in ("revert", "restore"):
+                raise ValueError("action (revert·restore)")
+            return 200, recheck_oldrule(b=b)
         if path == "/api/data/edit/bad":
             return 200, delete_bad(b.get("date", ""), b.get("dev", "ips"))
         if path == "/api/data/recheck/plan":
@@ -4280,6 +4536,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/api/sup/targets", "/api/sup/approve", "/api/sup/discard", "/api/sup/additions", "/api/sup/manual",
                     "/api/sup/manual/remove"):
             return 200, sup_cand_action(path, b)
+        if path in ("/api/sup/server/prepare", "/api/sup/server/check", "/api/sup/server/check/stop", "/api/sup/server/result",
+                    "/api/sup/server/step"):
+            return 200, sup_server_action(path, b)
         if path == "/api/sup/stop":
             if not job_state("supervised")["running"]:
                 return 409, {"error": "실행 중인 비교·확정이 없습니다"}
@@ -4415,6 +4674,7 @@ main{padding:16px;max-width:1500px;margin:0 auto}.page{display:none}.page.on{dis
 .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:16px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}.card h2{font-size:15px;margin:0 0 12px}
 .big{font-size:44px;font-weight:700;line-height:1}.muted{color:var(--muted)}.row{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end}
+.prog{align-self:center;font-size:13px;white-space:nowrap}   /* 강제 중지 옆 진행률 */
 .bar{height:12px;background:var(--chip);border-radius:6px;overflow:hidden;margin:10px 0}.bar>i{display:block;height:100%;background:var(--accent)}
 table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;padding:6px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--card)}
 td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}
@@ -4435,7 +4695,7 @@ details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-top:8px}
 tr.lv-bad td{background:rgba(214,69,69,.06)}.reason{font-size:12.5px;min-width:240px}
 .pager{display:flex;gap:8px;align-items:center;margin-top:10px}
 .est{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:13px;line-height:1.6}.est b{font-weight:600}#gOrderInfo .warn,.est .warn{color:var(--warn);font-weight:600}
-.c-OK{background:#d7f3e3;color:#13633a}.c-RULE{background:#dde8fb;color:#1f4fa3}.c-CHECK{background:#fff0d1;color:#8a5a00}.c-BAD{background:#fde0e0;color:#a32424}
+.c-OK{background:#d7f3e3;color:#13633a}.c-RULE{background:#dde8fb;color:#1f4fa3}.c-CHECK{background:#fff0d1;color:#8a5a00}.c-BAD{background:#fde0e0;color:#a32424}.c-VOTED{background:#ece0fb;color:#5b2a9a}
 .vsum{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:13px}.vwarn{flex-basis:100%;color:var(--warn);font-size:13px;line-height:1.6}
 .xg{margin-top:6px}.xh{margin-top:6px}.xhr{display:flex;gap:6px;align-items:center;font-size:12px;line-height:1.6}.xhl{width:64px;text-align:right}
 .hb{display:inline-block;height:9px;border-radius:2px;background:#9a9a9a;vertical-align:middle;margin-right:4px}.hb.ok{background:var(--ok)}.hb.mid{background:var(--warn)}.hb.bad{background:var(--bad)}
@@ -4487,7 +4747,7 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
   <label>검토 모델<input id="gRev" placeholder="예: claude_cli:opus"></label></div></details>
  <div class="row" style="margin-top:12px">
   <button id="bDry">건수 확인 (호출 없음)</button><button id="bPilot">파일럿 5개</button>
-  <button class="primary" id="bGen">생성 시작</button><button id="bStop">중지 (지금 요청까지)</button><button class="danger" id="bKill">강제 중지</button></div>
+  <button class="primary" id="bGen">생성 시작</button><button id="bStop">중지 (지금 요청까지)</button><button class="danger" id="bKill">강제 중지</button><span class="muted prog" id="genProg" style="display:none"></span></div>
  <div class="msg" id="genMsg"></div><pre id="genLog"></pre></div>
 <div class="card"><h2>수집 (1_0)</h2>
  <div class="status"><span class="dot" id="agDot"></span><span id="agStatus"></span></div>
@@ -4539,14 +4799,14 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
   <label>label<select id="dLabel"><option value="">전체</option><option>anomalies</option><option>normal</option></select></label>
   <label>룰 id<input id="dRule" placeholder="예: et:1:2001044" style="width:150px"></label>
   <label>payload 검색<input id="dQ" style="width:200px"></label>
-  <label>label 정합성<select id="dCons"><option value="">전체</option><option value="OK">정합</option><option value="RULE">정합 (룰 기준)</option><option value="CHECK">확인 필요</option><option value="BAD">불일치</option></select></label>
+  <label>label 정합성<select id="dCons"><option value="">전체</option><option value="OK">정합</option><option value="RULE">정합 (룰 기준)</option><option value="CHECK">확인 필요</option><option value="BAD">불일치</option><option value="VOTED">합의로 label 바꿈</option></select></label>
   <label>보류 대상<select id="dHold"><option value="">전체</option><option value="rule">'정합 (룰 기준)' 공격</option><option value="pyua">python-requests UA 정상</option></select></label>
-  <label>LLM 재확인<select id="dLlm"><option value="">전체</option><option value="todo">불일치 중 아직 안 함</option><option value="ok">label 맞음</option><option value="flip">label 반대</option><option value="unfit">학습에 부적합</option><option value="unknown">판단 불가</option><option value="any">재확인한 것 전부</option><option value="c_keep">합의: 확인됨 (유지)</option><option value="c_delete">합의: 삭제</option><option value="c_review">합의: 추가 분석</option><option value="c_flip">합의: label 반대 (사람)</option></select></label>
+  <label>LLM 재확인<select id="dLlm"><option value="">전체</option><option value="todo">불일치 중 아직 안 함</option><option value="ok">label 맞음</option><option value="flip">label 반대</option><option value="unfit">학습에 부적합</option><option value="unknown">판단 불가</option><option value="any">재확인한 것 전부</option><option value="c_keep">합의: 확인됨 (유지)</option><option value="c_delete">합의: 부적합 삭제</option><option value="c_review">합의: 추가 분석</option><option value="c_flip">합의: label 반대 (투표·사람)</option></select></label>
   <button id="dGo">조회</button><button id="dVerifyNew">검증 안 한 데이터만 검증</button><button id="dVerify">전체 검증</button><button class="danger" id="dVerifyStop" style="display:none">검증 중지</button><button id="dSave" style="display:none" title="고른 날짜(전체면 모든 날짜)의 데이터 전체를 08_dataset/&lt;날짜&gt;/ 에 로그 + label 파일로 저장">파일로 저장</button><a id="dDown" style="font-size:13px;align-self:center">CSV 내려받기</a>
  </div>
  <div class="vsum" id="dVsum"></div><div class="vsum" id="dSaveSum" style="display:none"></div>
  <div class="vsum" id="dEdits"></div><div id="dEditList" style="display:none"></div>
- <div class="vsum" id="dRc"></div><div class="vsum" id="dRcR"></div><div id="dRcRules" style="display:none"></div><div id="dRcX" style="display:none"></div>
+ <div class="vsum" id="dRc"></div><div class="vsum" id="dRcR"></div><div id="dRcRules" style="display:none"></div><div id="dRcX" style="display:none"></div><div id="dRcOld" style="display:none"></div>
  <div class="rcbox" id="dRcBox" style="display:none"><div class="row">
   <label>대상<select id="rcTarget"><option value="bad">불일치 (전부)</option><option value="rule">정합 (룰 기준) - 룰당 표본</option></select></label>
   <label>날짜<select id="rcDate"></select></label>
@@ -4554,12 +4814,12 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
   <span class="optc" id="rcSample" hidden><label class="inl"><input type="checkbox" id="rcLlmOnly" checked> LLM 원본만 (증강 제외)</label>
    <label>룰당<span class="optc"><select id="rcPer"><option>1</option><option selected>3</option><option>5</option><option value="custom">직접 입력</option></select><input id="rcPerN" type="number" min="1" max="1000" step="1" value="10" style="width:64px" hidden></span></label></span></div>
  <div class="row">
-  <label>방식<select id="rcMode"><option value="">새로 재확인</option><option value="cross">교차 확인 (1번째 결과를 2번째 모델로)</option></select></label>
+  <label>방식<select id="rcMode"><option value="">새로 재확인</option><option value="cross">교차 확인 (1번째 결과를 2번째 모델로)</option><option value="tiebreak">3차 모델 투표 (합의가 '투표 갈림'인 줄)</option></select></label>
   <label id="rcFirstL" hidden>1번째 결과 <span class="muted">(이 모델이 맞음·판단 불가라 한 줄만)</span><select id="rcFirst"></select></label>
   <label><span id="rcModelL">모델 <span class="muted">(이번 실행만 · 비우면 검토 모델)</span></span><input id="rcModel" list="rcModels" style="width:230px"><datalist id="rcModels"></datalist></label>
   <label>추론 강도<select id="rcEff"></select></label>
   <button id="rcPlan">대상·예상 보기 (호출 없음)</button><button class="primary" id="rcGo">재확인 시작</button>
-  <button id="rcStop" style="display:none">중지 (지금 요청까지)</button><button class="danger" id="rcKill" style="display:none">강제 중지</button></div>
+  <button id="rcStop" style="display:none">중지 (지금 요청까지)</button><button class="danger" id="rcKill" style="display:none">강제 중지</button><span class="muted prog" id="rcProg" style="display:none"></span></div>
  <div class="row" id="rcPickRow" hidden>
   <label>대상 룰<select id="rcPickSel"><option value="mid">애매한 룰만 (1번째 모델의 룰별 삭제 비율로)</option><option value="all">전부</option></select></label>
   <span class="optc" id="rcPickOpt"><label>삭제 비율<span class="optc"><input id="rcLo" type="number" min="0" max="99" value="30" style="width:52px">% 이상 ~<input id="rcHi" type="number" min="1" max="100" value="70" style="width:52px">% 미만</span></label>
@@ -4631,7 +4891,7 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
 <div class="card"><h2>버전 <span class="muted" style="font-weight:400" id="sVerHdr"></span></h2><div id="sVers" style="overflow-x:auto"></div>
  <div class="muted" style="font-size:12.5px;margin-top:6px">흐름: 초안(담기) → <b>1차 확정</b>(후보 rev 1, 학습 파일 내보내기 - 아직 기준이 될 수 없음) → <b>피처 테스트</b>(precision·recall·F1, 기준 버전만으로 학습한 결과와 같은 시험 세트에서) → 필요하면 <b>데이터 추가</b>(다시 내보내면 rev+1) → 목표를 넘으면 <b>최종 승인</b>(확정·잠금, 다음 버전의 기준)</div>
  <details style="margin-top:10px"><summary>기준 버전 등록 (기존 학습데이터 · 넣을 것)</summary><div id="sReg"></div></details></div>
-<div class="card" id="sCandCard" style="display:none"><h2>후보 버전 <span class="muted" style="font-weight:400" id="sCandHdr"></span><button class="sm" id="sCandClose" style="float:right">닫기</button></h2><div id="sCandBody"></div></div>
+<div class="card" id="sCandCard" style="display:none"><h2>후보 버전 <span class="muted" style="font-weight:400" id="sCandHdr"></span><button class="sm" id="sCandClose" style="float:right">닫기</button></h2><div id="sCandBody"></div><div id="sSrvBody"></div><div id="sCandFoot"></div></div>
 </section>
 </main>
 <script>
@@ -4663,6 +4923,9 @@ async function loadState(){S=await get("/api/state");const g=S.generation,c=S.co
  $("genDot").className="dot"+(g.running||rdo.starting?" on":"");
  $("genStatus").textContent=rdo.starting&&!g.running?"다시 만들기 시작하는 중… (다시 검토할 요청을 찾는 중, 1분쯤)":g.running&&redo?`다시 만들기 실행 중 (검토에서 뺀 샘플 다시 검토) · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작 · 멈추려면 '강제 중지'`:g.running?(g.starting?"시작하는 중…":`실행 중 · 단계 ${g.lock.step||"-"} · 입력 ${g.lock.input_date||"-"}${g.lock.custom_first?" · 사용자 룰 먼저":""} · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작`+(g.stop_requested?" · 중지 요청됨":"")):(c.running||(a.running&&(a.status||{}).state==="수집 중")?"대기 · 지금 수집 중이지만 생성을 함께 시작할 수 있습니다 (시작할 때의 입력 날짜를 끝까지 씀)":"대기");
  for(const id of["bDry","bPilot","bGen"])$(id).disabled=g.running||rdo.starting;$("bStop").disabled=!g.running||redo;$("bKill").disabled=!g.running;
+ {const r=g.run,G=(r&&r.gen)||{},R=(r&&r.rev)||{};   // 강제 중지 옆 진행률 (서버가 로그로 계산한 run, 실행 중일 때만)
+  progSet("genProg",g.running&&r&&r.state==="running"&&!r.error?`진행 ${r.pct}%`+(r.dry_run?"":` · 생성 ${fmt((G.ok||0)+(G.fail||0))}/${fmt(G.target||0)}${G.fail?` (실패 ${fmt(G.fail)})`:""}`
+   +(R.target?` · 검토 ${fmt((R.ok||0)+(R.fail||0))}/${fmt(R.target)}${R.fail?` (실패 ${fmt(R.fail)})`:""}`:""))+(r.remaining_s!=null?` · 남은 약 ${mins(r.remaining_s)}`:""):"")}
  if(EX)exRedoUi();if(M)mHints();
  if(document.activeElement!==$("gN"))estimate();
  const ast=a.status||{},busy=c.running||(a.running&&ast.state==="수집 중");$("agDot").className="dot"+(busy?" on":a.running?" idle":"");
@@ -4676,6 +4939,9 @@ async function loadState(){S=await get("/api/state");const g=S.generation,c=S.co
  for(const id of["genLog","agLog"])$(id).scrollTop=1e9;}
 /* 이번 실행의 진행률 (서버가 3_0·3_2·3_3 로그만 읽어 계산) */
 function hms(s){s=Math.max(0,Math.round(s||0));const h=Math.floor(s/3600),m=Math.floor(s%3600/60);return h?`${h}시간 ${m}분`:m?`${m}분 ${s%60}초`:`${s}초`}
+function mins(s){s=Math.max(0,Math.round(s||0));const h=Math.floor(s/3600),m=Math.round(s%3600/60);return h?`${h}시간 ${m}분`:s>=60?`${Math.round(s/60)}분`:`${s}초`}   // 강제 중지 옆 진행률의 남은 시간 (분 단위)
+/* 강제 중지 버튼 옆 진행률 (2026-11-04~): 실행 중일 때만 보이고, 끝나면 숨김 (결과는 원래 자리에) */
+function progSet(id,txt){const el=$(id);if(!el)return;el.textContent=txt||"";el.style.display=txt?"":"none"}
 function clock(sec){const d=new Date(Date.now()+sec*1000),t=d.toTimeString().slice(0,5);return d.toDateString()===new Date().toDateString()?t:`${d.getMonth()+1}/${d.getDate()} ${t}`}
 function runHtml(g){const r=g.run;
  if(g.starting)return '<div class="muted">시작하는 중…</div>';
@@ -4937,7 +5203,7 @@ function dSummary(){const v=$("dDate").value,ds=v==="all"?D:D.filter(d=>d.date==
  $("dSum").textContent=`· ${v==="all"?"전체":v} · ${fmt(a+n)}건 (anomalies ${fmt(a)} / normal ${fmt(n)}) · 룰 ${fmt(ds.reduce((s,d)=>s+d.rules,0))}개`;
  // 지금 조건에 맞는 모든 줄을 표의 열 그대로 CSV
  $("dDown").href="/download/frame?"+new URLSearchParams({date:v,dev:$("dDev").value,label:$("dLabel").value,rule:$("dRule").value.trim(),q:$("dQ").value.trim(),cons:$("dCons").value,hold:$("dHold").value,llm:$("dLlm").value});
- $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다. <b>LLM 재확인</b>: '불일치' 줄 전부 또는 '정합 (룰 기준)' 줄의 룰당 표본을 고른 LLM 에 다시 물은 판정(label 맞음·반대·학습에 부적합·판단 불가)과 근거 - 코드 판정과 따로 보이고, 반영은 위 버튼으로 수정·삭제를 저장합니다 (대상마다 따로 되돌림). '정합 (룰 기준)'의 룰별 요약에서 삭제가 많은 룰을 6. 선별의 '룰 조정 - 빼기'로 넘길 수 있습니다. <b>교차 확인·합의</b>: 재확인 상자의 '방식 - 교차 확인'은 1번째 모델이 맞음·판단 불가라 한 줄만 다른 모델로 다시 묻고(반대·부적합은 이미 삭제라 묻지 않음, 지시문은 같음), 줄마다 합의를 냅니다 - 하나라도 반대·부적합이면 삭제(반대도 label 을 바꾸지 않음), 두 모델 이상 모두 맞음이면 확인됨(유지), 그 밖은 추가 분석(두 모델의 판정·근거를 나란히 보고 줄마다 또는 묶어서 유지·삭제·label 반대). 6. 선별의 '불일치' 중 남기기 옵션은 합의가 확인됨인 것만 남깁니다.";if(dConv())$("dHelp").innerHTML=convHelp();}
+ $("dHelp").innerHTML="<b>label 사유</b>: 어떤 룰의 어떤 조건을 만족·불일치했는지 + 생성 메모. <b>검증 결과</b>: 생성 때 검증(코드 검사·검토 모델·증강) + 지금 현재 룰로 다시 확인. <b>label 정합성</b>: 라벨이 증거와 맞는지 — 정합(룰 + 범용 공격 흔적·다른 공격 룰도 일치) / 정합(룰 기준: 이 룰의 고유 패턴으로만 공격) / 확인 필요 / 불일치. <b>탐지 피처</b>: ML 피처(4.1) 중 이 payload 에서 켜지는 것 — k_ 공격 흔적, ra_ 신뢰할 수 있는 공격 룰, r_ 이 룰·정규식. 피처 이름에 마우스를 올리면 설명이 나오고, 누르면 <a href=\"#/features\">5. 피처</a> 페이지에서 봅니다. <b>보류 대상</b>: 6. 선별의 보류 옵션에 걸리는 샘플만 — '정합 (룰 기준)' 공격(그날 '전체 검증'이 있어야 함) / python-requests UA 정상. <b>CSV 내려받기</b>: 지금 조건(날짜·장비·label·룰·검색·정합성·보류 대상)에 맞는 모든 줄을 이 표의 열 그대로 CSV(엑셀용, payload 는 로그와 같은 한 줄)로 받습니다. '전체 검증'을 해 두면 바로 받고, 아니면 줄마다 다시 확인해 1천 줄에 약 15초 걸립니다. 로그 형식(|||) 파일은 <a href=\"#/sup\">6. 기존 학습데이터와 비교</a>에서 버전을 확정할 때 기존 학습데이터와 합쳐 만듭니다. <b>LLM 재확인</b>: '불일치' 줄 전부 또는 '정합 (룰 기준)' 줄의 룰당 표본을 고른 LLM 에 다시 물은 판정(label 맞음·반대·학습에 부적합·판단 불가)과 근거 - 코드 판정과 따로 보이고, 반영은 위 버튼으로 수정·삭제를 저장합니다 (대상마다 따로 되돌림). '정합 (룰 기준)'의 룰별 요약에서 삭제가 많은 룰을 6. 선별의 '룰 조정 - 빼기'로 넘길 수 있습니다. <b>교차 확인·합의</b>: 재확인 상자의 '방식 - 교차 확인'은 1번째 모델이 부적합이 아니라고 한 줄을 다른 모델로 다시 묻고(부적합은 이미 삭제라 묻지 않음, 지시문은 같음), 줄마다 합의를 냅니다 (2026-11-04~) - 어느 모델이든 '학습에 부적합'이면 삭제, 그 밖에는 맞음·반대 다수결(두 모델 이상): 맞음 다수면 확인됨(유지), 반대 다수면 label 반대(label 을 바꾸고 투표 결과·근거를 사유로), 판정이 한 모델뿐이면 2번째 모델 대기, 갈리면 투표 갈림 → '3차 모델로 투표'(그 줄을 아직 판정하지 않은 모델로 다시 묻고 다수결, 그래도 갈리면 추가 분석에서 사람이 유지·삭제·label 반대). '정합 (룰 기준)' 줄의 label 반대는 룰에 걸리는 정상(또는 룰에 안 걸리는 공격)을 만듭니다. 합의로 label 을 바꿔 학습 로그에 반영한 줄은 검증에서 '불일치' 대신 '합의로 label 바꿈'으로 따로 셉니다. 6. 선별의 '불일치' 중 남기기 옵션은 합의가 확인됨인 것만 남깁니다.";if(dConv())$("dHelp").innerHTML=convHelp();}
 function dVUrl(){return `/api/data/verify?date=${$("dDate").value}&dev=${dSrc()}${dConv()?"&view=conv":""}`}   // conv = FW·웹 (원본 검증, 장비 이름 없이)
 async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=await get(dVUrl())}catch(e){$("dVsum").textContent="";return}
  dV=s;dReady=s.status==="done"&&!!s.frame_ready;renderStale(s);
@@ -4953,7 +5219,7 @@ async function loadVerify(){const v=$("dDate").value;if(!v)return;let s;try{s=aw
  const gaps=(s.gaps||[]).length?`<div class="vwarn">${v!=="all"?esc(s.gaps[0].text):`정합성·LLM 재확인 조건에서 빠지는 날짜 ${s.gaps.length}개 - ${s.gaps.map(g=>`${esc(g.date)} ${({stale:"낡음",none:"검증 안 함",error:"검증 실패"})[g.why]||esc(g.why)}`).join(" · ")} <span class="muted">(까닭은 위 안내 줄, 그 날짜를 고르면 자세히)</span>`}</div>`:"";
  if(s.status!=="done"&&!s.done_dates){$("dVsum").innerHTML=(s.status==="error"&&v==="all"?`<span class="muted">검증 오류: ${esc(s.error)}</span>`:gaps?"":`<span class="muted">검증 전 — 모든 줄의 label 정합성을 확인하면 정합성으로 걸러 볼 수 있습니다.</span>`)+gaps+stop+est;return}
  const tot=Object.values(s.summary).reduce((a,b)=>a+b,0);
- $("dVsum").innerHTML=`<b>label 정합성${dConv()?" (원본 payload 기준)":""} (${fmt(tot)}줄${s.status!=="done"?` · 검증한 날짜 ${s.done_dates}/${s.n_dates}`:""})</b>`+["OK","RULE","CHECK","BAD"].map(k=>`<span class="chip c-${k}" data-c="${k}">${esc(s.names[k])} ${fmt(s.summary[k]||0)} (${tot?(100*(s.summary[k]||0)/tot).toFixed(1):0}%)</span>`).join("")+`<span class="muted">${s.finished_at.replace("T"," ")} 검증${s.reused?` · 이미 확인한 결과 ${fmt(s.reused)}줄 그대로 씀`:""}${s.old_rules?` · ${fmt(s.old_rules)}줄은 이전 룰 입력(${esc(Object.keys(s.rule_inputs).filter(k=>k!==s.latest_input).sort().join(", "))}) 기준 - 최신 룰(${esc(s.latest_input)})로 다시 보려면 '전체 검증'`:""}</span>`+gaps+stop+(s.est_new?est:"");
+ $("dVsum").innerHTML=`<b>label 정합성${dConv()?" (원본 payload 기준)":""} (${fmt(tot)}줄${s.status!=="done"?` · 검증한 날짜 ${s.done_dates}/${s.n_dates}`:""})</b>`+["OK","RULE","CHECK","BAD",...(s.summary.VOTED?["VOTED"]:[])].map(k=>`<span class="chip c-${k}" data-c="${k}">${esc(s.names[k])} ${fmt(s.summary[k]||0)} (${tot?(100*(s.summary[k]||0)/tot).toFixed(1):0}%)</span>`).join("")+`<span class="muted">${s.finished_at.replace("T"," ")} 검증${s.reused?` · 이미 확인한 결과 ${fmt(s.reused)}줄 그대로 씀`:""}${s.old_rules?` · ${fmt(s.old_rules)}줄은 이전 룰 입력(${esc(Object.keys(s.rule_inputs).filter(k=>k!==s.latest_input).sort().join(", "))}) 기준 - 최신 룰(${esc(s.latest_input)})로 다시 보려면 '전체 검증'`:""}</span>`+gaps+stop+(s.est_new?est:"");
  $("dVsum").querySelectorAll("[data-c]").forEach(c=>c.onclick=()=>{$("dHold").value="";dHoldUi();$("dCons").value=c.dataset.c;dOff=0;loadData()});renderEdits();}
 /* 화면 4 위쪽 '검증이 낡은 날짜' (2026-11-02~): 검증한 뒤 학습 로그가 다시 만들어진 날짜·장비 + 그때 돌던 작업, '바뀐 날짜만 다시 검증',
    학습 로그를 다시 만드는 작업이 끝나면 자동으로 다시 검증 (이 화면 서버가 켜져 있는 동안) */
@@ -5043,18 +5309,25 @@ $("dEditList").addEventListener("click",async e=>{const b=e.target.closest("butt
    시작 전 대상·예상·확인 창. 줄 1: 실행 상태 + '불일치' 판정·반영, 줄 2: '정합 (룰 기준)' 판정·룰별 요약·반영 (대상마다 따로 되돌림).
    FW·웹 보기에서는 IPS 라고 쓰지 않는다 (rcDevName) */
 const RCV={ok:"label 맞음",flip:"label 반대",unfit:"학습에 부적합",unknown:"판단 불가"},RCC={ok:"c-OK",flip:"c-BAD",unfit:"c-CHECK",unknown:""},RCT={bad:"불일치",rule:"정합 (룰 기준)"};
-// 합의 (교차 확인, 2026-11-02~): 상태·색·까닭 (3_6 consensus_state)
-const XS={keep:"확인됨 (유지)",delete:"삭제",flip:"label 반대",review:"추가 분석"},XC={keep:"c-OK",delete:"c-BAD",flip:"c-CHECK",review:""},XW={pending:"2번째 모델 대기",mixed:"판단 불가가 섞임",decided:"표시함",vote:""};
-function xCell(c){return `<div class="llm"><span class="chip ${XC[c.s]||""}">합의 ${esc(XS[c.s]||c.s)}${XW[c.w]?" · "+XW[c.w]:""}</span>${c.v.map(([m,v,r,at])=>`<div><span class="chip ${RCC[v]||""}">${esc(m)} ${esc(RCV[v]||v)}</span> ${esc(r)} <span class="muted">(${esc((at||"").slice(5,16).replace("T"," "))})</span></div>`).join("")}</div>`}
-function xLine(X,t){const cc=t==="rule"?"RULE":"BAD";if(!X||!(X.keep+X.delete+X.review+X.flip))return "";
- return `<span class="muted">합의</span>`+[["keep",X.keep],["delete",X.delete],["flip",X.flip],["review",X.review]].map(([k,v])=>v?`<span class="chip ${XC[k]}" data-l="c_${k}" data-c="${cc}" title="표에서 보기">${XS[k]} ${fmt(v)}${k==="keep"&&X.kept?` (유지 표시 ${fmt(X.kept)})`:""}${k==="review"?` (2번째 모델 대기 ${fmt(X.pending)} · 엇갈림 ${fmt(X.mixed)})`:""}</span>`:"").join("")}
-function xButtons(X,t){const tt=t==="rule"?' data-t="rule"':"",kp=X.keep-X.kept;
- return (X.delete?`<button class="sm danger" data-r="xdelete"${tt}>합의 삭제 ${fmt(X.delete)}줄 → 삭제로 저장</button>`:"")+(kp>0?`<button class="sm" data-r="xkeep"${tt}>확인됨 ${fmt(kp)}줄 유지 표시</button>`:"")+(X.review?`<button class="sm" data-r="xreview"${tt}>추가 분석 ${fmt(X.review)}줄</button>`:"")}
+// 합의 (교차 확인 2026-11-02~, 2026-11-04~ 부적합 삭제 + 다수결 투표): 상태·색·까닭 (3_6 consensus_state)
+const XS={keep:"확인됨 (유지)",delete:"부적합 삭제",flip:"투표로 label 반대",review:"추가 분석"},XC={keep:"c-OK",delete:"c-BAD",flip:"c-CHECK",review:""},
+ XW={pending:"2번째 모델 대기",split:"투표 갈림",mixed:"판단 불가가 섞임",unfit:"",decided:"표시함",vote:""};
+const XRULE="'정합 (룰 기준)' 줄의 label 반대는 룰에 걸리는 정상(또는 룰에 안 걸리는 공격)을 만듭니다";
+function xCell(c){return `<div class="llm"><span class="chip ${XC[c.s]||""}">합의 ${esc(c.s==="flip"&&c.w==="decided"?"label 반대":XS[c.s]||c.s)}${XW[c.w]?" · "+XW[c.w]:""}</span>${c.v.map(([m,v,r,at])=>`<div><span class="chip ${RCC[v]||""}">${esc(m)} ${esc(RCV[v]||v)}</span> ${esc(r)} <span class="muted">(${esc((at||"").slice(5,16).replace("T"," "))})</span></div>`).join("")}</div>`}
+function xLine(X,t){const cc=t==="rule"?"RULE":"BAD",sp=X?(X.split??X.mixed??0):0;if(!X||!(X.keep+X.delete+X.review+X.flip))return "";
+ return `<span class="muted">합의</span>`+[["keep",X.keep],["delete",X.delete],["flip",X.flip],["review",X.review]].map(([k,v])=>v?`<span class="chip ${XC[k]}" data-l="c_${k}" data-c="${cc}" title="표에서 보기">${XS[k]} ${fmt(v)}${k==="keep"&&X.kept?` (유지 표시 ${fmt(X.kept)})`:""}${k==="review"?` (2번째 모델 대기 ${fmt(X.pending)} · 투표 갈림 ${fmt(sp)})`:""}</span>`:"").join("")}
+function xButtons(X,t){const tt=t==="rule"?' data-t="rule"':"",kp=X.keep-X.kept,sp=X.split??X.mixed??0;
+ return (X.delete?`<button class="sm danger" data-r="xdelete"${tt} title="어느 모델이든 '학습에 부적합'이라 한 줄">부적합 삭제 ${fmt(X.delete)}줄 → 삭제로 저장</button>`:"")+
+  (X.flip?`<button class="sm" data-r="xflip"${tt} title="두 모델 이상이 판정하고 '반대'가 다수인 줄 - label 을 바꾸고 투표 결과·근거를 사유로${t==="rule"?" · "+XRULE:""}">투표로 label 반대 ${fmt(X.flip)}줄 → label 바꿔 저장</button>`:"")+
+  (kp>0?`<button class="sm" data-r="xkeep"${tt}>확인됨 ${fmt(kp)}줄 유지 표시</button>`:"")+(X.review?`<button class="sm" data-r="xreview"${tt}>추가 분석 ${fmt(X.review)}줄</button>`:"")+
+  (sp&&X.split!=null?`<button class="sm" data-r="xvote"${tt} title="투표 갈림 줄을 그 줄을 아직 판정하지 않은 다른 모델(3차)로 다시 묻고 다수결">3차 모델로 투표 (갈림 ${fmt(sp)}줄)…</button>`:"")+
+  (t==="rule"&&X.flip?`<span class="muted" style="font-size:12px">※ ${XRULE}</span>`:"")}
 function xUndo(n,X,t){const d=X?X.decided:0;return n||d?`<button class="sm" data-r="undo"${t==="rule"?' data-t="rule"':""}>LLM 반영 되돌리기 (수정·삭제 ${fmt(n)}건${d?` · 표시 ${fmt(d)}줄`:""})</button>`:""}
 let dRcS=null,dRcT=0,rcInit=false,rcWas=false,rcMsg="",rcMsgR="",rcSyncKey="",rcRulesD=null,rcThr=50,rcMinN=2,rcRulesG=null,rcProb=true;
 function rcDevName(d){return d==="ips"&&dConv()?"원본 payload":d.toUpperCase()}
-function rcSampleUi(){const r=$("rcTarget").value==="rule",x=$("rcMode").value==="cross";$("rcSample").hidden=!r||x;$("rcPerN").hidden=!r||x||$("rcPer").value!=="custom";
- $("rcFirstL").hidden=$("rcPickRow").hidden=!x;$("rcPickOpt").hidden=$("rcPickSel").value!=="mid";$("rcModelL").innerHTML=x?'2번째 모델 <span class="muted">(1번째와 다른 모델 · 이번 실행만)</span>':'모델 <span class="muted">(이번 실행만 · 비우면 검토 모델)</span>';
+function rcSampleUi(){const r=$("rcTarget").value==="rule",x=$("rcMode").value==="cross",tb=$("rcMode").value==="tiebreak";$("rcSample").hidden=!r||x||tb;$("rcPerN").hidden=!r||x||tb||$("rcPer").value!=="custom";
+ $("rcFirstL").hidden=$("rcPickRow").hidden=!x;$("rcPickOpt").hidden=$("rcPickSel").value!=="mid";
+ $("rcModelL").innerHTML=x?'2번째 모델 <span class="muted">(1번째와 다른 모델 · 이번 실행만)</span>':tb?'3차 모델 <span class="muted">(투표 갈림 줄을 아직 판정하지 않은 모델 · 이번 실행만)</span>':'모델 <span class="muted">(이번 실행만 · 비우면 검토 모델)</span>';
  if(x){rcFirstFill();if(!$("rcModel").value.trim()&&dRcS&&dRcS.cross)$("rcModel").value=dRcS.cross.default}}   // 교차 확인: 표본 대신 1번째가 판정한 줄
 function rcFirstFill(){const sel=$("rcFirst"),cur=sel.value,ms=((dRcS&&dRcS.cross&&dRcS.cross.models)||{})[$("rcTarget").value]||[];
  sel.innerHTML=ms.length?ms.map(([m,n])=>`<option value="${esc(m)}">${esc(m)} (${fmt(n)}줄)</option>`).join(""):'<option value="">(이 대상을 판정한 모델 없음)</option>';if(ms.some(([m])=>m===cur))sel.value=cur}
@@ -5074,10 +5347,10 @@ async function loadRc(){clearTimeout(dRcT);const v=$("dDate").value,dv=dSrc();if
  let h="<b>LLM 재확인</b>";
  if(run&&!fresh)h+=`<span>시작하는 중… ('${tn}' 줄과 그 룰을 읽는 중)</span>`;
  else if(run){const fin=(st.req_done||0)+(st.req_fail||0);
-  h+=`<span><b>도는 중</b> ('${tn}'${st.per_rule?` 룰당 ${st.per_rule}개`:""} · ${esc(st.model||"")}${st.cross?` · 교차 확인 ← ${esc(st.cross)}${st.pick?` (애매한 룰 ${Math.round(st.pick.lo*100)}~${Math.round(st.pick.hi*100)}%)`:""}`:""}) · 요청 ${fmt(fin)} / ${fmt(st.req_total||0)} · 판정 ${fmt(st.rows_done||0)} / ${fmt(st.rows_total||0)}줄${st.req_fail?` · 실패 ${st.req_fail}`:""}${st.eta_s!=null?` · 남은 약 ${hms(st.eta_s)}`:""}${s.job.stop_requested?" · <b>중지 요청됨</b> (보낸 요청까지)":""}</span>`}
+  h+=`<span><b>도는 중</b> ('${tn}'${st.per_rule?` 룰당 ${st.per_rule}개`:""} · ${esc(st.model||"")}${st.cross?` · 교차 확인 ← ${esc(st.cross)}${st.pick?` (애매한 룰 ${Math.round(st.pick.lo*100)}~${Math.round(st.pick.hi*100)}%)`:""}`:""}${st.tiebreak?" · 3차 모델 투표 (투표 갈림 줄)":""}) · 요청 ${fmt(fin)} / ${fmt(st.req_total||0)} · 판정 ${fmt(st.rows_done||0)} / ${fmt(st.rows_total||0)}줄${st.req_fail?` · 실패 ${st.req_fail}`:""}${st.eta_s!=null?` · 남은 약 ${hms(st.eta_s)}`:""}${s.job.stop_requested?" · <b>중지 요청됨</b> (보낸 요청까지)":""}</span>`}
  else if(st.state==="running")h+=`<span class="muted">지난 재확인이 끝나지 않고 멈춤 (강제 중지 등) - 다시 시작하면 남은 줄만</span>`;
- else if(st.finished_at)h+=`<span class="muted">${esc(isoClock(st.finished_at))} '${tn}' · ${esc(st.model||"")}${st.cross?` (교차 확인 ← ${esc(st.cross)}${st.pick?`, 애매한 룰 ${Math.round(st.pick.lo*100)}~${Math.round(st.pick.hi*100)}%`:""})`:""} ${({done:"끝남",stopped:"중지됨",fail:"실패"})[st.state]||""}${st.req_fail?` · 요청 ${st.req_fail}개 실패 (다시 시작하면 그 줄만)`:""}${st.error?` · ${esc(st.error)}`:""}</span>`;
- h+=`<button class="sm" data-r="box">LLM 재확인…</button>`;
+ else if(st.finished_at)h+=`<span class="muted">${esc(isoClock(st.finished_at))} '${tn}' · ${esc(st.model||"")}${st.cross?` (교차 확인 ← ${esc(st.cross)}${st.pick?`, 애매한 룰 ${Math.round(st.pick.lo*100)}~${Math.round(st.pick.hi*100)}%`:""})`:""}${st.tiebreak?" (3차 모델 투표)":""} ${({done:"끝남",stopped:"중지됨",fail:"실패"})[st.state]||""}${st.req_fail?` · 요청 ${st.req_fail}개 실패 (다시 시작하면 그 줄만)`:""}${st.error?` · ${esc(st.error)}`:""}</span>`;
+ h+=`<button class="sm" data-r="box">LLM 재확인…</button>`+(s.cross&&s.cross.bad&&s.cross.bad.split!=null?'<button class="sm" data-r="oldrule" title="LLM 재확인 합의로 저장한 삭제를 새 규칙(부적합 삭제 + 다수결 투표)으로 다시 셈 - 누르기 전에는 바꾸지 않음">옛 규칙으로 지운 줄 다시 보기</button>':"");
  const XB=s.cross&&s.cross.bad,XR=s.cross&&s.cross.rule;   // 합의 수 (3_6 이 예전 판이면 없음 → 예전 버튼)
  if(s.bad||s.applied){h+=`<span class="muted">'불일치' ${fmt(s.bad)}줄</span>`+rcChips(c,"BAD")+(s.todo?`<span class="chip" data-l="todo" data-c="BAD">아직 ${fmt(s.todo)}</span>`:"")+(XB?xLine(XB,"bad"):"");
   if(!run)h+=(XB?xButtons(XB,"bad")+xUndo(s.applied,XB,"bad"):(del?`<button class="sm danger" data-r="delete">반대·부적합 ${fmt(del)}줄 → 삭제로 저장</button>`:"")+
@@ -5091,6 +5364,9 @@ async function loadRc(){clearTimeout(dRcT);const v=$("dDate").value,dv=dSrc();if
    (R.applied?`<button class="sm" data-r="undo" data-t="rule">LLM 반영 ${fmt(R.applied)}건 되돌리기</button>`:""))+(rcMsgR?`<span class="muted">${esc(rcMsgR)}</span>`:"")}
  $("dRcR").innerHTML=hr;
  $("rcStop").style.display=$("rcKill").style.display=run?"":"none";$("rcGo").disabled=$("rcPlan").disabled=run;
+ {const rt=st.rows_total||0,qt=st.req_total||0,qf=(st.req_done||0)+(st.req_fail||0);   // 강제 중지 옆 진행률 (줄 기준, 줄 수가 없으면 요청 기준)
+  progSet("rcProg",run&&fresh&&(rt||qt)?`진행 ${Math.floor(100*(rt?(st.rows_done||0)/rt:qf/qt))}%`+(rt?` · 줄 ${fmt(st.rows_done||0)}/${fmt(rt)}`:"")
+   +` · 요청 ${fmt(qf)}/${fmt(qt)} (실패 ${fmt(st.req_fail||0)})`+(st.eta_s!=null?` · 남은 약 ${mins(st.eta_s)}`:""):run&&!fresh?"시작하는 중…":"")}
  if(run)dRcT=setTimeout(loadRc,2000);
  if(rcWas&&!run){loadData();if($("dRcRules").style.display!=="none")loadRcRules();if($("dRcX").style.display!=="none")loadRcX()}   // 끝나면 표의 판정·룰별 요약·추가 분석도 새로
  if($("rcMode").value==="cross")rcFirstFill();
@@ -5098,7 +5374,8 @@ async function loadRc(){clearTimeout(dRcT);const v=$("dDate").value,dv=dSrc();if
 function rcPer(){return $("rcPer").value==="custom"?Math.max(1,Math.min(1000,Math.round(+$("rcPerN").value||1))):+$("rcPer").value}
 function rcBody(){return {model:$("rcModel").value.trim(),effort:$("rcEff").value,date:$("rcDate").value||$("dDate").value,target:$("rcTarget").value,
  devs:$("rcDev").value==="all"?"all":dSrc(),per_rule:rcPer(),llm_only:$("rcLlmOnly").checked,cross:$("rcMode").value==="cross"?$("rcFirst").value:"",
- pick:$("rcMode").value==="cross"&&$("rcPickSel").value==="mid"?{lo:+$("rcLo").value,hi:+$("rcHi").value,min_rows:+$("rcMinR").value,small:$("rcSmall").value}:null}}   // 애매한 룰만
+ pick:$("rcMode").value==="cross"&&$("rcPickSel").value==="mid"?{lo:+$("rcLo").value,hi:+$("rcHi").value,min_rows:+$("rcMinR").value,small:$("rcSmall").value}:null,   // 애매한 룰만
+ tiebreak:$("rcMode").value==="tiebreak"}}   // 3차 모델 투표 ('투표 갈림' 줄)
 /* 애매한 룰만 (2026-11-02~): 1번째 모델의 룰별 삭제 비율 묶음과 분포 (10% 구간, 판정 줄 수 막대) */
 function xHist(h,lo,hi){const mx=Math.max(1,...h.map(x=>x[2]));
  return `<div class="xh"><div class="muted">1번째 모델의 룰별 삭제 비율 분포 (막대 = 판정 줄 수, 판정이 적은 룰 포함)</div>${h.map(([b,r,n])=>`<div class="xhr"><span class="xhl muted">${b}~${b+10}%</span><span class="hb ${b+10<=lo?"ok":b>=hi?"bad":"mid"}" style="width:${n?Math.max(2,Math.round(220*n/mx)):0}px"></span><span class="muted">룰 ${fmt(r)}개 · ${fmt(n)}줄</span></div>`).join("")}</div>`}
@@ -5109,7 +5386,8 @@ async function rcEstimate(b){b=b||rcBody();const rule=b.target==="rule";
  try{p=await post("/api/data/recheck/plan",b)}catch(e){$("rcEst").textContent="실패: "+e.message;return null}
  const usd=x=>x==null?"단가 미등록":x<0.01?"$0.01 미만":"$"+x.toFixed(2),s=p.stats;
  const uv=Object.entries((p.unverified||[]).reduce((a,[d,v])=>((a[v]=a[v]||[]).push(d.slice(5)),a),{})).map(([v,ds])=>`${rcDevName(v)} ${ds.join(", ")}`).join(" · ");
- const what=s&&s.first?`교차 확인 - ${esc(s.first)} 가 판정한 '${RCT[p.target]||""}' ${fmt(s.first_rows)}줄 중 반대·부적합 ${fmt(s.first_delete)}줄은 이미 삭제 (묻지 않음) → 맞음·판단 불가 ${s.groups?`${fmt(s.ask_all)}줄 중 아래 묶음의 룰 ${fmt(s.rules_asked)}개 · ${fmt(s.ask)}줄`:`${fmt(s.ask)}줄`}을 2번째 모델로`
+ const what=s&&s.tiebreak?`3차 모델 투표 - '${RCT[p.target]||""}' 합의가 투표 갈림인 ${fmt(s.split)}줄 (판정한 모델: ${s.voters.map(([m,n])=>`${esc(m)} ${fmt(n)}`).join(", ")}) 중 이 모델이 이미 판정 ${fmt(s.voted)}줄 → 다수결 (그래도 갈리면 추가 분석에서 사람이 정함)`
+  :s&&s.first?`교차 확인 - ${esc(s.first)} 가 판정한 '${RCT[p.target]||""}' ${fmt(s.first_rows)}줄 중 ${s.ask_all+s.first_delete===s.first_rows&&s.first_delete?`부적합 ${fmt(s.first_delete)}줄은 이미 삭제 (묻지 않음) → `:""}${s.groups?`${fmt(s.ask_all)}줄 중 아래 묶음의 룰 ${fmt(s.rules_asked)}개 · ${fmt(s.ask)}줄`:`${fmt(s.ask)}줄`}을 2번째 모델로`
   :s?`'정합 (룰 기준)' ${fmt(s.pool)}줄 (룰 ${fmt(s.rules)}개${s.llm_only?` · 그중 LLM 원본 ${fmt(s.llm)}줄`:""}) → 룰 ${fmt(s.rules_sampled)}개 × 최대 ${fmt(s.per_rule)}개 = 표본 ${fmt(p.rows)}줄`:`대상 '불일치' ${fmt(p.rows)}줄`;
  $("rcEst").innerHTML=(p.key_problem?`<div class="warn">시작할 수 없음: ${esc(p.key_problem)}</div>`:"")+`<b>${esc(p.model)}</b> · ${what} <span class="muted">(내용 기준 - 장비가 달라도 같은 샘플은 한 번)</span>${p.done?` · 이 모델로 이미 ${fmt(p.done)}줄`:""} → <b>이번 ${fmt(p.todo)}줄 · 요청 ${fmt(p.requests)}개</b> <span class="muted">(같은 룰끼리 이어서 10줄씩)</span><br>
   예상 토큰 입력 <b>${fmt(p.tokens_in)}</b> · 출력 <b>${fmt(p.tokens_out)}</b> · 시간 약 <b>${hms(p.seconds)}</b> <span class="muted">(동시 ${p.workers}개)</span> · 비용 <b>${p.subscription?"Claude 구독 사용량 (토큰 요금 없음)":usd(p.cost)}</b>
@@ -5120,8 +5398,8 @@ async function rcEstimate(b){b=b||rcBody();const rule=b.target==="rule";
  return p}
 $("rcPlan").onclick=()=>rcEstimate();
 for(const id of["rcTarget","rcPer","rcMode","rcPickSel"])$(id).onchange=rcSampleUi;
-$("rcGo").onclick=async()=>{const b=rcBody(),p=await rcEstimate(b);if(!p)return;if(p.key_problem){alert(p.key_problem);return}if(!p.todo){alert(b.cross?"교차 확인할 줄이 없습니다 (2번째 모델이 이미 모두 판정함)":"새로 재확인할 줄이 없습니다 (이 모델로 모두 재확인함)");return}
- const what=b.cross?`교차 확인 '${RCT[b.target]}' ${fmt(p.todo)}줄 (1번째 ${b.cross} 가 맞음·판단 불가라 한 줄${b.pick?` 중 애매한 룰 ${b.pick.lo}~${b.pick.hi}%${b.pick.small==="include"?" + 판정 적은 룰":""}`:""})`:b.target==="rule"?`'정합 (룰 기준)' 표본 ${fmt(p.todo)}줄 (룰당 최대 ${b.per_rule}개${b.llm_only?", LLM 원본만":""})`:`'불일치' ${fmt(p.todo)}줄`;
+$("rcGo").onclick=async()=>{const b=rcBody(),p=await rcEstimate(b);if(!p)return;if(p.key_problem){alert(p.key_problem);return}if(!p.todo){alert(b.tiebreak?"3차 투표할 줄이 없습니다 (투표 갈림 줄이 없거나 이 모델이 이미 모두 판정함 - 다른 모델을 고르세요)":b.cross?"교차 확인할 줄이 없습니다 (2번째 모델이 이미 모두 판정함)":"새로 재확인할 줄이 없습니다 (이 모델로 모두 재확인함)");return}
+ const what=b.tiebreak?`3차 모델 투표 '${RCT[b.target]}' ${fmt(p.todo)}줄 (합의가 투표 갈림인 줄 → 다수결)`:b.cross?`교차 확인 '${RCT[b.target]}' ${fmt(p.todo)}줄 (1번째 ${b.cross} 가 부적합이 아니라고 한 줄${b.pick?` 중 애매한 룰 ${b.pick.lo}~${b.pick.hi}%${b.pick.small==="include"?" + 판정 적은 룰":""}`:""})`:b.target==="rule"?`'정합 (룰 기준)' 표본 ${fmt(p.todo)}줄 (룰당 최대 ${b.per_rule}개${b.llm_only?", LLM 원본만":""})`:`'불일치' ${fmt(p.todo)}줄`;
  if(!confirm(`다시 확인합니다: ${what} · 모델 ${p.model}\n요청 ${fmt(p.requests)}개 · 예상 토큰 입력 ${fmt(p.tokens_in)} / 출력 ${fmt(p.tokens_out)} · ${p.subscription?"Claude 구독 사용량":"API 비용 "+(p.cost==null?"(단가 미등록)":"약 $"+p.cost.toFixed(2))} · 시간 약 ${hms(p.seconds)}${p.subscription?`\n\n※ Claude CLI: 토큰 요금은 없지만 요청 ${fmt(p.requests)}개만큼 Claude 구독 사용량을 많이 씁니다 (한도에 닿으면 남은 요청은 멈춤, 같은 구독의 다른 작업도 막힐 수 있음).`:""}\n별도 프로세스로 돌고, 판정은 표에 코드 판정과 따로 보입니다 (학습 로그·검증 결과는 바꾸지 않음). 진행할까요?`))return;
  try{await post("/api/data/recheck/start",b);rcMsg=rcMsgR="";setTimeout(loadRc,800)}catch(e){alert("실패: "+e.message)}};
 $("rcStop").onclick=async()=>{try{await post("/api/data/recheck/stop",{});loadRc()}catch(e){alert("실패: "+e.message)}};
@@ -5131,26 +5409,49 @@ async function rcClick(e){const ch=e.target.closest("[data-l]");
  const b=e.target.closest("button[data-r]");if(!b)return;const a=b.dataset.r,t=b.dataset.t||"bad",s=dRcS;
  if(a==="box"){const x=$("dRcBox");x.style.display=x.style.display==="none"?"":"none";if(!x.style.display)rcBoxSync();return}
  if(a==="rules"){const x=$("dRcRules");x.style.display=x.style.display==="none"?"":"none";if(!x.style.display)loadRcRules();return}
- if(a==="xreview"){rcX={t,why:"mixed",off:0};$("dRcX").style.display="";loadRcX();return}   // 합의 '추가 분석' 목록
+ if(a==="xreview"){rcX={t,why:"split",off:0};$("dRcX").style.display="";loadRcX();return}   // 합의 '추가 분석' 목록
+ if(a==="oldrule"){const x=$("dRcOld");x.style.display=x.style.display==="none"?"":"none";if(!x.style.display)loadRcOld();return}   // 옛 규칙으로 지운 줄
+ if(a==="xvote"){const x=$("dRcBox");x.style.display="";rcBoxSync();$("rcTarget").value=t;$("rcMode").value="tiebreak";$("rcModel").value="";rcSampleUi();   // 3차 모델 투표: 상자를 투표로 열고 모델 고르기
+  $("rcEst").innerHTML=`<span class="muted">'${RCT[t]}' 합의가 투표 갈림인 줄을 그 줄을 아직 판정하지 않은 다른 모델(3차)로 묻고 다수결로 정합니다. 3차 모델을 고르고 '대상·예상 보기'로 대상 줄·요청 수·예상 토큰·비용을 본 뒤 시작하세요 (진행률은 '강제 중지' 옆).</span>`;
+  $("rcModel").focus();x.scrollIntoView({block:"nearest"});return}
  const c=t==="rule"?s.rule.counts:s.counts,n=t==="rule"?s.rule.applied:s.applied,tn=t==="rule"?"'정합 (룰 기준)' ":"",v=$("dDate").value;
  const X=(s.cross&&s.cross[t])||{};
  const msg={delete:`LLM 이 'label 반대'·'학습에 부적합'이라 한 ${tn}${fmt((c.flip||0)+(c.unfit||0))}줄을 삭제로 저장합니다.`,flip:`LLM 이 'label 반대'라 한 ${tn}${fmt(c.flip)}줄의 label 을 바꿔 저장합니다.`,
   undo:`${tn}LLM 재확인으로 저장한 수정·삭제 ${fmt(n)}건을 되돌리고${X.decided?` 유지 표시·사람 판단 ${fmt(X.decided)}줄도 지웁니다`:"니다"}.`,
-  xdelete:`합의가 '삭제'인 ${tn}${fmt(X.delete||0)}줄을 삭제로 저장합니다 (하나라도 반대·부적합 - 반대도 label 을 바꾸지 않고 삭제).`,
+  xdelete:`합의가 '부적합 삭제'인 ${tn}${fmt(X.delete||0)}줄을 삭제로 저장합니다 (어느 모델이든 '학습에 부적합'이라 한 줄).`,
+  xflip:`합의가 '투표로 label 반대'인 ${tn}${fmt(X.flip||0)}줄의 label 을 바꿔 저장합니다 (두 모델 이상이 판정하고 '반대'가 다수 - 사유에 투표 결과·모델 근거).${t==="rule"?`\n\n※ ${XRULE}.`:""}`,
   xkeep:`합의가 '확인됨'(두 모델 이상 모두 맞음)인 ${tn}${fmt((X.keep||0)-(X.kept||0))}줄에 유지 표시를 남깁니다 (그 뒤 다른 모델 판정이 와도 확인됨으로 둠${t==="bad"?" · 화면 6 '불일치' 중 남기기 옵션은 '새로 생긴 데이터만 비교' 뒤 반영":""}).`}[a];
  if(!confirm(msg+(t==="rule"?` (${v==="all"?"모든 날짜":v}, 두 장비)`:"")+(a==="undo"||a==="xkeep"?"":" 사람이 이미 수정·삭제를 저장한 샘플은 건너뜁니다. '학습 로그에 반영' 때 적용되고 목록에서 되돌릴 수 있습니다.")+" 진행할까요?"))return;
  try{const r=await post("/api/data/recheck/apply",{date:v,dev:dSrc(),action:a,target:t});
   const m=a==="undo"?`되돌림 ${r.undone}건`:a==="xkeep"?`유지 표시 ${fmt(r.marked)}줄`:`저장 ${r.saved}건${r.skipped?` · 이미 수정·삭제한 샘플이라 건너뜀 ${r.skipped}건`:""}`;if(t==="rule")rcMsgR=m;else rcMsg=m;loadEdits();loadData();loadRc();if($("dRcX").style.display!=="none")loadRcX()}catch(err){alert("실패: "+err.message)}}
+/* '옛 규칙으로 지운 줄 다시 보기' (2026-11-04~): LLM 재확인 합의로 저장한 삭제를 새 규칙으로 다시 셈 - 되돌리기는 누를 때만 */
+async function loadRcOld(){const el=$("dRcOld");el.innerHTML='<span class="muted">합의 삭제를 새 규칙으로 다시 세는 중…</span>';let r;
+ try{r=await get("/api/data/recheck/oldrule")}catch(e){el.textContent="실패: "+e.message;return}
+ const ks=Object.keys(r.states),sum=k=>r.groups.reduce((a,g)=>a+g[2][k],0),chg=["keep","flip","pending","split"].reduce((a,k)=>a+sum(k),0);
+ el.innerHTML=`<div class="row"><b>옛 규칙으로 지운 줄 다시 보기</b> <span class="muted">LLM 재확인 합의로 저장한 삭제(옛 규칙 '하나라도 반대·부적합 → 삭제'로 저장한 것 포함)를 새 규칙으로 다시 셉니다. 누르기 전에는 아무것도 바꾸지 않습니다.</span><button class="sm" id="rcOldClose">닫기</button></div>`+
+  (r.groups.length?`<table class="mini"><thead><tr><th>저장 시각</th><th>대상</th><th class="n">줄</th>${ks.map(k=>`<th class="n">${esc(r.states[k])}</th>`).join("")}</tr></thead><tbody>${r.groups.map(([at,t,c])=>`<tr><td class="nw">${esc(at.replace("T"," "))}</td><td>${esc(RCT[t])}</td><td class="n">${fmt(ks.reduce((a,k)=>a+c[k],0))}</td>${ks.map(k=>`<td class="n">${fmt(c[k])}</td>`).join("")}</tr>`).join("")}</tbody></table>
+  <div class="row"><span>새 규칙으로 바뀌는 줄 <b>${fmt(chg)}</b> (확인됨 ${fmt(sum("keep"))} · label 반대 ${fmt(sum("flip"))} · 추가 분석 ${fmt(sum("pending")+sum("split"))}) · 그대로 삭제 ${fmt(sum("delete"))}${sum("none")?` · 판정 기록 없음 ${fmt(sum("none"))} (그대로)`:""}</span>${chg?`<button class="sm danger" id="rcOldGo">바뀌는 ${fmt(chg)}줄 삭제 되돌리기</button>`:""}</div>
+  <div class="muted" style="font-size:12.5px">되돌린 뒤 '학습 로그에 반영'(다시 만들기) → '검증 안 한 데이터만 검증'을 하면 그 줄이 합의 줄에 다시 보입니다: 확인됨은 학습에 남고, label 반대는 '투표로 label 반대 저장', 추가 분석은 교차 확인(2번째 모델 대기)·'3차 모델로 투표'(투표 갈림). 지운 삭제는 기록 파일에 남아 '되돌림 취소'로 다시 삭제할 수 있습니다.</div>`
+  :'<div class="muted">LLM 재확인 합의로 저장한 삭제가 없습니다.</div>')+
+  (r.last?`<div class="row"><span class="muted">${esc(isoClock(r.last.at))} 에 ${fmt(r.last.n)}줄 되돌림 (${esc(r.last.file)})</span><button class="sm" id="rcOldUndo">이 되돌림 취소 (${fmt(r.last.n)}줄 다시 삭제)</button></div>`:"")}
+$("dRcOld").addEventListener("click",async e=>{const b=e.target.closest("button");if(!b)return;
+ if(b.id==="rcOldClose"){$("dRcOld").style.display="none";return}
+ const a=b.id==="rcOldGo"?"revert":b.id==="rcOldUndo"?"restore":"";if(!a)return;
+ if(!confirm(a==="revert"?"새 규칙으로 삭제가 아닌 줄(확인됨·label 반대·추가 분석)의 합의 삭제를 지웁니다. 부적합 삭제는 그대로입니다.\n학습 로그에서 이미 빠진 줄은 '학습 로그에 반영'(다시 만들기)을 해야 돌아오고, 그 뒤 '검증 안 한 데이터만 검증'을 하면 합의 줄에 다시 보입니다. 지운 것은 기록 파일에 남아 취소할 수 있습니다. 진행할까요?"
+  :"가장 최근 되돌림을 취소하고 그 줄들을 다시 삭제로 저장합니다 (그 뒤 다른 수정·삭제가 생긴 샘플은 건너뜀). 진행할까요?"))return;
+ try{const r=await post("/api/data/recheck/oldrule",{action:a});
+  alert(a==="revert"?`${fmt(r.reverted)}줄의 삭제를 지웠습니다 (기록: ${r.backup||"-"}). '학습 로그에 반영' 뒤 '검증 안 한 데이터만 검증'을 하세요.`:`${fmt(r.restored)}줄을 다시 삭제로 저장했습니다${r.skipped?` (그 뒤 다른 수정이 있어 건너뜀 ${fmt(r.skipped)}줄)`:""}.`);
+  loadRcOld();loadEdits();loadRc()}catch(err){alert("실패: "+err.message)}});
 /* 합의 '추가 분석' 목록 (2026-11-02~): 두 모델의 판정·근거를 나란히 보고 줄마다 또는 고른 줄을 묶어 유지·삭제·label 반대 (사람 판단) */
-let rcX={t:"bad",why:"mixed",off:0},rcXD=null;
+let rcX={t:"bad",why:"split",off:0},rcXD=null;
 async function loadRcX(){const el=$("dRcX"),v=$("dDate").value,{t,why,off}=rcX;el.innerHTML='<span class="muted">추가 분석 줄을 읽는 중…</span>';let r;
  try{r=await get(`/api/data/recheck/review?target=${t}&date=${v}&dev=${dSrc()}&why=${why}&offset=${off}&limit=50`)}catch(e){el.textContent="실패: "+e.message;return}
  rcXD=r;const cn=r.counts||{};
  el.innerHTML=`<div class="row"><b>추가 분석</b> <span class="muted">('${RCT[t]}' · ${v==="all"?"모든 날짜":esc(v)} · ${t==="bad"?rcDevName(dSrc()):"두 장비"} · 내용 기준)</span>
-  <select id="rcXWhy"><option value="mixed">판단 불가가 섞임 ${fmt(cn.mixed||0)}줄</option><option value="pending">2번째 모델 대기 ${fmt(cn.pending||0)}줄</option><option value="all">전체</option></select><button class="sm" id="rcXClose">닫기</button></div>
+  <select id="rcXWhy"><option value="split">투표 갈림 ${fmt(cn.split||0)}줄</option><option value="pending">2번째 모델 대기 ${fmt(cn.pending||0)}줄</option><option value="all">전체</option></select><button class="sm" id="rcXClose">닫기</button></div>
   <div class="row"><span class="muted">고른 <b id="rcXN">0</b>줄을</span><button class="sm" data-xd="keep">유지</button><button class="sm danger" data-xd="delete">삭제</button><button class="sm" data-xd="flip">label 반대</button>
   <span class="muted">유지 = 확인됨으로 표시 (학습에 남김) · 삭제·label 반대 = 수정·삭제로 저장 ('학습 로그에 반영' 때 적용) · 'LLM 반영 되돌리기'로 모두 되돌림</span></div>
-  ${r.rows.length?`<table class="mini"><thead><tr><th><input type="checkbox" id="rcXAll"></th><th>날짜 · 줄</th><th>룰 · label</th><th>payload</th><th>모델별 판정 · 근거</th><th>정하기</th></tr></thead><tbody>${r.rows.map((x,i)=>`<tr><td><input type="checkbox" data-xi="${i}"></td><td class="nw">${esc(x.date.slice(5))} ${esc(x.dev.toUpperCase())}<div class="muted">${x.line}</div></td><td>${esc(x.rule_id)}<div><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></div></td><td><div class="payload" style="max-height:140px">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td>${x.votes.map(([m,vv,rr])=>`<div><span class="chip ${RCC[vv]||""}">${esc(m)} ${esc(RCV[vv]||vv)}</span> ${esc(rr)}</div>`).join("")}${x.why==="pending"?'<div class="muted">2번째 모델 판정 없음 - 교차 확인을 돌리면 합의가 정해질 수 있음</div>':""}</td><td class="nw"><button class="sm" data-xr="${i}" data-xd="keep">유지</button><button class="sm danger" data-xr="${i}" data-xd="delete">삭제</button><button class="sm" data-xr="${i}" data-xd="flip">반대</button></td></tr>`).join("")}</tbody></table>`:'<div class="muted">이 조건의 추가 분석 줄이 없습니다.</div>'}
+  ${r.rows.length?`<table class="mini"><thead><tr><th><input type="checkbox" id="rcXAll"></th><th>날짜 · 줄</th><th>룰 · label</th><th>payload</th><th>모델별 판정 · 근거</th><th>정하기</th></tr></thead><tbody>${r.rows.map((x,i)=>`<tr><td><input type="checkbox" data-xi="${i}"></td><td class="nw">${esc(x.date.slice(5))} ${esc(x.dev.toUpperCase())}<div class="muted">${x.line}</div></td><td>${esc(x.rule_id)}<div><span class="chip l-${esc(x.label)}">${esc(x.label)}</span></div></td><td><div class="payload" style="max-height:140px">${esc(x.payload.replace(/\\n/g,"\n"))}</div></td><td>${x.votes.map(([m,vv,rr])=>`<div><span class="chip ${RCC[vv]||""}">${esc(m)} ${esc(RCV[vv]||vv)}</span> ${esc(rr)}</div>`).join("")}${x.why==="pending"?'<div class="muted">2번째 모델 판정 없음 - 교차 확인을 돌리면 합의가 정해질 수 있음</div>':x.why==="split"&&x.votes.length<3?'<div class="muted">투표 갈림 - 3차 모델 투표로 다수가 생기면 정해짐</div>':""}</td><td class="nw"><button class="sm" data-xr="${i}" data-xd="keep">유지</button><button class="sm danger" data-xr="${i}" data-xd="delete">삭제</button><button class="sm" data-xr="${i}" data-xd="flip">반대</button></td></tr>`).join("")}</tbody></table>`:'<div class="muted">이 조건의 추가 분석 줄이 없습니다.</div>'}
   <div class="row"><button class="sm" id="rcXPrev"${off?"":" disabled"}>이전</button><button class="sm" id="rcXNext"${off+50<r.total?"":" disabled"}>다음</button><span class="muted">${fmt(r.total)}줄 중 ${r.total?off+1:0}–${Math.min(off+50,r.total)}</span></div>`;
  $("rcXWhy").value=why}
 function rcXCount(){$("rcXN").textContent=$("dRcX").querySelectorAll("[data-xi]:checked").length}
@@ -5184,7 +5485,7 @@ function rcPicked(){return (rcRulesD||[]).filter(x=>(x[3]>=rcMinN&&x[5]*100>=rcT
 const XG={ok:["괜찮음","c-OK"],mid:["애매함","c-CHECK"],bad:["문제","c-BAD"],small:["판정 적음",""]};
 function renderRcRules(){if(!$("rcTbl"))return;const pick=new Set(rcPicked().map(x=>x[0])),rows=rcRulesD.slice(0,300),pct=x=>Math.round(100*x[5]/x[3])+"%";
  $("rcPick").textContent=`${fmt(pick.size)}개`;$("rcToSup").disabled=!pick.size;
- $("rcTbl").innerHTML=`<table class="mini"><thead><tr><th>룰 id</th><th>공격 유형</th><th class="n">정합 (룰 기준) 줄</th><th class="n">판정</th><th class="n">확인됨</th><th class="n">삭제</th><th class="n">추가 분석</th><th class="n">label 반대 (사람)</th><th class="n">삭제 비율</th>${rcRulesG?`<th title="1번째 모델(${esc(rcRulesG.first)})의 룰별 삭제 비율 묶음 (${rcRulesG.lo}%·${rcRulesG.hi}%, 판정 ${rcRulesG.min}줄 기준)">1번째 묶음</th>`:""}</tr></thead><tbody>${rows.map(x=>`<tr${pick.has(x[0])?' class="adj"':""}><td><a href="#" data-rule="${esc(x[0])}">${esc(x[0])}</a></td><td>${esc(x[1]||"")}</td>${x.slice(2,8).map(n=>`<td class="n">${fmt(n)}</td>`).join("")}<td class="n"><b>${pct(x)}</b></td>${rcRulesG?`<td>${x[8]?`<span class="chip ${XG[x[8]][1]}">${XG[x[8]][0]}</span>`:""}</td>`:""}</tr>`).join("")}</tbody></table>`+
+ $("rcTbl").innerHTML=`<table class="mini"><thead><tr><th>룰 id</th><th>공격 유형</th><th class="n">정합 (룰 기준) 줄</th><th class="n">판정</th><th class="n">확인됨</th><th class="n">삭제</th><th class="n">추가 분석</th><th class="n">label 반대 (투표·사람)</th><th class="n">삭제 비율</th>${rcRulesG?`<th title="1번째 모델(${esc(rcRulesG.first)})의 룰별 삭제 비율 묶음 (${rcRulesG.lo}%·${rcRulesG.hi}%, 판정 ${rcRulesG.min}줄 기준)">1번째 묶음</th>`:""}</tr></thead><tbody>${rows.map(x=>`<tr${pick.has(x[0])?' class="adj"':""}><td><a href="#" data-rule="${esc(x[0])}">${esc(x[0])}</a></td><td>${esc(x[1]||"")}</td>${x.slice(2,8).map(n=>`<td class="n">${fmt(n)}</td>`).join("")}<td class="n"><b>${pct(x)}</b></td>${rcRulesG?`<td>${x[8]?`<span class="chip ${XG[x[8]][1]}">${XG[x[8]][0]}</span>`:""}</td>`:""}</tr>`).join("")}</tbody></table>`+
   (rcRulesD.length>300?`<div class="muted">삭제 비율이 높은 300개까지 보임 (전체 ${fmt(rcRulesD.length)}개, 빼기 기준은 전체에 적용)</div>`:"")}
 $("dRcRules").addEventListener("input",e=>{if(e.target.id==="rcThr")rcThr=Math.max(1,Math.min(100,+e.target.value||1));else if(e.target.id==="rcMinN")rcMinN=Math.max(1,+e.target.value||1);else if(e.target.id==="rcProb")rcProb=e.target.checked;else return;renderRcRules()});
 $("dRcRules").addEventListener("click",e=>{const a=e.target.closest("a[data-rule]");
@@ -5460,6 +5761,7 @@ function sCandOpen(name,scroll=true){sCandName=name;sCandMsg="";$("sCandCard").s
 async function loadCand(){clearTimeout(sCandT);if(!sCandName)return;const name=sCandName;let d;
  try{d=await get("/api/sup/eval?name="+encodeURIComponent(name))}catch(e){$("sCandBody").innerHTML=`<div class="msg">불러오지 못했습니다: ${esc(e.message)}</div>`;return}
  if(name!==sCandName)return;sCandD=d;renderCand();
+ if(!sSrvD||sSrvD.name!==name||sSrvD.rev!==d.rev)loadSrv();       // 서버 반영 칸 (후보·rev 가 바뀌면 다시)
  const run=d.job.running||(d.queue.name===name&&d.queue.todo.length>0);if(run)sCandT=setTimeout(loadCand,3000);
  if(sCandRun&&!run)loadSup();sCandRun=run}
 function renderCand(){const el=$("sCandBody"),d=sCandD,x=SS&&SS.versions.find(v=>v.name===sCandName);
@@ -5467,9 +5769,10 @@ function renderCand(){const el=$("sCandBody"),d=sCandD,x=SS&&SS.versions.find(v=
  const fin=x.status==="final",rev=x.rev,t=x.targets||{},exp=t.exp||d.default_exp,res=d.results||{},cur=res[String(rev)]||{},chk=d.check||{dev:{}};
  const A=x.additions||{},stale=!!(x.spec_changed_at&&x.spec_changed_at>(x.exported_at||"")),last=(x.revs||[]).slice(-1)[0]||{};
  const run=d.job.running||(d.queue.name===x.name&&d.queue.todo.length>0),exporting=!!(SS.job&&SS.job.running),st=d.status||{};
- const tested=["ips","waf"].every(dv=>(cur[dv]||{})[exp]),step=fin?6:tested?4:3;
+ const sg=d.server||{},sOk=!sg.active||sg.met;   // 서버 반영 승인 조건 (5_8 gate, 로컬 전용 5_8a 가 있을 때만)
+ const tested=["ips","waf"].every(dv=>(cur[dv]||{})[exp]),step=fin?7:tested&&sg.active&&sg.met?6:tested?5:3;
  $("sCandHdr").textContent=`· ${x.name} · ${fin?"최종 승인 (확정)":"1차 확정 rev "+rev}`;
- let h=`<div class="steps">${["초안",`1차 확정 (rev ${rev})`,"피처 테스트","데이터 추가 (필요하면)","최종 승인"].map((s,i)=>`<span class="step ${i+1<step?"done":i+1===step?"running":""}">${"①②③④⑤"[i]} ${esc(s)}</span>`).join("")}</div>`;
+ let top=null,h=`<div class="steps">${["초안",`1차 확정 (rev ${rev})`,"피처 테스트","데이터 추가 (필요하면)","서버 반영","최종 승인"].map((s,i)=>`<span class="step ${i+1<step?"done":i+1===step?"running":""}">${"①②③④⑤⑥"[i]} ${esc(s)}</span>`).join("")}</div>`;
  const cnt=dv=>{const c=(x.dev||{})[dv]||{},o=((last.counts||{})[dv]||{}).by_origin||{};return `${dv.toUpperCase()} ${cN(c.rows)}행 (기준 + 추가 ${cN(c.added)}: 신규 ${cN(o.new)} · 외부 파일 ${cN(o.manual)})`};
  h+=`<div class="muted" style="margin:6px 0">${esc(isoClock(x.exported_at||""))} 내보냄 · ${cnt("ips")} · ${cnt("waf")} · 11_supervised/versions/${esc(x.name)}/</div>`;
  if(stale&&!fin)h+=`<div class="msg">선별을 다시 담았습니다 (${esc(isoClock(x.spec_changed_at))}) - '다시 내보내기 (rev ${rev+1})' 를 해야 학습 파일·테스트·승인에 들어갑니다</div>`;
@@ -5498,18 +5801,18 @@ function renderCand(){const el=$("sCandBody"),d=sCandD,x=SS&&SS.versions.find(v=
   <div class="row"><label>외부 파일 (CSV: method, payload, label[, attack_type] · 또는 '|||' 로그 8필드)<input type="file" id="cvFile" accept=".csv,.log,.txt"></label><button class="sm" id="cvUp">올리기 (검사)</button></div>
   ${(A.manual||[]).length?`<table class="mini"><thead><tr><th>파일</th><th>형식</th><th class="n">줄</th><th class="n">넣을 줄</th><th class="n">공격 / 정상</th><th>중복 (기준 · 신규 · 파일 안)</th><th>올린 시각</th><th></th></tr></thead><tbody>${A.manual.map(m=>`<tr><td>${esc(m.orig||m.file)}</td><td>${m.format==="log"?"로그":"CSV"}</td><td class="n">${fmt(m.rows)}</td><td class="n"><b>${fmt(m.use)}</b></td><td class="n">${fmt((m.label||{}).anomalies)} / ${fmt((m.label||{}).normal)}</td><td class="muted">${fmt((m.dup||{})["기준"])} · ${fmt((m.dup||{})["신규"])} · ${fmt((m.dup||{})["파일 안"])}</td><td class="muted">${esc(isoClock(m.added_at||""))}</td><td><button class="sm" data-mrm="${esc(m.file)}">빼기</button></td></tr>`).join("")}</tbody></table>`:""}
   <div class="row" style="margin-top:6px"><button class="primary" id="cvExport"${run||exporting?" disabled":""}>다시 내보내기 (rev ${rev+1})</button><span class="muted" style="align-self:center">지금 선별 + 위의 데이터 추가로 학습 파일·로그를 다시 만든다 (지난 rev 의 테스트 결과는 '이전 rev' 로 남음)</span></div>`;
-  const ok=chk.complete&&chk.met;
-  h+=`<h3 style="margin:14px 0 4px">최종 승인</h3><div>${!chk.complete?`<span class="muted">rev ${rev} 의 IPS·WAF 테스트 결과(실험 ${esc(chk.exp||exp)})가 둘 다 있어야 승인합니다</span>`:ok?'<span class="chip c-OK">두 장비 모두 목표를 넘음</span>':'<span class="chip c-BAD">목표 미달</span> <span class="muted">그래도 승인하려면 사유를 적으세요 (manifest 에 남음)</span>'}</div>
-  ${chk.complete&&!ok?'<textarea id="cvReason" placeholder="목표에 못 미쳐도 승인하는 사유" style="width:100%;min-height:54px;margin-top:4px"></textarea>':""}
+  top=h;h="";const ok=chk.complete&&chk.met&&sOk;     // 최종 승인은 서버 반영 칸 아래 (sCandFoot)
+  h+=`<h3 style="margin:14px 0 4px">최종 승인</h3><div>${!chk.complete?`<span class="muted">rev ${rev} 의 IPS·WAF 테스트 결과(실험 ${esc(chk.exp||exp)})가 둘 다 있어야 승인합니다</span>`:chk.met?'<span class="chip c-OK">피처 테스트: 두 장비 모두 목표를 넘음</span>':'<span class="chip c-BAD">피처 테스트: 목표 미달</span>'}</div>${srvGate(sg,rev)}
+  ${chk.complete&&!ok?'<div class="muted">그래도 승인하려면 사유를 적으세요 (manifest 에 남음)</div><textarea id="cvReason" placeholder="목표·서버 반영 기준에 못 미쳐도 승인하는 사유" style="width:100%;min-height:54px;margin-top:4px"></textarea>':""}
   <div class="row" style="margin-top:6px"><button class="primary" id="cvApprove"${!chk.complete||run||exporting||stale?" disabled":""}>최종 승인 (rev ${rev})</button><button class="danger" id="cvDiscard"${run||exporting?" disabled":""}>후보 버리기</button><span class="muted" style="align-self:center">승인하면 잠기고 다음 버전의 기준이 됩니다. 버리면 폴더를 _보관/ 으로 옮기고 이름을 다시 쓸 수 있습니다.</span></div>`}
- else{const ap=x.approval||{};h+=`<h3 style="margin:14px 0 4px">최종 승인 기록</h3><div>${esc(isoClock(ap.at||""))} · rev ${esc(String(ap.rev??""))} · 실험 ${esc(ap.exp||"")} · ${ap.met?'<span class="chip c-OK">목표 넘음</span>':`<span class="chip c-BAD">목표 미달</span> 사유: ${esc(ap.reason||"")}`}</div>`}
+ else{top=h;h="";const ap=x.approval||{};h+=`<h3 style="margin:14px 0 4px">최종 승인 기록</h3><div>${esc(isoClock(ap.at||""))} · rev ${esc(String(ap.rev??""))} · 실험 ${esc(ap.exp||"")} · ${ap.server?`${ap.targets_met?'<span class="chip c-OK">목표 넘음</span>':'<span class="chip c-BAD">목표 미달</span>'} · 서버 반영 ${ap.server.met?'<span class="chip c-OK">넘음</span>':'<span class="chip c-BAD">미달·결과 없음</span>'}${ap.met?"":` · 사유: ${esc(ap.reason||"")}`}`:ap.met?'<span class="chip c-OK">목표 넘음</span>':`<span class="chip c-BAD">목표 미달</span> 사유: ${esc(ap.reason||"")}`}</div>`}
  if(sCandMsg)h+=`<div class="muted" style="margin-top:6px">${esc(sCandMsg)}</div>`;
- el.innerHTML=h}
+ el.innerHTML=top??h;$("sCandFoot").innerHTML=top==null?"":h}
 function cB64(buf){let s="";const a=new Uint8Array(buf);for(let i=0;i<a.length;i+=0x8000)s+=String.fromCharCode.apply(null,a.subarray(i,i+0x8000));return btoa(s)}
 async function cPost(url,body,msg){try{const r=await post(url,Object.assign({name:sCandName},body));sCandMsg=typeof msg==="function"?msg(r):(msg||"");await loadSup();loadCand();return r}catch(e){alert("실패: "+e.message);return null}}
-$("sCandClose").onclick=()=>{sCandClosed=true;sCandName=null;clearTimeout(sCandT);$("sCandCard").style.display="none"};
+$("sCandClose").onclick=()=>{sCandClosed=true;sCandName=null;clearTimeout(sCandT);clearTimeout(sSrvT);$("sCandCard").style.display="none"};
 $("sCandBody").addEventListener("change",e=>{const c=e.target.closest("[data-cexp]");if(!c)return;const s=sCandExps||new Set([sCandD.default_exp]);if(c.checked)s.add(c.dataset.cexp);else s.delete(c.dataset.cexp);sCandExps=s});
-$("sCandBody").addEventListener("click",async e=>{const el=e.target,x=SS.versions.find(v=>v.name===sCandName);if(!x)return;
+const cvClick=async e=>{const el=e.target,x=SS.versions.find(v=>v.name===sCandName);if(!x)return;   // 후보 카드 본문·최종 승인(아래) 공통
  const rm=el.closest("a[data-arm]");if(rm){e.preventDefault();cPost("/api/sup/additions",{kind:rm.dataset.arm,values:[rm.dataset.val],action:"remove"},`'${rm.dataset.val}' 를 뺐습니다`);return}
  const add=el.closest("button[data-add]");if(add){const k=add.dataset.add,inp=$(k==="rules"?"cvRule":"cvType"),vals=inp.value.split(",").map(s=>s.trim()).filter(Boolean);if(!vals.length)return;
   cPost("/api/sup/additions",{kind:k,values:vals,action:"add"},`${k==="rules"?"룰":"공격 유형"} ${vals.length}개를 넣었습니다 - 다시 내보내면 들어갑니다`);return}
@@ -5528,12 +5831,118 @@ $("sCandBody").addEventListener("click",async e=>{const el=e.target,x=SS.version
  if(el.id==="cvExport"){const n=["rules","types","samples"].reduce((a,k)=>a+((x.additions||{})[k]||[]).length,0)+((x.additions||{}).manual||[]).length;
   if(!confirm(`'${x.name}' 을 다시 내보냅니다 (rev ${x.rev} → rev ${x.rev+1}, 데이터 추가 ${n}건 반영).\n학습 파일·로그를 새로 만들고 rev ${x.rev} 의 큰 파일은 남기지 않습니다 (목록·manifest 는 revs/rev${x.rev}/ 에, 테스트 결과는 '이전 rev' 로 남음). 진행할까요?`))return;
   try{await post("/api/sup/export",{name:x.name});sCandMsg=`rev ${x.rev+1} 내보내기를 시작했습니다`;setTimeout(loadSup,800)}catch(err){alert("실패: "+err.message)}return}
- if(el.id==="cvApprove"){const c=sCandD.check||{},why=($("cvReason")||{}).value||"";if(!c.met&&!why.trim()){alert("목표에 못 미칩니다 - 사유를 적어야 승인됩니다");return}
+ if(el.id==="cvApprove"){const c=sCandD.check||{},why=($("cvReason")||{}).value||"",sg=sCandD.server||{},sBad=!!(sg.active&&!sg.met);
+  if((!c.met||sBad)&&!why.trim()){alert((sBad?"서버 반영 기준(4지표 95%·예측 일치 98%)에 못 미치거나 서버 결과가 없습니다":"목표에 못 미칩니다")+" - 사유를 적어야 승인됩니다");return}
   const ms=["ips","waf"].map(dv=>{const z=((c.dev||{})[dv]||{}).metrics||{};return `${dv.toUpperCase()} P ${cPct(z.precision)} · R ${cPct(z.recall)} · F1 ${cPct(z.f1)}`}).join("\n");
-  if(!confirm(`'${x.name}' rev ${x.rev} 를 최종 승인합니다 (실험 ${c.exp}).\n${ms}${c.met?"":"\n목표 미달 - 사유: "+why}\n승인하면 잠겨 고칠 수 없고, 다음 버전의 기준이 됩니다. 진행할까요?`))return;
+  const sl=sg.active?"\n서버 반영: "+["ips","waf"].map(dv=>{const g=(sg.dev||{})[dv]||{};return `${dv.toUpperCase()} ${g.met?"넘음":"미달 ("+(g.fails||[]).join(", ")+")"}`}).join(" · "):"";
+  if(!confirm(`'${x.name}' rev ${x.rev} 를 최종 승인합니다 (실험 ${c.exp}).\n${ms}${sl}${c.met&&!sBad?"":"\n미달 - 사유: "+why}\n승인하면 잠겨 고칠 수 없고, 다음 버전의 기준이 됩니다. 진행할까요?`))return;
   cPost("/api/sup/approve",{rev:x.rev,reason:why,exp:c.exp},"최종 승인했습니다");return}
  if(el.id==="cvDiscard"){if(!confirm(`후보 '${x.name}' 을 버립니다. 폴더(학습 파일·테스트 결과·외부 파일)를 _보관/ 으로 옮기고 목록에서 뺍니다 (이름을 다시 쓸 수 있음). 진행할까요?`))return;
-  const r=await cPost("/api/sup/discard",{},"");if(r){sCandName=null;$("sCandCard").style.display="none";$("sSaveMsg").textContent=`후보 '${x.name}' 을 버렸습니다 (${r.moved_to||"폴더 없음"})`}}});
+  const r=await cPost("/api/sup/discard",{},"");if(r){sCandName=null;$("sCandCard").style.display="none";$("sSaveMsg").textContent=`후보 '${x.name}' 을 버렸습니다 (${r.moved_to||"폴더 없음"})`}}};
+$("sCandBody").addEventListener("click",cvClick);$("sCandFoot").addEventListener("click",cvClick);
+/* ── 6. 후보 '서버 반영' (2026-11-04~, 5_8_server.py · job server): 올릴 파일·레시피 사본(로컬 전용 5_8a)·로컬 사전 점검(95%·98% 미리 보기)·
+   서버 결과(4지표·예측 일치)·체크리스트. 승인 조건은 5_8 gate (renderCand 의 srvGate) ── */
+let sSrvD=null,sSrvT=0,sSrvRun=false,sSrvMsg="",sSrvDirty={};   // sSrvDirty: 입력 중인 값 (3초마다 새로 그려도 남김, 저장하면 지움)
+const svChip=(ok,t)=>ok==null?"":ok?`<span class="chip c-OK">${t||"넘음"}</span>`:`<span class="chip c-BAD">${t||"미달"}</span>`;
+const svTop=(o,k=6)=>Object.entries(o||{}).slice(0,k).map(([a,b])=>`${esc(a)} ${fmt(b)}`).join(", ")||"-";
+const svM4=m=>m?`정확도 ${cPct(m.accuracy)} · P ${cPct(m.precision)} · R ${cPct(m.recall)} · F1 ${cPct(m.f1)}`:"-";
+const svDl=f=>`/download/sup/server?name=${encodeURIComponent(sCandName||"")}&file=${encodeURIComponent(f||"")}`;
+async function loadSrv(force=false){clearTimeout(sSrvT);const el=$("sSrvBody");if(!sCandName){el.innerHTML="";return}const name=sCandName;let d;
+ try{d=await get("/api/sup/server?name="+encodeURIComponent(name))}catch(e){if(name===sCandName)el.innerHTML=`<h3 style="margin:14px 0 4px">서버 반영</h3><div class="muted">${esc(e.message)}</div>`;return}
+ if(name!==sCandName)return;if(!sSrvD||sSrvD.name!==name)sSrvDirty={};sSrvD=d;const run=!!(d.job&&d.job.running),a=document.activeElement;
+ if(force||!(run&&a&&el.contains(a)&&a.tagName==="INPUT"))renderSrv();      // 점검 중 3초마다 새로 그릴 때 입력 중인 칸은 두고
+ if(run)sSrvT=setTimeout(loadSrv,3000);if(sSrvRun&&!run)loadCand();sSrvRun=run}
+function srvGate(sg,rev){if(!sg||!sg.active)return sg&&sg.error?`<div class="muted">서버 반영 조건을 읽지 못함: ${esc(sg.error)}</div>`:"";
+ return `<div>서버 반영 (rev ${rev} · 4지표 95% · ② 예측 일치 98%): ${["ips","waf"].map(dv=>{const g=(sg.dev||{})[dv]||{};return `${dv.toUpperCase()} ${svChip(g.met)}${g.met?"":` <span class="muted">${esc((g.fails||[]).join(" · "))}</span>`}${!g.met&&g.f1_ok?' <span class="muted">(f1 만 보면 95% 이상 - 지난번 통과 방식, 승인은 사유로)</span>':""}${g.impl!=null?` <span class="muted">(① 다른 칸 ${fmt(g.impl)})</span>`:""}`}).join(" · ")}</div>`}
+function renderSrv(){const el=$("sSrvBody"),d=sSrvD;if(!d||d.name!==sCandName){el.innerHTML="";return}
+ const L=d.local||{},run=!!(d.job&&d.job.running),rs=d.run||{},fin=d.status==="final";
+ let h=`<h3 style="margin:14px 0 4px">서버 반영 <span class="muted" style="font-weight:400;font-size:12.5px">rev ${d.rev} · 서버에서 IPS·WAF 각각 직접 진행 · 학습 피처 = 디코딩 입력 · 기준: 혼동행렬 4지표(정확도·precision·recall·f1, 공격 기준) 모두 95% 이상 · ② 디코딩 입력·원본 입력 예측 일치 98% 이상 · ① 구현 일치(같은 원본에서 파이썬 피처 = SQL 피처)</span></h3>`;
+ h+=`<div class="muted" style="font-size:12.5px">${L.ok?`서버 레시피 ${(L.files||[]).length}개 읽음 (12_server/recipes, 로컬 전용) · 사본 규칙 ${esc(L.rules_version||"")}`:L.present?`서버 레시피를 읽지 못함: ${esc(L.error||("없는 파일 "+(L.missing||[]).join(", ")))}`:`로컬 전용 ${esc(d.local_file)} 가 없어 레시피 사본·디코딩 점검·승인 조건은 꺼져 있습니다 (올릴 파일·원본 피처 미리 보기·결과 기록만)`}</div>`;
+ const pv=d.prev_server;if(pv&&pv.dev)h+=`<div style="font-size:12.5px;margin-top:4px"><b>지난 서버 결과 (기준 '${esc(pv.version)}', 참고)</b>: ${["ips","waf"].filter(dv=>pv.dev[dv]).map(dv=>`${dv.toUpperCase()} ${svM4(pv.dev[dv])} ${svChip(!["accuracy","precision","recall","f1"].some(k=>(pv.dev[dv][k]??0)<.95),"4지표")} ${svChip((pv.dev[dv].f1??0)>=.95,"f1")}`).join(" · ")} <span class="muted">${esc(pv.note||"")}</span></div>`;
+ const gr=d.grid||{};h+=`<div class="muted" style="font-size:12.5px">서버 Train: 열 = 피처 + payload (method 안 씀 - 이 PC 는 payload 를 학습 피처로 안 쓰는 것으로 봄) · RF 트리 수 ${esc((gr.trees||[]).join("·"))} × 최대 깊이 ${esc((gr.depth||[]).join("·"))} 그리드 · ② 는 Score 레시피 결과 둘 비교 (저장 모델로 직접 예측은 안 됨)</div>`;
+ const nn=((((d.dev||{}).ips||{}).upload||{}).checks||{}).normal_rows;
+ h+=`<div class="msg" style="border-left:4px solid var(--bad);margin:6px 0"><b>레시피 1 (decode) 주의</b>: 원래 레시피 1 은 label 을 모두 '1'(공격)로 덮어 <b>정상 행이 공격이 됩니다</b>${nn!=null?` (이번 추가 샘플의 정상 ${fmt(nn)}행)`:""}. 첨부 형식 열 빼기(열이 없어 오류)·4월 첨부 기준 행 번호 빼기(엉뚱한 행이 빠짐)도 우리 파일에 맞지 않습니다 → <b>레시피 사본 1</b> 을 쓰세요. 원래 레시피 1 을 꼭 써야 하면 아래에서 '공격 행만 올리기'를 고르세요 (정상 행은 서버 데이터에 안 들어감).</div>`;
+ const vI=(d.versions||{}).ips||[],vW=(d.versions||{}).waf||[],vAll=[...new Map([...vI,...vW].map(x=>[x.ver,x])).values()],both=v=>vI.some(x=>x.ver===v)&&vW.some(x=>x.ver===v);
+ h+=`<div class="row" style="margin-top:6px"><label>서버 데이터 이름 날짜<input id="svTag" value="${esc(d.tag)}" maxlength="6" style="width:80px"></label><span class="muted" style="align-self:center">기준 ${esc(d.base_tag||"-")}</span>
+  <label>올릴 행<select id="svLab">${Object.entries(d.label_modes||{}).map(([k,t])=>`<option value="${k}"${k===d.labels?" selected":""}>${esc(t)}</option>`).join("")}</select></label>
+  <label>NUL(0x00) 이 든 샘플<select id="svNul">${Object.entries(d.nul_modes||{}).map(([k,t])=>`<option value="${k}"${k===d.nul?" selected":""}>${esc(t)}</option>`).join("")}</select></label>
+  <label title="피처 세션이 만드는 보강판(12_server/features/out)이 IPS·WAF 둘 다 있어야 고를 수 있음 - 레시피 사본 3·3r·4 와 로컬 사전 점검에 같이 씀">피처 정의 판<select id="svVer">${vAll.map(x=>`<option value="${esc(x.ver)}"${x.ver===d.ver?" selected":""}${both(x.ver)?"":" disabled"}>${esc(x.ver)} - ${esc(x.desc||"")}${both(x.ver)?"":` (${vI.some(y=>y.ver===x.ver)?"IPS":"WAF"} 만)`}</option>`).join("")}</select></label>
+  <button class="primary" id="svPrep"${run?" disabled":""}>${d.prepared?"다시 만들기":"올릴 파일·레시피 사본 만들기"} (rev ${d.rev})</button>${d.prepared?`<span class="muted" style="align-self:center">${esc(isoClock(d.prepared_at||""))} 만듦 · 판 ${esc(d.ver)} · <a href="/download/sup/server/bundle?name=${encodeURIComponent(d.name)}" title="사본·올릴 파일·피처 사전·SQL·점검 결과·서버 기록을 설명(README_설명.md)과 함께 zip 하나로 - 회사 내부용">넘겨줄 묶음 받기 (zip)</a></span>`:""}</div>`;
+ const stl=["ips","waf"].filter(dv=>(d.stale||{})[dv]);if(stl.length)h+=`<div class="msg">${stl.map(v=>v.toUpperCase()).join("·")} 추가 샘플 목록이 파일을 만든 뒤 바뀌었습니다 - 다시 만드세요</div>`;
+ h+=`<div class="row"><label class="inl"><input type="checkbox" id="svIps" checked> IPS</label><label class="inl"><input type="checkbox" id="svWaf" checked> WAF</label>
+  <label class="inl" title="서버 Train 처럼 RF 트리 수 × 최대 깊이 그리드에서 검증 f1 이 가장 좋은 조합을 고름 (끄면 RF 100 트리·깊이 제한 없음 - 빠른 확인)"><input type="checkbox" id="svGrid" checked> 그리드 (서버처럼)</label>
+  <label title="그리드(조합 고르기)에 쓸 행 - 층화 표본의 80/20. 고른 조합으로 다시 학습할 때는 늘 전체 행">그리드 행<select id="svGrows"><option value="${gr.rows||150000}">${fmt(gr.rows||150000)} 표본 (기본)</option><option value="0">전체 (오래 걸림)</option></select></label>
+  <button id="svChk"${run?" disabled":""}>로컬 사전 점검 시작 (판 위에서 고른 것)</button>${run?'<button class="danger" id="svStop">중지</button>':""}
+  <span class="muted" style="align-self:center;font-size:12.5px">학습 파일 전체(올릴 파일에서 뺀 행 빼고)를 레시피 1 로 디코딩해 피처를 만들고, 그리드로 고른 RF 로 전체 학습 → 학습분 안 4지표·② 예측 일치 (처음은 오래 걸리고, 계산한 피처는 캐시에 남아 다음부터 빠름)</span></div>`;
+ if(run)h+=`<div><b>점검 중</b>${rs.version&&rs.version!==d.name?` (다른 버전 '${esc(rs.version)}' - 끝나야 시작·다시 만들기 가능)`:""} ${esc(String(rs.dev||"").toUpperCase())} · ${esc(rs.step_text||"시작하는 중")} · ${Math.round(rs.pct||0)}%${rs.eta_s!=null?` · 남은 약 ${hms(rs.eta_s)}`:""}</div>`;
+ else if(rs.status&&rs.version===d.name&&rs.status!=="done")h+=`<div class="muted">지난 점검: ${({stopped:"중지됨",error:"실패",running:"끊김"})[rs.status]||esc(rs.status)}${rs.error?` · ${esc(rs.error)}`:""}</div>`;
+ for(const dv of["ips","waf"])h+=srvDev(d,dv);
+ if(sSrvMsg)h+=`<div class="muted" style="margin-top:6px">${esc(sSrvMsg)}</div>`;
+ el.innerHTML=h;
+ for(const [k,v] of Object.entries(sSrvDirty)){const i=el.querySelector(`[data-sv="${k}"],[data-svmemo="${k}"]`)||(/^sv[A-Z]/.test(k)?$(k):null);if(i)i.value=v}}
+function srvDev(d,dv){const x=(d.dev||{})[dv]||{},u=x.upload,cp=x.copies,ck=x.check,s=x.server||{},v=x.verdict||{},U=dv.toUpperCase();
+ let h=`<div style="border-top:1px solid var(--line);margin-top:10px;padding-top:6px"><b>${U}</b> `;
+ if(u){const c=u.checks||{},ex=Object.entries(u.excluded||{});h+=`올릴 파일 <a href="${svDl(u.file)}">${esc(u.file)}</a> ${fmt(u.rows)}행 (공격 ${fmt((u.label||{}).anomalies)} · 정상 ${fmt((u.label||{}).normal)})${ex.length?` <b>· 뺀 행 ${ex.map(([k,n])=>`${esc(k)} ${fmt(n)}`).join(", ")}</b> (추가 샘플 ${fmt(u.added_rows)} 중)`:""} <span class="muted">· ${fmt(Math.round((u.bytes||0)/1024))}KB · sha256 ${esc((u.sha256||"").slice(0,12))}…</span>
+  <div class="muted" style="font-size:12.5px">검사: NUL ${fmt(c.nul_rows)}${u.nul_replaced?` (%00 으로 바꿈 ${fmt(u.nul_replaced)})`:""} · 빈 payload ${fmt(c.empty_payload)} · 빈 method ${fmt(c.empty_method)}${c.empty_method?" (서버가 '-' 로 바꿈)":""} · 값 안 줄바꿈 ${fmt(c.newline_rows)}행 · 큰따옴표 ${fmt(c.quote_rows)}행 · SQL 만 줄바꿈으로 보는 글자 ${fmt(c.sql_break_rows)}행</div>`;
+  h+=cp?`<div>레시피 사본 <a href="${svDl(cp.zip)}">${esc(cp.zip)}</a> <span class="muted" style="font-size:12.5px">(판 ${esc(cp.ver||"std")} · ${(cp.files||[]).length}개 - 서버 Python 레시피에 붙여 넣기, 순서·데이터셋 이름은 README)</span></div>`:""}
+ else h+=`<span class="muted">아직 올릴 파일을 만들지 않았습니다</span>`;
+ if(ck){const ins=ck.insample||{},ho=ck.holdout,ag=ck.agree,im=ck.impl,f95=ins.fails||[];
+  h+=`<div style="margin-top:4px"><b>로컬 사전 점검</b> <span class="muted" style="font-size:12.5px">${esc(isoClock(ck.at||""))} · ${fmt(Math.round(ck.seconds||0))}초 · 판 ${esc(ck.feature_ver||"std")} · 학습 피처 ${ck.basis==="decoded"?"디코딩 입력":"원본 입력"} · ${fmt(ck.rows_used??ck.rows)}행 (추가 ${fmt(ck.added_used??ck.added_rows)}${ck.excluded?`, 올릴 파일에서 뺀 ${fmt(ck.excluded)}행 뺌`:""}) · ${esc(ck.model||"")}</span></div>`;
+  if(ck.basis==null)h+=`<div class="msg">예전 방식(원본 피처로 학습) 점검 결과입니다 - 지금 기준(디코딩 피처로 학습)으로 다시 점검하세요</div>`;
+  const f1r=ins.all&&ins.all.f1!=null?ins.all.f1>=.95:null;
+  h+=`<div>95% 미리 보기 (학습분 안 = 서버 레시피 6 방식, 전체): ${svM4(ins.all)} ${svChip(!f95.length,!f95.length?"4지표 넘음":"4지표 미달")}${f95.length?` <span class="muted">${esc(f95.join(" · "))}</span>`:""} ${svChip(f1r,f1r?"참고 f1 ≥95% 넘음":"참고 f1 미달")}</div>`;
+  if(ins.base&&ins.added)h+=`<div class="muted" style="font-size:12.5px">참고 - 기준만 ${svM4(ins.base)} · 추가만 ${svM4(ins.added)}</div>`;
+  const gd=ck.grid;if(gd&&gd.best)h+=`<div style="font-size:12.5px">그리드: 고른 조합 <b>트리 ${fmt(gd.best.trees)} · 깊이 ${fmt(gd.best.depth)}</b> <span class="muted">(검증 ${esc(gd.metric||"f1")} 가장 높음, 그리드 ${fmt(gd.rows)}행${gd.sampled?" 표본":""}의 80/20)</span> <details style="display:inline"><summary>12 조합 보기</summary><table class="mini"><thead><tr><th class="n">트리</th><th class="n">깊이</th><th class="n">정확도</th><th class="n">P</th><th class="n">R</th><th class="n">F1</th><th class="n">추가 행 F1</th></tr></thead><tbody>${(gd.table||[]).map(r=>`<tr${r.trees===gd.best.trees&&r.depth===gd.best.depth?' class="hl"':""}><td class="n">${r.trees}</td><td class="n">${r.depth}</td>${["accuracy","precision","recall","f1","added_f1"].map(k=>`<td class="n">${cPct(r[k])}</td>`).join("")}</tr>`).join("")}</tbody></table></details></div>`;
+  if(ho)h+=`<div class="muted" style="font-size:12.5px">참고 검증분 (${esc(ho.note||"5-fold 한 fold")}, ${fmt(ho.test_rows)}행): ${svM4(ho.all)}${(ho.fails||[]).length?` · 95% 아래: ${esc(ho.fails.join(" · "))}`:""} · 그중 추가 행 ${svM4(ho.added)}</div>`;
+  if(ag&&ag.all){const ca=(ag.causes||{}).added||{},cb=(ag.causes||{}).base||{};
+   h+=`<div>② 98% 미리 보기 (같은 모델의 디코딩 입력 vs 원본 입력 예측 일치, 전체 ${fmt(ag.all.rows)}행): <b>${cPct(ag.all.rate)}</b> ${svChip(ag.a98)} · 기준 ${cPct(ag.base.rate)} · 추가 ${fmt(ag.added.rows)}행 ${cPct(ag.added.rate)} <span class="muted">(추가만은 참고)</span></div>`;
+   if(ag.added.disagree)h+=`<div class="muted" style="font-size:12.5px">② 가 다른 추가 샘플 ${fmt(ag.added.disagree)}개 (원본 공격→디코딩 정상 ${fmt(ag.added.raw_attack_dec_normal)} · 원본 정상→디코딩 공격 ${fmt(ag.added.raw_normal_dec_attack)}) - 원인: 피처 ${svTop(ca.features)} · 인코딩 ${svTop(ca.encodings)} · 룰 ${svTop(ca.rules,5)} · 유형 ${svTop(ca.types,5)} · <a href="${svDl(ag.diff_file)}">샘플 목록 CSV</a> <span title="디코딩/원본 예측이 다른 신규 샘플을 화면 6 에서 빼거나 표시할지는 사용자 결정 전 - 지금은 목록(sk)만">(빼기·표시는 결정 뒤)</span></div>`;
+   if(ag.base.disagree)h+=`<div class="muted" style="font-size:12.5px">기준 행에서 다른 ${fmt(ag.base.disagree)}개: 피처 ${svTop(cb.features,4)} · 인코딩 ${svTop(cb.encodings,4)}</div>`}
+  else if(ck.decode)h+=`<div class="muted" style="font-size:12.5px">예전 점검의 98% 미리 보기: 전체 추정 ${cPct(ck.decode.overall_est)}</div>`;
+  if(im)h+=`<div class="muted" style="font-size:12.5px">① 구현 일치 미리 보기 (같은 원본, 파이썬 vs SQL 줄바꿈 처리 ${esc((im.chars||[]).join("·")||"차이 없음")}): 그 글자가 든 행 ${fmt(im.rows)} · 피처 다른 행 ${fmt(im.feat_diff_rows)} · 예측 다른 행 ${fmt(im.pred_diff_rows)} (Java 정규식 차이는 서버 5 에서)</div>`;
+  if(ck.note)h+=`<div class="muted">${esc(ck.note)}</div>`;
+  if((ck.upload_match||{}).diff)h+=`<div class="msg">추가 행 ${fmt(ck.upload_match.diff)}개가 학습 파일의 추가 행과 다릅니다 - 다시 내보내세요</div>`}
+ const sm=s.metrics,sa=s.agree,si=s.impl;
+ h+=`<div style="margin-top:6px"><b>서버 결과</b> ${sm?`${svM4(sm)} ${svChip(v.m95,v.m95?"4지표 넘음":"4지표 미달")} ${svChip(v.f1_ok,v.f1_ok?"참고 f1 ≥95% 넘음":"참고 f1 미달")} <span class="muted" style="font-size:12.5px">(TP ${fmt(sm.tp)} · FP ${fmt(sm.fp)} · TN ${fmt(sm.tn)} · FN ${fmt(sm.fn)} · ${esc(isoClock(sm.at||""))})</span> <a href="#" data-svclr="${dv}:metrics">지우기</a>`:'<span class="muted">4지표 없음</span>'} · ② 예측 일치 ${sa?`<b>${cPct(sa.value)}</b> ${svChip(v.a98)} <span class="muted" style="font-size:12.5px">${esc(isoClock(sa.at||""))}</span> <a href="#" data-svclr="${dv}:agree">지우기</a>`:'<span class="muted">없음</span>'} · ① 다른 칸 ${si?`<b>${fmt(si.diff_cells)}</b>${si.diff_rows!=null?` (행 ${fmt(si.diff_rows)}${si.rate!=null?` · 같은 행 ${cPct(si.rate)} ${svChip(v.impl_ok,v.impl_ok?"참고 99.8% 넘음":"참고 99.8% 미달")}`:""})`:""} <a href="#" data-svclr="${dv}:impl">지우기</a>`:'<span class="muted">없음</span>'}</div>`;
+ h+=`<div class="row"><span style="align-self:center">6 출력</span>${["tp","fp","tn","fn"].map(k=>`<label>${k.toUpperCase()}<input data-sv="${dv}:${k}" style="width:84px" inputmode="numeric"></label>`).join("")}<button class="sm" data-svm="${dv}">4지표 저장</button>
+  <label>5b 출력 '예측 일치 (전체)' %<input data-sv="${dv}:agree" style="width:70px"></label><button class="sm" data-sva="${dv}">② 저장</button></div>
+  <div class="row"><span style="align-self:center">5 출력 (①)</span><label>다른 칸<input data-sv="${dv}:icells" style="width:70px" inputmode="numeric"></label><label>다른 행 (선택)<input data-sv="${dv}:irows" style="width:70px" inputmode="numeric"></label><label>전체 행 (선택)<input data-sv="${dv}:itotal" style="width:84px" inputmode="numeric"></label><button class="sm" data-svi="${dv}">① 저장</button></div>`;
+ h+=`<div class="row"><label>서버 틀린 행 CSV (6 출력)<input type="file" data-svf="${dv}:wrong_csv" accept=".csv,.tsv,.txt"></label><label>예측 다른 행 CSV (5b 출력)<input type="file" data-svf="${dv}:diff_csv" accept=".csv,.tsv,.txt"></label><button class="sm" data-svup="${dv}">올리기 (우리 샘플과 짝짓기)</button></div>`;
+ for(const [k,t] of [["wrong_csv","서버 틀린 행"],["diff_csv","서버 예측 다른 행"]]){const w=s[k];if(w)h+=`<div class="muted" style="font-size:12.5px">${t} ${fmt(w.rows)}행 (${esc(w.filename||"")}, ${esc(isoClock(w.at||""))}): 추가 샘플 ${fmt(w.added_rows)} · 기준 ${fmt(w.base_rows)} · 룰 ${svTop(w.by_rule,6)} · 유형 ${svTop(w.by_type,5)} <a href="#" data-svclr="${dv}:${k}">지우기</a></div>`}
+ const st=x.steps||[],nd=st.filter(z=>z.done).length;
+ h+=`<details${nd&&nd<st.length?" open":""}><summary>서버 단계 체크리스트 ${nd}/${st.length}</summary><table class="mini"><tbody>${st.map(z=>`<tr><td><input type="checkbox" data-svs="${dv}:${esc(z.key)}"${z.done?" checked":""}></td><td class="nw">${esc(z.title)}</td><td class="reason">${esc(z.detail||"")}</td><td class="muted nw">${esc(isoClock(z.at||""))}</td><td><input data-svmemo="${dv}:${esc(z.key)}" value="${esc(z.memo||"")}" placeholder="메모 (Enter 로 저장)" style="width:170px"></td></tr>`).join("")}</tbody></table></details>`;
+ return h+`</div>`}
+async function svPost(url,body,msg,done=[]){try{const r=await post(url,Object.assign({name:sCandName},body));for(const k of done)delete sSrvDirty[k];
+  sSrvMsg=typeof msg==="function"?msg(r):(msg||"");await loadSrv(true);loadCand();return r}catch(e){alert("실패: "+e.message);return null}}
+$("sSrvBody").addEventListener("input",e=>{const t=e.target,k=t.dataset.sv||t.dataset.svmemo||(/^sv[A-Z]/.test(t.id||"")?t.id:"");if(k)sSrvDirty[k]=t.value});
+$("sSrvBody").addEventListener("click",async e=>{const el=e.target,d=sSrvD;if(!d)return;
+ const clr=el.closest("a[data-svclr]");if(clr){e.preventDefault();const [dv,what]=clr.dataset.svclr.split(":");if(confirm(`${dv.toUpperCase()} 서버 결과(${what})를 지웁니다. 진행할까요?`))svPost("/api/sup/server/result",{dev:dv,kind:"clear",what},"지웠습니다");return}
+ if(el.id==="svPrep"){const tag=$("svTag").value.trim(),nul=$("svNul").value,labels=$("svLab").value,ver=$("svVer").value;
+  if(!confirm(`rev ${d.rev} 의 추가 샘플로 서버에 올릴 파일(IPS·WAF)${(d.local||{}).ok?"과 레시피 사본":""}을 만듭니다 (데이터 이름 날짜 ${tag}, 기준 ${d.base_tag}, 피처 정의 판 ${ver}).\n올릴 행: ${(d.label_modes||{})[labels]||labels} · NUL: ${(d.nul_modes||{})[nul]||nul}${d.prepared?"\n이미 만든 파일은 새로 바뀝니다 (서버 결과·체크리스트 기록은 남음).":""}\n진행할까요?`))return;
+  svPost("/api/sup/server/prepare",{tag,nul,labels,ver},r=>"만들었습니다: "+["ips","waf"].map(v=>`${v.toUpperCase()} ${r.dev[v].upload} ${fmt(r.dev[v].rows)}행${Object.keys(r.dev[v].excluded||{}).length?" (뺀 행 "+Object.entries(r.dev[v].excluded).map(([k,n])=>k+" "+fmt(n)).join(", ")+")":""}${r.dev[v].copies?" + "+r.dev[v].copies:""}`).join(" · "),["svTag","svNul","svLab","svVer"]);return}
+ if(el.id==="svChk"){const devs=[["ips","svIps"],["waf","svWaf"]].filter(([,id])=>$(id).checked).map(([v])=>v);if(!devs.length){alert("장비를 고르세요");return}
+  const grid=$("svGrid").checked,grows=+$("svGrows").value,ver=$("svVer").value;
+  if(!confirm(`rev ${d.rev} 로컬 사전 점검을 시작합니다: ${devs.map(v=>v.toUpperCase()).join(" → ")} · 피처 정의 판 ${ver} · ${grid?`그리드 (트리 수 × 깊이 12 조합, ${grows?fmt(grows)+"행 표본":"전체 행"})`:"그리드 없이 RF 100 트리"}.\n장비마다 학습 파일 전체(약 40만 행)를 디코딩해 피처를 만들고 RF 를 학습합니다 (CPU 를 많이 씀 - 처음은 장비마다 십수 분 이상, 피처 캐시 뒤에는 그리드·학습 시간만). 진행할까요?`))return;
+  svPost("/api/sup/server/check",{devs,grid,grid_rows:grows,ver},"사전 점검을 시작했습니다");return}
+ if(el.id==="svStop"){svPost("/api/sup/server/check/stop",{},"중지를 요청했습니다 (지금 단계가 끝나면 멈춤)");return}
+ const g=(dv,k)=>($("sSrvBody").querySelector(`[data-sv="${dv}:${k}"]`)||{}).value||"";
+ const bm=el.closest("button[data-svm]");if(bm){const dv=bm.dataset.svm;
+  svPost("/api/sup/server/result",{dev:dv,kind:"metrics",tp:g(dv,"tp"),fp:g(dv,"fp"),tn:g(dv,"tn"),fn:g(dv,"fn")},r=>`${dv.toUpperCase()} 서버 4지표: ${svM4(r)}`,
+   ["tp","fp","tn","fn"].map(k=>`${dv}:${k}`));return}
+ const ba=el.closest("button[data-sva]");if(ba){const dv=ba.dataset.sva;
+  svPost("/api/sup/server/result",{dev:dv,kind:"agree",value:g(dv,"agree")},r=>`${dv.toUpperCase()} ② 예측 일치 ${cPct(r.value)} 저장`,[`${dv}:agree`]);return}
+ const bi=el.closest("button[data-svi]");if(bi){const dv=bi.dataset.svi;
+  svPost("/api/sup/server/result",{dev:dv,kind:"impl",diff_cells:g(dv,"icells"),diff_rows:g(dv,"irows"),total_rows:g(dv,"itotal")},r=>`${dv.toUpperCase()} ① 다른 칸 ${fmt(r.diff_cells)} 저장`,
+   ["icells","irows","itotal"].map(k=>`${dv}:${k}`));return}
+ const bu=el.closest("button[data-svup]");if(bu){const dv=bu.dataset.svup;let n=0;
+  for(const k of["wrong_csv","diff_csv"]){const inp=$("sSrvBody").querySelector(`[data-svf="${dv}:${k}"]`),f=inp&&inp.files[0];if(!f)continue;
+   if(f.size>50*2**20){alert(`${f.name}: 50MB 를 넘습니다`);continue}n++;
+   await svPost("/api/sup/server/result",{dev:dv,kind:k,filename:f.name,data:cB64(await f.arrayBuffer())},r=>`${f.name}: ${fmt(r.rows)}행 중 우리 추가 샘플 ${fmt(r.added_rows)}`)}
+  if(!n)alert("파일을 고르세요");return}});
+$("sSrvBody").addEventListener("change",e=>{const c=e.target.closest("input[data-svs]");if(!c)return;const [dv,key]=c.dataset.svs.split(":"),memo=($("sSrvBody").querySelector(`[data-svmemo="${dv}:${key}"]`)||{}).value||"";
+ svPost("/api/sup/server/step",{dev:dv,key,done:c.checked,memo},"",[`${dv}:${key}`])});
+$("sSrvBody").addEventListener("keydown",e=>{const m=e.target.closest("input[data-svmemo]");if(!m||e.key!=="Enter")return;const [dv,key]=m.dataset.svmemo.split(":"),c=$("sSrvBody").querySelector(`[data-svs="${dv}:${key}"]`);
+ svPost("/api/sup/server/step",{dev:dv,key,done:!!(c&&c.checked),memo:m.value},"메모를 저장했습니다",[`${dv}:${key}`])});
 function renderReg(){if($("sReg").dataset.done)return;$("sReg").dataset.done="1";const d=SS.defaults,fc=SS.feature_code||{};
  $("sReg").innerHTML=`<div class="muted" style="font-size:12.5px;margin:6px 0">첫 기준 버전(예: 26 상반기 = v26.02.02)의 파일 위치를 넣습니다. 공개본을 받아 쓸 때 넣을 것: 사용자 룰(<code>00_custom_rules</code>), 기존 학습 로그(<code>06_기존 데이터/{ips,waf}_*_raw.log</code>), 기준 학습데이터(표준모델 학습 형식 CSV: method, payload, label, {장비}_payload_* 피처 → <code>06_기존 데이터/학습데이터/</code>), 표준모델 피처 파일(노트북을 변환한 .py, '# 1) 피처 생성' 앞에 정규식 사전 → <code>06_기존 데이터/피처 코드/</code>).</div>
  <div class="row"><label>이름<input id="rgName" placeholder="26 상반기" style="width:120px"></label><label>태그<input id="rgTag" placeholder="v26.02.02" style="width:110px"></label></div>

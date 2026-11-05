@@ -21,11 +21,16 @@
           decisions.jsonl 화면 4 가 쓰는 사람 판단·유지 표시 (이 파일은 읽기만, 합의에 씀)
         코드 판정(cons)·학습 로그·검증 파일은 바꾸지 않는다. 화면 4 가 표·필터에 보여 주고,
         반영(삭제·label 바꾸기)은 화면에서 기존 수정·삭제(edits)로 저장한다 (되돌릴 수 있음).
-[교차 확인·합의] (2026-11-02~) --cross <1번째 모델>: 1번째 모델이 맞음·판단 불가라 한 줄만 이번 모델(2번째)로 다시 묻는다
-  (반대·부적합은 이미 삭제라 묻지 않음, 지시문은 같음). 줄마다 합의 (consensus_state, 대상별):
-    사람 판단·유지 표시가 있으면 그것 / 하나라도 반대·부적합 → 삭제 (반대도 label 을 바꾸지 않고 삭제) /
-    두 모델 이상 모두 맞음 → 확인됨 (유지) / 그 밖 → 추가 분석 (한 모델만 판정 = 2번째 모델 대기, 판단 불가가 섞임 = 엇갈림)
+[교차 확인·합의] (2026-11-02~) --cross <1번째 모델>: 1번째 모델이 부적합이 아니라고 한 줄(맞음·반대·판단 불가)만 이번 모델(2번째)로
+  다시 묻는다 (부적합은 이미 삭제라 묻지 않음, 지시문은 같음). 줄마다 합의 (consensus_state, 대상별, 2026-11-04~ 투표):
+    사람 판단·유지 표시가 있으면 그것 / 어느 모델이든 학습에 부적합 → 삭제 /
+    그 밖에는 확정 판정(맞음·반대, 판단 불가는 빼고)의 다수결: 확정 판정이 2개 이상이고 한쪽이 많으면 그쪽
+    (맞음 → 확인됨 (유지), 반대 → label 반대 - 화면이 label 을 바꾸고 투표 결과·근거를 사유로 남김) /
+    그 밖 → 추가 분석 (한 모델만 판정 = 2번째 모델 대기 → 교차 확인, 두 모델 이상인데 다수 없음 = 투표 갈림 → 3차 투표)
+  --tiebreak (3차 모델 투표, 2026-11-04~): 그 대상에서 합의가 '투표 갈림'인 줄만, 그 줄을 아직 판정하지 않은 이번 모델로 묻는다
+    (다수가 생기면 그쪽, 그래도 없으면 추가 분석에 남아 사람이 정함).
   모델은 추론 강도(@…)를 떼고 보고 Claude 는 claude_cli·anthropic 을 같은 모델로 본다 (모델마다 가장 최근 판정).
+  화면이 합의로 label 을 바꿔 학습 로그에 반영한 줄(edits 의 'LLM 재확인' label 수정)은 다시 '불일치' 대상으로 보지 않는다.
   화면 6 '불일치' 중 남기기 옵션은 '불일치' 합의가 확인됨인 샘플만 남긴다 (5_0a_common.llm_ok_keys 가 같은 규칙).
     python 3_6_recheck_labels.py --cross openai:gpt-6-luna --model claude_cli:claude-opus-5-5 --dry-run
   애매한 룰만 (2026-11-02~, --rules-from-ratio 하한 상한): 1번째 모델이 판정한 줄을 룰마다 모아 삭제 비율(반대·부적합 ÷ 판정 줄)로
@@ -76,10 +81,17 @@ THINK_PER_REQUEST = {"openai": 2000, "claude_cli": 1500, "anthropic": 1500}   # 
 SEC_PER_REQUEST = 40            # 기록이 없을 때 예상: 요청 하나의 시간 (초)
 # 참고 단가 (USD / 100만 토큰, 입력·출력). 2026-10-29 확인: Claude 는 Anthropic 가격표, gpt-6-luna 는 OpenAI 가격을 옮긴
 # 집계 사이트, solar-pro2 는 집계 사이트마다 달라 높은 쪽. 바뀌면 고친다. claude_cli 는 토큰 요금 대신 구독 사용량.
-PRICES = {"openai:gpt-6-luna": (0.10, 0.50), "openai:gpt-5": (1.25, 10.0), "upstage:solar-pro2": (0.15, 0.60),
+# 2026-11-05: gpt-5-mini·gpt-6.1-sol 추가 (사용자가 준 가격표, 캐시 입력 할인은 넣지 않음 → 예상은 위쪽 값)
+PRICES = {"openai:gpt-6-luna": (0.10, 0.50), "openai:gpt-5": (1.25, 10.0), "openai:gpt-5-mini": (0.25, 2.0),
+          "openai:gpt-6.1-sol": (2.0, 10.0), "upstage:solar-pro2": (0.15, 0.60),
           "anthropic:claude-opus-5-5": (4.0, 20.0), "anthropic:claude-sonnet-5-5": (2.0, 10.0),
           "anthropic:claude-haiku-5-5": (0.10, 0.50)}
-STATES = {"keep": "확인됨 (유지)", "delete": "삭제", "flip": "label 반대", "review": "추가 분석"}   # 합의 상태 (flip 은 사람 판단만)
+STATES = {"keep": "확인됨 (유지)", "delete": "삭제", "flip": "label 반대", "review": "추가 분석"}   # 합의 상태
+# 합의 규칙 (2026-11-04~ 부적합 삭제 + 다수결 투표 - 사용자 확인 중이라 바꾸기 쉽게 여기와 consensus_state 한 곳에):
+VOTE_DELETE = ("unfit",)        # 어느 모델이든 이 판정이 하나라도 있으면 삭제
+VOTE_DECISIVE = ("ok", "flip")  # 다수결에 세는 판정 (판단 불가는 뺌) - ok 다수 → 확인됨, flip 다수 → label 반대
+VOTE_MIN = 2                    # 다수결에 필요한 확정 판정 수 (이보다 적으면 2번째 모델 대기)
+CROSS_ASK = ("ok", "unknown", "flip")   # 교차 확인이 묻는 1번째 판정 (부적합은 이미 삭제라 묻지 않음)
 CROSS_DEFAULT = "claude_cli:claude-opus-5-5"     # 화면 4 교차 확인의 2번째 모델 기본 제안
 CLI_WORKERS = 4                                  # claude_cli(구독 사용량) 동시 요청 수 상한 (LLM_설정.md 2026-10-26 메모)
 
@@ -148,14 +160,35 @@ def _stamp(paths):
     return tuple(out)
 
 
+LLM_EDIT_WHY = "LLM 재확인"     # 화면 4 가 LLM 재확인(합의·사람 판단)으로 저장한 수정·삭제 사유의 앞부분 (0_0_run_ui RECHECK_WHY)
+
+
+def voted_sks(date):
+    """화면이 LLM 재확인으로 label 을 바꾼 샘플 {sk: 바꾼 label} (그 날짜 edits.json). 학습 로그에 반영된 줄(label 이 바뀐 label 이고
+    label 파일의 edited 에 label)은 '합의로 label 바꿈'이라 다시 '불일치'·'정합 (룰 기준)' 대상으로 보지 않는다 (2026-11-04~)."""
+    try:
+        edits = json.loads((DATASET / date / "edits.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {sk: e.get("label") for sk, e in edits.items()
+            if e.get("action") == "edit" and e.get("label") and str(e.get("why", "")).startswith(LLM_EDIT_WHY)}
+
+
+def _voted(meta, label, vs):
+    """그 줄이 LLM 재확인으로 바꾼 label 이 학습 로그에 반영된 줄인지 (label 파일 meta, 지금 label, voted_sks)."""
+    sk = meta.get("sk")
+    return bool(sk) and sk in vs and vs[sk] == label and "label" in str(meta.get("edited") or "")
+
+
 def bad_rows(date, dev):
     """그 날짜·장비의 '불일치' 줄 [{k, ck, sk, rule_id, label, payload, note, attack_type, reason, in, date, dev, line}].
-    파일(검증 결과·로그·줄별 결과·label)이 그대로면 지난 결과 (화면이 자주 물어도 다시 읽지 않음)."""
+    파일(검증 결과·로그·줄별 결과·label·수정)이 그대로면 지난 결과 (화면이 자주 물어도 다시 읽지 않음).
+    LLM 재확인으로 label 을 바꿔 반영한 줄('합의로 label 바꿈')은 뺀다."""
     path = _log_path(date, dev)
     if path is None:
         return []
     frame, lab = DATASET / date / f"{dev}_frame.jsonl", path.with_name(path.stem + "_label.jsonl")
-    key = _stamp((DATASET / date / f"{dev}_verify.json", path, frame, lab))
+    key = _stamp((DATASET / date / f"{dev}_verify.json", path, frame, lab, DATASET / date / "edits.json"))
     with _cache_lock:
         hit = _cache.get((date, dev))
     if hit and hit[0] == key:
@@ -163,7 +196,7 @@ def bad_rows(date, dev):
     got = verified(date, dev)
     codes = got[1] if got else ""
     bad = {i for i, c in enumerate(codes) if c == "4"}
-    rows = []
+    rows, vs = [], voted_sks(date)
     if bad:
         fr = _lines(frame, bad) if frame.exists() else {}
         if len(fr) == len(bad):                     # 줄별 결과가 로그와 맞을 때만 (검증이 다시 쓰는 중이면 다음에)
@@ -175,6 +208,8 @@ def bad_rows(date, dev):
                 f = split_log(logs.get(i, ""))
                 payload, label = (f[6], f[7]) if len(f) == 8 else (logs.get(i, ""), "")
                 m = json.loads(metas[i]) if i in metas else {}
+                if _voted(m, label, vs):
+                    continue                        # 합의로 label 바꿈 (반영됨)
                 rid = m.get("id", "")
                 rows.append({"k": a["k"], "ck": sample_key(label, rid, payload), "sk": m.get("sk", ""), "rule_id": rid,
                              "label": label, "payload": payload, "note": m.get("note", ""),
@@ -246,14 +281,14 @@ def rule_pool(date, dev):
     if path is None:
         return []
     frame, lab = DATASET / date / f"{dev}_frame.jsonl", path.with_name(path.stem + "_label.jsonl")
-    key = _stamp((DATASET / date / f"{dev}_verify.json", path, frame, lab))
+    key = _stamp((DATASET / date / f"{dev}_verify.json", path, frame, lab, DATASET / date / "edits.json"))
     with _cache_lock:
         hit = _pool.get((date, dev))
     if hit and hit[0] == key:
         return hit[1]
     got = verified(date, dev)
     want = {i for i, c in enumerate(got[1]) if c == "2"} if got else set()
-    out = []
+    out, vs = [], voted_sks(date)
     if want:
         fr = _lines_at(frame, want) if frame.exists() else {}
         if len(fr) == len(want):                    # 줄별 결과가 로그와 맞을 때만 (bad_rows 와 같음)
@@ -263,6 +298,8 @@ def rule_pool(date, dev):
                 if not m:
                     continue                        # 예전 형식 결과 (내용 지문 없음)
                 a = json.loads(metas[i]) if i in metas else {}
+                if _voted(a, a.get("label", ""), vs):
+                    continue                        # 합의로 label 바꿈 (반영됨)
                 out.append((m.group(1), a.get("id", ""), a.get("origin") == "llm", i, a.get("sk", ""), a.get("label", ""),
                             a.get("attack_type", "")))
     with _cache_lock:
@@ -460,16 +497,29 @@ def read_decisions(out_dir=None):
 
 
 def consensus_state(votes, decision=None):
-    """한 줄의 합의 → (상태, 까닭). 사람 판단·유지 표시(decision)가 있으면 그것 (decided), 없으면 하나라도 반대·부적합 → delete,
-    두 모델 이상 모두 맞음 → keep, 그 밖 → review (pending = 한 모델만 판정 · mixed = 판단 불가가 섞임)."""
+    """한 줄의 합의 → (상태, 까닭). 규칙은 위 VOTE_* 상수 (2026-11-04~ 부적합 삭제 + 다수결 투표):
+    사람 판단·유지 표시(decision)가 있으면 그것 (decided) / 어느 모델이든 부적합 → delete (unfit) /
+    확정 판정(맞음·반대)이 VOTE_MIN 개 이상이고 한쪽이 많으면 → 맞음 keep · 반대 flip (vote) /
+    그 밖 → review: 판정한 모델이 하나뿐 = pending (2번째 모델 대기 → 교차 확인), 두 모델 이상인데 다수 없음 = split
+    (투표 갈림 → 3차 투표, 그래도 없으면 사람). 예전(11-02~11-04)에는 반대도 삭제, 판단 불가가 섞이면 mixed."""
     if decision:
         return decision["decision"], "decided"
     vs = [r.get("verdict") for r in (votes or {}).values()]
-    if any(v in ("flip", "unfit") for v in vs):
-        return "delete", "vote"
-    if len(vs) >= 2 and all(v == "ok" for v in vs):
-        return "keep", "vote"
-    return "review", "pending" if len(vs) < 2 else "mixed"
+    if any(v in VOTE_DELETE for v in vs):
+        return "delete", "unfit"
+    ok, flip = vs.count(VOTE_DECISIVE[0]), vs.count(VOTE_DECISIVE[1])
+    if ok + flip >= VOTE_MIN and ok != flip:
+        return ("keep" if ok > flip else "flip"), "vote"
+    return "review", "pending" if len(vs) < 2 else "split"
+
+
+def vote_text(votes):
+    """투표 결과 한 줄 (label 바꿀 때 사유): '반대 2 : 맞음 1 (claude-opus-5-5 반대: 근거 …; gpt-6-luna 맞음)'."""
+    vs = [(m.split(":", 1)[-1], r.get("verdict"), r.get("reason", "")) for m, r in sorted((votes or {}).items())]
+    c = {v: sum(1 for _, x, _ in vs if x == v) for v in VERDICTS}
+    head = " : ".join(f"{VERDICTS[v].replace('label ', '')} {c[v]}" for v in ("flip", "ok", "unfit", "unknown") if c[v])
+    return f"{head} (" + "; ".join(f"{m} {VERDICTS.get(v, v).replace('label ', '')}" + (f": {r[:80]}" if r and v != "ok" else "")
+                                   for m, v, r in vs) + ")"
 
 
 def consensus_map(results, decisions, target):
@@ -479,9 +529,9 @@ def consensus_map(results, decisions, target):
 
 
 def consensus_counts(keys, cmap):
-    """줄(k) 목록의 합의 수 {keep, delete, flip, review, pending, mixed, decided, kept} (판정이 없는 줄은 세지 않음,
-    decided = 사람 판단·유지 표시가 있는 줄, kept = 그중 유지)."""
-    out = dict.fromkeys(("keep", "delete", "flip", "review", "pending", "mixed", "decided", "kept"), 0)
+    """줄(k) 목록의 합의 수 {keep, delete, flip, review, pending, split, decided, kept} (판정이 없는 줄은 세지 않음,
+    pending·split = 추가 분석의 까닭, decided = 사람 판단·유지 표시가 있는 줄, kept = 그중 유지)."""
+    out = dict.fromkeys(("keep", "delete", "flip", "review", "pending", "split", "decided", "kept"), 0)
     for k in keys:
         c = cmap.get(k)
         if not c:
@@ -500,25 +550,26 @@ GROUPS = {"ok": "대체로 괜찮음", "mid": "애매함", "bad": "대체로 문
 
 def rule_groups(rows, votes, first, lo=0.3, hi=0.7, min_rows=2):
     """'애매한 룰만' 교차 확인: 대상 줄(rows {k: 줄}) 중 1번째 모델(first, base_model)이 판정한 줄을 룰마다 모아
-    삭제 비율(반대·부적합 ÷ 판정 줄)로 나눈다 → ({룰 id: 묶음}, {묶음: {rules, rows(판정 줄), ask(맞음·판단 불가 줄)}},
+    삭제 비율(반대·부적합 ÷ 판정 줄)로 나눈다 → ({룰 id: 묶음}, {묶음: {rules, rows(판정 줄), ask(교차 확인이 묻는 줄 = CROSS_ASK)}},
     10% 구간 분포 [[구간 시작 %, 룰 수, 판정 줄 수]]). 묶음: ok = lo 미만, mid = lo 이상 hi 미만, bad = hi 이상,
     small = 판정 줄이 min_rows 보다 적음 (비율과 상관없이, 분포에는 넣음)."""
     per = {}
     for k, x in rows.items():
         r = (votes.get(k) or {}).get(first)
         if r:
-            s = per.setdefault(x["rule_id"], [0, 0])
+            s = per.setdefault(x["rule_id"], [0, 0, 0])
             s[0] += 1
             s[1] += r.get("verdict") in ("flip", "unfit")
+            s[2] += r.get("verdict") in CROSS_ASK
     group, summary, hist = {}, {g: {"rules": 0, "rows": 0, "ask": 0} for g in GROUPS}, [[i * 10, 0, 0] for i in range(10)]
-    for rid, (n, d) in per.items():
+    for rid, (n, d, a) in per.items():
         ratio = d / n
         g = "small" if n < min_rows else "ok" if ratio < lo else "bad" if ratio >= hi else "mid"
         group[rid] = g
         s = summary[g]
         s["rules"] += 1
         s["rows"] += n
-        s["ask"] += n - d
+        s["ask"] += a
         b = hist[min(9, int(ratio * 10 + 1e-9))]
         b[1] += 1
         b[2] += n
@@ -678,34 +729,65 @@ def mock_answer(rows, salt=""):
 
 
 def prepare(dates, mid, per=PER_REQUEST, out_dir=None, target="bad", devs=DEVS, per_rule=PER_RULE, llm_only=True, cross=None,
-            pick=None):
+            pick=None, tiebreak=False, cross_per_rule=0):
     """대상·이번에 보낼 줄·요청 묶음·룰. rows = 대상 (rule 이면 표본), stats = rule 의 표본 정보
     (내용 기준 줄·LLM 원본 줄·룰 수·표본을 고른 룰 수).
-    cross = 교차 확인의 1번째 모델: 대상 줄 중 그 모델이 판정한 줄에서 맞음·판단 불가인 줄만 (반대·부적합은 이미 삭제라 묻지 않음,
+    cross = 교차 확인의 1번째 모델: 대상 줄 중 그 모델이 판정한 줄에서 부적합이 아닌 줄만 (CROSS_ASK - 부적합은 이미 삭제라 묻지 않음,
     '정합 (룰 기준)'도 표본이 아니라 1번째가 판정한 줄), 이번 모델과 같은 모델(base_model)이 이미 판정한 줄은 건너뜀.
     pick = 애매한 룰만 {lo, hi, min_rows, small: include|exclude} - rule_groups 의 mid (+ small 이 include 면 판정 적은 룰) 룰의 줄만.
-    stats = {first, second, first_rows (1번째가 판정한 줄), first_delete (그중 반대·부적합), ask (이번 대상: 맞음·판단 불가),
-    ask_all (룰을 고르기 전), groups (pick 이면 {pick, summary, hist})}."""
+    stats = {first, second, first_rows (1번째가 판정한 줄), first_delete (그중 부적합), ask (이번 대상),
+    ask_all (룰을 고르기 전), groups (pick 이면 {pick, summary, hist})}.
+    tiebreak = 3차 모델 투표: 대상 줄 중 합의가 '투표 갈림'(split)인 줄에서 이번 모델(base_model)이 아직 판정하지 않은 줄만.
+    stats = {tiebreak, split (갈린 줄), voted (그중 이번 모델이 이미 판정), voters (갈린 줄을 판정한 모델별 줄 수)}.
+    cross_per_rule = 교차 확인의 룰 품질 점검 (rule 대상, 2026-11-05~): 룰마다 이번 모델이 판정한 줄이 이 수가 되게만 묻는다
+    (이미 그만큼 판정한 룰은 건너뜀, 내용 지문 순서). 0 이면 모든 줄."""
     results = read_results(out_dir)
+    if tiebreak:
+        me, votes = base_model(mid), votes_by_key(results, target)
+        dec = read_decisions(out_dir).get(target, {})
+        pool = collect(dates, devs) if target == "bad" else rule_rows(dates, devs)
+        split = {k: x for k, x in pool.items() if k in votes and consensus_state(votes[k], dec.get(k)) == ("review", "split")}
+        done = {k for k in split if me in votes[k]}
+        todo = [x for k, x in split.items() if k not in done]
+        if target == "rule":
+            todo = rule_details(todo)
+        voters = {}
+        for k in split:
+            for m in votes[k]:
+                voters[m] = voters.get(m, 0) + 1
+        return {"rows": split, "todo": todo, "reqs": batches(todo, per), "rules": rules_for(todo), "done": len(done),
+                "stats": {"tiebreak": True, "second": me, "split": len(split), "voted": len(done),
+                          "voters": sorted(([m, n] for m, n in voters.items()), key=lambda a: -a[1])}}
     if cross:
         first, me = base_model(cross), base_model(mid)
         votes = votes_by_key(results, target)
         pool = collect(dates, devs) if target == "bad" else rule_rows(dates, devs)
         mine = {k: x for k, x in pool.items() if first in votes.get(k, {})}
-        ask = {k: x for k, x in mine.items() if votes[k][first].get("verdict") in ("ok", "unknown")}
+        ask = {k: x for k, x in mine.items() if votes[k][first].get("verdict") in CROSS_ASK}
         ask_all, groups = len(ask), None
         if pick:
             group, summary, hist = rule_groups(mine, votes, first, pick["lo"], pick["hi"], pick["min_rows"])
             want = {"mid"} | ({"small"} if pick.get("small", "include") == "include" else set())
             ask = {k: x for k, x in ask.items() if group.get(x["rule_id"]) in want}
             groups = {"pick": pick, "summary": summary, "hist": hist}
+        if cross_per_rule and target == "rule":     # 룰 품질 점검: 룰마다 이번 모델 판정이 cross_per_rule 줄이 되게만
+            by_rule = {}
+            for k in sorted(ask):
+                by_rule.setdefault(ask[k]["rule_id"], []).append(k)
+            keep = set()
+            for ks in by_rule.values():
+                had = [k for k in ks if me in votes.get(k, {})]
+                keep.update(had)                    # 이미 판정한 줄은 '이미 한 줄' 로 센다
+                keep.update([k for k in ks if me not in votes.get(k, {})][:max(0, cross_per_rule - len(had))])
+            ask = {k: x for k, x in ask.items() if k in keep}
         done = {k for k in ask if me in votes.get(k, {})}
         todo = [x for k, x in ask.items() if k not in done]
         if target == "rule":
             todo = rule_details(todo)
         return {"rows": ask, "todo": todo, "reqs": batches(todo, per), "rules": rules_for(todo), "done": len(done),
                 "stats": {"first": first, "second": me, "first_rows": len(mine), "first_delete": len(mine) - ask_all, "ask": len(ask),
-                          "ask_all": ask_all, "rules_asked": len({x["rule_id"] for x in ask.values()}), "groups": groups}}
+                          "ask_all": ask_all, "rules_asked": len({x["rule_id"] for x in ask.values()}), "groups": groups,
+                          "per_rule_cap": cross_per_rule if target == "rule" else 0}}
     done = {(r.get("k"), r.get("model")) for r in results}
     stats = None
     if target == "rule":
@@ -754,15 +836,16 @@ def check_cross(cross, mid):
 
 
 def estimate(model=None, effort=None, dates=None, per=PER_REQUEST, target="bad", devs=DEVS, per_rule=PER_RULE, llm_only=True,
-             cross=None, pick=None):
+             cross=None, pick=None, tiebreak=False, cross_per_rule=0):
     """화면 4 의 '대상·예상': 대상 줄·이미 한 줄·요청 수·예상 토큰·시간·비용 (호출 없음). cross = 교차 확인 1번째 모델,
-    pick = 애매한 룰만 (stats.groups 에 묶음별 룰·줄 수와 삭제 비율 분포).
+    pick = 애매한 룰만 (stats.groups 에 묶음별 룰·줄 수와 삭제 비율 분포), tiebreak = 3차 모델 투표 (투표 갈림 줄만).
     토큰: 그 모델의 지난 재확인 기록이 있으면 줄당 평균, 없으면 글자 ÷ 3 (3_1 과 같은 어림) + 줄당 답·요청당 추론 토큰."""
     cfg, _, run, style = model_config(model, effort)
     mid = model_id(cfg)
     check_cross(cross, mid)
-    p = prepare(dates, mid, per, target=target, devs=devs, per_rule=per_rule, llm_only=llm_only, cross=cross,
-                pick=pick if cross else None)
+    p = prepare(dates, mid, per, target=target, devs=devs, per_rule=per_rule, llm_only=llm_only, cross=None if tiebreak else cross,
+                pick=pick if cross and not tiebreak else None, tiebreak=tiebreak,
+                cross_per_rule=cross_per_rule if cross and not tiebreak else 0)
     reqs, todo = p["reqs"], p["todo"]
     prompt_chars = len(prompt_text(target))
     chars = sum(prompt_chars + len(user_message(b, p["rules"], target)) for b in reqs)
@@ -782,7 +865,8 @@ def estimate(model=None, effort=None, dates=None, per=PER_REQUEST, target="bad",
             "tokens_in": tin, "tokens_out": tout, "history": bool(h), "seconds": round(math.ceil(len(reqs) / workers) * sec_req),
             "workers": workers, "cost": cost(mid, tin, tout), "subscription": style == "claude_cli", "others": others,
             "by_date": _count_by_date(p["rows"].values(), todo), "target": target, "stats": p["stats"],
-            "unverified": unverified(dates, devs), "cross": base_model(cross) if cross else None}
+            "unverified": unverified(dates, devs), "cross": base_model(cross) if cross and not tiebreak else None,
+            "tiebreak": bool(tiebreak)}
 
 
 def _count_by_date(rows, todo):
@@ -851,6 +935,10 @@ def run(args, log):
     dates = None if args.dates in (None, "", "all") else [d for d in args.dates.split(",") if DATE_RE.match(d)]
     devs, target, llm_only = tuple(d for d in DEVS if d in args.devs.split(",")) or DEVS, args.target, not args.with_augmented
     cross = base_model(args.cross) if args.cross else None
+    tiebreak = bool(args.tiebreak)                  # 3차 모델 투표 ('투표 갈림' 줄만, 교차 확인과 함께 쓰지 않음)
+    if tiebreak and cross:
+        log.error("[3.6] --tiebreak 와 --cross 는 함께 쓰지 않습니다 (3차 투표는 갈린 줄을 아직 판정하지 않은 모델로)")
+        return 1
     pick = None                                     # 애매한 룰만 (교차 확인일 때만)
     if args.rules_from_ratio:
         lo, hi = args.rules_from_ratio
@@ -858,6 +946,10 @@ def run(args, log):
             log.error("[3.6] --rules-from-ratio 는 --cross 와 함께, 0 <= 하한 < 상한 <= 1, --min-rows 1 이상")
             return 1
         pick = {"lo": lo, "hi": hi, "min_rows": args.min_rows, "small": args.small_rules}
+    cpr = max(0, args.cross_per_rule or 0)          # 룰 품질 점검: 교차 확인에서 룰마다 이 수의 줄만 (rule 대상)
+    if cpr and not (cross and target == "rule"):
+        log.error("[3.6] --cross-per-rule 은 --cross 와 --target rule 을 함께 쓸 때만")
+        return 1
     try:
         check_cross(cross, mid)
     except ValueError as e:
@@ -865,17 +957,19 @@ def run(args, log):
         return 1
     st = {"req_done": 0, "req_fail": 0, "rows_done": 0, "verdicts": {k: 0 for k in VERDICTS}, "tokens_in": 0, "tokens_out": 0}
     if not args.dry_run:        # 잠금을 먼저 잡고 상태를 새로 쓴다 (대상을 세는 동안 화면이 지난 실행의 상태를 보지 않게)
-        holder = RT.acquire_lock("recheck", by="3_6", model=mid, target=target, cross=cross, pick=pick)
+        holder = RT.acquire_lock("recheck", by="3_6", model=mid, target=target, cross=cross, pick=pick, tiebreak=tiebreak)
         if holder:
             log.error("[3.6] LLM 재확인이 이미 실행 중입니다 (PID %s, %s 시작)", holder.get("pid"), holder.get("started_at"))
             return 2
         RT.clear_stop("recheck")
         _status(log, state="running", pid=os.getpid(), model=mid, style=style, dates=dates or "all", started_at=RT.now_iso(),
                 finished_at=None, error="", rows_total=None, req_total=None, eta_s=None, target=target, devs=list(devs),
-                per_rule=args.per_rule if target == "rule" and not cross else None,
-                llm_only=llm_only if target == "rule" and not cross else None, cross=cross, pick=pick, **st)
+                per_rule=args.per_rule if target == "rule" and not (cross or tiebreak) else None,
+                llm_only=llm_only if target == "rule" and not (cross or tiebreak) else None, cross=cross, pick=pick,
+                tiebreak=tiebreak, cross_per_rule=cpr or None, **st)
     try:
-        p = prepare(dates, mid, args.per_request, out_dir, target, devs, args.per_rule, llm_only, cross, pick)
+        p = prepare(dates, mid, args.per_request, out_dir, target, devs, args.per_rule, llm_only, cross, pick, tiebreak,
+                    cross_per_rule=cpr)
     except BaseException as e:
         if not args.dry_run:
             _status(log, state="fail", error=f"{type(e).__name__}: {e}", finished_at=RT.now_iso())
@@ -887,8 +981,11 @@ def run(args, log):
     if pick:
         g = s["groups"]["summary"]
         log.info("[3.6] %s: %s", pick_text(pick), " · ".join(f"{GROUPS[k]} 룰 {g[k]['rules']}개 · 판정 {g[k]['rows']}줄" for k in GROUPS))
-    what = (f"교차 확인 - '{TARGETS[target]}' 줄 중 {s['first']} 가 판정한 {s['first_rows']}개에서 반대·부적합 {s['first_delete']}개"
-            f"(이미 삭제)를 뺀 맞음·판단 불가 {s['ask_all']}개" + (f" 중 {pick_text(pick)} {s['ask']}개 (룰 {s['rules_asked']}개)" if pick else "")
+    what = (f"3차 모델 투표 - '{TARGETS[target]}' 줄 중 합의가 '투표 갈림'인 {s['split']}개 "
+            f"(판정한 모델: {', '.join(f'{m} {n}' for m, n in s['voters'])})" if tiebreak else
+            f"교차 확인 - '{TARGETS[target]}' 줄 중 {s['first']} 가 판정한 {s['first_rows']}개에서 부적합 {s['first_delete']}개"
+            f"(이미 삭제)를 뺀 {s['ask_all']}개" + (f" 중 {pick_text(pick)} {s['ask']}개 (룰 {s['rules_asked']}개)" if pick else "")
+            + (f" 중 룰 품질 점검 (룰당 {cpr}줄까지) {s['ask']}개 (룰 {s['rules_asked']}개)" if cpr else "")
             if cross else
             f"'{TARGETS[target]}' 줄 {len(p['rows'])}개" if s is None else
             f"'{TARGETS[target]}' 줄 {s['pool']}개 (룰 {s['rules']}개) 중 {'LLM 원본만 ' if llm_only else ''}"
@@ -941,13 +1038,15 @@ def run(args, log):
         now = RT.now_iso()
         recs = [{"k": r["k"], "ck": r["ck"], "sk": r["sk"], "model": mid, "verdict": got[n][0], "reason": got[n][1],
                  "at": now, "req": req, "rule_id": r["rule_id"], "label": r["label"], "date": r["date"], "dev": r["dev"],
-                 "line": r["line"], "target": target, **({"cross": cross} if cross else {}), **({"pick": pick} if pick else {})}
+                 "line": r["line"], "target": target, **({"cross": cross} if cross else {}), **({"pick": pick} if pick else {}),
+                 **({"tiebreak": True} if tiebreak else {})}
                 for n, r in enumerate(rows, 1) if n in got]
         with lock:
             with open(out_dir / "results.jsonl", "a", encoding="utf-8") as f:
                 f.writelines(json.dumps(x, ensure_ascii=False) + "\n" for x in recs)
             with open(out_dir / "requests.jsonl", "a", encoding="utf-8") as f:
                 f.write(json.dumps({"req": req, "model": mid, "target": target, **({"cross": cross, "pick": pick} if cross else {}),
+                                    **({"tiebreak": True} if tiebreak else {}),
                                     "rows": len(rows), "answered": len(recs), "tries": tries,
                                     "seconds": round(time.time() - t1, 1), "usage": u, "at": now, "error": err[:300]},
                                    ensure_ascii=False) + "\n")
@@ -1002,6 +1101,10 @@ def main(argv=None):
     ap.add_argument("--rules-from-ratio", type=float, nargs=2, metavar=("하한", "상한"),
                     help="교차 확인을 애매한 룰만: 1번째 모델의 룰별 삭제 비율이 하한 이상 상한 미만인 룰 (0~1, 예: 0.3 0.7)")
     ap.add_argument("--min-rows", type=int, default=2, help="애매한 룰: 1번째 모델이 판정한 줄이 이보다 적은 룰은 '판정 적음' (기본 2)")
+    ap.add_argument("--cross-per-rule", type=int, default=0,
+                    help="룰 품질 점검 (--cross·--target rule): 룰마다 이번 모델 판정이 이 수의 줄이 되게만 묻는다 (기본 0 = 모든 줄)")
+    ap.add_argument("--tiebreak", action="store_true",
+                    help="3차 모델 투표: 합의가 '투표 갈림'(두 모델 이상인데 맞음·반대 다수 없음)인 줄만 --model(그 줄을 아직 판정하지 않은 모델)로")
     ap.add_argument("--small-rules", choices=("include", "exclude"), default="include",
                     help="애매한 룰: '판정 적음' 룰도 교차 확인에 넣음(include, 기본) / 뺌(exclude)")
     ap.add_argument("--effort", help="추론 강도 (minimal·low·medium·high·xhigh·max, '-' = 넘기지 않음. 기본: '검토 추론 강도')")

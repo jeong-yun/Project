@@ -38,8 +38,10 @@ SEED = 42
 GRADES = ["제거", "A", "B", "C"]
 GRADE_TEXT = {"제거": "제거 (중복)", "A": "A 부족한 데이터 (기준 모델이 틀림)",
               "B": "B 새 패턴 (기준 모델은 맞힘)", "C": "C 이미 학습된 패턴"}
-CONS_CODE = {"1": "OK", "2": "RULE", "3": "CHECK", "4": "BAD"}      # 4. 화면 '전체 검증' 결과 (label 정합성)
-CONS_TEXT = {"OK": "정합", "RULE": "정합 (룰 기준)", "CHECK": "확인 필요", "BAD": "불일치", "": "검증 전"}
+CONS_CODE = {"1": "OK", "2": "RULE", "3": "CHECK", "4": "BAD",      # 4. 화면 '전체 검증' 결과 (label 정합성)
+             "5": "VOTED"}      # 5 = LLM 재확인 합의로 label 을 바꿔 반영한 줄 (검증 코드에는 없고 read_dataset 이 정함, 2026-11-04~)
+CONS_TEXT = {"OK": "정합", "RULE": "정합 (룰 기준)", "CHECK": "확인 필요", "BAD": "불일치", "VOTED": "합의로 label 바꿈",
+             "": "검증 전"}
 
 
 class Stopped(Exception):
@@ -223,12 +225,22 @@ def _base_model(mid):
     return f"claude:{name}" if p in ("claude_cli", "anthropic") else m
 
 
+def _consensus(vs):
+    """3_6 consensus_state 와 같은 규칙 (2026-11-04~ 부적합 삭제 + 다수결 - 3_6 의 VOTE_* 를 바꾸면 함께 바꾼다):
+    부적합이 하나라도 → delete, 확정 판정(맞음·반대)이 2개 이상이고 한쪽이 많으면 → keep(맞음)·flip(반대), 그 밖 → review."""
+    if "unfit" in vs:
+        return "delete"
+    ok, flip = vs.count("ok"), vs.count("flip")
+    return ("keep" if ok > flip else "flip") if ok + flip >= 2 and ok != flip else "review"
+
+
 def llm_ok_keys():
     """4. 화면 'LLM 재확인'(3_6)의 '불일치' 합의가 확인됨(유지)인 샘플 내용 지문(ck) - 6. 선별의 '불일치' 중 남기기 옵션에 쓴다
     (5.5 가 비교 표의 lk 로 남김). 결과 파일이 없으면 빈 집합.
-    합의 (2026-11-02~, 3_6 consensus_state 와 같은 규칙 - 바꾸면 함께): 화면의 사람 판단·유지 표시(decisions.jsonl)가 있으면 그것,
-    없으면 하나라도 반대·부적합 → 삭제, 두 모델 이상 모두 맞음 → 확인됨, 그 밖 → 추가 분석. 한 모델만 맞음이면 남기지 않는다
-    (예전에는 가장 최근 판정 하나가 맞음이면 남김)."""
+    합의 (3_6 consensus_state 와 같은 규칙 - 바꾸면 함께, _consensus): 화면의 사람 판단·유지 표시(decisions.jsonl)가 있으면 그것,
+    없으면 부적합이 하나라도 → 삭제, 맞음·반대 다수결 (2개 이상) → 확인됨·label 반대, 그 밖 → 추가 분석. 한 모델만 맞음이면 남기지
+    않는다 (11-02~, 예전에는 가장 최근 판정 하나가 맞음이면 남김). label 반대는 남기지 않는다 - 화면이 label 을 바꿔 반영하면 그 줄은
+    '합의로 label 바꿈'(read_dataset 의 VOTED)이라 '불일치' 빼기에 걸리지 않는다."""
     votes, ck = {}, {}
     for r in _jsonl(RECHECK):
         if (r.get("target") or "bad") == "bad" and r.get("k"):
@@ -247,12 +259,21 @@ def llm_ok_keys():
                 ck.setdefault(d["k"], d["ck"])
     out = set()
     for k in set(votes) | set(dec):
-        vs = list(votes.get(k, {}).values())
-        state = dec.get(k) or ("delete" if any(v in ("flip", "unfit") for v in vs) else
-                               "keep" if len(vs) >= 2 and all(v == "ok" for v in vs) else "review")
+        state = dec.get(k) or _consensus(list(votes.get(k, {}).values()))
         if state == "keep" and ck.get(k):
             out.add(ck[k])
     return out
+
+
+def llm_flipped(date):
+    """그 날짜에 화면이 LLM 재확인(합의·사람 판단)으로 label 을 바꾼 샘플 {sk: 바꾼 label} (edits.json 의 'LLM 재확인' label 수정,
+    3_6 voted_sks 와 같음) - 학습 로그에 반영된 줄은 read_dataset 이 '불일치' 대신 VOTED 로 둔다."""
+    try:
+        edits = json.loads((DATASET / date / "edits.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {sk: e.get("label") for sk, e in edits.items()
+            if e.get("action") == "edit" and e.get("label") and str(e.get("why", "")).startswith("LLM 재확인")}
 
 
 def sample_key(label, rule_id, payload):
@@ -292,17 +313,20 @@ def read_dataset(date, dev):
         with open(lab, encoding="utf-8") as f:
             metas = [x for x in f if x.strip()]
     codes = verify_codes(date, dev, stat)
+    flipped = llm_flipped(date) if codes else {}        # LLM 재확인 합의로 label 을 바꾼 샘플 (반영된 줄은 '불일치' 대신 VOTED)
     with open(p, "rb") as f:
         for i, line in enumerate(x for x in f if x.strip()):
             fs = split_log_line(line.rstrip(b"\r\n").decode("utf-8", errors="replace"))
             payload, method, label = (fs[6], fs[5], fs[7]) if len(fs) == 8 else ("|||".join(fs), "", "")
             m = json.loads(metas[i]) if i < len(metas) else {}
             rid = m.get("id", "")
+            cons = CONS_CODE.get(codes[i], "") if codes and i < len(codes) else ""
+            if cons == "BAD" and flipped.get(m.get("sk")) == label and "label" in str(m.get("edited") or ""):
+                cons = "VOTED"
             for k, val in (("date", date), ("line", i), ("payload_raw", payload), ("method", method), ("label", label),
                            ("rule_id", rid), ("source", rid.split(":")[0] if rid else ""), ("sk", m.get("sk", "")),
                            ("attack_type", "normal" if label == "normal" else (m.get("attack_type") or "other")),
-                           ("origin", m.get("origin", "")), ("edited", m.get("edited", "")),
-                           ("cons", CONS_CODE.get(codes[i], "") if codes and i < len(codes) else "")):
+                           ("origin", m.get("origin", "")), ("edited", m.get("edited", "")), ("cons", cons)):
                 cols[k].append(val)
     return cols, stat
 
