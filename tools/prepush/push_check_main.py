@@ -107,14 +107,14 @@ def main() -> int:
             # 방금 본 커밋일 때만 덮어쓴다 — 그 사이 누가 또 올렸으면 git 이 거절한다
             push.append(f"--force-with-lease=refs/heads/{CHECK_BRANCH}:{check_sha}")
 
-    print(f"\n새 커밋 {new}개를 {CHECK_BRANCH} 로 올립니다. 먼저 올리기 전 검사가 돕니다…\n")
+    print(f"\n새 커밋 {new}개를 {CHECK_BRANCH} 으로 올립니다. 먼저 올리기 전 검사가 돕니다…\n")
     res = subprocess.run(["git", *push, "origin", f"refs/heads/main:refs/heads/{CHECK_BRANCH}"], cwd=REPO)
     if res.returncode != 0:
         print("\n❌ 올리지 못했습니다. 위 '올리기 전 검사' 결과나 git 메시지를 보고 고친 뒤 다시 실행하세요.")
         return 1
     sha = git("rev-parse", "--short", "main").stdout.strip()
     web = web_url(git("remote", "get-url", "origin").stdout)
-    print(f"\n✅ {CHECK_BRANCH} 로 올렸습니다 (커밋 {sha}).")
+    print(f"\n✅ {CHECK_BRANCH} 으로 올렸습니다 (커밋 {sha}).")
     print("   GitHub 이 전체 테스트·비밀 검사를 돌리고, 모두 통과하면 main 에 자동 반영합니다 (보통 15~25분).")
     if web:
         print(f"   결과 보기: {actions_url(web)}")
