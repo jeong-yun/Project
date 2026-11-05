@@ -345,6 +345,41 @@ def numbers_in(text: str) -> set[str]:
             found.add(_norm_number(m.group(2), None))
     for m in re.finditer(r"\d+", text):  # 날짜·기간 '2021~2024', '2023-03' 의 조각
         found.add(str(int(m.group())))
+    found |= date_variants(norm)
+    return found
+
+
+# ─── 날짜 표기 바꾸기 (같은 날짜 · 다른 표기) ──────────────────────────────
+# 2026-11-04 실측: 수정 요청으로 '2026-06-01' → '26.06' 처럼 표기만 바꾼 것을 '문서에 없는 숫자 20개'로 실패 처리 → 재작성.
+# 원문의 날짜(연·월)마다 같은 날짜의 다른 표기를 허용 숫자에 넣는다. 원문에 없는 다른 달(26.07)은 여전히 실패.
+#   원문 2026-06-01 · 2026.06 · 2026/06 · 2026년 6월 → 26.06 · 26.6 · 2026.06 · 2026.6 · 26
+#   원문 26.06 · 26년 6월 (연 두 자리, 20xx 로 본다)   → 2026 · 2026.06 · 2026.6
+# '26.06%' · '26.06배' 처럼 단위가 붙은 수, 월이 1~12 가 아닌 수는 날짜로 보지 않는다.
+DATE_LONG = re.compile(r"(?<![\d.])((?:19|20)\d{2})\s*(?:[-./]\s*|년\s*)(\d{1,2})(?!\d)(?:\s*월)?")
+DATE_SHORT = re.compile(r"(?<![\d.,])(\d{2})(?:\.(\d{1,2})(?![\d%])|\s*년\s*(\d{1,2})\s*월)")
+
+
+def _date_tokens(year: int, month: int) -> set[str]:
+    yy = year % 100
+    out = {str(year), str(yy)}
+    for y in (str(year), f"{yy:02d}"):
+        for mm in (f"{month:02d}", str(month)):
+            out.add(_norm_number(y, mm))
+    return out
+
+
+def date_variants(text: str) -> set[str]:
+    """글 속 날짜(연·월)마다 같은 날짜의 다른 표기 (비교용 숫자 모양 — numbers_in 과 같은 정규화)."""
+    found: set[str] = set()
+    for m in DATE_LONG.finditer(text):
+        month = int(m.group(2))
+        if 1 <= month <= 12:
+            found |= _date_tokens(int(m.group(1)), month)
+    for m in DATE_SHORT.finditer(text):
+        month = int(m.group(2) or m.group(3))
+        if not 1 <= month <= 12 or (m.group(2) and _unit(text[m.end():])):
+            continue
+        found |= _date_tokens(2000 + int(m.group(1)), month)
     return found
 
 
