@@ -44,7 +44,7 @@
 | 폴더 | 내용 |
 |---|---|
 | `LLM/Agent_office` | 주력. Streamlit + LangGraph 멀티 에이전트 앱. 전용 규칙: [LLM/Agent_office/AGENTS.md](LLM/Agent_office/AGENTS.md) |
-| `LLM/train_set_making_by_rule(talos, et)` | Snort 룰 기반 IPS/WAF 학습 데이터 파이프라인 (코드만 공개, `tests/` 있음) |
+| `LLM/train_set_making_by_rule(talos, et)` | Snort 룰 기반 IPS/WAF 학습 데이터 파이프라인 (코드만 공개, `tests/` 있음). 전용 규칙: [AGENTS.md](<LLM/train_set_making_by_rule(talos, et)/AGENTS.md>) — **저장소 밖 원본에서 `0_9_export_public.py` 로 내보낸 사본**이라 여기서 고치지 않는다(다음 내보내기에 덮어써짐). 원본이 이 저장소 밖에서도 혼자 쓰이므로 자체 `CLAUDE.md`·`GEMINI.md`·검토 원칙을 함께 가진다 |
 | `LLM/AI_Agent`, `LLM/LLM 에이전트 기반 게임 IP …` | 작은 LLM 실험 |
 | `Arcus`, `분석`, `PredictStock`, `Titanic`, `wine_qualityN_data`, `GAME`, `Contect` | 학습용 실험 (유지보수 안 함) |
 
