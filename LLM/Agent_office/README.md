@@ -87,20 +87,24 @@
 
 ## 2-1. 무료 모델 (FreeLLMAPI) — 유료 키를 쓸 수 없을 때
 
-**FreeLLMAPI**([저장소](https://github.com/tashfeenahmed/freellmapi), Google·Groq 등 무료 티어를 OpenAI 호환 주소 하나로 묶는 내 PC 의 프록시, Docker 로 실행)를
+**FreeLLMAPI**([저장소](https://github.com/tashfeenahmed/freellmapi), Google·Groq 등 무료 티어를 OpenAI 호환 주소 하나로 묶는 내 PC 의 프록시)를
 `freellm` provider 로 연결했습니다. 직급마다 유료 후보가 모두 실패(키 없음·크레딧 부족·장애)하면 무료 모델로 넘어가고,
 사이드바의 **🆓 무료 모델만 사용** 을 켜면 처음부터 무료 모델만 씁니다.
 
-**Docker 가 필요합니다 — 설치·필요 사양은 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)**
-(요약: Windows 11 23H2 이상 또는 Windows 10 22H2, 64비트 Pro·Enterprise·Education · WSL 2.1.5 이상 · CPU 가상화 켜짐(SLAT) · RAM 8GB 이상 · 디스크 10GB 이상 여유).
-윈도우10은 [안내서 2-4절 '윈도우10에서 설치할 때'](docs/FREELLM_설치.md#2-4-윈도우10에서-설치할-때) 확인 — 22H2 면 최신 Docker Desktop 그대로, `wsl --update` 필수.
+**새 PC 설치는 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)** — 맨 앞 **0절 '어느 방식으로 설치할까'** 에서 고릅니다.
 
-**새 PC 설치는 [docs/FREELLM_설치.md](docs/FREELLM_설치.md)** 를 따라 하세요 — Docker Desktop·WSL2 준비 → `.env`(암호화 키) → `docker compose up -d`
-→ 대시보드(<http://127.0.0.1:3001>)에 Google AI Studio·Groq 무료 키 등록 → 통합 키를 이 폴더 `.env` 의 `FREELLMAPI_API_KEY` 에 넣기
-(주소 `FREELLMAPI_BASE_URL`, 기본 `http://127.0.0.1:3001/v1`) → 자동 시작·업데이트·백업·문제 해결·보안까지.
+| | A. 데스크톱 앱 (.exe, Docker 없이) | B. Docker |
+|---|---|---|
+| 이런 PC | 회사 PC(Docker 구독 없음) · RAM 8GB 이하 · 관리자 권한/재부팅 어려움 | 개인 PC 또는 Docker 구독 있음 · RAM 넉넉 · 늘 켜 두는 서버 |
+| 준비물 | 설치 파일 하나 (Windows 10 이상 x64) | Docker Desktop + WSL 2 (관리자 권한·재부팅, 사양은 안내서 'B 방식 필요 사양') |
+| `.env` 주소 `FREELLMAPI_BASE_URL` | `http://127.0.0.1:31415/v1` | `http://127.0.0.1:3001/v1` (기본값) |
+| 통합 키 복사 | 트레이 → Copy Key | 대시보드 Keys 페이지 위쪽 |
+
+공통 순서: 설치·실행 → 대시보드 Keys 페이지에 Google AI Studio·Groq 무료 키 등록 → **이 PC 의** 통합 키를 이 폴더 `.env` 의 `FREELLMAPI_API_KEY` 에 넣고 저장 → Streamlit 다시 켜기.
+**다른 PC 의 `.env` 를 그대로 가져오면 통합 키·포트가 달라 401 이 납니다** (통합 키는 PC 마다 다름).
 
 - 점검: `python scripts/check_freellm.py` (서버 켜짐·통합 키·`models.yaml` 의 무료 모델이 있는지, 키 값은 출력 안 함). 사이드바 ⚙️ 모델·검증 상태에 `✅ freellm` 이면 준비 완료.
-- 평소: Docker Desktop 만 켜면 자동으로 다시 켜집니다 (`restart: unless-stopped`). 평가도 `python -m evals.run_eval … --free`
+- 평소: A 는 트레이 'Start at login', B 는 Docker Desktop 만 켜면 자동으로 다시 켜집니다 (`restart: unless-stopped`). 평가도 `python -m evals.run_eval … --free`
 
 **직급별 무료 모델 배정** (2026-10-20 실측: FreeLLMAPI 카탈로그의 지능 순위·무료 한도 + 직접 호출한 속도·구조화 출력 성공 여부)
 

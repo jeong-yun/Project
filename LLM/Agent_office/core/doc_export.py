@@ -91,7 +91,28 @@ def parse_markdown(text: str) -> list[Block]:
             para.append(line)
         i += 1
     flush()
+    _renumber(blocks)
     return blocks
+
+
+def _renumber(blocks: list[Block]) -> None:
+    """번호 목록을 목록마다 첫 번호부터 다시 센다 — 프로젝트마다 '1. 2. 3.' 이 이어지지 않게, '1. 1. 1.' 로 적어도 1·2·3 으로."""
+    counters: dict[int, tuple[int, str]] = {}  # 들여쓰기 수준 → (지금 번호, 뒤 기호 '.' 또는 ')')
+    for block in blocks:
+        if block.kind != "li":
+            counters.clear()
+            continue
+        for deeper in [lv for lv in counters if lv > block.level]:
+            del counters[deeper]
+        if not block.ordered:
+            counters.pop(block.level, None)
+            continue
+        if block.level in counters:
+            number, mark = counters[block.level][0] + 1, counters[block.level][1]
+        else:
+            number, mark = int(block.ordered[:-1]), block.ordered[-1]
+        counters[block.level] = (number, mark)
+        block.ordered = f"{number}{mark}"
 
 
 INLINE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\)")
@@ -176,9 +197,15 @@ def to_docx(markdown: str, title: str = "") -> bytes:
             _add_runs(heading, block.text)
         elif block.kind == "p":
             _add_runs(document.add_paragraph(), block.text)
+        elif block.kind == "li" and block.ordered:
+            # Word 의 'List Number' 는 문서 전체가 번호 하나를 이어 쓴다 → 목록마다 다시 센 번호를 글자로 쓰고 내어쓰기
+            p = document.add_paragraph()
+            p.paragraph_format.left_indent = Pt(18 + 18 * block.level)
+            p.paragraph_format.first_line_indent = Pt(-18)
+            _add_runs(p, f"{block.ordered}\t{block.text}")
+            p.paragraph_format.tab_stops.add_tab_stop(Pt(18 + 18 * block.level))
         elif block.kind == "li":
-            style = "List Number" if block.ordered else ("List Bullet 2" if block.level else "List Bullet")
-            _add_runs(document.add_paragraph(style=style), block.text)
+            _add_runs(document.add_paragraph(style="List Bullet 2" if block.level else "List Bullet"), block.text)
         elif block.kind == "quote":
             p = document.add_paragraph()
             p.paragraph_format.left_indent = Pt(12)
