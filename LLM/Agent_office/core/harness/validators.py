@@ -15,7 +15,8 @@
   career_facts  : 자소서·포트폴리오의 인용이 올린 문서에 글자 그대로 있는지 + 본문 숫자가 문서·JD·문항에 있는지 (core/career.py)
   char_limits   : 자소서 문항마다 답변이 있고 글자 수 제한(공백 포함/제외)을 지키는지 (코드가 센다)
   jd_coverage   : JD 요구사항(R1…)을 하나도 빼지 않고 근거 있음/부분/공백으로 판정했는지
-  portfolio_format: 포트폴리오 절(요약·역량 표·프로젝트)과 프로젝트 카드 다섯 항목(문제·역할·기술·결과·배운 점)
+  portfolio_format: 포트폴리오 절(요약·역량 표·프로젝트)과 프로젝트 카드 다섯 항목 — 형식 지정이 있으면 원본 절 제목·표 머리글,
+                  원본 그림이 있으면 [그림 N] 표시
   jd_recommend  : JD 추천 — 모든 JD·요구사항 판정 + 순위·추천이 코드가 계산한 점수 순서와 같은지 (점수는 코드가 셈)
   portfolio_changes: 포트폴리오 최신화 변경 목록 — 이전 글 그대로 · 문서 인용 그대로 · 외부 출처는 승인한 URL · 외부 숫자 금지
 
@@ -382,28 +383,35 @@ class JdCoverageValidator(Validator):
 class PortfolioFormatValidator(Validator):
     name = "portfolio_format"
     description = ("포트폴리오 형식 — 형식 지정이 없으면 요약·핵심 역량(표)·프로젝트 절과 카드 다섯 항목(문제·역할·기술·결과·배운 점), "
-                   "형식 지정(추가 요청·형식 참고 파일)이 있으면 원본 절 제목·표 머리글이 결과에 그대로 있는지")
+                   "형식 지정(추가 요청·형식 참고 파일)이 있으면 원본 절 제목·표 머리글이 결과에 그대로 있는지, "
+                   "원본 그림이 있으면 '[그림 N]' 표시가 모두 남았는지")
 
     def check(self, answer: str, options: dict):
         from core import career
 
+        figures = list(options.get("career_figures") or [])
+        lost = career.missing_figures(answer, len(figures)) if figures else []
+        figure_problem = ([f"원본 그림 {', '.join(f'[그림 {n}]' for n in lost)} 이 빠졌다 — 그 그림이 있던 항목(예: 흐름도 칸) 아래에 "
+                           "'[그림 N]' 한 줄을 글자 그대로 남겨라 (Word 로 내보낼 때 코드가 그 자리에 원본 그림을 넣는다)"] if lost else [])
+        figure_note = f" · 그림 표시 {len(figures)}개 모두 남음" if figures and not lost else ""
         fmt = options.get("career_format")
         if isinstance(fmt, dict) and fmt.get("mode") == "original":
             sources = ", ".join(fmt.get("sources") or []) or "원본"
             if not (fmt.get("headings") or fmt.get("table_heads")):
-                problems = career.original_format_problems(answer, {})
+                problems = career.original_format_problems(answer, {}) + figure_problem
                 if problems:
                     return self.fail("포트폴리오 형식 오류: " + " / ".join(problems))
-                return self.ok(f"요청 형식 — 비교할 원본 절 제목·표가 없어({sources}) 생략 문구만 확인 (표준 형식 검사는 하지 않음)")
-            problems = career.original_format_problems(answer, fmt)
+                return self.ok(f"요청 형식 — 비교할 원본 절 제목·표가 없어({sources}) 생략 문구만 확인 (표준 형식 검사는 하지 않음){figure_note}")
+            problems = career.original_format_problems(answer, fmt) + figure_problem
             if problems:
                 return self.fail("요청 형식 오류: " + " / ".join(problems) + f" — 추가 요청대로 원본({sources})의 절 제목·표 머리글·구분·순서를 "
                                  "그대로 쓴다. 표준 형식(요약·핵심 역량·카드)으로 바꾸거나 요청 형식을 부록으로 미루지 않는다.")
-            return self.ok(f"요청 형식 통과 — 원본({sources}) 절 제목 {len(fmt.get('headings') or [])}개 · 표 {len(fmt.get('table_heads') or [])}개가 결과에 있음")
-        problems = career.check_portfolio(answer)
+            return self.ok(f"요청 형식 통과 — 원본({sources}) 절 제목 {len(fmt.get('headings') or [])}개 · "
+                           f"표 {len(fmt.get('table_heads') or [])}개가 결과에 있음{figure_note}")
+        problems = career.check_portfolio(answer) + figure_problem
         if problems:
             return self.fail("포트폴리오 형식 오류: " + " / ".join(problems) + " — 팀 업무 지침의 포트폴리오 형식대로 다시 써라.")
-        return self.ok(f"포트폴리오 형식 통과 (프로젝트 카드 {len(career.project_cards(answer))}개)")
+        return self.ok(f"포트폴리오 형식 통과 (프로젝트 카드 {len(career.project_cards(answer))}개){figure_note}")
 
 
 @register

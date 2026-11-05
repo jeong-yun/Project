@@ -293,9 +293,31 @@ def _items(data: dict | None, key: str) -> list[dict]:
     return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
 
 
+CODE_BLOCK = re.compile(r"```[ \t]*([\w+-]*)[^\n]*\n?(.*?)```", re.S)
+KEEP_CODE = ("mermaid",)  # 본문에 남기는 코드 블록 (흐름도) — 결과 .md 에 그대로, Word 에는 코드 상자 + 안내
+
+
 def body_text(answer: str) -> str:
-    """JSON·코드 블록을 뺀 본문."""
-    return re.sub(r"```.*?```", "", answer, flags=re.S).strip()
+    """JSON 요약 블록(```json, 언어 표시 없는 끝 JSON)과 그 밖의 코드 블록을 뺀 본문. ```mermaid 흐름도는 남긴다.
+
+    (2026-11-04: 예전에는 모든 코드 블록을 지워 모델이 쓴 mermaid 흐름도가 결과 파일에서 사라졌다)
+    mermaid 노드 글의 숫자도 본문이므로 사실 검사(check_facts)를 받는다.
+    """
+    def keep(m: re.Match) -> str:
+        return m.group(0) if m.group(1).lower() in KEEP_CODE else ""
+
+    return CODE_BLOCK.sub(keep, answer).strip()
+
+
+def figure_marks(text: str) -> set[int]:
+    """글 속 '[그림 N]' 번호들."""
+    return {int(n) for n in re.findall(r"\[그림\s*(\d{1,3})\]", text or "")}
+
+
+def missing_figures(answer: str, count: int) -> list[int]:
+    """원본 그림 1~count 중 결과 본문에 '[그림 N]' 표시가 없는 번호."""
+    have = figure_marks(body_text(answer))
+    return [n for n in range(1, count + 1) if n not in have]
 
 
 # ─── 지어낸 사실 막기 ──────────────────────────────────────────────────

@@ -355,13 +355,16 @@ def build(run: dict, text: str) -> dict:
     for fmt in opts["formats"]:
         if fmt == "md":
             files[f"{title}.md"] = markdown.encode("utf-8")
-        elif fmt == "docx":
-            files[f"{title}.docx"] = to_docx(markdown, title)
+        elif fmt == "docx":  # '[그림 N]' 자리에 원본 그림 (툴이 보관한 경로 — 되살린 업무는 없어서 글자 표시만)
+            files[f"{title}.docx"] = to_docx(markdown, title, figures=opts.get("career_figures"))
         elif fmt == "hwpx":
             files[f"{title}.hwpx"] = to_hwpx(markdown, title)
     facts = career.check_facts(text, source or "", str(opts.get("career_reference") or "")) if source is not None else None
+    marks = sorted(career.figure_marks(career.body_text(text)))
+    figures = list(opts.get("career_figures") or [])
     out = {"key": key, "markdown": markdown, "files": files, "rows": career.limit_rows(text, questions), "facts": facts,
-           "title": title, "kind": kind,
+           "title": title, "kind": kind, "figure_marks": marks, "figures": len(figures),
+           "missing_figures": career.missing_figures(text, len(figures)) if figures else [],
            "ranking": career.ranked(career.score_jds(text, jds, source)) if kind == "jd_recommend" and jds else [],
            "changes": career._items(career.answer_json(text), "changes") if kind == "portfolio_update" else [],
            "change_problems": career.check_changes(text, str(opts["career_old_portfolio"]), source or "",
@@ -401,6 +404,21 @@ def _changes_box(out: dict) -> None:
         st.error("🔎 변경 목록 검사 — 확인하세요\n\n" + "\n".join(f"- {p}" for p in out["change_problems"][:8]))
 
 
+def _figures_box(out: dict) -> None:
+    """🖼 원본 그림 — Word 에 넣은 그림 수 · 빠진 표시 · 그림 파일이 없는(되살린) 업무 안내."""
+    marks, figures = out.get("figure_marks") or [], out.get("figures") or 0
+    if figures:
+        placed = len([n for n in marks if n <= figures])
+        st.caption(f"🖼 원본 그림 {figures}개 중 {placed}개를 Word(.docx) 의 '[그림 N]' 자리에 넣었습니다 "
+                   "(한글 .hwpx 와 .md 에는 '[그림 N]' 글자로 남습니다).")
+        if out.get("missing_figures"):
+            st.warning("결과에서 빠진 그림 표시: " + ", ".join(f"[그림 {n}]" for n in out["missing_figures"])
+                       + " — 원본 Word 에서 직접 복사해 붙이거나, 다시 맡기세요.")
+    elif marks:
+        st.caption("🖼 결과에 '[그림 N]' 표시가 있지만 원본 그림 파일 정보가 없습니다 (서버를 다시 켜 되살린 업무 등) — "
+                   "Word 에는 글자로만 남습니다. 원본 Word 의 그림을 직접 붙이거나 업무를 다시 맡기세요.")
+
+
 def preview(run: dict, final_text: str) -> None:
     """최종 결과 아래 📄 문서 상자."""
     rid = run["run_id"]
@@ -430,6 +448,7 @@ def preview(run: dict, final_text: str) -> None:
                 if facts.no_evidence:
                     problems.append("근거 인용(evidence)이 없습니다")
                 st.error("🔎 사실 검사 — 제출 전에 확인하세요\n\n" + "\n".join(f"- {p}" for p in problems[:12]))
+        _figures_box(out)
         with st.expander("문서 미리보기 (내려받을 내용)"):
             st.markdown(out["markdown"])
         cols = st.columns(max(len(out["files"]), 1))

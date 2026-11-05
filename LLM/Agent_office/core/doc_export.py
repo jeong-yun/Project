@@ -1,7 +1,9 @@
 """마크다운 → Word(.docx) · 한글(.hwpx) 파일 (포트폴리오·자소서 팀 내려받기).
 
 마크다운은 이 팀 결과에 나오는 모양만 다룬다: 제목(# ~ ####), 문단, 글머리표(- · 1.), 표(| a | b |), 인용(>), 구분선(---),
-문단 안의 **굵게**·`코드`·[글](주소). 그 밖의 문법은 글자 그대로 들어간다.
+문단 안의 **굵게**·`코드`·[글](주소), ```mermaid 흐름도(코드 상자 + 이미지로 바꾸라는 안내 — JSON 등 다른 코드 블록은 뺀다).
+'[그림 N]' 표시: .docx 는 그 자리에 원본 그림(to_docx figures), .hwpx 는 '[그림 N — 원본 그림은 Word 파일 참고]' 글자.
+그 밖의 문법은 글자 그대로 들어간다.
 
   .docx : python-docx — 제목 스타일·표(Table Grid, 머리 줄 음영)·글머리표, 글꼴 맑은 고딕
   .hwpx : 한글 2014 이상이 여는 공개 XML 형식(OWPML, KS X 6101) — zip 안에 mimetype·version.xml·META-INF·Contents/header.xml·
@@ -22,13 +24,18 @@ FONT = "맑은 고딕"
 
 @dataclass
 class Block:
-    kind: str  # h · p · li · table · quote · hr
+    kind: str  # h · p · li · table · quote · hr · code
     text: str = ""
+    lang: str = ""  # code 블록의 언어 (mermaid)
     level: int = 0  # 제목 수준(1~4) / 글머리 들여쓰기
     ordered: str = ""  # 번호 목록이면 '1.' 같은 번호
     rows: list[list[str]] = field(default_factory=list)
 
 
+CODE_LANGS = ("mermaid",)  # 문서에 남기는 코드 블록 언어
+MERMAID_NOTE = "(mermaid 흐름도 — Word 는 mermaid 를 그리지 못합니다. mermaid.live 등에서 그림으로 바꿔 이 자리에 넣으세요)"
+FIGURE_RX = re.compile(r"\[그림\s*(\d{1,3})\]")
+HWPX_FIGURE = "[그림 {n} — 원본 그림은 Word 파일 참고]"
 TABLE_SEP = re.compile(r"^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$")
 
 
@@ -54,12 +61,17 @@ def parse_markdown(text: str) -> list[Block]:
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
-        if stripped.startswith("```"):  # 코드 블록은 문서에 넣지 않는다 (JSON 요약 등)
+        if stripped.startswith("```"):  # 코드 블록 — mermaid 흐름도만 문서에 넣고 나머지(JSON 요약 등)는 뺀다
             flush()
+            lang = stripped[3:].strip().split(" ")[0].lower()
             i += 1
+            code = []
             while i < len(lines) and not lines[i].strip().startswith("```"):
+                code.append(lines[i])
                 i += 1
             i += 1
+            if lang in CODE_LANGS:
+                blocks.append(Block("code", "\n".join(code).strip("\n"), lang=lang))
             continue
         if not stripped:
             flush()
@@ -178,7 +190,61 @@ def _shade(cell, color: str) -> None:
     tcpr.append(shd)
 
 
-def to_docx(markdown: str, title: str = "") -> bytes:
+BODY_WIDTH_CM = 16.0  # A4 본문 폭 (기본 여백) — 그림이 이보다 크면 줄인다
+
+
+def split_figures(text: str) -> tuple[str, list[int]]:
+    """글 → ('[그림 N]' 을 뺀 글, 그림 번호들)."""
+    numbers = [int(n) for n in FIGURE_RX.findall(text or "")]
+    rest = FIGURE_RX.sub("", text or "") if numbers else (text or "")
+    return re.sub(r"[ \t]{2,}", " ", rest).strip(), numbers
+
+
+def _figure_path(n: int, figures: list[str] | None) -> str | None:
+    from pathlib import Path
+
+    if figures and 1 <= n <= len(figures) and Path(figures[n - 1]).is_file():
+        return figures[n - 1]
+    return None
+
+
+def _add_picture(paragraph, path: str, max_cm: float) -> bool:
+    """원본 그림을 원래 크기로 넣되 max_cm 를 넘으면 줄인다. Word 가 못 읽는 형식(emf 등)이면 False."""
+    from docx.image.image import Image
+    from docx.shared import Cm, Emu
+
+    try:
+        width = min(int(Image.from_file(path).width), int(Cm(max_cm)))
+        paragraph.add_run().add_picture(path, width=Emu(width))
+        return True
+    except Exception:  # noqa: BLE001 — 깨진 그림·지원하지 않는 형식 → 글자 표시로
+        return False
+
+
+def _cell_paragraphs(cell, reuse_first: bool):
+    """표 칸에 그림 문단을 차례로 — 칸 글이 비었으면 첫 문단을 쓰고, 그다음부터 새 문단."""
+    used = [not reuse_first]
+
+    def next_paragraph():
+        if not used[0]:
+            used[0] = True
+            return cell.paragraphs[0]
+        return cell.add_paragraph()
+    return next_paragraph
+
+
+def _shade_paragraph(paragraph, color: str) -> None:
+    from docx.oxml.ns import qn
+
+    ppr = paragraph._p.get_or_add_pPr()
+    ppr.append(ppr.makeelement(qn("w:shd"), {qn("w:val"): "clear", qn("w:color"): "auto", qn("w:fill"): color}))
+
+
+def to_docx(markdown: str, title: str = "", figures: list[str] | None = None) -> bytes:
+    """마크다운 → Word. figures = 원본 그림 경로 ([그림 1] = 0번) — 글의 '[그림 N]' 자리(문단·글머리·표 칸 아래)에 원본 그림을 넣는다.
+
+    그림 파일이 없거나 Word 가 못 읽는 형식이면 '[그림 N]' 글자를 그대로 둔다. ```mermaid 는 회색 코드 상자 + 이미지로 바꾸라는 안내.
+    """
     import docx
     from docx.shared import Pt, RGBColor
 
@@ -191,21 +257,48 @@ def to_docx(markdown: str, title: str = "") -> bytes:
         style = document.styles[f"Heading {level}"]
         _font(style, size, True)
         style.font.color.rgb = RGBColor(0x1F, 0x3A, 0x5F)
+    def pictures(numbers: list[int], new_paragraph, max_cm: float, indent: float = 0) -> None:
+        """그림 번호마다 새 문단에 원본 그림 (없으면 '[그림 N]' 글자)."""
+        for n in numbers:
+            p = new_paragraph()
+            if indent:
+                p.paragraph_format.left_indent = Pt(indent)
+            path = _figure_path(n, figures)
+            if not (path and _add_picture(p, path, max_cm)):
+                _add_runs(p, f"[그림 {n}]")
+
     for block in parse_markdown(markdown):
+        text, numbers = split_figures(block.text) if figures and block.kind in ("p", "li") else (block.text, [])
         if block.kind == "h":
             heading = document.add_heading(level=block.level)
             _add_runs(heading, block.text)
         elif block.kind == "p":
-            _add_runs(document.add_paragraph(), block.text)
+            if text or not numbers:
+                _add_runs(document.add_paragraph(), text)
+            pictures(numbers, document.add_paragraph, BODY_WIDTH_CM)
         elif block.kind == "li" and block.ordered:
             # Word 의 'List Number' 는 문서 전체가 번호 하나를 이어 쓴다 → 목록마다 다시 센 번호를 글자로 쓰고 내어쓰기
             p = document.add_paragraph()
             p.paragraph_format.left_indent = Pt(18 + 18 * block.level)
             p.paragraph_format.first_line_indent = Pt(-18)
-            _add_runs(p, f"{block.ordered}\t{block.text}")
+            _add_runs(p, f"{block.ordered}\t{text}")
             p.paragraph_format.tab_stops.add_tab_stop(Pt(18 + 18 * block.level))
+            pictures(numbers, document.add_paragraph, BODY_WIDTH_CM - 1, 18 + 18 * block.level)
         elif block.kind == "li":
-            _add_runs(document.add_paragraph(style="List Bullet 2" if block.level else "List Bullet"), block.text)
+            _add_runs(document.add_paragraph(style="List Bullet 2" if block.level else "List Bullet"), text)
+            pictures(numbers, document.add_paragraph, BODY_WIDTH_CM - 1, 18 + 18 * block.level)
+        elif block.kind == "code":
+            p = document.add_paragraph()
+            p.paragraph_format.left_indent = Pt(6)
+            _shade_paragraph(p, "F2F2F2")
+            run = p.add_run(block.text)  # 줄바꿈은 python-docx 가 줄 나눔(w:br)으로 바꾼다
+            _font(run, 9)
+            run.font.name = "Consolas"
+            note = document.add_paragraph()
+            note_run = note.add_run(MERMAID_NOTE if block.lang == "mermaid" else f"({block.lang} 코드)")
+            _font(note_run, 9)
+            note_run.italic = True
+            note_run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
         elif block.kind == "quote":
             p = document.add_paragraph()
             p.paragraph_format.left_indent = Pt(12)
@@ -219,13 +312,17 @@ def to_docx(markdown: str, title: str = "") -> bytes:
         elif block.kind == "table":
             table = document.add_table(rows=len(block.rows), cols=len(block.rows[0]))
             table.style = "Table Grid"
+            cell_cm = max(3.0, BODY_WIDTH_CM / len(block.rows[0]) - 0.4)
             for r, row in enumerate(block.rows):
                 for c, value in enumerate(row):
                     cell = table.cell(r, c)
                     cell.text = ""
+                    value, numbers = split_figures(value) if figures else (value, [])
                     _add_runs(cell.paragraphs[0], value, bold_all=r == 0)
                     for run in cell.paragraphs[0].runs:
                         run.font.size = Pt(9.5)
+                    # 표 칸의 그림 — 칸 폭에 맞춰 줄인다 (원본 기술경력서는 흐름도가 모두 표 칸 안에 있었다)
+                    pictures(numbers, _cell_paragraphs(cell, reuse_first=not value), cell_cm)
                     if r == 0:
                         _shade(cell, "E8EEF7")
             document.add_paragraph("")
@@ -365,6 +462,11 @@ class _Hwpx:
         return (f'<hp:p id="{self._id()}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
                 f'{extra}{self._runs(text, char_pr, bold_pr)}</hp:p>')
 
+    def raw_para(self, text: str, para_pr: int = 0, char_pr: int = 0) -> str:
+        """마크다운으로 읽지 않고 글자 그대로 한 문단 (코드 줄)."""
+        return (f'<hp:p id="{self._id()}" paraPrIDRef="{para_pr}" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+                f'<hp:run charPrIDRef="{char_pr}"><hp:t>{escape(text)}</hp:t></hp:run></hp:p>')
+
     def table(self, rows: list[list[str]]) -> str:
         n_rows, n_cols = len(rows), len(rows[0])
         widths = _col_widths(rows, TEXT_W)
@@ -410,8 +512,13 @@ def to_hwpx(markdown: str, title: str = "") -> bytes:
     blocks = parse_markdown(markdown)
     body: list[str] = []
     first_extra = f'<hp:run charPrIDRef="0">{SEC_PR}{COL_PR}</hp:run>'  # 첫 문단에 구역(용지·여백) 정의
+    def figure_text(text: str) -> str:  # hwpx 에는 그림을 넣지 않는다 (BinData·manifest 가 필요 — 다음 단계)
+        return FIGURE_RX.sub(lambda m: HWPX_FIGURE.format(n=m.group(1)), text or "")
+
     for block in blocks:
         extra, first_extra = first_extra, ""
+        block.text = figure_text(block.text)
+        block.rows = [[figure_text(c) for c in row] for row in block.rows]
         if block.kind == "h":
             char_pr = {1: 2, 2: 3}.get(block.level, 4)
             body.append(doc.para(block.text, 1, char_pr, char_pr, extra))
@@ -424,6 +531,10 @@ def to_hwpx(markdown: str, title: str = "") -> bytes:
             body.append(doc.para(block.text, 4, 7, 1, extra))
         elif block.kind == "hr":
             body.append(doc.para("", 0, 0, 1, extra))
+        elif block.kind == "code":  # mermaid — 코드 글자 그대로 + 안내 (`·** 같은 글자를 마크다운으로 읽지 않게 한 줄씩 그대로)
+            body.append(doc.para("", 4, 7, 7, extra))
+            body += [doc.raw_para(line, 4, 7) for line in block.text.split("\n")]
+            body.append(doc.para(MERMAID_NOTE.replace("Word", "한글"), 4, 7, 7))
         elif block.kind == "table":
             if extra:
                 body.append(doc.para("", 0, 0, 1, extra))

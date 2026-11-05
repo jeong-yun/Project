@@ -44,6 +44,8 @@ class DocText:
     headings: list[str] = field(default_factory=list)  # 절 제목 (docx 제목 스타일 · md '#') — 원본 형식 검사용
     table_heads: list[list[str]] = field(default_factory=list)  # 표마다 첫 줄 칸 글 (docx 표 · md 표 머리글)
     images: list["DocImage"] = field(default_factory=list)  # docx 그림 (글의 [그림 N] 순서 — N 은 이 문서 안 번호)
+    path: str = ""  # 읽은 파일 경로 (read_file) — 그림을 같은 폴더에 보관할 때 쓴다
+    figure_range: tuple[int, int] = (0, 0)  # 업무 전체 그림 번호 (처음, 끝) — career_docs.number_figures 가 매긴다
 
     @property
     def chars(self) -> int:
@@ -160,7 +162,7 @@ def read_docx_full(data: bytes) -> DocxRead:
                     out.table_heads.append([FIGURE_RX.sub("", c).strip() for c in cells if FIGURE_RX.sub("", c).strip()])
                 lines.append(" | ".join(c for c in cells if c))
     out.text = "\n".join(lines)
-    out.units = f"문단 {n_para}개 · 표 {n_table}개" + (f" · 그림 {len(out.images)}개" if out.images else "")
+    out.units = f"문단 {n_para}개 · 표 {n_table}개"
     return out
 
 
@@ -364,4 +366,6 @@ def read_bytes(name: str, data: bytes) -> DocText:
 
 def read_file(path: str | Path, name: str | None = None) -> DocText:
     path = Path(path)
-    return read_bytes(name or path.name, path.read_bytes())
+    doc = read_bytes(name or path.name, path.read_bytes())
+    doc.path = str(path)
+    return doc
