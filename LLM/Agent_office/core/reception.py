@@ -155,13 +155,13 @@ def pick_best(result: MeetingResult, dept_ids: list[str]) -> str:
 def meeting(question: str, depts: list, teams: list[Team], models, choice: str = "") -> dict:
     """🛎 부서장 회의 — {dept_id(""=맡을 부서 없음), verdicts, analysis, how: llm|keyword, model, note}.
 
-    choice = 인포메이션 센터가 쓸 모델 ("provider:model", 없으면 models.yaml critic → utility — core/dept_heads.head_chain)."""
+    choice = 인포메이션 센터가 쓸 모델 ("provider:model", 없으면 models.yaml utility — core/dept_heads.assist_chain)."""
     by_id = {t.id: t for t in teams}
     ids = [d.id for d in depts]
     from core import dept_heads, llm_factory, usage  # 무거운 import 는 실제로 부를 때만
 
     note = ""
-    chain, _ = dept_heads.head_chain(models, choice)
+    chain = dept_heads.assist_chain(models, choice)  # 가벼운 안내 — 부장 기본(Opus 구독)이 아니라 utility
     try:
         with usage.scope(purpose="인포메이션 센터"):
             call = llm_factory.invoke_structured(chain, models, MeetingResult, meeting_messages(question, depts, by_id),
@@ -234,7 +234,7 @@ def propose(question: str, depts: list, teams: list[Team], models, rank_ids: lis
     from core import dept_heads, llm_factory, usage
 
     note = ""
-    chain, _ = dept_heads.head_chain(models, choice)
+    chain = dept_heads.assist_chain(models, choice)  # 가벼운 안내 — 부장 기본(Opus 구독)이 아니라 utility
     try:
         with usage.scope(purpose="새 부서 제안"):
             call = llm_factory.invoke_structured(chain, models, NewDeptProposal,

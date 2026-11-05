@@ -8,11 +8,13 @@
 
 run(dict) 의 주요 키
   status     reviewing → awaiting_human → adopted / rejected   (실패: error)
+             awaiting_human ⇄ followup_running (💬 결과에 대해 묻기·수정 요청을 백그라운드에서 답하는 중 — start_followup)
   done       스레드 종료 여부 (True 가 되면 화면이 '사람 결정' 단계를 보여 준다)
   statuses   {에이전트 id: (상태, 표시 문구)}  — 조직도 배지 (working / wait / done / revise)
   activity   {에이전트 id: 지금 하는 일}        — 에이전트 패널의 '진행 중' 표시
   drafting   {에이전트 id: 지금 쓰고 있는 초안}  — 토큰 단위로 늘어남. 형제 실무자들이 동시에 쓰므로 에이전트별로 따로 모은다
   steps      완료된 단계(AgentAnswer) 목록      — 타임라인
+  assigned   {관리자 id: [업무를 받은 하위 id]}   — 📊 진행률이 실제로 일을 받은 사람만 세게 (core/progress.py)
   brief / tools / web / notes / error
   checkpoint 🔀 단계마다 확인에서 멈춘 곳 (status=step_check 일 때 — core/step_mode.py 의 payload)
   attempts   ✏️ 고쳐 다시 하기 전의 시도들 [{round, question, brief, steps, ended_at, why}] — 비교용
@@ -53,7 +55,7 @@ def stage_of(run: dict) -> int:
     """
     if run["status"] in ("adopted", "rejected"):
         return len(STAGES)
-    if run["status"] == "awaiting_human":
+    if run["status"] in ("awaiting_human", FOLLOWUP_RUNNING):
         return len(STAGES) - 1
     reached = 1 if run.get("brief") is not None else 0
     for step in run["steps"]:
@@ -86,6 +88,10 @@ def restore_run(row: dict) -> dict:
     브리프·근거 자료는 저장하지 않으므로 비어 있다.
     """
     run = new_run(row["id"], row["question"], row["root_id"], row["team_id"])
+    interrupted = row["status"] == FOLLOWUP_RUNNING  # 💬 추가 질문 중에 서버가 꺼짐 → 결정 대기로 되돌리고 알린다
+    if interrupted:
+        row = {**row, "status": "awaiting_human"}
+        run["followup_error"] = FOLLOWUP_INTERRUPTED
     run.update(status=row["status"], done=True, steps=row["steps"], activity={}, decision=row.get("decision"),
                started_at=datetime.fromisoformat(row["created_at"]).timestamp(), restored=True)
     run["statuses"] = {s.node_id: step_status(s) for s in row["steps"]}
@@ -115,6 +121,7 @@ def apply_event(run: dict, kind: str, payload) -> None:
     elif kind == "delegated":
         statuses[payload["node"]] = ("wait", "⏳ 하위 결과 대기")
         activity[payload["node"]] = "⏳ 하위 에이전트 결과를 기다리는 중"
+        run.setdefault("assigned", {})[payload["node"]] = list(payload["children"])
         for cid in payload["children"]:
             statuses[cid] = ("wait", "⏳ 대기")
             activity[cid] = "⏳ 차례를 기다리는 중"
@@ -188,6 +195,80 @@ def archive_attempt(run: dict, why: str) -> dict:
     run["statuses"] = {run["root_id"]: ("working", "✏️ 고쳐 다시")}
     run["activity"] = {run["root_id"]: "✏️ 고쳐 다시"}
     return attempt
+
+
+# ─── 💬 결과에 대해 묻기·수정 요청 (결정 대기 중 백그라운드) ─────────────────────
+# 예전에는 화면 스크립트 안에서 st.spinner 로 기다려서 그동안 사무실 애니메이션·호출 모니터가 멈추고
+# 상태가 계속 '결정 대기'로만 보였다 (2026-11-05). 본 업무처럼 스레드로 돌리고 상태를 followup_running 으로 둔다.
+FOLLOWUP_RUNNING = "followup_running"
+FOLLOWUP_LABEL = "💬 추가 질문 답하는 중"
+FOLLOWUP_INTERRUPTED = "💬 추가 질문이 중단됨 — 앱을 다시 켜서 답을 받지 못했습니다. 다시 보내 주세요."
+
+
+def begin_followup(run: dict, request: str) -> None:
+    """결정 대기 → 추가 질문 진행 중. 답하는 사람(최종 답변자)이 사무실에서 일하는 모습으로 보이게 한다."""
+    root = run["root_id"]
+    run.update(done=False, status=FOLLOWUP_RUNNING, followup_error="")
+    run["followup_pending"] = {"request": request, "started_at": time.time()}
+    run["statuses"][root] = ("working", FOLLOWUP_LABEL)
+    run["activity"][root] = FOLLOWUP_LABEL
+
+
+def end_followup(run: dict, turn=None, error: str = "") -> None:
+    """추가 질문 끝 → 다시 결정 대기. turn 이 있으면 대화에 붙이고, 실패면 error 를 화면에 남긴다."""
+    root = run["root_id"]
+    run.pop("followup_pending", None)
+    if turn is not None:
+        run.setdefault("followups", []).append(turn)
+    run["followup_error"] = error
+    run["status"] = "awaiting_human"
+    run["statuses"][root] = ("wait", "👤 결정 대기")
+    run["activity"].pop(root, None)
+    run["notice"] = "followup"
+    run["done"] = True  # 마지막에 — 화면이 done 을 보고 결과를 다시 그린다
+
+
+def recover_followup(run: dict, why: str = FOLLOWUP_INTERRUPTED) -> bool:
+    """끊긴 추가 질문(서버를 다시 켬·스레드가 사라짐)을 결정 대기로 되돌린다. 되돌렸으면 True."""
+    if run.get("status") != FOLLOWUP_RUNNING:
+        return False
+    thread = run.get("followup_thread")
+    if thread is not None and thread.is_alive():
+        return False
+    end_followup(run, error=why)
+    run.pop("notice", None)
+    return True
+
+
+def start_followup(run: dict, request: str, work: Callable[[], object], on_finish=None, agent_id: str = "") -> threading.Thread:
+    """work() (= followup.respond(...)) 를 백그라운드에서 돌린다. 호출 모니터에 실시간으로 뜨고 바꾸기·중단도 된다."""
+    begin_followup(run, request)
+
+    def _target():
+        turn, error = None, ""
+        with usage.scope(team_id=run.get("team_id", ""), run_id=run["run_id"], agent_id=agent_id or run["root_id"],
+                         purpose="결정 전 문의·수정"):
+            try:
+                turn = work()
+            except NoAvailableModelError as e:
+                error = f"답할 수 있는 모델이 없습니다: {e}"
+            except call_monitor.CallCancelled as e:
+                error = f"⏹ 추가 질문을 중단했습니다 ({e})"
+            except Exception as e:  # noqa: BLE001 — 백그라운드 스레드의 예외는 화면에 보여 줘야 한다
+                error = f"답변 중 오류: {type(e).__name__}: {e}"
+            finally:
+                call_monitor.release(run["run_id"])  # ⏹ 중단은 이번 질문에만 — 결정·다음 질문은 정상으로
+                end_followup(run, turn, error)
+                if on_finish:
+                    try:
+                        on_finish(run)
+                    except Exception:  # noqa: BLE001 — 저장 실패가 화면을 막지 않게
+                        pass
+
+    thread = threading.Thread(target=_target, name=f"followup-{run['run_id'][:8]}", daemon=True)
+    run["followup_thread"] = thread
+    thread.start()
+    return thread
 
 
 def start_run(run: dict, events_factory: Callable[[], Iterator], on_step=None, on_finish=None) -> threading.Thread:

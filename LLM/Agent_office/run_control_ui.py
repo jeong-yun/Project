@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import streamlit as st
 
-from core import call_monitor, llm_factory, step_mode, switch_rules
+from core import call_monitor, llm_factory, progress, step_mode, switch_rules
 from core.brief import DesiredState, empty_state
 from core.schemas import ModelsConfig, OrgNode, Team
 from core.workflow import RESTART_POINTS
@@ -33,6 +33,7 @@ class Ctx:
     label: Callable[[str], str] = str  # 모델 키 → 화면 이름 ('모델 · 제공처 · 비용')
     stall_sec: float = call_monitor.STALL_SEC
     member_choices: dict[str, str] = field(default_factory=dict)
+    progress: Callable[[dict], "progress.Estimate | None"] | None = None  # 📊 진행률·남은 시간 (app.run_progress)
 
 
 def step_key(team_id: str) -> str:
@@ -58,6 +59,27 @@ def _fmt(sec: float) -> str:
 
 
 # ─── 1초마다 다시 그리는 영역 ─────────────────────────────────────────
+def progress_text(est: "progress.Estimate") -> str:
+    more = est.worst - est.total
+    steps = f"남은 단계 {est.remaining}개" + (f" (재시도·비평 반려 시 최대 {est.remaining + more}개)" if more > 0 else "")
+    what = "💬 추가 질문 " if est.phase == "followup" else ""
+    return f"📊 {what}{est.percent}% · {steps} · {progress.eta_text(est.remaining_sec)} — 추정: {est.basis}"
+
+
+def render_progress(est: "progress.Estimate") -> None:
+    """진행 막대 하나 — 완료 % · 남은 단계 · 예상 남은 시간 (추정이라고 밝힘)."""
+    st.progress(est.percent / 100, text=progress_text(est))
+
+
+def _estimate(ctx: Ctx, run: dict):
+    if ctx.progress is None:
+        return None
+    try:
+        return ctx.progress(run)
+    except Exception:  # noqa: BLE001 — 추정 실패가 모니터를 막지 않게
+        return None
+
+
 def render_summary(ctx: Ctx, run: dict) -> None:
     recs = call_monitor.calls(run["run_id"])
     if not recs:
@@ -92,6 +114,17 @@ def render_monitor(ctx: Ctx, run: dict) -> None:
     with t_live:
         _controls(ctx, run, recs, now)
     with t_gantt:
+        est = _estimate(ctx, run)
+        if est is not None:
+            render_progress(est)
+            left = progress.remaining_rows(est, ctx.names)
+            if left:
+                with st.expander(f"⏳ 남은 단계 {len(left)}개 · 단계마다 예상 시간 (추정)"):
+                    st.dataframe(left, use_container_width=True, hide_index=True)
+                    st.caption("예상 시간 = 같은 팀 지난 실행의 같은 단계·모델 걸린 시간 중앙값 (없으면 같은 종류 → 기본값). "
+                               "형제 팀원은 동시에 일하므로 남은 시간은 단계 시간의 합이 아니라 가장 긴 줄기로 계산합니다.")
+        elif run["done"]:
+            st.caption("📊 이 실행은 끝났거나 멈춰 있습니다 — 아래는 지금까지의 호출입니다.")
         st.caption("가로 막대 = 호출 하나. 빗금 = 동시 호출 자리·재시도 대기, 색 = 모델이 답하는 시간 "
                    "(파랑 응답 기다림 · 하늘 받는 중 · 초록 끝 · 빨강 실패/응답 없음 · 보라 사람이 끊음). 막대에 마우스를 올리면 자세히.")
         st.markdown(call_monitor.gantt_html(recs, now, stall_sec=ctx.stall_sec), unsafe_allow_html=True)
@@ -117,6 +150,12 @@ def _controls(ctx: Ctx, run: dict, recs, now) -> None:
     if run["done"]:
         return
     ctl = call_monitor.control(rid)
+    if run.get("status") == "followup_running":  # 💬 추가 질문 — 비평·하네스 건너뛰기는 없고 중단만
+        if st.button("⏹ 추가 질문 중단", key=f"stop_followup_{rid}", disabled=ctl.stopped, use_container_width=True,
+                     help="답하고 있는 호출을 끊습니다. 결과는 그대로 두고 결정 대기로 돌아갑니다."):
+            n = call_monitor.stop(rid, "💬 추가 질문 중단")
+            st.toast(f"⏹ 추가 질문을 중단합니다 (끊은 호출 {n}개)")
+        return
     c1, c2, c3 = st.columns(3)
     if c1.button("⛔ 비평 건너뛰기" if "critic" not in ctl.skips else "⛔ 비평 건너뜀", key=f"skip_critic_{rid}",
                  disabled="critic" in ctl.skips, use_container_width=True,

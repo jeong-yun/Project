@@ -63,7 +63,7 @@ models:
     structured_output: true
     streaming: true
     context: 200000
-    source: "Claude Code CLI `claude -p --input-format stream-json` 로 사진 블록 전달 — 2026-11-04 실측(도구 끈 상태, haiku: 글자·배경색 정답, --json-schema 함께 OK, 앱 경로 🧪 사진 시험 정답)"
+    source: "Claude Code CLI `claude -p --input-format stream-json` 로 사진 블록 전달 — 2026-11-04 실측(도구 끈 상태, haiku: 글자·배경색 정답, --json-schema 함께 OK, 앱 경로 🧪 사진 시험 정답) · 사진·형식 출력은 CLI 쪽 기능이라 모델과 상관없이 같다 — Claude 5 계열(Fable 5.1·Opus·Sonnet·Haiku 5.5)은 모두 이미지 입력 지원(Anthropic 공식 모델표, 2026-10-06). Fable·Sonnet 은 이 PC 에서 직접 시험하지 않음 (🧪 사진 시험으로 확인하면 그 결과가 우선)"
 
   # ── 무료 프록시(FreeLLMAPI) ──
   # 같은 Gemini 라도 FreeLLMAPI 가 사진을 Google 까지 넘기는지는 프록시에 달렸다 → 이름만으로 '된다'고 하지 않는다.

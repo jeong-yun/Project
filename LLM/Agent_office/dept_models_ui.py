@@ -84,8 +84,9 @@ def render_head(ctx: Ctx, dept: building.Department, where: str) -> None:
     head = dept_heads.head_of(dept)
     states = llm_factory.provider_status(ctx.models)
     choice = dept_heads.valid_choice(ctx.dept_store.get(dept.id), ctx.models)
-    base, source = dept_heads.base_chain(ctx.models)
-    default = f"기본 · {_label(ctx, member_models.model_key(base.primary), states)} ({dept_heads.SOURCE_LABELS[source]})"
+    base, source = dept_heads.head_chain(ctx.models)  # 고르지 않았을 때 실제로 쓰는 모델
+    base_key = member_models.model_key(base.primary)
+    default = f"기본 = {_label(ctx, base_key, states)} ({dept_heads.SOURCE_LABELS[source]})"
     widget = f"dept_head_model_{where}_{dept.id}"
     st.session_state[widget] = choice  # 저장값이 기준 (다른 화면에서 바꿔도 맞게)
     c1, c2 = st.columns([3, 5])
@@ -102,13 +103,34 @@ def render_head(ctx: Ctx, dept: building.Department, where: str) -> None:
         c2.markdown(f":orange[⚠️ **고른 모델 {member_models.split_key(choice)[1]}**] — 지금 쓸 수 없는 모델입니다 (사라짐·능력 부족). "
                     "비평은 기본 순서의 다음 모델로 합니다.")
     models_ui.hidden_note(hidden, ctx.merged)
+    for w in head_lead_warnings(ctx, dept, choice or base_key):
+        c2.markdown(f":orange[⚠️ {w}]")
     st.caption(f"관점: {head.persona}  \n부장은 팀 조직도 밖에서 이 부서 **모든 팀의 최종 답변을 비평**하고, 🧭 부서장으로 요청을 알맞은 팀에 보냅니다. "
-               "강도 제한은 없습니다 — 다만 채점 대상(팀장)보다 약한 모델이면 ⚠️ 로 알립니다. "
+               "부장은 맨 위라 **기본은 팀장과 같거나 더 강한 모델**입니다. 더 약한 모델도 고를 수 있지만 ⚠️ 로 알립니다. "
                "비공개 팀은 부장 모델을 고르지 않으면 팀장 모델로 비평합니다 (문서가 팀 밖 제공처로 가지 않게).")
+    if member_models.split_key(choice or base_key)[0] == "claude_cli":
+        st.caption("💳 Claude 구독(claude_cli): 청구는 없지만 **구독 사용 한도**를 씁니다 (내 Claude 대화·Claude Code 와 공유, 동시 1개). "
+                   "업무마다 비평 1번 + 불합격이면 자가 교정·다시 비평이 더해지고, 팀이 둘 이상인 부서는 🧭 팀 배정마다 1번 더 부릅니다. "
+                   "한도가 걱정되면 gpt-5.4 같은 API 모델을 고르세요.")
     note = st.session_state.get(HEAD_NOTE_KEY)
     if note and note[0] == dept.id:
         st.session_state.pop(HEAD_NOTE_KEY, None)
         st.info(note[1])
+
+
+def head_lead_warnings(ctx: Ctx, dept: building.Department, head_key: str) -> list[str]:
+    """부장(맨 위)이 이 부서 어느 팀장보다 약하면 팀마다 한 줄 (비공개 팀은 고르지 않았으면 팀장 모델로 비평하므로 뺀다)."""
+    out = []
+    chosen = bool(dept_heads.valid_choice(ctx.dept_store.get(dept.id), ctx.models))
+    for tid in dept.teams:
+        team = _team(ctx, tid)
+        if team.private and not chosen:
+            continue
+        org, _, chains = team_chains(ctx, team)
+        w = member_models.head_warning(ctx.models, head_key, member_models.model_key(chains[org.id].primary), f"{team.name} 팀장")
+        if w:
+            out.append(w)
+    return out
 
 
 def render_team_summaries(ctx: Ctx, dept: building.Department) -> None:
