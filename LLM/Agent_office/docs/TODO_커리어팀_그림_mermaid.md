@@ -79,3 +79,20 @@
 ## 진행 기록
 
 - 2026-11-04: 원인 확인·문서 작성 (코드 변경 없음). 같은 날 Word 번호 목록이 문서 전체로 이어지던 문제는 고침(7a4693d).
+- 2026-11-05 (브랜치 `claude/career-format-figures-54ba07`, 커밋 62b4543 · 908ea5d):
+  - **1단계** `core/doc_text.py` `read_docx_full`: 문단·표를 문서 순서대로 읽고, 문단·표 칸의 그림(`a:blip`, 옛 `v:imagedata`) 자리에 `[그림 N]`,
+    원본 바이트는 `DocText.images` (`DocImage(data, ext)`). 병합 칸은 `_tc` 로 한 번만. `read_docx(data) -> (text, units)` 시그니처는 유지.
+    hwpx 의 `hp:pic`·PDF 그림은 아직 (다음 단계).
+  - **2단계** `career_docs.number_figures`: 업무 전체 번호(지금 포트폴리오 → 최신 문서 → 형식 참고 파일), 올린 파일과 같은 폴더(`data/uploads/`, gitignore 확인)에
+    `figure_<sha1 12자>.<ext>` 로 저장 (같은 그림은 한 파일). `harness_options['career_figures']` = 경로 목록. 읽은 문서 표에 '그림' 칸, 지금 포트폴리오 줄에도 그림 수.
+    자소서에는 그림을 넣지 않음.
+  - **3단계** 지침(`career_writing.md` '공통 — 그림·흐름도', `recommend_update.md`) + `portfolio_format` 이 빠진 `[그림 N]` 을 실패로 (표준·요청 형식 모두).
+    `career_facts` 에는 넣지 않음. `[그림 12]` 의 12 가 숫자 검사에 걸리지 않는 것 테스트로 확인.
+  - **4단계** `career.body_text` 가 ```` ```mermaid ```` 를 남김(JSON·다른 코드는 지금처럼 뺌 — mermaid 노드 숫자도 사실 검사),
+    `doc_export.to_docx(figures=)` 가 문단·글머리·표 칸의 `[그림 N]` 자리에 원본 그림(원래 크기, 본문 16cm·칸 폭을 넘으면 줄임, 파일이 없거나 못 읽는 형식이면 글자),
+    mermaid 는 회색 코드 상자 + 안내, hwpx 는 `[그림 N — 원본 그림은 Word 파일 참고]` 글자. `career_ui.build` 가 그림 경로를 넘기고, 화면에 넣은 수·빠진 표시·
+    그림 정보 없는(되살린) 업무 안내.
+  - **5단계 확인** — 가짜 기술경력서 docx(표 칸 그림 2개, 하나는 병합 칸) + 가짜 모델로 `portfolio_update` 끝까지: 그림 표시를 지운 초안은 하네스가 되돌려 보냄 →
+    최종 Word 에 그림 2개(`inline_shapes`), 파일 안 그림도 2개(틀의 옛 그림이 숨어 남지 않음), md 에 `[그림 1]`·`[그림 2]`·mermaid
+    (`tests/test_career_figures.py::test_fake_model_portfolio_update_keeps_original_figures_in_word`).
+    실제 개인 문서로 흐름도 6개 자리 확인은 사용자가 할 일 → `TODO_커리어팀_형식_피드백.md` '8단계' 방법 참고.
