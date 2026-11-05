@@ -9,6 +9,9 @@ tests/test_floorplan_solver.py::test_big_program_puts_pool_in_end_block_and_shor
 tests/test_floorplan_solver.py::test_three_candidates_are_diverse
 tests/test_floorplan_space.py::test_big_sample_has_no_unrequested_void
 tests/test_floorplan_space.py::test_big_sample_corridors_stay_one_spine
+# 작은 평면도 DXF 왕복 뒤 다시 검증 — 배치 엔진이 바쁜 CPU 에서 계단을 문 없는 자리에 둔 적 있음 (2026-11-05, 리눅스 컨테이너 전체 실행 중 1번).
+# 혼자 돌리면 pyarrow 19·25 모두 3/3 통과.
+tests/test_floorplan.py::test_dxf_round_trip_exact_and_by_shapes
 
 # 실제 시간을 재는 동시 실행 테스트 — 스레드가 늦게 시작하면 '겹침'·'걸린 시간' 판단이 흔들린다.
 tests/test_concurrency.py::test_sibling_drafts_overlap_and_parent_waits_for_all
