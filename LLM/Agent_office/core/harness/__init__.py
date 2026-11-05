@@ -6,7 +6,7 @@
 단계별 평가 하네스(벤치마크)는 프로젝트 루트의 evals/ 폴더에 있다.
 """
 
-from core.harness import validators  # noqa: F401 — import 하는 순간 @register 로 검증기가 등록된다
+from core.harness import learning_validators, validators  # noqa: F401 — import 하는 순간 @register 로 검증기가 등록된다
 from core.harness.base import REGISTRY, Validator, all_passed, harness_feedback, register, run_validators
 
 __all__ = ["REGISTRY", "Validator", "all_passed", "harness_feedback", "register", "run_validators"]

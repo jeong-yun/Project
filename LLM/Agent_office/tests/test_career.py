@@ -532,7 +532,7 @@ def test_private_team_is_excluded_from_knowledge_sync(tmp_path):
         storage.save_decision(rid, HumanDecision(action="adopt", adopted_node_id="lead", final_answer="답", score=4))
     storage.add_lessons("career", "c1", [Lesson(agent_id="lead", kind="improve", lesson="김샘플의 가나다시큐리티 경력을 앞에 둔다")])
     storage.add_lessons("general", "g1", [Lesson(agent_id="lead", kind="praise", lesson="출처를 단다")])
-    assert feedback_sync.private_teams() == {"career"}
+    assert "career" in feedback_sync.private_teams()  # 교육부 두 팀(edu_career · edu_hobby)도 비공개
     folder = tmp_path / "knowledge"
     out = feedback_sync.export(storage, folder)
     everything = "".join(p.read_text(encoding="utf-8") for p in folder.iterdir())
