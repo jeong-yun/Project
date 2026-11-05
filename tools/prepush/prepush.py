@@ -248,7 +248,7 @@ def run_agent_office(root: Path, changed: list[str], res: Result, env: dict) -> 
             say("      고른 테스트 없음 — 건너뜀")
             return
     with tempfile.TemporaryDirectory(prefix="prepush-sel-") as tmp:
-        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rfE", "--rootdir", str(ao_root)]
+        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rfE", "--disable-warnings", "--rootdir", str(ao_root)]
         skipped_ls = list(load_sensitive) if selected is None else             [n for n in load_sensitive if pytest_select.matches(n, selected)]
         for node in load_sensitive:
             cmd += ["--deselect", node]
@@ -282,7 +282,7 @@ def run_agent_office(root: Path, changed: list[str], res: Result, env: dict) -> 
 def run_other(root: Path, project: str, files: list[str], res: Result, env: dict) -> None:
     say(f"    {project}: (바뀐 파일 {len(files)}개) → {project}/tests 전체")
     started = time.monotonic()
-    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rfE", "tests"]
+    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-rfE", "--disable-warnings", "tests"]
     code, out = run_streamed(cmd, cwd=root / project, env=env, indent="      | ")
     took = fmt_secs(time.monotonic() - started)
     if code == 0:

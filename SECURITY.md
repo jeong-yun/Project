@@ -33,9 +33,11 @@
 
 | 검사 | 언제 | 하는 일 |
 |---|---|---|
-| `secret-scan` (gitleaks) | push·PR 마다 | 새로 들어온 커밋에 키·토큰이 있으면 실패. 값은 로그에 가려서 보여 줌 |
+| 올리기 전 검사 (pre-push 훅, 내 PC) | `git push` 직전 (처음 한 번 `tools\setup_prepush.bat`) | 올리는 커밋의 비밀 값 검사(gitleaks, CI 와 같은 버전·설정) + 바뀐 부분 테스트. 실패하면 push 를 멈춤. [올리기 전 검사 안내](docs/올리기_전_검사.md) |
+| `promote-to-main` | `check/main` 으로 push 할 때 (평소 올리는 길) | 아래 `secret-scan`·`agent-office-tests` 를 돌려 **모두 통과하면** 그 커밋을 main 에 빨리 감기로 반영. 실패하면 main 은 그대로 |
+| `secret-scan` (gitleaks) | push·PR 마다 (`check/main` 은 promote-to-main 안에서) | 새로 들어온 커밋에 키·토큰이 있으면 실패. 값은 로그에 가려서 보여 줌 |
 | `secret-scan` 수동 실행 | Actions 탭에서 직접 | 전체 히스토리와 현재 파일 전체를 점검 |
-| `agent-office-tests` | `main` 으로 가는 push·PR 중 Agent Office 가 바뀐 것 | Agent Office 테스트 전체 (API 키·네트워크 없이 실행) |
+| `agent-office-tests` | `main` 으로 가는 push·PR, `check/main` push 중 Agent Office 가 바뀐 것 | Agent Office 테스트 전체 (API 키·네트워크 없이 실행) |
 | Dependabot | 한 달에 한 번 | Agent Office 파이썬 패키지·GitHub Actions 업데이트를 묶음 PR 하나씩으로 (메이저 버전은 제외, 자동 병합 안 함). 취약점 수정 PR(저장소 설정의 Dependabot security updates 를 켠 경우)은 이 일정·메이저 제외와 상관없이 따로 옴 |
 
 ## 키가 새어 나갔을 때
@@ -48,3 +50,5 @@
 ## 커밋 전 자동 검사 (선택)
 
 내 PC 에서 커밋하기 전에 키·개인 키·큰 파일을 미리 막고 싶다면 [pre-commit](https://pre-commit.com/) 을 씁니다. 한 번만 `pip install pre-commit` 후 레포 루트에서 `pre-commit install` 을 실행하면, 이후 `git commit` 때마다 `.pre-commit-config.yaml` 의 검사(gitleaks, 개인 키 탐지, 1MB 넘는 새 파일 차단, 병합 충돌 표시 확인)가 돌고, 걸리면 커밋이 멈춥니다. 전체 파일을 한 번 점검하려면 `pre-commit run --all-files`, 잠시 끄려면 `pre-commit uninstall` 을 실행합니다. CI 의 `secret-scan` 과 같은 gitleaks 버전·설정을 쓰므로, 로컬에서 통과하면 CI 에서도 대체로 통과합니다.
+
+> 올리기 전 검사(`core.hooksPath=.githooks`)를 켠 PC 에서는 `pre-commit install` 이 "core.hooksPath 가 설정됨" 이라며 설치를 거부합니다. push 직전 검사에 gitleaks 가 이미 들어 있으므로, pre-commit 은 필요할 때 `pre-commit run` 으로 손으로 돌립니다.
