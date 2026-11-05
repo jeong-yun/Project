@@ -105,7 +105,7 @@ def test_app_jd_recommend_adopt_saves_and_shows_where(career_app, tmp_path):
     at = adopt_jd_recommend(career_app)
     saved = sorted(p.name for p in (tmp_path / "results" / "career").glob("*"))
     assert len(saved) == 3 and any(n.endswith("_JD 추천.docx") for n in saved)
-    assert any("💾 결과 파일 3개" in i.value and "career" in i.value for i in at.info)
+    assert any("결과 파일 3개" in i.value and "career" in i.value for i in at.info)
     assert sum("📁 저장됨" in c.value for c in at.caption) == 3
     assert not at.warning
 
@@ -121,4 +121,4 @@ def test_app_adopt_still_saves_record_and_warns_when_documents_fail(career_app, 
     saved = list((tmp_path / "results" / "career").glob("*"))
     assert [p.suffix for p in saved] == [".md"]  # 채택 기록은 남는다
     assert any("Word·한글 문서를 만들지 못해 기록(.md)만 저장" in w.value for w in at.warning)
-    assert any("💾 결과 파일 1개" in i.value for i in at.info)
+    assert any("결과 파일 1개" in i.value for i in at.info)

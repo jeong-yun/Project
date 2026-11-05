@@ -19,3 +19,24 @@ regexes = [
   '''^sk-proj-ABCDEFGHIJKLMNOP\d{4}$''',
   '''^sk-test-0+1234$''',
 ]
+
+# 교육부 취미 팀 화면 테스트의 Streamlit 칸 이름(key=) — '칸 종류 + 가상 과목 id(hitaly01)'라 무작위 문자열처럼 보여
+# generic-api-key 로 잡혔다 (예: hb_vq_hitaly01 = 단어 퀴즈 칸). 실제 키 아님. 이 파일 + 이 모양만 예외.
+[[allowlists]]
+description = "Agent Office 교육부 테스트의 화면 칸 이름 (tests/test_edu_hobby.py)"
+condition = "AND"
+paths = ['''^LLM/Agent_office/tests/test_edu_hobby\.py$''']
+regexes = [
+  '''^[a-z]+(?:_[a-z]+)*_hitaly\d{2}$''',
+]
+
+# G2 마스킹 테스트(train_set_making_by_rule(talos, et)/tests/test_mask.py)의 가짜 민감값 — 마스킹이 JWT·client_secret 을
+# 가리는지 시험하려고 일부러 넣은 예시 값 (가짜 도메인 corp-mail.test 와 같은 줄). 실제 토큰 아님. 이 파일 + 이 값들만 예외.
+[[allowlists]]
+description = "G2 마스킹 테스트의 가짜 JWT·client_secret (tests/test_mask.py)"
+condition = "AND"
+paths = ['''^LLM/train_set_making_by_rule\(talos, et\)/tests/test_mask\.py$''']
+regexes = [
+  '''^eyJhbGciOiJIUzI1NiJ9\.eyJzdWIiOiIxMjM0NSJ9\.c2lnbmF0dXJlMTIz$''',
+  '''^Q2xpZW50U2VjcmV0VmFsdWUxMjM0NTY3ODkwYWJjZA$''',
+]
