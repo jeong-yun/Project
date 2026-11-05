@@ -53,7 +53,7 @@ import office_ui
 import run_control_ui
 from core import (
     audio_edit, building, call_monitor, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_caps,
-    model_catalog, music, office, progress, stock_calc, usage, verification,
+    model_catalog, model_recs, music, office, progress, stock_calc, usage, verification,
 )
 from core.agent import OrgAgent
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
@@ -143,6 +143,9 @@ if CATALOG_CFG.get("auto_refresh", True):
 catalog = model_catalog.merge(yaml_models, DATA_DIR, teams, selector_providers=tuple(
     CATALOG_CFG.get("selector_providers") or model_catalog.SELECTOR_PROVIDERS))
 models = catalog.models
+# ⭐ 역할별 추천 모델 점검 (config/model_recommendations.yaml — core/model_recs.py): 없는 팀·모델, 그림 역할, 비공개 팀의 무료 모델,
+# 상하 규칙(부서장 ≥ 팀장 ≥ …) 위반. 막지 않고 사이드바에 ⚠️ (추천에서 빠진 모델은 다음 후보·직급 기본으로)
+REC_WARNINGS = model_recs.check_cached(models, teams, ranks, building.departments([t.id for t in teams], building.load_config()))
 usage.set_catalog_prices(lambda: model_catalog.catalog_prices(DATA_DIR))
 # 🎛 부서별 모델 선택 (메인·팀 화면 공통 — dept_models_ui.py)
 dept_ctx = dept_models_ui.Ctx(teams=teams, ranks=ranks, models=models, merged=catalog, member_store=member_store,
@@ -315,6 +318,10 @@ elif st.session_state[VIEW_KEY] == OLD_TEAM_VIEW:  # 예전 값이 남은 세션
 with st.sidebar:
     view = st.radio("화면", [HOME, DEPT_VIEW], format_func={HOME: "🏠 메인", DEPT_VIEW: "🏢 부서 업무"}.get,
                     horizontal=True, key=VIEW_KEY)
+    if REC_WARNINGS:
+        with st.expander(f"⚠️ ⭐ 추천 모델 점검 {len(REC_WARNINGS)}건"):
+            st.caption("config/model_recommendations.yaml 이 설정·규칙과 어긋납니다 — 어긋난 추천은 다음 후보·직급 기본으로 씁니다.")
+            st.markdown("\n".join(f"- {w}" for w in REC_WARNINGS))
 st.query_params["view"] = view
 if view == HOME:
     home_open = [r for r in runs.values() if r["status"] not in DECIDED and r["team_id"] in team_names]
@@ -462,12 +469,13 @@ member_choices = member_store.load(team_id, LEGACY_ID)
 # 저장된 선택 중 제공처에서 사라졌거나 팀 업무를 못 하는 모델 → 저장값은 그대로 두고 이번엔 대체 모델·기본(다음 후보)으로 (경고 표시)
 member_choices, choice_issues = model_caps.check_choices(member_choices, model_caps.TEAM_WORK)
 choice_issue_of = {i.node_id: i for i in choice_issues}
-# 에이전트별 모델 후보 (팀원 모델 선택 반영 — 아무도 안 골랐으면 직급 설정 그대로). 조직도·에이전트 패널 표시용
-member_plans = member_models.plan(org, models, team, member_choices)
+runtime_states = llm_factory.provider_status(models)
+# 에이전트별 모델 후보 (팀원 모델 선택 반영 — 아무도 안 골랐으면 ⭐ 추천 → 직급 설정). 조직도·에이전트 패널 표시용
+# 추천은 '지금 쓸 수 있는 첫 모델'로 보여 준다 (runtime_states — 맡길 때 workflow 도 같은 기준으로 상하 규칙을 맞춘다)
+member_plans = member_models.plan(org, models, team, member_choices, runtime_states)
 member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
 # 이 팀이 속한 부서와 부장 — 부장이 이 팀의 ⚖️ 비평가 (core/dept_heads.py)
 dept_head = dept_head_info
-runtime_states = llm_factory.provider_status(models)
 
 
 def chosen_off(node_id: str) -> tuple[str, str] | None:
@@ -497,7 +505,7 @@ class TeamInfo:
             self.plans, self.chains = member_plans, member_chains
         else:
             choices = model_caps.check_choices(member_store.load(t.id, t.legacy.team if t.legacy else None), model_caps.TEAM_WORK)[0]
-            self.plans = member_models.plan(self.org, models, t, choices)
+            self.plans = member_models.plan(self.org, models, t, choices, runtime_states)
             self.chains = {nid: member_models.member_rank_models(p, models, t) for nid, p in self.plans.items()}
 
     def name(self, node_id: str) -> str:
@@ -539,7 +547,8 @@ office_ctx = office_ui.OfficeCtx(
     ranks={nid: (n.rank, ranks_by_id[n.rank].name) for nid, n in nodes.items()},
     specialties={nid: n.specialty for nid, n in nodes.items()}, parents=parents,
     blocked={nid: f"{off[0]} — {off[1]}" for nid in nodes if (off := chosen_off(nid))},
-    models={nid: member_models.split_key(p.effective)[1] for nid, p in member_plans.items()},
+    models={nid: ("⭐ " if p.recommended and not p.chosen_on_chain else "") + member_models.split_key(p.effective)[1]
+            for nid, p in member_plans.items()},
     storage=storage, runs=runs, settings=settings, data_dir=DATA_DIR, go_to_run=go_to_run,
     web=WEB_SEARCH_TOOL in team.tools,
     # 터미널의 '그 밖의 한 줄'도 자유 질문처럼 범위 확인 → 범위 밖이면 맞는 팀으로 보내기 (아래 함수들은 부를 때 찾는다)
@@ -704,6 +713,8 @@ def node_html(info: TeamInfo, node: OrgNode, statuses: dict, focus: str, active_
         model = f"⛔ {off[0]} 꺼짐" + (f" → {candidates[0][0].model}" if candidates else " · 실패 예정")
     elif resting and candidates and candidates[0][0] != primary:  # 거부·한도로 잠시 건너뛰는 중
         model = f"⚠️ {primary.model} 건너뜀({resting}) → {candidates[0][0].model}"
+    elif info.plans[node.id].recommended and not info.plans[node.id].chosen_on_chain:  # 고르지 않음 → ⭐ 추천 기본
+        model = f"⭐ {model}"
     badge = (
         f"<div><span class='ao-badge ao-b-{state}'>{html.escape(label)}{DOTS if state == 'working' else ''}</span></div>"
         if state
@@ -725,7 +736,7 @@ def tree_html(info: TeamInfo, node: OrgNode, *args) -> str:
 
 def head_html(focus: str) -> str:
     """👔 부서장 칸 — 부서 조직도 맨 위 (팀장들의 위)."""
-    model, _ = building_ui.head_model(models, dept_store, dept.id)
+    model, _ = building_ui.head_model(models, dept_store, dept.id, dept_heads.dept_private(dept, teams_by_id))
     busy = [t for t in dept.teams if (r := dept_run_of(t)[0]) and not r["done"]]
     badge = (f"<div><span class='ao-badge ao-b-wait'>👀 {len(busy)}팀 일하는 중</span></div>" if busy else "")
     return (f"<a class='ao-link' href='#' id='{NODE_LINK}{office.HEAD}'>"
@@ -1702,7 +1713,7 @@ def pick_agent(key: str) -> None:
 
 def render_head_panel() -> None:
     """👔 부서장을 누르면 — 하는 일·관점·모델·부서 팀 상태."""
-    model, source = building_ui.head_model(models, dept_store, dept.id)
+    model, source = building_ui.head_model(models, dept_store, dept.id, dept_heads.dept_private(dept, teams_by_id))
     with st.container(border=True):
         st.markdown(f"#### 👔 {dept_head.name} · {dept.emoji} {dept.name} 부서장")
         st.caption(f"🧭 요청을 읽고 맡을 팀을 고릅니다 · ⚖️ 이 부서 모든 팀의 최종 답변을 비평합니다 · 모델 {model} — {source}")

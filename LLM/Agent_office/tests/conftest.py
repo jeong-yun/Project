@@ -40,6 +40,17 @@ def no_model_caps_data():
 
 
 @pytest.fixture(autouse=True)
+def no_model_recs():
+    """⭐ 역할별 추천 모델(config/model_recommendations.yaml)을 기본으로 끈다 — 직급 기본을 확인하는 예전 테스트가 그대로 돌게.
+    추천 테스트(tests/test_model_recs.py)는 model_recs.configure() 로 켠다."""
+    from core import model_recs
+
+    model_recs.configure(None)
+    yield
+    model_recs.configure(None)
+
+
+@pytest.fixture(autouse=True)
 def no_claude_cli(monkeypatch):
     """실제 claude CLI(구독)를 부르지 않는다 — 기본은 '설치 안 됨'. claude_cli 테스트는 가짜 실행 파일로 바꿔 쓴다."""
     from core import claude_cli

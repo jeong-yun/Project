@@ -7,9 +7,11 @@
 
 비평가 모델 정하는 순서 (critic_plan)
   1. 부장 모델을 화면에서 골랐으면 그 모델
-  2. 비공개 팀(team.yaml private: true)이면 팀장 모델 후보 그대로 — 문서가 팀원이 쓰는 제공처 밖으로 나가지 않게
-  3. config/models.yaml 의 critic: = 부장 기본 (팀장과 같거나 더 강한 모델 — 지금은 Claude 구독 Opus 5.5 → gpt-5.5 → … → 무료)
-  4. utility (critic 을 지웠을 때만 — 예전 동작)
+  2. ⭐ 추천 (config/model_recommendations.yaml heads — core/model_recs.py). 비공개 팀이면 추천에서 무료 모델을 뺀다.
+     추천이 모두 꺼져 있으면(비공개 팀 + '🆓 무료 모델만' 등) 다음 순서로
+  3. 비공개 팀(team.yaml private: true)이면 팀장 모델 후보 그대로 — 문서가 팀원이 쓰는 제공처 밖으로 나가지 않게
+  4. config/models.yaml 의 critic: = 부장 기본 (팀장과 같거나 더 강한 모델 — 지금은 Claude 구독 Opus 5.5 → gpt-5.5 → … → 무료)
+  5. utility (critic 을 지웠을 때만 — 예전 동작)
   고른 모델의 대안(fallback) = 3·4 의 후보 중 고른 모델보다 강하지 않은 것 (대안으로 넘어가도 더 비싼 모델로 올라가지 않음).
   무료(freellm) 모델을 골랐으면 대안도 무료만 (팀원 모델 선택과 같은 규칙). '🆓 무료 모델만 사용'이면 유료가 꺼지므로
   후보 중 무료 모델이 쓰인다 — 후보에 무료 모델이 하나도 없으면 utility 의 무료 모델을 끝에 붙인다.
@@ -34,7 +36,7 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from core import member_models
+from core import member_models, model_recs
 from core.schemas import ModelsConfig, ModelSpec, RankModels, Team
 
 FILE_NAME = "department_models.json"
@@ -42,6 +44,7 @@ FREE = member_models.FREE_PROVIDER
 
 SOURCE_LABELS = {
     "chosen": "부장 모델 (화면에서 고름)",
+    "recommended": "⭐ 추천 (config/model_recommendations.yaml)",
     "private": "팀장 모델 (비공개 팀 — 팀 밖 제공처로 보내지 않음)",
     "critic": "부장 기본 — models.yaml critic",
     "utility": "models.yaml utility (critic 없음)",
@@ -72,6 +75,11 @@ def head_of(dept) -> DeptHead:
     name = str(raw.get("name") or f"{dept.name} 부장")
     persona = str(raw.get("persona") or f"부서 소개: {dept.description} 이 부서 결과물을 마지막으로 확인하는 책임자로서 본다.")
     return DeptHead(dept_id=dept.id, dept_name=dept.name, emoji=dept.emoji, name=name, persona=persona)
+
+
+def dept_private(dept, teams_by_id: dict) -> bool:
+    """이 부서에 비공개 팀이 하나라도 있는가 — 🧭 배정 요청에 개인 문서가 들어갈 수 있으므로 추천에서 무료 모델을 뺀다."""
+    return any(getattr(teams_by_id.get(t), "private", False) for t in getattr(dept, "teams", []))
 
 
 # ─── 모델 후보 ─────────────────────────────────────────────────────────
@@ -129,13 +137,24 @@ def chosen_chain(key: str, models: ModelsConfig) -> RankModels:
     return RankModels(primary=spec_of(key, models), fallback=fallback)
 
 
-def head_chain(models: ModelsConfig, choice: str = "") -> tuple[RankModels, str]:
-    """부장 모델 후보와 출처 — 🧭 팀 배정에 쓴다 (비공개 팀 규칙은 팀이 정해진 뒤 critic_plan 에서)."""
+def head_chain(models: ModelsConfig, choice: str = "", dept_id: str | None = None,
+               private: bool = False) -> tuple[RankModels, str]:
+    """부장 모델 후보와 출처 — 🧭 팀 배정에 쓴다 (비공개 팀 규칙은 팀이 정해진 뒤 critic_plan 에서).
+    dept_id 를 주면 ⭐ 추천(heads)을 기본으로 쓴다. private = 비공개 팀만 있는 부서 (추천에서 무료 모델을 뺀다)."""
     choice = valid_choice(choice, models)
     if choice:
         return _with_free_tail(chosen_chain(choice, models), models), "chosen"
+    rec = model_recs.head_rec(dept_id, models, private)
+    if rec is not None:
+        return (rec.chain if private else _with_free_tail(rec.chain, models)), "recommended"
     chain, source = base_chain(models)
     return _with_free_tail(chain, models), source
+
+
+def head_why(dept_id: str | None, models: ModelsConfig, private: bool = False) -> str:
+    """부서장 ⭐ 추천 이유 (없으면 '')."""
+    rec = model_recs.head_rec(dept_id, models, private)
+    return rec.why if rec else ""
 
 
 # ─── 비평가 계획 (팀 하나) ────────────────────────────────────────────
@@ -180,8 +199,12 @@ def critic_plan(models: ModelsConfig, team: Team | None, chains: dict[str, RankM
     """이 팀의 비평가 모델 후보. chains = 팀원별 모델 후보 (core/member_models.team_rank_models), lead_id = 팀장 id."""
     choice = valid_choice(choice, models)
     lead = chains.get(lead_id)
+    private = bool(team is not None and team.private)
+    rec = None if choice else model_recs.head_rec(head.dept_id if head else None, models, private)
     if choice:
         chain, source = _with_free_tail(chosen_chain(choice, models), models), "chosen"
+    elif rec is not None:  # ⭐ 추천 — 비공개 팀이면 무료 모델을 뺀 목록 그대로 (무료 꼬리도 붙이지 않음)
+        chain, source = (rec.chain if private else _with_free_tail(rec.chain, models)), "recommended"
     elif team is not None and team.private and lead is not None:
         chain, source = lead, "private"
     else:
