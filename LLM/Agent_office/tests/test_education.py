@@ -269,15 +269,18 @@ def test_ui_extension_points_protect_base_tasks():
         education_ui.register_preview("quiz", lambda *a: None)
     with pytest.raises(ValueError):
         education_ui.register_adopt("create", lambda *a: None)
+    # 2·3단계 모듈(edu_career_ui …)이 이미 등록한 것은 그대로 두고 되돌린다 (비우면 그 팀 버튼·채택이 사라진다)
+    quick_before, adopt_before = list(education_ui.QUICK_TASKS["career"]), dict(education_ui.ADOPT_HOOKS)
     try:
-        education_ui.register_quick("career", "🛠 프로젝트", "project_plan")
-        education_ui.register_quick("career", "🛠 프로젝트", "project_plan")  # 두 번 불러도 한 번만
-        assert education_ui.QUICK_TASKS["career"] == [("🛠 프로젝트", "project_plan")]
-        fn = education_ui.register_adopt("project_plan", lambda ctx, run, decision: "저장")
-        assert education_ui.ADOPT_HOOKS["project_plan"] is fn
+        education_ui.register_quick("career", "🧪 시험 버튼", "x_test_task")
+        education_ui.register_quick("career", "🧪 시험 버튼", "x_test_task")  # 두 번 불러도 한 번만
+        assert education_ui.QUICK_TASKS["career"].count(("🧪 시험 버튼", "x_test_task")) == 1
+        fn = education_ui.register_adopt("x_test_task", lambda ctx, run, decision: "저장")
+        assert education_ui.ADOPT_HOOKS["x_test_task"] is fn
     finally:
-        education_ui.QUICK_TASKS["career"].clear()
-        education_ui.ADOPT_HOOKS.pop("project_plan", None)
+        education_ui.QUICK_TASKS["career"][:] = quick_before
+        education_ui.ADOPT_HOOKS.clear()
+        education_ui.ADOPT_HOOKS.update(adopt_before)
     assert set(learning.EXTENSION_MODULES) == {"core.learning_career", "core.learning_hobby"}
     assert set(education_ui.UI_EXTENSIONS) == {"edu_career_ui", "edu_hobby_ui"}
 

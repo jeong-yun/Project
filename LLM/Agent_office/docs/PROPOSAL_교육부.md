@@ -206,3 +206,19 @@ education_ui.register_adopt("project_plan", on_project_adopt)       # 그 업무
   여행부(`이탈리아` 같은 지명)·커리어부(`자소서`·`JD`) 낱말과 겹치지 않게 '배우기' 쪽 낱말을 쓴다.
 - JD 추천(2단계)은 커리어부 '🎯 업무(JD) 추천'(`teams/career`, `core/career.py score_jds`)을 **불러 쓰고 고치지 않는다** — 그 팀은 다른 세션 담당이다.
 - 미리 보기는 8501 이 아닌 포트로. `streamlit.web.bootstrap` 으로 띄우면 `load_config_options(flag_options={"server_port": …})` 를 먼저 불러야 포트가 먹는다.
+
+---
+
+## 진행 기록
+
+### 2단계 — 🧭 직무 전환 교육팀 전문 업무 (2026-11-05, 브랜치 `claude/edu-career-85f838`)
+
+- 업무 4개(tasks 맨 아래): `roadmap` 🗺 합격 로드맵·커리큘럼 · `project_plan` 🛠 개인 프로젝트 설계 · `project_check` 📌 프로젝트 진행 점검 · `jd_match` 🎯 JD 추천·지원 준비.
+  모두 `fixed: {edu_kind: career, edu_task: <업무 id>}`, 첫 칸 `course_id`. 질문(question)에는 과목 id·JD 원문을 넣지 않는다 (웹 검색어를 만들 때 질문이 쓰인다 — JD 원문은 instructions).
+- extras: `roadmap` = {target_role, deadline, weekly_hours, competencies, steps, certs, portfolio, at} · `projects` = 안내의 모양 + problem · deliverable · tech · difficulty ·
+  portfolio_line · last_check, 마일스톤에 blocked · memo · done_at · `jd_links` = {kind: jd | advice | search, title, url, note, at, …}. 새 키는 없음 (EXTRAS_KEYS 그대로).
+- 검증기 5개는 `core/learning_career.py` 에 `@register`, team.yaml `harness.final_only` 에도 적었다 (팀원 초안에는 JSON 이 없어서 — 안내 표에 없던 변경, 이 팀 파일만).
+- 커리어부 연결: `core/career.py` 의 `job_posts` · `coverage` · `score_jds` 를 '학습 기록'(끝낸 것만)에 대고 재사용 + 커리어부 '🎯 업무(JD) 추천' 양식 키를 채우는 버튼.
+  커리어부 파일은 고치지 않았다. `core.career` 는 함수 안에서 import 한다 — 모듈 맨 위에서 import 하면 `core.governance` 와 순환 import 가 된다 (**3단계도 같음**).
+- 공용 파일 변경: `tests/test_education.py` 의 확장 지점 테스트 하나 — 끝에서 `QUICK_TASKS["career"]` 를 비우고 `ADOPT_HOOKS["project_plan"]` 을 지워 2단계 등록이 사라지고 테스트도 실패했다 →
+  등록 전 목록을 저장했다 되돌리도록. 나머지 공용 파일은 그대로.
