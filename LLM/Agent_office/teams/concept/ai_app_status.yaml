@@ -1,0 +1,117 @@
+# AI-App(앱 적용 가능) 항목의 Agent Office 적용 현황 — 2026-11-09 코드를 직접 확인해 적었다.
+#
+# 카탈로그(CS 저장소)의 AI 는 두 파일로 나뉜다: AI-App(LLM 앱이 코드로 바로 적용) / AI-Model(앱 적용 불가 — 모델·학습·GPU).
+# 이 표는 AI-App 항목이 이 앱에 얼마나 들어와 있는지만 적는다 (개념 편집 팀 화면 '🧩 AI 앱 적용' 에 보임).
+#   status: 적용 / 일부 / 없음,  files: 관련 파일,  note: 어디서 어떻게 (또는 무엇이 없는지)
+# 항목 찾기: name 의 한글명·영문명·약어(core.catalog.name_keys)가 카탈로그 항목 이름과 겹치면 그 항목.
+# 코드를 바꿔 현황이 달라지면 이 표도 고친다. 표에 없는 AI-App 항목은 화면에 '❔ 확인 안 함'으로 보인다.
+
+entries:
+  - name: "선언적 LM 프로그래밍과 프롬프트 자동 최적화(DSPy)"
+    status: 일부
+    files: [core/feedback.py, evals/run_eval.py]
+    note: "사람 결정에서 교훈을 뽑아 프롬프트에 넣고 평가 세트도 있으나, 지표로 지시문·예시를 자동 탐색하지는 않음"
+  - name: "과정 보상 모델(Process Reward Models, PRMs)"
+    status: 일부
+    files: [core/verification.py, core/step_mode.py]
+    note: "상급자가 루브릭으로 하위 결과를 채점하고 단계 모드에서 사람이 단계마다 확인 — 학습된 단계 채점 모델은 없음"
+  - name: "테스트 타임 스케일링 법칙(Test-Time Scaling Laws, TTSL)"
+    status: 일부
+    files: [core/workflow.py, core/verification.py]
+    note: "순차 고쳐 쓰기(하네스 재시도 max_retries·비평가 자가 교정)는 있음 — 여러 답을 동시에 뽑아 고르기(Best-of-N)는 없음"
+  - name: "보상 기반 협력적 테스트 타임 컴퓨팅(RTTC)"
+    status: 일부
+    files: [core/search.py]
+    note: "보조 모델이 질문마다 검색 필요 여부와 검색어를 정함 — 보상 모델로 전략을 고르지는 않음"
+  - name: "사고 트리(Tree of Thoughts, ToT)"
+    status: 일부
+    files: [core/step_mode.py, core/workflow.py]
+    note: "단계 모드에서 팀장이 진행 방향 2~3개를 내고 사람이 고름 — 모델이 갈래를 스스로 평가·가지치기하지는 않음"
+  - name: "추측성 RAG(Speculative RAG)"
+    status: 일부
+    files: [core/member_models.py, core/workflow.py]
+    note: "직급별 모델(실무자 초안 → 상급자 검토)은 있음 — 검색 문서를 나눠 병렬 초안을 만들지는 않음"
+  - name: "메니샷 인컨텍스트 러닝(Many-Shot ICL)"
+    status: 일부
+    files: [core/verification.py, config/verification.yaml, core/feedback.py]
+    note: "채점 루브릭에 고득점·저득점 예시(퓨샷)와 교훈 문장은 들어감 — 사람이 채택한 결과물을 예시로 넣지는 않음"
+  - name: "루프 엔지니어링(Loop Engineering)"
+    status: 적용
+    files: [core/workflow.py, core/verification.py, core/autonomy.py]
+    note: "하네스 재시도 상한·비평가 자가 교정 상한·자율 실행 하루 예산과 횟수 상한이 정지 조건"
+  - name: "생각의 사슬(Chain-of-Thought, CoT)"
+    status: 적용
+    files: [core/schemas.py, teams/concept/skills/it_concept_prompt.md]
+    note: "구조화 출력에서 analysis 를 점수·결론보다 먼저 쓰게 함, 개념 팀은 검증 로그를 최종본보다 먼저 씀"
+  - name: "에이전트 자가 수정(Agentic Self-Correction)"
+    status: 적용
+    files: [core/harness/, core/verification.py, core/followup.py]
+    note: "하네스 검증 실패 → 오류를 돌려줘 다시 씀, 비평가 불합격 → 수정 지시, 후속 대화 수정본도 하네스 재검사"
+  - name: "복합 AI 시스템(Compound AI Systems)"
+    status: 적용
+    files: [core/workflow.py, core/search.py, core/harness/]
+    note: "웹 검색·데이터 툴 + 직급별 모델 + 코드 검증기 + 비평가를 한 흐름으로 묶음"
+  - name: "하네스 엔지니어링(Harness Engineering)"
+    status: 적용
+    files: [core/harness/, core/claude_cli.py, core/autonomy.py]
+    note: "팀별 코드 검증기, Claude CLI 도구 끄기(safe-mode), 자율 실행 허용 행동 제한"
+  - name: "AI 에이전트 메모리 아키텍처(AI Agent Memory Architecture)"
+    status: 적용
+    files: [core/feedback.py, core/storage.py, core/workflow.py]
+    note: "장기 기억 = 에이전트별 교훈(글자 한도 안에서 프롬프트에), 단기 = LangGraph 체크포인트(멈춘 실행 재개)"
+  - name: "에이전틱 AI(Agentic AI)"
+    status: 일부
+    files: [core/workflow.py, core/autonomy.py]
+    note: "팀이 쓸 도구는 team.yaml 로 고정 — 에이전트가 실행 중 도구를 스스로 고르지 않음, 자율 실행도 정해 둔 업무만"
+  - name: "에이전틱 워크플로우(Agentic Workflow)"
+    status: 적용
+    files: [core/workflow.py]
+    note: "팀장 업무 분배 → 실무자 작성 → 상급자 검토·통합 → 사람 결정"
+  - name: "멀티 에이전트 시스템(MAS)"
+    status: 적용
+    files: [core/workflow.py, teams/]
+    note: "팀마다 조직도(team.yaml 의 org)로 직급별 에이전트를 둠"
+  - name: "AI 합의 알고리즘(Consensus for AI Agents)"
+    status: 일부
+    files: [core/workflow.py, core/verification.py]
+    note: "상급자가 하위 결과를 통합하고 비평가가 판정 — 같은 질문에 여러 모델이 따로 답해 투표·합의하지는 않음"
+  - name: "RAG(Retrieval-Augmented Generation, 검색 증강 생성)"
+    status: 적용
+    files: [core/search.py, core/catalog.py]
+    note: "웹 검색 결과에 번호를 붙여 모든 직급 프롬프트에, 개념 팀은 관련 카탈로그 항목(find_related)을 함께 전달"
+  - name: "에이전틱 RAG(Agentic RAG)"
+    status: 일부
+    files: [core/search.py]
+    note: "검색 여부·검색어를 모델이 정하지만 한 번뿐 — 결과가 부족할 때 다시 찾는 루프는 없음"
+  - name: "Self-RAG(자가 반성형 검색 증강 생성)"
+    status: 일부
+    files: [core/search.py, core/harness/validators.py, core/verification.py]
+    note: "검색 필요 판단·인용 문구 대조(evidence_quotes)·비평가에게 근거 전달은 있음 — 문서마다 유용성 채점은 없음"
+  - name: "그래프RAG(GraphRAG)"
+    status: 없음
+    files: []
+    note: "지식 그래프 색인 없음"
+  - name: "레이트 청킹(Late Chunking)"
+    status: 없음
+    files: []
+    note: "임베딩 검색을 쓰지 않음 — 카탈로그 관련 항목 찾기는 단어 겹침(IDF) 점수"
+  - name: "인컨텍스트 강화학습(In-Context Reinforcement Learning, ICRL)"
+    status: 없음
+    files: []
+    note: "교훈은 문장 규칙이고, 시도별 점수를 프롬프트에 쌓아 다시 시도하는 흐름은 없음"
+  - name: "합성 데이터(Synthetic Data)"
+    status: 일부
+    files: [tests/fakes.py, evals/cases/]
+    note: "테스트용 가짜 모델·가짜 데이터와 사람이 쓴 평가 케이스는 있음 — 모델로 평가 케이스를 늘리지는 않음"
+  - name: "액티브 러닝(Active Learning)"
+    status: 일부
+    files: [core/ask_first.py, core/step_mode.py]
+    note: "'질문 먼저'·단계 모드로 사람에게 묻지만, 모델이 불확실한 것만 골라 묻지는 않음"
+  - name: "온톨로지"
+    status: 일부
+    files: [core/catalog.py]
+    note: "카탈로그 분류(AI 앱 적용 가능·불가 두 파일)·태그와 7절 하위 항목으로 개념을 묶음 — 관계를 기계가 추론하는 그래프는 없음"
+  - name: "MCP(Model Context Protocol)"
+    status: 없음
+    files: [core/tools/, core/claude_cli.py]
+    note: "도구는 파이썬 함수로 직접 연결, Claude CLI 를 부를 때는 MCP 를 끔(--strict-mcp-config)"

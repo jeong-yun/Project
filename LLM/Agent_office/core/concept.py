@@ -15,9 +15,10 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from functools import lru_cache
+from pathlib import Path
 
 from core.brief import DesiredState
-from core.catalog import CATEGORY_FILES, TAGS, Catalog, Entry, is_header, today_label, with_updated_date
+from core.catalog import CATEGORY_FILES, LEGACY_FILES, TAGS, Catalog, Entry, is_header, today_label, with_updated_date
 from core.config import TEAMS_DIR, load_skills
 from core.harness.base import extract_code_blocks
 
@@ -36,7 +37,7 @@ NARRATIVE_END = re.compile(r"(다|니다|었다|였다|한다|된다|이다)\.?\
 PLAN_EXAMPLE = {
     "concept_plan": {
         "action": "add",
-        "category": "AI",
+        "category": "AI-App",
         "tag": "Perf",
         "title": "한글명(English, 약어)",
         "target": "",
@@ -273,7 +274,9 @@ def check_answer(answer: str, options: dict | None = None) -> list[str]:
     if action not in ACTIONS:
         problems.append(f"concept_plan.action 은 add/update/delete 중 하나 (현재 {action!r})")
     if action != "delete":
-        if plan.get("category") not in CATEGORY_FILES:
+        if plan.get("category") in LEGACY_FILES:  # 나누기 전 이름 — 어느 AI 파일인지 고르게 한다
+            problems.append(f"concept_plan.category 'AI' 는 두 파일로 나뉘었다 — {AI_CHOICE}")
+        elif plan.get("category") not in CATEGORY_FILES:
             problems.append(f"concept_plan.category 는 {list(CATEGORY_FILES)} 중 하나 (현재 {plan.get('category')!r})")
         if plan.get("tag") and plan["tag"] not in TAGS:
             problems.append(f"concept_plan.tag 는 {list(TAGS)} 중 하나 또는 빈 문자열 (현재 {plan.get('tag')!r})")
@@ -353,6 +356,42 @@ def check_sub_items(entry: str) -> list[str]:
         if missing:
             problems.append(f"7절 하위 항목 '{title}' 에 빠진 줄: {missing} — '- 개념: / - 작동원리: / - 장점: / - 단점(고유): / - 예시:'")
     return problems
+
+
+# ─── AI 두 파일 (2026-11-09 나눔) · Agent Office 적용 현황 ──────────────────
+# AI-App = LLM API 를 부르는 앱이 코드로 바로 적용할 수 있는 개념, AI-Model = 앱 적용 불가(모델 구조·서빙·GPU·학습·연구).
+# AI-App 항목이 이 앱(Agent Office)에 얼마나 들어와 있는지는 teams/concept/ai_app_status.yaml (코드를 직접 확인해 적음).
+
+AI_CHOICE = ("'AI-App'(LLM 앱이 프롬프트·호출 흐름·검색·검증 코드로 바로 적용) 또는 "
+             "'AI-Model'(앱 적용 불가 — 모델 구조·서빙·GPU 커널·가중치 학습·모델 내부 분석, 그 기술을 쓴 모델을 고르는 것으로만 반영) 중 하나")
+
+
+def status_path():
+    return TEAMS_DIR / TEAM_ID / "ai_app_status.yaml"
+
+
+@lru_cache(maxsize=4)
+def _status_rows(path: str, mtime: float) -> tuple[dict, ...]:
+    import yaml
+
+    from core.catalog import name_keys
+
+    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    return tuple({**row, "_keys": frozenset(name_keys(str(row.get("name", ""))))} for row in data.get("entries") or [])
+
+
+def status_rows() -> tuple[dict, ...]:
+    """ai_app_status.yaml 의 행 (파일이 그대로면 직전에 읽은 것)."""
+    path = status_path()
+    return _status_rows(str(path), path.stat().st_mtime) if path.exists() else ()
+
+
+def app_status(entry: Entry, rows: tuple[dict, ...] | None = None) -> dict | None:
+    """AI-App 항목의 Agent Office 적용 현황 {status: 적용|일부|없음, files, note} — 이름(한글·영문·약어)이 겹치는 행. 없으면 None."""
+    from core.catalog import name_keys
+
+    keys = name_keys(entry.name)
+    return next((r for r in (status_rows() if rows is None else rows) if r["_keys"] & keys), None)
 
 
 # ─── 적용된 프롬프트 판(버전) ────────────────────────────────────────────
@@ -451,7 +490,9 @@ def build_concept_request(
     brief = DesiredState(
         goal=f"'{name}' 개념의 검증된 카탈로그 최종본과 GitHub 요약, 카탈로그 적용 계획",
         context=(
-            f"카탈로그 분류: Cloud(1.Cloud & Infrastructure) / AI(2.Artificial Intelligence) / Security(3.Security & Trust). "
+            "카탈로그 분류(적용 계획의 category): Cloud(1.Cloud & Infrastructure) / AI-App(2-1. AI 앱 적용 가능) / "
+            "AI-Model(2-2. AI 앱 적용 불가, 모델·학습·GPU) / Security(3.Security & Trust). "
+            f"AI 개념은 {AI_CHOICE} — 기준: LLM 을 API 로 부르는 앱이 모델을 바꾸지 않고 코드만으로 적용할 수 있는가.\n"
             f"오늘 날짜 {d.isoformat()} — 새 항목 제목의 작성일은 ({today_label(d)}).\n"
             "작성 규칙은 시스템 프롬프트의 'IT 개념 프롬프트'를 따른다."
         ),
@@ -490,7 +531,7 @@ def delete_plan(target: Entry) -> dict:
 
 def apply_edits(catalog: Catalog, edits: list[dict]) -> list[str]:
     """다른 기존 항목의 문장 교체 (find 가 그 항목 본문에 정확히 한 번 있을 때만). 결과 메시지 목록."""
-    from core.catalog import CATEGORY_FILES as FILES, replace_entry, _read, _write
+    from core.catalog import file_of, replace_entry, _read, _write
 
     logs = []
     for edit in edits or []:
@@ -502,7 +543,7 @@ def apply_edits(catalog: Catalog, edits: list[dict]) -> list[str]:
         if not find or entry.body.count(find) != 1:
             logs.append(f"⚠️ 수동 수정 필요 — '{entry.name[:30]}' 에서 바꿀 문장을 정확히 찾지 못함: {find[:40]!r}")
             continue
-        path = catalog.root / FILES[entry.category]
+        path = catalog.root / file_of(entry.category)
         new_text = f"{entry.header}\n{entry.body.replace(find, replace)}"
         _write(path, replace_entry(_read(path), entry, new_text))
         logs.append(f"✅ {entry.name[:40]} — {edit.get('reason') or '문장 교체'}")

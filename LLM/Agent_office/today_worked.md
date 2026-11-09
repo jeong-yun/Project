@@ -1023,6 +1023,38 @@
 - 아직: 실제 모델로 정리 제안 품질·결정 뒤 추가 호출 시간 확인 안 함. 실행 중인 앱 화면에서 확인 안 함. 부장(비평가)은 교훈을 받지 않는다.
 - 다음 할 일: 사용자가 일반 팀 옛 교훈 10개를 옮기고, 개념 팀장 교훈 정리 제안을 받아 보기.
 
+## 2026-11-09
+
+**AI 개념을 'LLM 앱에 적용 가능 / 불가' 두 파일로 나누기 · Agent Office 적용 현황**
+- 배경 (사용자 말): "AI 용어를 세분화해서 … 앱의 성능을 향상시킬 수 있는 개념과 없는 개념을 나눠", 이어서
+  "git hub 에 AI(앱 적용 가능), AI(앱 적용 불가_gpu 수정) 처럼 파일이 나눠 졌으면 좋겠어".
+- 작업:
+  - CS 카탈로그 AI 항목 70개 본문을 모두 읽고 'LLM 을 API 로 부르는 앱이 모델을 바꾸지 않고 코드만으로 적용할 수 있는가'로 나눔
+    → 앱 적용 가능 27 / 불가 43 (모델 구조·서빙 22 + 학습·연구·총론 21).
+    처음 초안(30 / 40)에서 3개를 옮김: KV 캐시 압축·축출(서빙 엔진 안의 일 — API 프롬프트 캐시는 본문이 따로 구분한 다른 개념),
+    마트료시카 표현 학습(임베딩 모델을 고르는 것으로만 효과), XAI(본문 기법 SHAP·LIME 은 모델 내부 접근 필요). 음원 생성 방법은 학습·연구 → 모델 선택(음악 팀 Lyria).
+  - CS 저장소는 별도 worktree(`CS-ai-split`, 브랜치 `ai-app-split`)에서 파일을 나눔 — 실행 중인 앱이 읽는 CS main 은 그대로.
+    `Artificial Intelligence - App(AI 앱 적용 가능)_Term.txt` 27개 / `Artificial Intelligence - Model(AI 앱 적용 불가, 모델·학습·GPU)_Term.txt` 43개,
+    본문·작성일·수정일·순서 그대로, `0. Summary.md` 2절 → 2-1·2-2, CS README 분류 기준. push 안 함.
+  - `core/catalog.py`: 분류 `AI` → `AI-App`·`AI-Model`. 나누기 전 카탈로그(옛 AI 파일)도 읽고 고칠 수 있고, 옛 결과의 category "AI" 는
+    수정이면 대상 항목이 있는 파일로, 새 항목이면 어느 파일인지 고르라고 알림(채택 전에 막음).
+  - 개념 편집 팀: 업무 브리프·스킬(`it_concept_prompt.md` 2줄)·review 기준에 파일 고르는 기준, 하네스가 category "AI" 를 잡음.
+  - 화면: 작성 입력 위 '🧩 AI 개념 — LLM 앱에 적용할 수 있나?' (접힘) — 가능 탭은 Agent Office 적용 현황(✅ 적용 9 · 🟡 일부 14 · ⬜ 없음 4 + 관련 파일),
+    불가 탭은 목록. 현황은 코드를 직접 확인해 `teams/concept/ai_app_status.yaml` 에 적음(관련 파일이 실제로 있는지 테스트가 확인).
+- 기술: 원문 줄 단위 분할 + 다시 합쳐 대조, 이름 열쇠(한글·영문·약어) 매칭, 옛 분류 호환, Streamlit AppTest
+- 성과: 실제 분할본을 코드로 확인 — 27 + 43 = 70, 빠진 항목 0·겹친 항목 0, 본문이 원문과 같음, 파일마다 원래 순서 유지, 요약 줄 71개는 제목 줄만 바뀜.
+  현황표 27개가 앱 쪽 항목 27개와 하나씩 맞음(불가 쪽 오매칭 0). 새 테스트 12건(`tests/test_concept_ai_files.py`, 가짜 카탈로그).
+- 아직: 실행 중인 앱 화면에서 확인 안 함. 실제 모델로 개념 편집 팀이 파일을 잘 고르는지 확인 안 함.
+- 다음 할 일 — 앱 성능 향상 후보 (구현 안 함, 숫자는 모두 추정·실측 안 함):
+  1. API 프롬프트 캐시 (메니샷 ICL 항목·Cloud 의 컨텍스트 캐싱) — 매 호출 같은 시스템 프롬프트(스킬 + 교훈 최대 2만 자)의 입력 비용·첫 토큰 지연 감소.
+     비용: 캐시 쓰기 할증(제공처별), 고정부·변동부 분리. 측정: `core/usage.py` 에 캐시 토큰 집계 추가 후 같은 요청 전후. 파일: `core/llm_factory.py`·`core/agent.py`·`core/usage.py`
+  2. 여러 번 답하게 해서 고르기 (TTSL·AI 합의) — 최종 통합안을 N개 만들어 하네스·비평가 점수로 고름. 비용: 그 단계 호출 N배 + 판정 1회.
+     측정: `evals/run_eval.py` PRM/ORM·비평 점수·하네스 재시도 수. 파일: `core/workflow.py`·`core/verification.py`·team.yaml
+  3. 채택 결과를 예시로 넣기 (메니샷 ICL) — 같은 팀·업무의 채택본 1~3개를 예시로. 비용: 입력 토큰 증가(1번과 함께).
+     측정: 하네스 1차 통과율·재시도 수·입력 토큰. 파일: `core/storage.py`·`core/feedback.py`·`core/workflow.py`
+  4. 근거가 부족하면 다시 찾기 (에이전틱 RAG·Self-RAG) — 비용: 부족할 때만 보조 모델 +1·검색 +1. 측정: evals 사실 항목 통과율·비평가 '근거 부족' 지적 수. 파일: `core/search.py`
+  5. 교훈·지시문 자동 채점 (DSPy) — 평가 세트로 후보를 채점해 좋은 것만 남김. 비용: 실제 모델 평가 실행(사용자 동의 필요). 측정: evals 전후. 파일: `evals/run_eval.py`·`core/feedback.py`
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

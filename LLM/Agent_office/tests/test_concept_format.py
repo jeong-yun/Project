@@ -18,7 +18,7 @@ TARGET = (Path(__file__).parent / "fixtures" / "concept_flashattention.txt").rea
 SKILL = TEAMS_DIR / "concept" / "skills" / "it_concept_prompt.md"
 D = date(2026, 10, 26)
 NAME = "플래시어텐션(FlashAttention)"
-PLAN = {"action": "update", "category": "AI", "tag": "Perf", "title": NAME, "target": NAME, "absorb": [],
+PLAN = {"action": "update", "category": "AI-Model", "tag": "Perf", "title": NAME, "target": NAME, "absorb": [],
         "summary": {"emoji": "⚡", "name": "FlashAttention", "keywords": "IO-aware, Tiling", "one_line": "정확 어텐션의 IO 최적화"}}
 OTHER = "[Perf]라딕스 어텐션(RadixAttention) (작성일: 26.08.01)\n1. 정의 및 개념\n - 요청 간 KV 재사용."
 
@@ -97,7 +97,7 @@ def test_malformed_entry_fails_with_feedback(broken, expect):
 
 
 def test_update_header_must_keep_date_history():
-    entry = cat.parse_entries(TARGET, "AI")[0]
+    entry = cat.parse_entries(TARGET, "AI-Model")[0]
     expected = concept.expected_header(entry, D)
     assert expected.endswith("(작성일: 26.09.23)(수정일: 26.10.16, 10.26)")
     options = {"concept_header": expected}
@@ -113,7 +113,7 @@ def test_update_header_must_keep_date_history():
 
 @pytest.fixture
 def root(tmp_path):
-    (tmp_path / cat.CATEGORY_FILES["AI"]).write_text(f"{OTHER}\n\n{TARGET}\n", encoding="utf-8")
+    (tmp_path / cat.CATEGORY_FILES["AI-Model"]).write_text(f"{OTHER}\n\n{TARGET}\n", encoding="utf-8")
     for key in ("Cloud", "Security"):
         (tmp_path / cat.CATEGORY_FILES[key]).write_text("", encoding="utf-8")
     return tmp_path

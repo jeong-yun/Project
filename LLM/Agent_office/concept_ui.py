@@ -108,6 +108,8 @@ def sidebar(settings: dict) -> CatalogContext | None:
     subdir = str(root.relative_to(repo)).replace("\\", "/") if repo else ""
     catalog = load_catalog(root)
     counts = " · ".join(f"{k} {len(catalog.by_category(k))}" for k in cat.CATEGORY_FILES)
+    if catalog.legacy:  # AI 를 나누기 전 카탈로그 — 옛 AI 파일 항목도 보이게
+        counts += f" · AI(나누기 전) {len(catalog.by_category('AI'))}"
     st.caption(f"항목: {counts}")
     if repo is None:
         st.warning("git 저장소가 아닙니다 — 반영은 되지만 커밋·푸시는 할 수 없습니다.")
@@ -208,6 +210,7 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
         return None
 
     # ── ✍️ 작성: 추가/수정은 고르지 않는다 — 개념명으로 기존 항목을 찾아 자동 판정 ──
+    ai_panel(ctx)
     name = st.text_input("개념명(한/영) *", key=f"cw_name_{team_id}",
                          placeholder="예: 그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO)")
     draft = st.text_area("초안", height=220, key=f"cw_draft_{team_id}",
@@ -227,6 +230,9 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
             m0 = matches[0]
             st.info(f"기존에 있는 개념입니다 → **수정**으로 진행합니다: {ctx.label(m0.entry.name)}"
                     + (f"  \n(다른 항목의 7.변형 소절 '{m0.detail}' 로 편입되어 있어 그 부모 항목을 수정합니다)" if m0.kind == "하위" else ""))
+            status = concept.app_status(m0.entry) if m0.entry.category == "AI-App" else None
+            if status:
+                st.caption(f"🧩 Agent Office 적용 현황: {STATUS_ICON.get(status.get('status'), '❔')} — {status.get('note', '')}")
         else:
             st.success("카탈로그에 없는 개념입니다 → **추가**로 진행합니다. (검토 중 팀이 기존 개념의 하위라고 판단하면 편입으로 바꿉니다)")
         picked = st.selectbox("판정 (필요하면 바꾸기)", [m.entry.name for m in matches] + [ADD], format_func=option_label,
@@ -253,6 +259,49 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
         "concept": {"action": action, "title": name.strip(), "target": target.name if target else "",
                     "prompt": concept.prompt_version()["hash"]},
     }
+
+
+# ─── 🧩 AI 개념 — LLM 앱 적용 가능 / 불가 (두 파일) ───────────────────────
+
+STATUS_ORDER = {"없음": 0, "일부": 1, "적용": 2}  # 앱 성능을 올릴 여지가 큰 것(없음·일부)을 위로
+STATUS_ICON = {"적용": "✅ 적용", "일부": "🟡 일부", "없음": "⬜ 없음"}
+UNCHECKED = "❔ 확인 안 함"
+
+
+def app_rows(entries: list[cat.Entry]) -> list[dict]:
+    """AI-App 항목 표 — Agent Office 적용 현황(적용/일부/없음 + 관련 파일), 성능을 올릴 여지가 큰 것부터."""
+    status_rows = concept.status_rows()  # 표 파일은 한 번만 확인 (Windows 에서 파일 확인 1회 약 1ms)
+    rows = []
+    for e in entries:
+        s = concept.app_status(e, status_rows) or {}
+        rows.append({"항목": e.name, "Agent Office": STATUS_ICON.get(s.get("status"), UNCHECKED),
+                     "관련 파일": ", ".join(s.get("files") or []), "현황 설명": s.get("note", "")})
+    rows.sort(key=lambda r: STATUS_ORDER.get(r["Agent Office"].split()[-1], -1))
+    return rows
+
+
+def ai_panel(ctx: CatalogContext) -> None:
+    """🧩 AI 항목을 'LLM 앱에 적용 가능 / 불가' 두 파일로 나눠 보기 (접힘). 앱 적용 가능 쪽에는 Agent Office 적용 현황."""
+    app, model = ctx.catalog.by_category("AI-App"), ctx.catalog.by_category("AI-Model")
+    with st.expander(f"🧩 AI 개념 — LLM 앱에 적용할 수 있나? (가능 {len(app)} · 불가 {len(model)})", expanded=False):
+        if ctx.catalog.legacy:
+            st.warning("이 카탈로그는 AI 를 두 파일로 나누기 전 모양입니다 (옛 AI 파일이 있음). CS 저장소에서 나눈 판을 받으면 "
+                       "여기서 앱 적용 가능·불가로 나눠 볼 수 있습니다. 지금도 읽기·쓰기는 됩니다.")
+        st.caption("LLM 을 API 로 부르는 앱(Agent Office 같은 앱)이 모델을 바꾸지 않고 코드만으로 적용할 수 있는가로 나눈 두 파일입니다. "
+                   "개념 편집 팀이 새 AI 항목을 쓸 때 어느 파일에 넣을지 함께 정합니다.")
+        t1, t2 = st.tabs([f"✅ 앱 적용 가능 ({len(app)})", f"🧱 앱 적용 불가 — 모델·학습·GPU ({len(model)})"])
+        with t1:
+            rows = app_rows(app)
+            counts = {k: sum(1 for r in rows if r["Agent Office"] == v) for k, v in {**STATUS_ICON, "?": UNCHECKED}.items()}
+            st.caption("Agent Office 적용 현황 (코드를 직접 확인한 것 — `teams/concept/ai_app_status.yaml`): "
+                       + " · ".join(f"{STATUS_ICON[s]} {counts[s]}" for s in STATUS_ICON)
+                       + (f" · {UNCHECKED} {counts['?']}" if counts["?"] else "")
+                       + " — '없음·일부'가 앱 성능을 더 올릴 수 있는 후보입니다.")
+            st.dataframe(rows, hide_index=True, use_container_width=True)
+        with t2:
+            st.caption("모델 구조·서빙·GPU 커널은 그 기술을 쓴 모델·서빙을 고르는 것으로만 효과가 있고, "
+                       "가중치 학습·모델 내부 분석·연구는 API 로 부르는 앱에서 적용할 수 없습니다.")
+            st.dataframe([{"항목": e.name, "태그": e.tag} for e in model], hide_index=True, use_container_width=True)
 
 
 # ─── 📜 적용된 프롬프트 ─────────────────────────────────────────────────
@@ -301,7 +350,8 @@ def result_tabs(content: str, run: dict) -> None:
     decided = {"add": "🆕 추가", "update": "✏️ 수정", "delete": "🗑 삭제"}.get(plan.get("action"), "판정 없음")
     target = plan.get("target") or info.get("target")
     st.caption(f"편집 팀 판정: **{decided}**" + (f" — 대상 「{target}」" if target and plan.get("action") == "update" else "")
-               + (f" · 통합으로 빠질 항목: {', '.join(plan['absorb'])}" if plan.get("absorb") else ""))
+               + (f" · 통합으로 빠질 항목: {', '.join(plan['absorb'])}" if plan.get("absorb") else "")
+               + (f" · 넣을 곳: **{plan['category']}**" if plan.get("category") else ""))
     applied_prompt(run.get("question", ""), run.get("brief"), concept.used_prompt_version(run.get("question", "")),
                    key=f"res_{run.get('run_id', '')}")
     problems = concept.check_answer(content, run.get("harness_options"))
@@ -343,6 +393,9 @@ def check_adoptable(entry: str, plan_text: str) -> tuple[dict | None, str]:
     plan, _ = concept.normalize_plan(plan)  # 사람이 고친 계획도 absorb·edits 모양을 맞춘다 (모양 문제는 결과 화면에서 이미 알림)
     if not entry.strip() and plan.get("action") != "delete":
         return None, "최종본이 비어 있습니다 — 최종 통합안(<final> 이 있는 안)을 고르세요."
+    if plan.get("action") == "add" and plan.get("category") in cat.LEGACY_FILES:  # 옛 결과 — 새 항목은 넣을 AI 파일을 정해야 한다
+        return None, ("AI 는 두 파일로 나뉘었습니다 — 적용 계획 JSON 의 category 를 \"AI-App\"(LLM 앱에서 바로 적용) 또는 "
+                      "\"AI-Model\"(앱 적용 불가 — 모델·학습·GPU) 로 고친 뒤 채택해 주세요.")
     return plan, ""
 
 
