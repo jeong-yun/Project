@@ -262,17 +262,24 @@ def test_dept_screen_shows_head_and_every_team_prompt(tmp_path, monkeypatch, set
     """리서치·지식부 화면에서 토글을 켜면 부장 비평 관점 + 두 팀(general, concept) 팀원 프롬프트가 교훈과 함께 보인다."""
     from pathlib import Path
 
+    import streamlit as st
+
     set_keys()
     monkeypatch.setenv("AGENT_OFFICE_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path / "results"))
     add(Storage(tmp_path / "data" / "runs.db"), "general", "lead", "출처를 꼭 단다")
-    at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
-    at.query_params["dept"] = "research"
-    at.query_params["view"] = "dept"
-    at = at.run()
-    assert not at.exception, at.exception
-    at = at.toggle(key="prompts_research").set_value(True).run()
-    assert not at.exception, at.exception
+    # 앱의 저장소(get_storage)는 st.cache_resource 라, 앞서 다른 데이터 폴더로 앱을 띄운 테스트의 것이 남아 있으면 이 DB 를 안 본다
+    st.cache_resource.clear()
+    try:
+        at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
+        at.query_params["dept"] = "research"
+        at.query_params["view"] = "dept"
+        at = at.run()
+        assert not at.exception, at.exception
+        at = at.toggle(key="prompts_research").set_value(True).run()
+        assert not at.exception, at.exception
+    finally:
+        st.cache_resource.clear()
     codes = [c.value for c in at.code]
     assert any(c.startswith("너는 리서치·지식부 부장이다.") and "비평가(Critic)" in c for c in codes)  # 부장 비평 프롬프트
     assert any("출처를 꼭 단다" in c and "지난 업무에서 받은 피드백" in c for c in codes)  # 일반 팀 팀장 + 교훈
