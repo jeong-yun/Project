@@ -31,7 +31,7 @@ SUMMARY = """# 요약
 
 ### 1. Cloud & Infrastructure(클라우드 및 인프라)
 * **CNAPP:** 통합 플랫폼.
-### 2. Artificial Intelligence(AI 지능 및 시스템)
+### 2-2. Artificial Intelligence - Model(AI 앱 적용 불가, 모델·학습·GPU)
 * **[Perf]Calibrated Test-Time Scaling:** 신뢰도 기반 예산.
 ### 3. Security & Trust(보안 및 신뢰성)
 
@@ -63,14 +63,14 @@ def answer_with(entry: str, plan: dict) -> str:
     return f"<review_log>1단계 표 / 2단계 검증 로그</review_log>\n<final>\n{entry}\n</final>\n## GitHub 요약\n- 요약\n```json\n{json.dumps({'concept_plan': plan}, ensure_ascii=False)}\n```"
 
 
-PLAN = {"action": "add", "category": "AI", "tag": "Perf", "title": "DAPO", "target": "", "absorb": [],
+PLAN = {"action": "add", "category": "AI-Model", "tag": "Perf", "title": "DAPO", "target": "", "absorb": [],
         "summary": {"name": "DAPO", "keywords": "분리 클리핑", "one_line": "GRPO 의 클리핑을 분리한 RL 알고리즘"},
         "basic_terms": [{"term": "엔트로피 붕괴(Entropy Collapse)", "definition": "정책이 한 답만 내게 되는 현상"}]}
 
 
 @pytest.fixture
 def root(tmp_path):
-    (tmp_path / cat.CATEGORY_FILES["AI"]).write_text(AI_TEXT, encoding="utf-8")
+    (tmp_path / cat.CATEGORY_FILES["AI-Model"]).write_text(AI_TEXT, encoding="utf-8")
     (tmp_path / cat.CATEGORY_FILES["Cloud"]).write_text("", encoding="utf-8")
     (tmp_path / cat.CATEGORY_FILES["Security"]).write_text("", encoding="utf-8")
     (tmp_path / cat.OLD_FILE).write_text("[AI-Sec]옛 항목 (작성일: 26.01.01)\n1. 개념", encoding="utf-8")
@@ -101,7 +101,7 @@ def test_updated_date_is_appended():
 def test_add_with_absorb_moves_old_entry_and_updates_summary(root):
     plan = {**PLAN, "absorb": ["Calibrated Test-Time Scaling"]}
     changes = cat.apply_plan(cat.Catalog.load(root), plan, GOOD_ENTRY, D)
-    ai = (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    ai = (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8")
     assert ai.startswith("[Perf]DAPO")  # 새 항목은 맨 위
     assert "CaTS" not in ai  # 흡수된 항목은 빠지고
     old = (root / cat.OLD_FILE).read_text(encoding="utf-8")
@@ -119,20 +119,20 @@ def test_update_replaces_in_place_and_category_move(root):
     new = GOOD_ENTRY.replace("DAPO(Decoupled Clip and Dynamic sAmpling Policy Optimization) (작성일: 26.10.20)",
                              "그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO) (작성일: 26.08.19)(수정일: 26.09.11)")
     cat.apply_plan(cat.Catalog.load(root), {**PLAN, "action": "update", "target": "GRPO"}, new, D)
-    ai = (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    ai = (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8")
     assert ai.startswith("[Perf]그룹 상대적 정책") and "(수정일: 26.09.11, 10.20)" in ai  # 제자리 + 수정일 추가
     assert ai.count("그룹 상대적 정책 최적화") == 1  # 제자리 교체 (중복 없음)
     # 분류 이동: 자가 치유 → Security
     healing = "자가 치유 보안 인프라(Self-Healing Security) (수정일: 26.02.10)\n1. 개념: 이동"
     cat.apply_plan(cat.Catalog.load(root), {**PLAN, "action": "update", "category": "Security", "target": "자가 치유 보안 인프라"}, healing, D)
-    assert "자가 치유" not in (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    assert "자가 치유" not in (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8")
     assert (root / cat.CATEGORY_FILES["Security"]).read_text(encoding="utf-8").startswith("자가 치유 보안 인프라")
 
 
 def test_delete_moves_to_old_term(root):
     c = cat.Catalog.load(root)
     cat.apply_plan(c, concept.delete_plan(c.find("CaTS")), "", D)
-    assert "CaTS" not in (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    assert "CaTS" not in (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8")
     assert (root / cat.OLD_FILE).read_text(encoding="utf-8").startswith("[Perf]보정된")
     with pytest.raises(ValueError):
         cat.apply_plan(c, {**PLAN, "action": "update", "target": "없는 개념"}, GOOD_ENTRY, D)
@@ -144,7 +144,7 @@ def test_apply_edits_only_when_text_matches_once(root):
         {"entry": "GRPO", "find": "없는 문장", "replace": "x"},
     ])
     assert logs[0].startswith("✅") and logs[1].startswith("⚠️")
-    assert "(DAPO 는 §7)" in (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    assert "(DAPO 는 §7)" in (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8")
 
 
 # ─── 결과 형식 검사 (하네스 concept_entry) ─────────────────────────────
@@ -154,7 +154,7 @@ def test_good_answer_passes_and_parses():
     answer = answer_with(GOOD_ENTRY, PLAN)
     assert concept.check_answer(answer) == []
     res = concept.parse_result(answer)
-    assert res.final_entry.startswith("[Perf]DAPO") and res.plan["category"] == "AI" and "GitHub 요약" in res.summary_md
+    assert res.final_entry.startswith("[Perf]DAPO") and res.plan["category"] == "AI-Model" and "GitHub 요약" in res.summary_md
     assert REGISTRY["concept_entry"].check(answer, {}).passed
 
 
@@ -287,7 +287,7 @@ def test_find_existing_decides_update_or_add(root):
     # 없는 개념 → 추가
     assert cat.find_existing(c, "DAPO(Decoupled Clip)") == []
     # 이름 일부만 겹치는 것은 같은 개념이 아님 ('RAG' ≠ '에이전틱 RAG')
-    (root / cat.CATEGORY_FILES["AI"]).write_text(AI_TEXT + "\n\n에이전틱 RAG(Agentic RAG) (작성일: 26.03.16)\n1. 개념", encoding="utf-8")
+    (root / cat.CATEGORY_FILES["AI-Model"]).write_text(AI_TEXT + "\n\n에이전틱 RAG(Agentic RAG) (작성일: 26.03.16)\n1. 개념", encoding="utf-8")
     assert cat.find_existing(cat.Catalog.load(root), "RAG(Retrieval-Augmented Generation)") == []
 
 
@@ -296,7 +296,7 @@ def test_update_keeps_original_created_date(root):
     new = GOOD_ENTRY.replace("DAPO(Decoupled Clip and Dynamic sAmpling Policy Optimization) (작성일: 26.10.20)",
                              "그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO) (작성일: 26.10.20)")
     cat.apply_plan(cat.Catalog.load(root), {**PLAN, "action": "update", "target": "GRPO"}, new, D)
-    header = (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8").splitlines()[0]
+    header = (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8").splitlines()[0]
     assert header == "[Perf]그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO) (작성일: 26.08.19)(수정일: 26.09.11, 10.20)"
 
 
@@ -330,7 +330,7 @@ def test_main_app_adoption_helpers(root):
 
 def test_update_replaces_summary_line_in_place():
     # 실제 사례: 요약 'Muon(MomentUm Orthogonalized…)' ↔ 항목 '뮤온 옵티마이저(Muon: MomentUm …)' — 수정 시 옛 요약이 남아 2번 나옴
-    text = """### 2. Artificial Intelligence(AI 지능 및 시스템)
+    text = """### 2-2. Artificial Intelligence - Model(AI 앱 적용 불가, 모델·학습·GPU)
 * **[Perf]FlashAttention:** a
 * **[Perf]Muon(MomentUm Orthogonalized by Newton-Schulz):** 옛 정의
 * **[Perf]KAN:** b
@@ -341,7 +341,7 @@ def test_update_replaces_summary_line_in_place():
 | :--- | :--- | :--- |
 | **Muon(MomentUm Orthogonalized by Newton-Schulz)** | 옛 | 옛 정의 |
 | **KAN** | k | b |"""
-    plan = {"action": "update", "category": "AI", "tag": "Perf", "title": "뮤온",
+    plan = {"action": "update", "category": "AI-Model", "tag": "Perf", "title": "뮤온",
             "target": "뮤온 옵티마이저(Muon: MomentUm Orthogonalized by Newton-Schulz)",
             "summary": {"name": "Muon Optimizer(Muon)", "keywords": "새", "one_line": "새 정의"}}
     out = cat.update_summary(text, plan, []).splitlines()
@@ -445,7 +445,7 @@ def clones(tmp_path):
         _git("config", "user.name", "t", cwd=path)
     root = work / "Term" / "Every_day"
     root.mkdir(parents=True)
-    (root / cat.CATEGORY_FILES["AI"]).write_text(AI_TEXT + "\n", encoding="utf-8")
+    (root / cat.CATEGORY_FILES["AI-Model"]).write_text(AI_TEXT + "\n", encoding="utf-8")
     (root / cat.SUMMARY_FILE).write_text(SUMMARY, encoding="utf-8")
     _git("add", ".", cwd=work)
     _git("commit", "-m", "첫 커밋", cwd=work)
@@ -456,7 +456,7 @@ def clones(tmp_path):
 
 
 def _edit(repo, old, new, message):
-    path = repo / "Term" / "Every_day" / cat.CATEGORY_FILES["AI"]
+    path = repo / "Term" / "Every_day" / cat.CATEGORY_FILES["AI-Model"]
     path.write_text(path.read_text(encoding="utf-8").replace(old, new, 1), encoding="utf-8")
     _git("commit", "-am", message, cwd=repo)
 
@@ -481,7 +481,7 @@ def test_push_auto_rebases_when_github_is_ahead(clones):
     sync, ok, log = cat.git_sync_push(work, root)
     assert sync.ok and ok and sync.integrated == 2 and "2개" in sync.message and "항목 4개" in sync.message
     assert _log(origin, "main") == ["Term: DAPO 추가", "웹 편집 2", "웹 편집 1", "첫 커밋"]  # 웹 커밋 위에 내 커밋
-    text = (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    text = (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8")
     assert "DAPO" in text and "웹에서 다듬은 옛 항목" in text and "웹에서 다듬은 예산 배분" in text
     assert cat.ahead_behind(work) == (0, 0) and not cat.git_status(work, "Term")
 
@@ -497,13 +497,13 @@ def test_push_conflict_aborts_and_does_not_push(clones):
 
     sync, ok, log = cat.git_sync_push(work, root)
     assert not sync.ok and not ok and log == ""
-    assert sync.conflicts == ["Term/Every_day/" + cat.CATEGORY_FILES["AI"]]
+    assert sync.conflicts == ["Term/Every_day/" + cat.CATEGORY_FILES["AI-Model"]]
     assert "충돌" in sync.message and "푸시하지 않았" in sync.message and "git pull --rebase" in sync.message
     assert _log(origin, "main") == ["웹 편집", "첫 커밋"]  # GitHub 에는 아무것도 올라가지 않음
     assert _log(work) == before  # 내 커밋 그대로, rebase 중 상태 아님
     assert not (work / ".git" / "rebase-merge").exists() and not (work / ".git" / "rebase-apply").exists()
     assert not cat.git_status(work, ".")  # 작업 폴더 깨끗 (충돌 표시 없음)
-    assert "PC: 그룹 평균" in (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    assert "PC: 그룹 평균" in (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8")
 
 
 def test_behind_count_and_pull(clones):
@@ -518,7 +518,7 @@ def test_behind_count_and_pull(clones):
     # 커밋 안 된 변경(겹치지 않는 파일)이 있어도 내 커밋이 없으면 앞으로 당기기만 해서 받는다
     (root / cat.SUMMARY_FILE).write_text(SUMMARY + "\n메모", encoding="utf-8")
     sync = cat.git_sync(work, root)
-    assert sync.ok and sync.integrated == 1 and "웹 편집" in (root / cat.CATEGORY_FILES["AI"]).read_text(encoding="utf-8")
+    assert sync.ok and sync.integrated == 1 and "웹 편집" in (root / cat.CATEGORY_FILES["AI-Model"]).read_text(encoding="utf-8")
     assert cat.repo_info(work, "Term").behind == 0 and cat.git_sync(work, root).integrated == 0
 
 

@@ -4,7 +4,8 @@
   README.md                                          작성 조건 (분류·태그·형식 규칙)
   0. Summary.md                                      요약 (분류별 로드맵 + 한 줄 요약 표)
   Cloud & Infrastructure(클라우드 및 인프라)_Term.txt   분류 1
-  Artificial Intelligence(AI 지능 및 시스템)_Term.txt    분류 2
+  Artificial Intelligence - App(AI 앱 적용 가능)_Term.txt                    분류 2-1 (LLM 앱이 코드로 바로 적용)
+  Artificial Intelligence - Model(AI 앱 적용 불가, 모델·학습·GPU)_Term.txt   분류 2-2 (모델 구조·서빙·학습 — 모델 선택으로만)
   Security & Trust(보안 및 신뢰성)_Term.txt             분류 3
   basic_Term.txt                                     기초 용어 (`용어: 한 줄 정의`)
   old_term.txt                                       통합·삭제되어 빠진 항목 보관소
@@ -27,14 +28,20 @@ from pathlib import Path
 
 CATEGORY_FILES = {
     "Cloud": "Cloud & Infrastructure(클라우드 및 인프라)_Term.txt",
-    "AI": "Artificial Intelligence(AI 지능 및 시스템)_Term.txt",
+    "AI-App": "Artificial Intelligence - App(AI 앱 적용 가능)_Term.txt",
+    "AI-Model": "Artificial Intelligence - Model(AI 앱 적용 불가, 모델·학습·GPU)_Term.txt",
     "Security": "Security & Trust(보안 및 신뢰성)_Term.txt",
 }
 CATEGORY_TITLES = {  # 0. Summary.md 의 분류 제목
     "Cloud": "### 1. Cloud & Infrastructure(클라우드 및 인프라)",
-    "AI": "### 2. Artificial Intelligence(AI 지능 및 시스템)",
+    "AI-App": "### 2-1. Artificial Intelligence - App(AI 앱 적용 가능)",
+    "AI-Model": "### 2-2. Artificial Intelligence - Model(AI 앱 적용 불가, 모델·학습·GPU)",
     "Security": "### 3. Security & Trust(보안 및 신뢰성)",
 }
+AI_CATEGORIES = ("AI-App", "AI-Model")
+# 2026-11-09 AI 파일을 둘로 나누기 전의 분류 — 옛 카탈로그(나누기 전 CS)도 읽고 고칠 수 있게, 옛 결과의 category "AI" 도 받는다
+LEGACY_FILES = {"AI": "Artificial Intelligence(AI 지능 및 시스템)_Term.txt"}
+LEGACY_TITLES = {"AI": "### 2. Artificial Intelligence(AI 지능 및 시스템)"}
 BASIC_FILE, OLD_FILE, README_FILE, SUMMARY_FILE = "basic_Term.txt", "old_term.txt", "README.md", "0. Summary.md"
 TAGS = ("Privacy", "AI-Sec", "Perf", "Gov")
 TABLE_HEADER = "## 🛠️ 핵심 개념 한 줄 요약"
@@ -45,7 +52,7 @@ UPDATED = re.compile(r"수정일\s*:?\s*([^)]*)\)")
 
 @dataclass
 class Entry:
-    category: str  # Cloud | AI | Security | old
+    category: str  # Cloud | AI-App | AI-Model | Security (나누기 전 카탈로그는 AI)
     header: str  # 제목 줄 원문
     body: str  # 제목 다음 줄부터 (끝 공백 줄 제외)
     tag: str = ""
@@ -112,11 +119,16 @@ class Catalog:
     @classmethod
     def load(cls, root: Path) -> "Catalog":
         cat = cls(Path(root))
-        for category, filename in CATEGORY_FILES.items():
+        for category, filename in {**CATEGORY_FILES, **LEGACY_FILES}.items():
             path = cat.root / filename
             if path.exists():
                 cat.entries += parse_entries(path.read_text(encoding="utf-8"), category)
         return cat
+
+    @property
+    def legacy(self) -> bool:
+        """AI 를 두 파일로 나누기 전 카탈로그인가 (옛 AI 파일에 항목이 있음)."""
+        return any(e.category in LEGACY_FILES for e in self.entries)
 
     def by_category(self, category: str) -> list[Entry]:
         return [e for e in self.entries if e.category == category]
@@ -360,7 +372,7 @@ def update_summary(text: str, plan: dict, removed: list[Entry]) -> str:
         kept.append(line)
     lines = kept
     if plan.get("action") in ("add", "update") and plan.get("summary"):
-        heading = CATEGORY_TITLES[plan["category"]]
+        heading = {**CATEGORY_TITLES, **LEGACY_TITLES}.get(plan["category"], "")
         section = lines.index(heading) if heading in lines else None
         end = None
         if section is not None:
@@ -397,10 +409,22 @@ def add_basic_terms(text: str, terms: list[dict]) -> tuple[str, list[str]]:
     return text.rstrip("\n") + "\n" + "\n".join(added), added
 
 
+def file_of(category: str) -> str:
+    return {**CATEGORY_FILES, **LEGACY_FILES}[category]
+
+
+def resolve_category(category: str | None, target: Entry | None, legacy: bool = False) -> str | None:
+    """옛 결과의 category "AI" → 나눈 카탈로그에서는 수정 대상 항목이 있는 AI 파일의 분류 (새 항목이면 정할 수 없어 None).
+    나누기 전 카탈로그(legacy)에서는 그대로 "AI"."""
+    if category not in LEGACY_FILES or legacy:
+        return category
+    return target.category if target is not None and target.category in AI_CATEGORIES else None
+
+
 def apply_plan(catalog: Catalog, plan: dict, final_entry: str, d: date | None = None) -> list[Change]:
     """승인된 결과를 카탈로그 파일에 반영한다 (로컬 파일만 — 커밋·푸시는 따로).
 
-    plan = {"action": "add|update|delete", "category": "AI|Cloud|Security", "tag": "...", "title": "...",
+    plan = {"action": "add|update|delete", "category": "Cloud|AI-App|AI-Model|Security", "tag": "...", "title": "...",
             "target": "수정·삭제할 기존 항목 이름", "absorb": ["편입·병합되어 빠질 기존 항목 이름", ...],
             "summary": {"name", "keywords", "one_line"}, "basic_terms": [{"term", "definition"}]}
     - update: 대상 항목을 새 본문으로 교체 (분류가 바뀌면 옛 파일에서 빼고 새 파일 맨 위로) — 제목에 수정일 추가
@@ -418,21 +442,26 @@ def apply_plan(catalog: Catalog, plan: dict, final_entry: str, d: date | None = 
         raise ValueError(f"수정·삭제할 기존 항목을 찾지 못했습니다: {plan.get('target')!r}")
 
     if action == "delete":
-        path = root / CATEGORY_FILES[target.category]
+        path = root / file_of(target.category)
         _write(path, remove_entry(_read(path), target))
         old_text = prepend_entry(old_text, target.text)
         removed.append(target)
         changes.append(Change(path.name, "삭제", target.name))
         changes.append(Change(OLD_FILE, "이관", f"{target.name} → old_term"))
     else:
-        if category not in CATEGORY_FILES:
+        category = resolve_category(category, target, catalog.legacy)
+        if category is None:
+            raise ValueError("AI 는 두 파일로 나뉘었습니다 — 적용 계획의 category 를 'AI-App'(LLM 앱에서 바로 적용) 또는 "
+                             "'AI-Model'(앱 적용 불가 — 모델·학습·GPU) 로 고쳐 주세요")
+        if category not in CATEGORY_FILES and category not in LEGACY_FILES:
             raise ValueError(f"분류는 {list(CATEGORY_FILES)} 중 하나여야 합니다: {category!r}")
+        plan = {**plan, "category": category}  # 요약 절 찾기도 실제 분류로
         entry_text = final_entry.strip()
-        new_path = root / CATEGORY_FILES[category]
+        new_path = root / file_of(category)
         if action == "update":
             first, _, rest = entry_text.partition("\n")
             entry_text = f"{with_updated_date(keep_dates(first, target.header), d)}\n{rest}".rstrip()
-            old_file = root / CATEGORY_FILES[target.category]
+            old_file = root / file_of(target.category)
             if target.category == category:
                 _write(new_path, replace_entry(_read(new_path), target, entry_text))
                 changes.append(Change(new_path.name, "교체", target.name))
@@ -450,7 +479,7 @@ def apply_plan(catalog: Catalog, plan: dict, final_entry: str, d: date | None = 
         if entry is None:
             changes.append(Change(OLD_FILE, "건너뜀", f"흡수 대상 '{name}' 을 찾지 못함"))
             continue
-        path = root / CATEGORY_FILES[entry.category]
+        path = root / file_of(entry.category)
         _write(path, remove_entry(_read(path), entry))
         old_text = prepend_entry(old_text, entry.text)
         removed.append(entry)
