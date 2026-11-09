@@ -45,9 +45,9 @@ from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
 from core.config import load_skills, parent_map, subtree
 from core.dept_heads import DeptHead
-from core.feedback import generate_lessons
+from core.feedback import active_lessons, generate_lessons, lesson_budget, propose_cleanup, team_lessons
 from core.member_models import team_rank_models
-from core.schemas import AgentAnswer, HumanDecision, Lesson, ModelsConfig, OrgNode, Rank, Team, ToolResult
+from core.schemas import AgentAnswer, CleanupProposal, HumanDecision, Lesson, ModelsConfig, OrgNode, Rank, Team, ToolResult
 from core.search import WebContext
 from core.storage import Storage
 from core.tools import run_tools
@@ -76,6 +76,7 @@ class OfficeState(TypedDict, total=False):
     steps: Annotated[list[AgentAnswer], operator.add]  # 타임라인 (모든 단계, 누적)
     decision: HumanDecision
     lessons: list[Lesson]
+    cleanup: list[CleanupProposal]  # 새 교훈과 겹치거나 충돌하는 옛 교훈 — 정리 제안 (사용자가 고르기 전에는 안 바꿈)
     notes: list[str]
     # 🔀 단계마다 확인 (core/step_mode.py) — 끄면(기본) 아래 값은 쓰지 않는다
     step_mode: bool
@@ -122,7 +123,7 @@ def build_office_graph(
     """
     verification_cfg = verification_cfg or {}
     rewrite_answer = settings.get("review", {}).get("rewrite_answer", True)
-    max_lessons = settings.get("feedback", {}).get("max_lessons_in_prompt", 5)
+    lesson_chars = lesson_budget(settings)  # 에이전트마다 교훈 글자 한도 — 켜 둔 교훈은 이 안이면 모두 들어간다
     critic_cfg = verification.critic_settings(verification_cfg, team.verification)
     rubric = team.rubric or verification_cfg.get("review_rubric")
     with_human = checkpointer is not None  # interrupt 는 체크포인터가 있어야 동작한다
@@ -146,7 +147,9 @@ def build_office_graph(
     # ── 작은 도우미 ──────────────────────────────────────────────
 
     def lessons_for(node_id: str) -> list[str] | None:
-        return storage.recent_lessons(team.id, node_id, max_lessons) if storage else None
+        """프롬프트에 넣을 교훈 — 화면의 📜 프롬프트 보기(core/feedback.team_prompts)와 같은 함수로 고른다."""
+        pick = team_lessons(storage, team.id, lesson_chars).get(node_id) if storage else None
+        return pick.texts if pick else None
 
     def evidence_parts(state: OfficeState) -> list[str]:
         """근거 자료 묶음 = 데이터 툴 결과(사실 수치)마다 1개 + 웹 검색 결과 1개."""
@@ -635,10 +638,14 @@ def build_office_graph(
         lessons, notes = generate_lessons(
             state["question"], state["steps"], state["decision"], names, parents, team, models
         )
+        cleanup = []
         if storage:
             run_id = config.get("configurable", {}).get("thread_id")
-            storage.add_lessons(team.id, run_id, lessons)
-        return {"lessons": lessons, "notes": notes}
+            new_ids = dict(zip((l.agent_id for l in lessons), storage.add_lessons(team.id, run_id, lessons)))
+            # 새 교훈과 겹치거나 충돌하는 옛 교훈을 찾아 '정리 제안'만 만든다 — 바꾸는 것은 사용자가 화면에서 고른 뒤
+            cleanup, more = propose_cleanup(team, active_lessons(storage, team.id), names, models, new_ids)
+            notes = [*notes, *more]
+        return {"lessons": lessons, "cleanup": cleanup, "notes": notes}
 
     def stepwise(state: OfficeState) -> bool:
         return bool(with_human and state.get("step_mode"))
@@ -727,6 +734,8 @@ def _events(graph, inputs, config) -> Iterator[tuple[str, object]]:
                 yield "research", update.get("web")
             elif node == "feedback":
                 yield "lessons", update["lessons"]
+                if update.get("cleanup"):  # 정리 제안이 있을 때만
+                    yield "cleanup", update["cleanup"]
                 for note in update.get("notes", []):
                     yield "note", note
 
@@ -837,6 +846,7 @@ def resume_with_decision(graph, org: OrgNode, decision: HumanDecision, thread_id
 
     Yields:
         ("lessons", list[Lesson]) — 저장된 에이전트별 교훈
+        ("cleanup", list[CleanupProposal]) — 새 교훈과 겹치거나 충돌하는 옛 교훈 정리 제안 (있을 때만, 아직 아무것도 안 바꿈)
         ("note", str)             — 피드백 생성 중 경고 (fallback 사용 등)
     """
     yield from _events(graph, Command(resume=decision.model_dump()), _config(org, thread_id))

@@ -7,8 +7,10 @@ review:
   rewrite_answer: true
 
 feedback:
-  # 다음 실행 시 에이전트별 시스템 프롬프트에 주입할 최근 교훈 개수
-  max_lessons_in_prompt: 5
+  # 에이전트 한 명의 시스템 프롬프트에 넣을 교훈의 글자 수 한도. 켜 둔 교훈은 이 안이면 모두 들어간다.
+  # 넘치면 오래된 교훈부터 빠지고, 부서 화면 '📜 프롬프트·📚 교훈'이 빠진 교훈을 알려 주며 정리를 제안한다.
+  # (2026-11-06 실측: 가장 많은 개념 편집 팀 팀장이 교훈 12개 16,830자 — 예전 '최근 5개'는 7개를 조용히 뺐다)
+  lesson_chars_in_prompt: 20000
 
 storage:
   data_dir: data           # gitignore 대상 (runs.db, 업로드 이미지 등)

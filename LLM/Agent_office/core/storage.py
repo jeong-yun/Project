@@ -274,14 +274,19 @@ class Storage:
 
     # ─── lessons ─────────────────────────────────────────────────
 
-    def add_lessons(self, team_id: str, run_id: str | None, lessons: list[Lesson]) -> None:
+    def add_lessons(self, team_id: str, run_id: str | None, lessons: list[Lesson]) -> list[int]:
+        """교훈을 넣고 새 번호(id)를 넣은 순서대로 돌려준다 (교훈 정리 제안이 '새 교훈'을 가리킬 때 쓴다)."""
         now = _now()
         with closing(self._connect()) as conn, conn:
-            conn.executemany(
-                "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, created_at) VALUES (?,?,?,?,?,?)",
-                [(team_id, l.agent_id, run_id, l.kind, l.lesson, now) for l in lessons],
-            )
+            ids = [
+                conn.execute(
+                    "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, created_at) VALUES (?,?,?,?,?,?)",
+                    (team_id, l.agent_id, run_id, l.kind, l.lesson, now),
+                ).lastrowid
+                for l in lessons
+            ]
         self._sync_feedback()
+        return ids
 
     def insert_lessons_raw(self, items: list[dict]) -> None:
         """knowledge/ 에서 가져온 교훈을 그대로 넣는다 (작성 시각·켜짐 여부 보존, 동기화는 부르지 않음)."""
@@ -318,11 +323,15 @@ class Storage:
         )
         return {r["agent_id"]: r["n"] for r in rows}
 
-    def update_lesson(self, lesson_id: int, lesson: str | None = None, active: bool | None = None) -> None:
+    def update_lesson(self, lesson_id: int, lesson: str | None = None, active: bool | None = None,
+                      agent_id: str | None = None) -> None:
+        """agent_id: 교훈을 받을 팀원 바꾸기 — 조직도가 바뀌어 지금 없는 팀원 id 로 남은 교훈을 옮길 때 (화면에서 사용자가 고름)."""
         if lesson is not None:
             self._execute("UPDATE lessons SET lesson=? WHERE id=?", (lesson, lesson_id))
         if active is not None:
             self._execute("UPDATE lessons SET active=? WHERE id=?", (int(active), lesson_id))
+        if agent_id is not None:
+            self._execute("UPDATE lessons SET agent_id=? WHERE id=?", (agent_id, lesson_id))
         self._sync_feedback()
 
     def delete_lesson(self, lesson_id: int) -> None:

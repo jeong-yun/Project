@@ -315,6 +315,35 @@ class LessonSet(BaseModel):
     lessons: list[Lesson] = Field(description="참여한 에이전트마다 1개씩의 교훈")
 
 
+class LessonGroup(BaseModel):
+    """같은 에이전트의 교훈 중 겹치거나 충돌하는 묶음 (교훈 정리 제안 — core/feedback.py propose_cleanup)."""
+
+    agent_id: str = Field(description="교훈 주인 에이전트 id (괄호 안의 id 그대로)")
+    ids: list[int] = Field(description="묶을 교훈 번호들 (같은 에이전트, 2개 이상)")
+    relation: Literal["overlap", "conflict"] = Field(description="overlap: 같은 지시 되풀이 / conflict: 서로 반대 지시")
+    merged: str = Field(description="묶음 전체를 대신할 일반 행동 지침 (짧게, 지시를 빠뜨리지 않게)")
+    detail: str = Field(description="사람 코멘트 속 구체 규칙 중 꼭 남길 것 (없으면 빈 문자열)")
+    reason: str = Field(description="왜 묶었는지 한 문장")
+
+
+class LessonGroupSet(BaseModel):
+    groups: list[LessonGroup] = Field(description="겹치거나 충돌하는 교훈 묶음 (없으면 빈 목록)")
+
+
+class CleanupProposal(BaseModel):
+    """화면에 보일 교훈 정리 제안 — 사용자가 고르기 전에는 아무것도 바꾸지 않는다."""
+
+    team_id: str
+    agent_id: str
+    ids: list[int]  # 묶인 교훈 번호 (옛 것 + 새 것)
+    new_id: int | None = None  # 이번 결정에서 생긴 교훈 — 없으면 쌓여 있던 교훈 정리
+    relation: Literal["overlap", "conflict"]
+    kind: Literal["praise", "improve"]  # 합친 교훈의 종류 (하나라도 고칠 점이면 고칠 점)
+    merged: str  # 합친 문장 (사람 코멘트 부분은 '(사람 코멘트: …)' 로 — 공개 knowledge/ 로는 나가지 않게)
+    reason: str
+    by: Literal["model", "code"]  # 보조 모델이 묶었는지, 문장 비교(코드)로 찾았는지
+
+
 # ════════════════════════════════════════════════════════════════════
 # 3) 실행 결과 스키마
 # ════════════════════════════════════════════════════════════════════
