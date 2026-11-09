@@ -50,12 +50,14 @@ import education_ui
 import home_ui
 import models_ui
 import office_ui
+import prompt_ui
 import run_control_ui
 from core import (
     audio_edit, building, call_monitor, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_caps,
     model_catalog, model_recs, music, office, progress, stock_calc, usage, verification,
 )
 from core.agent import OrgAgent
+from core.feedback import lesson_budget, team_lessons
 from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
 from core import scope as team_scope
 from core.brief import DesiredState
@@ -1318,7 +1320,8 @@ def start_background_followup(run: dict, request: str) -> None:
     turns = list(run.get("followups") or [])
     validators = list(dict.fromkeys([*team.harness.validators, *(run.get("extra_validators") or [])]))
     evidence = followup_evidence(run)
-    lessons = storage.recent_lessons(team_id, root, settings.get("feedback", {}).get("max_lessons_in_prompt", 5))
+    pick = team_lessons(storage, team_id, lesson_budget(settings)).get(root)  # 실행과 같은 교훈 고르기 (글자 한도)
+    lessons = pick.texts if pick else None
     options = {**team.harness.options, **check_options(run)}
 
     def work():
@@ -1389,11 +1392,13 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
 
 def submit_decision(run: dict, decision: HumanDecision) -> None:
     """멈춰 있던 그래프를 사람의 결정으로 재개하고, 생성된 교훈을 기록한다."""
-    lessons, notes = [], []
+    lessons, cleanup, notes = [], [], []
     with st.spinner("결정을 반영하고 에이전트별 피드백을 정리하는 중…"),             usage.scope(team_id=team_id, run_id=run["run_id"], purpose="결정 반영·교훈"):
         for kind, payload in resume_with_decision(make_graph(), org, decision, run["run_id"]):
             if kind == "lessons":
                 lessons = payload
+            elif kind == "cleanup":
+                cleanup = payload
             elif kind == "note":
                 notes.append(payload)
     storage.save_decision(run["run_id"], decision)  # 피드백이 있는 결과만 저장소에 남는다
@@ -1401,7 +1406,7 @@ def submit_decision(run: dict, decision: HumanDecision) -> None:
     if decision.action == "adopt":
         run["saved_files"] = save_adopted(run, decision)
     run.update(status="adopted" if decision.action == "adopt" else "rejected",
-               decision=decision, lessons=lessons, notes=run["notes"] + notes)
+               decision=decision, lessons=lessons, cleanup=cleanup, notes=run["notes"] + notes)
 
 
 def render_final_and_decision(run: dict, run_key: tuple) -> None:
@@ -1548,6 +1553,9 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
     for lesson in run["lessons"]:
         icon = "👍" if lesson.kind == "praise" else "🔧"
         st.markdown(f"- **{name_of(lesson.agent_id)}** {icon} {lesson.lesson}")
+    if run.get("cleanup"):  # 새 교훈과 겹치거나 어긋나는 옛 교훈 — 사용자가 고르기 전에는 아무것도 바꾸지 않는다
+        st.markdown("##### 🧹 교훈 정리 제안 — 새 교훈과 겹치거나 어긋나는 옛 교훈이 있습니다")
+        prompt_ui.render_cleanup(team, run["cleanup"], key=run["run_id"])
     # 결정까지 끝난 업무는 닫으면 화면이 처음 상태(입력칸이 맨 위)로 돌아간다 — 기록은 사이드바 '🕘 지난 업무'에 남는다
     if st.button("✖ 이 결과 닫고 새 업무 시작", key=f"close_{run['run_id']}"):
         runs.pop(run_key, None)
@@ -1625,6 +1633,10 @@ def set_tab_title() -> None:
 # 본문 ① 문의 대상
 # ════════════════════════════════════════════════════════════════════
 st.title(f"🏢 {dept.emoji} {dept.name}")
+prompt_ui.configure(prompt_ui.Ctx(storage=storage, ranks=ranks, models=models, budget=lesson_budget(settings),
+                                  verification_cfg=verification_cfg))
+DEPT_TEAMS = [teams_by_id[t] for t in dept.teams]
+prompt_ui.budget_warning(DEPT_TEAMS, "아래 '📜 프롬프트·📚 교훈 보기'를 켜고 '📚 교훈 관리'")
 headcounts = {tid: len(dept_infos[tid].nodes) for tid in dept.teams}
 st.caption(f"👔 **{dept_head.name}**에게 맡기면 알맞은 팀을 골라 넘기고, 그 팀의 팀장이 팀원에게 나눠 일합니다 · "
            f"부서원 {sum(headcounts.values()) + 1}명 (부서장 1 · " + " · ".join(f"{team_names[t]} {n}" for t, n in headcounts.items())
@@ -2167,6 +2179,11 @@ if idle:
 
 st.fragment(run_every=REFRESH_SEC if any_running else None)(live_area)()
 render_member_models()
+# 📜 팀원마다 실제로 받는 시스템 프롬프트 · 📚 교훈 관리 (prompt_ui.py) — 켰을 때만 그린다 (다시 그릴 때 드는 시간 없음)
+if st.toggle(f"📜 {dept.name} 프롬프트·📚 교훈 보기", key=f"prompts_{dept_id}",
+             help="부장의 비평 관점, 팀원마다 다음 업무에서 받는 시스템 프롬프트(교훈 포함)를 보고 교훈을 고치거나 끕니다."):
+    with st.container(border=True):
+        prompt_ui.render_dept(dept, dept_head, DEPT_TEAMS, key=dept_id)
 
 
 # ════════════════════════════════════════════════════════════════════

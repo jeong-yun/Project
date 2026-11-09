@@ -16,9 +16,10 @@ from pathlib import Path
 
 import streamlit as st
 
+import prompt_ui
 from core import catalog as cat
 from core import concept
-from core.config import BASE_DIR
+from core.config import BASE_DIR, load_team
 from core.memo import SigCache, file_sig
 
 CONCEPT_FEATURE = "concept_catalog"  # team.yaml features 에 있으면 이 화면 조각을 쓴다
@@ -257,23 +258,6 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
 # ─── 📜 적용된 프롬프트 ─────────────────────────────────────────────────
 
 
-def agent_prompts(skills: str) -> list[tuple[str, str, str]]:
-    """개념 편집 팀 에이전트마다 (이름, 전문 분야, 시스템 프롬프트) — 실행 때와 같은 OrgAgent.system_prompt 로 만든다."""
-    from core.agent import OrgAgent
-    from core.config import load_models, load_ranks, load_team, team_org
-
-    team, ranks = load_team(concept.TEAM_ID), load_ranks()
-    ranks_by_id = {r.id: r for r in ranks}
-    nodes = list(team_org(team, ranks).walk())
-    names = {n.id: n.name or ranks_by_id[n.rank].name for n in nodes}
-    models = load_models()
-    out = []
-    for n in nodes:
-        agent = OrgAgent(n, ranks_by_id[n.rank], team, models, names=names, skills=skills)
-        out.append((agent.name, n.specialty or ranks_by_id[n.rank].role, agent.system_prompt()))
-    return out
-
-
 def applied_prompt(question: str, brief, used: str = "", key: str = "") -> None:
     """📜 적용된 프롬프트 (접힘) — 에이전트가 실제로 받는 것: 스킬 전문(판 표시) · 업무 브리프 · 에이전트별 시스템 프롬프트.
 
@@ -297,17 +281,13 @@ def applied_prompt(question: str, brief, used: str = "", key: str = "") -> None:
                 st.caption("개념명을 넣으면 보낼 업무 브리프(요청·완료 기준·제약·결과 형식)가 여기 나옵니다.")
             else:
                 st.code(brief.as_prompt(question), language="markdown", wrap_lines=True, height=420)
-        with tabs[2]:
+        with tabs[2]:  # 부서 화면 '📜 프롬프트·📚 교훈'과 같은 보기 — 실행 때와 같은 코드로 만든 프롬프트 (교훈 포함)
             try:
-                agents = agent_prompts(ver["text"])
+                team = load_team(concept.TEAM_ID)
             except Exception as e:  # noqa: BLE001 — 설정을 못 읽어도 화면은 그린다
                 st.caption(f"에이전트 정보를 읽지 못했습니다: {e}")
                 return
-            st.dataframe([{"에이전트": a, "전문 분야": s} for a, s, _ in agents], hide_index=True, use_container_width=True)
-            pick = st.selectbox("시스템 프롬프트 보기", [a for a, _, _ in agents], key=f"prompt_agent_{key}")
-            system = next(p for a, _, p in agents if a == pick)
-            st.code(system, language="markdown", wrap_lines=True, height=360)
-            st.caption("지난 피드백 교훈(최대 몇 개)은 실행 때 이 끝에 덧붙습니다.")
+            prompt_ui.member_prompts(team, key=f"concept_{key}")
 
 
 # ─── 최종 결과 · 결정 · 반영 ─────────────────────────────────────────────
