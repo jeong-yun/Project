@@ -187,3 +187,24 @@ def test_tool_results_reach_prompts_and_harness(ranks, models, travel, use_scrip
     draft = next(p for k, p in events if k == "step")
     assert {h.validator for h in draft.harness} == {"itinerary_days", "required_terms"}
     assert all(h.passed for h in draft.harness)
+
+
+@pytest.mark.parametrize("team_id", ["travel_domestic", "travel_abroad"])
+def test_travel_final_checks_skip_member_drafts(team_id, ranks, models, use_script):
+    """맛집·명소 담당 초안에는 최종 계획서용 검사(모든 날 일정·예산·숙소·교통)가 돌지 않는다 — 최종 답변에만."""
+    team = load_team(team_id)
+    final = "1일차 출발\n2일차 관광\n3일차 귀가\n예산 표, 숙소, 교통, 입국 조건, 환전"
+    use_script(Script(text="맛집 3곳: 순두부 마을, 중앙시장 닭강정, 안목해변 카페거리",
+                      ReviewResult=make_review("revise", 8, answer=final),
+                      Delegation=make_delegation("am_spots", "staff_food")))
+    org = team_org(team, ranks)
+    req = build_request(team.tasks[0], {"start_date": "2026-11-20", "end_date": "2026-11-22"})
+    graph = build_office_graph(org, ranks, team, models, {}, NO_CRITIC)
+    events = list(stream_office(graph, org, req.question, "gm_itinerary", brief=req.brief, auto_brief=False,
+                                tool_inputs=req.tool_inputs, extra_validators=req.validators, harness_options=req.harness_options))
+    steps = [p for k, p in events if k == "step"]
+    drafts = [s for s in steps if s.kind == "draft"]
+    assert len(drafts) == 2 and all(not d.harness and d.attempts == 1 for d in drafts)  # 범위 밖 내용을 쓰라고 다시 시키지 않는다
+    root = steps[-1]
+    assert root.node_id == "gm_itinerary" and {h.validator for h in root.harness} == {"itinerary_days", "required_terms"}
+    assert all(h.passed for h in root.harness)
