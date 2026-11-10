@@ -1,5 +1,9 @@
 """설정 파일·조직도·아바타·스킬 테스트."""
 
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 from core.config import (
@@ -72,3 +76,16 @@ def test_skills_are_loaded_from_team_folder():
     skills = load_skills("general")
     assert "적대적 리뷰어" in skills and "## 스킬: answer_style" in skills
     assert load_skills("_template") == ""
+
+
+def test_streamlit_config_never_sends_big_screen_parts_as_hash_only():
+    """`.streamlit/config.toml` — 큰 화면 조각을 '해시만' 보내는 기능을 끈다 (브라우저 'Connection error … 404' 방지).
+
+    Streamlit 이 이 폴더에서 실제로 읽은 값을 본다 → 파일이 빠지거나, 값이 줄거나, 새 Streamlit 에서 옵션이 없어지면 실패한다.
+    웹소켓으로 보낼 수 있는 가장 큰 메시지(server.maxMessageSize, MB)보다 기준이 크면 해시만 보내는 일이 없다.
+    """
+    code = ("from streamlit import config; "
+            "print(config.get_option('global.minCachedMessageSize') >= config.get_option('server.maxMessageSize') * 1e6)")
+    done = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parent.parent,
+                          capture_output=True, text=True, timeout=120)
+    assert done.stdout.strip() == "True", done.stdout + done.stderr
