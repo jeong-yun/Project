@@ -1268,7 +1268,9 @@ def followup_evidence(run: dict) -> str:
     if web and web.results:
         parts.append("## 🌐 웹 검색 결과\n" + web.as_prompt())
     budget = verification.critic_settings(verification_cfg, team.verification).get("evidence_chars", 6000)
-    return verification.trim_evidence(parts, budget)
+    evidence = verification.trim_evidence(parts, budget)
+    original = concept_ui.followup_original(run) if is_concept else ""  # 개념 수정: 원본 전문 (변경 제안의 find 를 복사할 글 — 줄이지 않는다)
+    return "\n\n".join(x for x in (original, evidence) if x)
 
 
 def render_followup(run: dict) -> None:
@@ -1499,7 +1501,7 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
         chosen = candidates[idx]
         with st.form(f"decide_{run['run_id']}"):
             if is_concept:  # 개념 편집 팀: 카탈로그에 들어갈 최종본과 적용 계획을 나눠서 고친다
-                concept_entry, concept_plan = concept_ui.decision_fields(chosen.content, f"{run['run_id']}_{n_rev}_{idx}")
+                concept_entry, concept_plan = concept_ui.decision_fields(chosen.content, f"{run['run_id']}_{n_rev}_{idx}", run)
                 edited = chosen.content
             else:
                 edited = st.text_area("최종 답변 (필요하면 직접 수정)", value=chosen.content, height=260,
@@ -1526,7 +1528,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
                 action="adopt" if adopt else "reject",
                 adopted_node_id=chosen.node_id if adopt else None,
                 final_answer=edited.strip() if adopt else "",
-                edited=bool(adopt and edited.strip() != chosen.content.strip()),
+                edited=bool(adopt and (concept_ui.human_edited(chosen.content, concept_entry, run) if is_concept
+                                       else edited.strip() != chosen.content.strip())),
                 score=score,
                 # 결정 전에 주고받은 문의·수정 요청도 교훈 생성에 쓰이도록 코멘트에 붙인다
                 comment="\n\n".join(x for x in (comment.strip(), followup.decision_note(run.get("followups") or [])) if x),

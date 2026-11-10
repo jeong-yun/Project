@@ -6,6 +6,11 @@
   <final> 카탈로그에 그대로 들어갈 항목 텍스트 (제목 줄부터 참고문헌까지) </final>
   ## GitHub 요약 …
   ```json {"concept_plan": {...}} ```   ← 적용 계획 (분류·태그·추가/수정·통합 대상·요약·기초 용어·다른 항목 수정)
+
+기존 항목 수정(update)은 원본 기반 (2026-11-10) — 팀은 <final> 을 쓰지 않고 적용 계획의 changes 에 변경 제안만 낸다.
+  변경 제안 = {find: 원본 구절 그대로, replace: 바꿀 글, kind: 근거|형식, source: 출처, evidence: 근거}
+  최종본은 코드가 원본에 끼워 넣어 만든다 (review_changes → assemble) — 변경 목록에 없는 곳은 원본과 글자 그대로 같다.
+  근거(source·evidence)는 사람이 반영 여부를 판단하는 데만 쓰고 카탈로그·커밋 메시지에는 넣지 않는다.
 """
 
 import hashlib
@@ -47,6 +52,20 @@ PLAN_EXAMPLE = {
         "edits": [{"entry": "수정할 다른 기존 항목 이름", "find": "그 항목 본문에 있는 바꿀 문장 그대로", "replace": "교체문", "reason": "이유"}],
     }
 }
+
+
+# 기존 항목 수정(update)의 변경 제안 — 원본의 find 를 replace 로. 근거는 화면에서 사람이 판단하는 데만 쓴다
+ORIGINAL_TAG = "original"  # 요청 글의 <original>…</original> = 수정 대상 항목 전문 (앱을 다시 켠 뒤에도 여기서 원본을 되찾는다)
+CHANGE_KINDS = {"근거": "근거에 따른 수정", "형식": "형식 수정"}
+CHANGE_EXAMPLE = [
+    {"find": "<original> 에 있는 고칠 구절 그대로", "replace": "바꿀 글 (고친 결과만)", "kind": "근거",
+     "source": "저자·기관. 문헌 제목 (식별자, URL)",
+     "evidence": "무엇이 틀렸거나 낡았는지 — 그 문헌의 해당 내용 요지나 짧은 인용 — 판정(오류/과장/누락/낡음)"},
+    {"find": "형식에 어긋난 구절 그대로", "replace": "형식을 맞춘 글", "kind": "형식", "source": "",
+     "evidence": "어긴 형식 규칙 (예: 개조식 종결 — 4단계 가독성 규칙)"},
+]
+NO_TEXT = re.compile(r"^[\s\-–—.·]*(?:없음|해당\s*없음|미상|n/?a|none|null)?[\s\-–—.·]*$", re.IGNORECASE)  # 빈칸이나 '없음'
+DRAFT_SOURCE = re.compile(r"^\W*(?:사용자\s*)?초안\W*$")  # 출처가 '초안'뿐 — 초안은 검증 대상이지 근거가 아니다
 
 
 SECTION_TITLES = {  # 절 제목 표준형 (기준 항목 「플래시어텐션」) — 모델이 '1.정의및개념'처럼 붙여 쓴 경우에만 이것으로 맞춘다
@@ -147,6 +166,30 @@ class ConceptResult:
     plan: dict = field(default_factory=dict)
     problems: list[str] = field(default_factory=list)
     change_notes: list[str] = field(default_factory=list)  # 최종본에서 떼어 낸 🔧수정·➕추가 표시와 이유 (화면에만)
+    changes: list["Proposal"] | None = None  # 기존 항목 수정의 변경 제안 (None = 추가·예전 방식 결과)
+    original: str = ""  # 변경 제안을 적용할 원본 항목 전문
+
+
+@dataclass
+class Proposal:
+    """변경 제안 하나 — 원본의 find 를 replace 로 바꾼다. 근거(source·evidence)는 화면에만 보이고 카탈로그에 들어가지 않는다."""
+
+    find: str
+    replace: str
+    kind: str = "근거"  # CHANGE_KINDS 의 열쇠
+    source: str = ""  # 출처 — 원전·공식 문서 이름과 식별자·URL (형식 수정은 비워도 됨)
+    evidence: str = ""  # 근거 — 무엇이 왜 틀렸는지 / 어느 형식 규칙에 어긋나는지
+    start: int = -1  # 원본에서 find 가 시작하는 위치 (적용할 수 없으면 -1)
+    problem: str = ""  # 적용할 수 없는 이유 (원문을 못 찾음·여러 곳·겹침·바뀌는 것 없음)
+    no_evidence: str = ""  # 근거가 없다고 본 이유 — 있으면 기본으로 반영하지 않는다 (사람이 켤 수는 있다)
+
+    @property
+    def usable(self) -> bool:
+        return self.start >= 0
+
+    @property
+    def default_on(self) -> bool:
+        return self.usable and not self.no_evidence
 
 
 def _between(text: str, tag: str) -> str:
@@ -157,12 +200,19 @@ def _between(text: str, tag: str) -> str:
 def replace_final(answer: str, new_entry: str) -> str:
     """답변의 <final>…</final> 내용을 (사람이 고친) 최종본으로 바꾼다 — 채택 기록에 실제 반영본이 남도록."""
     pattern = re.compile(r"(<final>).*?(</final>)", flags=re.DOTALL | re.IGNORECASE)
-    if not pattern.search(answer):
-        return answer
-    return pattern.sub(lambda m: f"{m.group(1)}\n{new_entry.strip()}\n{m.group(2)}", answer, count=1)
+    if pattern.search(answer):
+        return pattern.sub(lambda m: f"{m.group(1)}\n{new_entry.strip()}\n{m.group(2)}", answer, count=1)
+    # 기존 항목 수정(변경 제안) 결과에는 <final> 이 없다 → 사람이 확정한 최종본을 검증 로그 바로 뒤에 넣는다
+    block = f"<final>\n{new_entry.strip()}\n</final>"
+    log_end = re.search(rf"</(?:{LOG_TAG}|{OLD_LOG_TAG})>", answer, flags=re.IGNORECASE)
+    return f"{answer[:log_end.end()]}\n{block}{answer[log_end.end():]}" if log_end else f"{block}\n{answer}"
 
 
-def parse_result(answer: str) -> ConceptResult:
+def parse_result(answer: str, options: dict | None = None, adopted: bool = False) -> ConceptResult:
+    """결과 나누기. options 에 concept_original(수정 대상 원본)이 있고 팀 판정이 수정이면 최종본은 원본 + 변경 제안으로 코드가 만든다.
+
+    adopted: 채택한 기록을 읽을 때 — <final> 에 사람이 확정한 글이 들어 있으므로 그대로(정규화 없이) 보여 준다.
+    """
     entry, notes = strip_change_notes(normalize_entry(_between(answer, "final")))
     log = _between(answer, LOG_TAG) or _between(answer, OLD_LOG_TAG)
     res = ConceptResult(thought=log, final_entry=entry, change_notes=notes)
@@ -177,7 +227,85 @@ def parse_result(answer: str) -> ConceptResult:
         if isinstance(data, dict) and "concept_plan" in data:
             res.plan, fixes = normalize_plan(data["concept_plan"])
             res.problems += fixes
+    original = (options or {}).get("concept_original") or ""
+    if original and res.plan.get("action") == "update":
+        res.original, res.change_notes = original, []
+        res.changes = review_changes(original, res.plan.get("changes") or [])
+        res.final_entry = ((_between(answer, "final") if adopted else "")
+                           or assemble(original, res.changes, None, (options or {}).get("concept_header", "")))
+        # 🐙 GitHub 요약에는 근거를 싣지 않는다 — 검증 로그·<final>·'## 변경 요약' 을 뺀 나머지만
+        tail = re.split(rf"</(?:{LOG_TAG}|{OLD_LOG_TAG}|final)>", answer, flags=re.IGNORECASE)[-1]
+        tail = re.sub(r"```json.*?```", "", tail, flags=re.DOTALL)
+        res.summary_md = re.sub(r"^#+\s*변경 요약.*?(?=^#+\s|\Z)", "", tail, flags=re.DOTALL | re.MULTILINE).strip()
     return res
+
+
+def _clean_replace(text: str, find: str) -> str:
+    """바꿀 글에서 마크다운 굵게(**)와 🔧·➕ 변경 표시를 뗀다 (원문에 ** 가 있으면 굵게는 그대로)."""
+    text = text.replace("\r\n", "\n")
+    return strip_change_notes(text if "**" in find else text.replace("**", ""))[0]
+
+
+def _evidence_gap(p: Proposal) -> str:
+    """근거가 없다고 보는 이유 ('' = 근거 있음). 내용이 맞는지는 사람이 읽고 판단한다 — 코드는 빈칸·초안뿐·가짜 식별자만 거른다."""
+    if NO_TEXT.match(p.evidence):
+        return "근거(evidence)가 적혀 있지 않음"
+    if p.kind == "근거" and (NO_TEXT.match(p.source) or DRAFT_SOURCE.match(p.source)):
+        return "출처(source — 원전·공식 문서 이름과 식별자·URL)가 없음. 초안만으로는 근거가 되지 않음"
+    if PLACEHOLDER.search(f"{p.source} {p.evidence}"):
+        return "출처가 실제 식별자가 아님 (플레이스홀더)"
+    return ""
+
+
+def review_changes(original: str, raw: list[dict]) -> list[Proposal]:
+    """모델이 쓴 변경 제안을 원본에 대어 본다 — 적용할 수 있는지(원문이 원본에 정확히 한 번, 서로 겹치지 않음)와 근거 유무."""
+    out: list[Proposal] = []
+    taken: list[tuple[int, int]] = []  # 앞선 변경이 차지한 원본 구간
+    for item in raw or []:
+        find = str(item.get("find") or "").replace("\r\n", "\n")
+        p = Proposal(find=find, replace=_clean_replace(str(item.get("replace") or ""), find),
+                     kind="형식" if re.search(r"형식|format", str(item.get("kind") or ""), re.IGNORECASE) else "근거",
+                     source=str(item.get("source") or "").strip(), evidence=str(item.get("evidence") or "").strip())
+        count = original.count(find) if find else 0
+        start = original.find(find) if count == 1 else -1
+        if not find:
+            p.problem = "고칠 원문(find)이 비어 있음"
+        elif count == 0:
+            p.problem = "고칠 원문을 원본 항목에서 찾지 못함 (글자·공백이 원본과 다름)"
+        elif count > 1:
+            p.problem = f"고칠 원문이 원본 항목의 {count}곳에 있어 어디를 고칠지 알 수 없음"
+        elif find == p.replace:
+            p.problem = "바뀌는 것이 없음 (원문과 바꿀 글이 같음)"
+        elif any(s < start + len(find) and start < e for s, e in taken):
+            p.problem = "앞의 다른 변경과 같은 곳을 고침"
+        else:
+            p.start = start
+            taken.append((start, start + len(find)))
+        p.no_evidence = _evidence_gap(p)
+        out.append(p)
+    return out
+
+
+def assemble(original: str, changes: list[Proposal], picked: list[bool] | None = None, header: str = "") -> str:
+    """원본에 고른 변경만 끼워 넣은 최종본. 변경이 차지한 구간 밖은 원본을 그대로 이어 붙인다 (정규화하지 않음).
+
+    picked: 변경마다 반영할지 (None = 기본값 — 적용할 수 있고 근거가 있는 것만). 적용할 수 없는 변경은 골라도 반영하지 않는다.
+    header: 코드가 정한 제목 줄 (기존 날짜 이력 + 오늘 수정일). 비우면 원본 제목 줄에 오늘 수정일을 붙인다.
+    """
+    on = [c for i, c in enumerate(changes) if c.usable and (c.default_on if picked is None else picked[i])]
+    parts, pos = [], 0
+    for c in sorted(on, key=lambda c: c.start):
+        parts += [original[pos:c.start], c.replace]
+        pos = c.start + len(c.find)
+    first, sep, rest = "".join([*parts, original[pos:]]).partition("\n")
+    old_first = original.partition("\n")[0]
+    header = header or with_updated_date(old_first)
+    return f"{header if first == old_first else keep_dates(first, header)}{sep}{rest}"
+
+
+def original_of(question: str) -> str:
+    """요청 글에 실린 수정 대상 원본 전문 (<original>…</original>). 없으면 '' — 추가이거나 이 기능 이전의 요청."""
+    return _between(question, ORIGINAL_TAG)
 
 
 NAME_KEYS = ("name", "title", "term", "entry", "target", "항목", "이름")  # 모델이 이름을 객체로 감쌀 때 쓰는 키
@@ -236,6 +364,11 @@ def normalize_plan(plan) -> tuple[dict, list[str]]:
         if not isinstance(plan["edits"], list) and plan["edits"] not in (None, ""):
             problems.append("concept_plan.edits 는 [{entry, find, replace, reason}, …] 목록으로 쓴다")
         plan["edits"] = edits
+    if "changes" in plan:
+        changes = [c for c in _as_list(plan["changes"]) if isinstance(c, dict)]
+        if len(changes) != len(_as_list(plan["changes"])) or not isinstance(plan["changes"], list) and plan["changes"] not in (None, ""):
+            problems.append("concept_plan.changes 는 [{find, replace, kind, source, evidence}, …] 목록으로 쓴다 (칸마다 객체)")
+        plan["changes"] = changes
     if "summary" in plan and not isinstance(plan["summary"], dict):
         if plan["summary"] not in (None, ""):
             problems.append(f"concept_plan.summary 는 {{emoji, name, keywords, one_line}} 객체여야 한다 (현재 {plan['summary']!r})")
@@ -259,7 +392,7 @@ def normalize_plan(plan) -> tuple[dict, list[str]]:
 
 def check_answer(answer: str, options: dict | None = None) -> list[str]:
     """결과 형식 검사 (하네스). 틀린 곳 목록 — 비어 있으면 통과."""
-    res = parse_result(answer)
+    res = parse_result(answer, options)
     problems = list(res.problems)
     lower = answer.lower()
     if not res.thought:
@@ -283,9 +416,48 @@ def check_answer(answer: str, options: dict | None = None) -> list[str]:
         summary = plan.get("summary") or {}
         if not all(str(summary.get(k, "")).strip() for k in ("name", "keywords", "one_line")):
             problems.append("concept_plan.summary 에 name·keywords·one_line 이 모두 있어야 한다")
-        problems += check_entry(res.final_entry, (options or {}).get("concept_header", "") if action == "update" else "")
+        if res.changes is not None:  # 기존 항목 수정 — 원본 + 변경 제안
+            problems += check_changes(answer, res, (options or {}).get("concept_header", ""))
+        else:
+            problems += check_entry(res.final_entry, (options or {}).get("concept_header", "") if action == "update" else "")
     if action in ("update", "delete") and not str(plan.get("target", "")).strip():
         problems.append("수정·삭제는 concept_plan.target 에 기존 항목 이름을 적어야 한다")
+    return problems
+
+
+def _rule(problem: str) -> str:
+    """형식 문제 문장에서 규칙 이름만 — 건수는 뺀다 (원본에 원래 있던 문제인지 가릴 때 쓴다)."""
+    return re.sub(r"\d+(?=줄|건)", "", problem.split(":")[0])
+
+
+def check_changes(answer: str, res: ConceptResult, header: str = "") -> list[str]:
+    """기존 항목 수정(변경 제안)의 검사 — 변경마다 적용 가능·근거·새로 쓴 글의 형식, 그리고 변경 때문에 새로 생긴 형식 문제.
+
+    원본에 원래 있던 형식 문제는 막지 않는다 (실제 카탈로그 154개 중 지금 검사를 통과하는 항목은 36개 — 2026-11-10 실측).
+    그런 것은 요청에 '형식 수정 후보'로 알려 주고, 고칠지는 팀이 변경 제안으로 낸다.
+    """
+    problems = []
+    if re.search(r"<final>", answer, flags=re.IGNORECASE):
+        problems.append("기존 항목 수정은 <final> 최종본을 쓰지 않는다 — 고칠 곳만 concept_plan.changes 에 쓰면 코드가 원본에 적용한다")
+    if "changes" not in res.plan:
+        problems.append("concept_plan.changes 목록이 없다 — 고칠 곳마다 {find, replace, kind, source, evidence} (고칠 곳이 없으면 [])")
+    for i, c in enumerate(res.changes or [], 1):
+        issues = [x for x in (c.problem, c.no_evidence) if x]
+        if c.problem and "원문" in c.problem:
+            issues[0] += " — <original> 의 구절을 글자 그대로 복사하고 한 번만 나오게 앞뒤를 조금 더 넣는다"
+        absolute = [w for w in ABSOLUTE if w in c.replace and w not in c.find]
+        if absolute:
+            issues.append(f"절대 표현 {absolute}")
+        if PLACEHOLDER.search(c.replace):
+            issues.append("바꿀 글에 플레이스홀더 인용이 있음")
+        old_lines = set(c.find.splitlines())
+        narrative = [l.strip()[:30] for l in c.replace.splitlines() if l not in old_lines and NARRATIVE_END.search(l.strip())]
+        if narrative:
+            issues.append(f"개조식(명사형 종결)이 아닌 줄 {narrative[:2]}")
+        if issues:
+            problems.append(f"changes {i}번째({c.find[:30]!r}): " + "; ".join(issues))
+    before = {_rule(p) for p in check_entry(res.original)}
+    problems += [f"변경을 적용하면 새로 생기는 형식 문제 — {p}" for p in check_entry(res.final_entry, header) if _rule(p) not in before]
     return problems
 
 
@@ -459,43 +631,58 @@ def build_concept_request(
     """개념 작성 요청 → (질문, 최종 상태 브리프). 질문 = 프롬프트의 [입력] 절.
 
     action 은 코드가 판정한 것 (catalog.find_existing): 기존에 있으면 update, 없으면 add.
-    sub_title 이 있으면 이 개념이 target 항목의 '7. 변형·확장 상세' 소절로 이미 들어 있다는 뜻 → 부모 항목 전체를 수정한다.
+    sub_title 이 있으면 이 개념이 target 항목의 '7. 변형·확장 상세' 소절로 이미 들어 있다는 뜻 → 그 부모 항목을 수정한다.
+    수정(update)은 원본 기반 — 대상 항목 전문을 <original> 로 싣고, 팀은 항목을 다시 쓰지 않고 변경 제안 목록(changes)만 낸다.
     """
     d = d or date.today()
-    if action == "update" and sub_title:
+    update = action == "update" and target is not None
+    if update and sub_title:
         how = (f"수정 (update) — 이 개념은 「{target.name}」의 7.변형·확장 상세 소절 '{sub_title}' 로 이미 있음 "
-               "→ 부모 항목 전체를 다시 쓰되 그 소절을 초안으로 보완")
-    elif action == "update":
-        how = "수정 (update) — 같은 개념이 카탈로그에 이미 있음 → 기존 항목을 초안으로 보완한 전체 수정본 작성 (작성일은 기존 그대로)"
+               "→ 부모 항목(원본)은 그대로 두고, 그 소절을 중심으로 근거가 있는 곳·형식에 어긋난 곳만 변경 제안으로")
+    elif update:
+        how = ("수정 (update) — 같은 개념이 카탈로그에 이미 있음 → 기존 항목(원본)은 그대로 두고, "
+               "근거가 있어 고쳐야 하는 곳·형식에 어긋난 곳만 변경 제안으로 (전체를 다시 쓰지 않는다)")
     elif action == "add":
         how = "추가 (add) — 같은 이름의 항목이 없음 (단, 1단계에서 기존 항목에 편입·병합해야 하면 update/absorb 로 판정)"
     else:
         how = f"{ACTIONS[action]} ({action})"
-    header = expected_header(target, d) if action == "update" and target else ""
+    header = expected_header(target, d) if update else ""
     parts = [
         "[입력]",
         f"- 작업(코드 자동 판정): {how}",
         f"- 개념명(한/영): {name}",
     ]
     if header:
-        parts.append(f"- 수정본 제목 줄(날짜 이력 유지 — 이대로 쓴다): {header}")
+        parts.append(f"- 수정본 제목 줄(날짜 이력 유지 — 코드가 이렇게 맞춘다): {header}")
     parts.append(f"- 초안:\n{draft.strip() or '(없음 — 개념명만으로 작성)'}")
-    if target:
+    if update:
+        flaws = check_entry(target.text)  # 원본에 원래 있는 형식 문제 — 하네스는 막지 않고, 팀이 형식 수정으로 낼 후보로 알려 준다
+        parts.append(f"- 기존 카탈로그 항목(수정 대상 전문 = 원본, 분류 {target.category}) — 아래 {ORIGINAL_TAG} 태그 안의 글:\n"
+                     f"<{ORIGINAL_TAG}>\n{target.text}\n</{ORIGINAL_TAG}>")
+        parts.append("- 원본의 형식 검사 결과(코드가 확인 — 형식 수정 후보):\n" + ("\n".join(f"  · {x}" for x in flaws) or "  · 걸린 것 없음"))
+    elif target:
         parts.append(f"- 기존 카탈로그 항목(수정 대상 전문, 분류 {target.category}):\n{target.text}")
     if related:
         parts.append("- 관련 기존 카탈로그 항목 (1단계 비교 대상 후보 — 제목·정의·관계 발췌):\n\n" + "\n\n".join(entry_digest(e) for e in related))
     parts.append(f"{PROMPT_LINE}{prompt_version()['label']}")  # 어느 판 프롬프트로 만든 결과인지 — 질문과 함께 저장된다
     question = "\n".join(parts)
+    context = (
+        "카탈로그 분류(적용 계획의 category): Cloud(1.Cloud & Infrastructure) / AI-App(2-1. AI 앱 적용 가능) / "
+        "AI-Model(2-2. AI 앱 적용 불가, 모델·학습·GPU) / Security(3.Security & Trust). "
+        f"AI 개념은 {AI_CHOICE} — 기준: LLM 을 API 로 부르는 앱이 모델을 바꾸지 않고 코드만으로 적용할 수 있는가.\n"
+        f"오늘 날짜 {d.isoformat()} — 새 항목 제목의 작성일은 ({today_label(d)}).\n"
+        "작성 규칙은 시스템 프롬프트의 'IT 개념 프롬프트'를 따른다."
+    )
+    no_invention = [
+        "존재를 확인할 수 없는 논문·arXiv ID·URL·수치를 만들지 않는다",
+        "초안의 배치·계보 주장을 원전 확인 없이 수용하지 않는다",
+    ]
+    if update:
+        return "\n".join(parts), _update_brief(name, context, header, no_invention)
     plan_json = json.dumps(PLAN_EXAMPLE, ensure_ascii=False)
     brief = DesiredState(
         goal=f"'{name}' 개념의 검증된 카탈로그 최종본과 GitHub 요약, 카탈로그 적용 계획",
-        context=(
-            "카탈로그 분류(적용 계획의 category): Cloud(1.Cloud & Infrastructure) / AI-App(2-1. AI 앱 적용 가능) / "
-            "AI-Model(2-2. AI 앱 적용 불가, 모델·학습·GPU) / Security(3.Security & Trust). "
-            f"AI 개념은 {AI_CHOICE} — 기준: LLM 을 API 로 부르는 앱이 모델을 바꾸지 않고 코드만으로 적용할 수 있는가.\n"
-            f"오늘 날짜 {d.isoformat()} — 새 항목 제목의 작성일은 ({today_label(d)}).\n"
-            "작성 규칙은 시스템 프롬프트의 'IT 개념 프롬프트'를 따른다."
-        ),
+        context=context,
         success_criteria=[
             "<review_log> 안에 1단계(관련 기존 항목 비교 표·이중 해리·판정)와 2단계(원전 식별·주장별 판정 표·체크리스트)를 먼저 쓴다",
             "<final> 안에 카탈로그 형식 최종본(제목 줄 ~ 참고문헌)을 개조식으로 쓴다",
@@ -509,10 +696,7 @@ def build_concept_request(
             "'7. 변형·확장 상세', 마지막 절은 번호를 붙인 '8. 참고 문헌'(7절이 없으면 '7. 참고 문헌'), 불릿 ' - ', 등장 배경 ①②③, "
             "작동 원리·부적합 영역 ⓐⓑⓒ, 7절 하위 항목 '   1) 이름' 아래 '     - 개념: / 작동원리: / 장점: / 단점(고유): / 예시:', "
             "같은 항목은 §번호·다른 항목은 「항목명」으로 참조, 마크다운 굵게(**) 쓰지 않음",
-            *(["기존 항목 수정: 기존 형식(절 제목·들여쓰기·표식)이 프롬프트와 어긋나지 않으면 그대로 두고 내용만 고친다. "
-               f"제목 줄 날짜는 '{header_dates(header)}' 그대로"] if header else []),
-            "존재를 확인할 수 없는 논문·arXiv ID·URL·수치를 만들지 않는다",
-            "초안의 배치·계보 주장을 원전 확인 없이 수용하지 않는다",
+            *no_invention,
             "최종본에 '완벽·100%·무조건·완전 차단' 같은 절대 표현을 쓰지 않는다",
         ],
         output_format=(
@@ -522,6 +706,54 @@ def build_concept_request(
         assumptions=[],
     )
     return question, brief
+
+
+def _update_brief(name: str, context: str, header: str, no_invention: list[str]) -> DesiredState:
+    """기존 항목 수정의 브리프 — 원본은 그대로, 근거가 있는 곳·형식에 어긋난 곳만 변경 제안(changes)으로.
+
+    스킬(IT 개념 프롬프트)의 '<final> 최종본'·'## 변경 요약' 자리를 이 브리프가 대신한다 (스킬 [답변 전체 순서]에 예외 한 줄).
+    """
+    example = {"concept_plan": {**PLAN_EXAMPLE["concept_plan"], "action": "update", "target": "수정할 기존 항목 이름",
+                                "changes": CHANGE_EXAMPLE}}
+    return DesiredState(
+        goal=f"'{name}' 기존 카탈로그 항목(원본)에 대한 근거 있는 변경 제안 목록과 GitHub 요약, 카탈로그 적용 계획",
+        context=context + ("\n기존 항목 수정은 원본 기반이다 — 최종본은 코드가 <original> 에 변경 제안을 끼워 넣어 만들고, "
+                           "사람이 변경마다 근거를 읽고 반영할지 고른다. 변경 제안에 없는 곳은 원본 그대로 남는다."),
+        success_criteria=[
+            "<review_log> 안에 1단계(관련 기존 항목 비교 표·이중 해리·판정)와 2단계(원전 식별·주장별 판정 표·체크리스트)를 먼저 쓴다",
+            "최종본 전문은 쓰지 않는다 — 고칠 곳만 적용 계획의 changes 에 변경 제안으로 쓴다 "
+            "(변경 하나 = find 원문 구절 → replace 바꿀 글 + kind + source + evidence)",
+            "변경 제안마다 그것 하나만 읽고도 반영할지 판단할 수 있는 근거가 있다",
+            "GitHub 요약(이모지+개념명+태그 / 분류 / 핵심 키워드 / 한 줄 정의)을 쓴다",
+            "맨 끝에 적용 계획 ```json 블록을 쓴다 (편입·병합이면 absorb 에 흡수될 기존 항목, 다른 항목 수정은 edits 에)",
+        ],
+        constraints=[
+            "원본 기반: <original> 의 문장은 그대로 둔다. 고칠 수 있는 것은 두 가지뿐 — ① 근거에 따른 수정(kind \"근거\": 사실 오류·"
+            "낡은 내용·근거가 확인된 보완·추가) ② 형식 수정(kind \"형식\": 스킬의 출력 형식·가독성 규칙이나 위 '원본의 형식 검사 결과'에 "
+            "어긋난 곳). 근거도 형식 사유도 없는 다듬기·바꿔 쓰기·순서 바꾸기는 하지 않는다",
+            "changes 의 find 는 <original> 의 구절을 글자 그대로 복사한다 (공백·기호 포함, 원본에서 한 번만 나오도록 필요한 만큼만 — "
+            "줄 전체가 아니어도 된다. 여러 줄은 JSON 문자열 안에서 \\n). 새 줄을 넣을 때는 바로 앞 줄을 find 에 쓰고 replace 에 "
+            "'그 줄 + \\n + 새 줄', 지울 때는 replace 를 빈 문자열로. 같은 곳을 고치는 변경은 하나로 합친다",
+            "kind \"근거\": source 에 원전·공식 문서 이름과 식별자·URL, evidence 에 원본의 무엇이 틀렸거나 낡았는지 + 그 문헌의 해당 내용 "
+            "요지나 짧은 인용 + 판정(오류/과장/누락/낡음)을 쓴다. 검증 로그를 보지 않고 그 변경 하나만 읽어도 이해되게 쓴다",
+            "kind \"형식\": evidence 에 어느 형식 규칙에 어긋나는지 쓴다 (source 는 비워도 된다). 뜻은 바꾸지 않는다. 절이 통째로 없는 것처럼 "
+            "내용을 새로 써야 하는 형식 문제는 근거가 확인된 내용이 있을 때만 kind \"근거\" 로 추가하고, 없으면 그대로 둔다",
+            "초안의 새 내용과 스킬의 '능동적 지식 확장'도 원전으로 확인된 것만 kind \"근거\" 변경으로 낸다. 확인하지 못한 것은 변경으로 "
+            "내지 않고 <review_log> 에 '미확인'으로만 남긴다 (초안만으로는 근거가 되지 않는다)",
+            "근거(source·evidence)는 사람이 반영할지 판단하는 데만 쓰이고 카탈로그(GitHub)에는 올라가지 않는다 → replace 에는 고친 결과만 "
+            "쓴다 (근거 설명·🔧➕ 표시 금지. 항목 형식에 원래 있는 참고 문헌 줄·출처 표기는 형식대로). GitHub 요약과 summary 에도 "
+            "근거 설명을 쓰지 않는다",
+            "replace 에 쓰는 글은 스킬의 [출력 형식 견본]·개조식(명사형 종결)을 따르고 주변 글의 들여쓰기·표식에 맞춘다. "
+            "마크다운 굵게(**)와 '완벽·100%·무조건·완전 차단' 같은 절대 표현을 쓰지 않는다",
+            f"제목 줄 날짜는 고치지 않는다 — 코드가 '{header_dates(header)}' 로 맞춘다. 분류·태그가 바뀌면 적용 계획의 category·tag 에 쓴다",
+            *no_invention,
+        ],
+        output_format=(
+            "<review_log>1단계 표·이중 해리·판정 / 2단계 검증 로그 표</review_log> → ## GitHub 요약 → ```json 적용 계획``` "
+            "(최종본 블록과 '## 변경 요약' 은 쓰지 않는다) 예시: " + json.dumps(example, ensure_ascii=False)
+        ),
+        assumptions=[],
+    )
 
 
 def delete_plan(target: Entry) -> dict:
