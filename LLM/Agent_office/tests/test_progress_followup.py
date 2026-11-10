@@ -203,6 +203,40 @@ def test_followup_call_is_monitored_and_can_be_stopped(org, ranks, team, models,
     call_monitor.reset()
 
 
+def test_head_review_call_is_monitored_and_can_be_cut(org, ranks, team, models, use_script):
+    """👔 부장 검토도 ⏱ 호출 모니터·📊 진행률에 잡히고, 끊으면 수정본은 그대로 낸다."""
+    from core import followup
+    from core.agent import OrgAgent
+    from tests.test_followup import edit, head_review, judge
+
+    call_monitor.reset()
+    gate = threading.Event()
+
+    def slow(messages):
+        gate.wait(20)
+        return judge(5)
+
+    use_script(Script(FollowupResult=edit("수정본"), RevisionCritic=slow))
+    agent = OrgAgent(org, next(r for r in ranks if r.id == org.rank), team, models)
+    run = waiting_run(org)
+    thread = live.start_followup(run, "줄여줘", lambda: followup.respond(agent, "q", "결과", "줄여줘", [],
+                                                                      head=head_review(org, team, models)))
+    try:
+        call = wait_for(lambda: next((c for c in call_monitor.in_flight(run["run_id"]) if c.kind == "critic"), None))
+        assert "연구부 부장" in call.who
+        est = progress.estimate(plan_for(org), run, call_monitor.calls(run["run_id"]))
+        assert est.phase == "followup" and est.total == 2 and est.done == 1  # 팀장 답 1 + 부장 검토 1
+        assert call_monitor.skip(run["run_id"], "critic") == 1  # ⛔ 부장 검토 건너뛰기
+        thread.join(20)
+    finally:
+        gate.set()
+    turn = run["followups"][0]
+    assert run["status"] == "awaiting_human" and not run["followup_error"]
+    assert turn.revised and turn.content == "수정본" and turn.critic is None and any("끊음" in x for x in turn.log)
+    assert [c.kind for c in call_monitor.calls(run["run_id"])] == ["followup", "critic"]  # ⏱ 호출 기록에 둘 다 남는다
+    call_monitor.reset()
+
+
 def test_interrupted_followup_is_recovered(org):
     run = waiting_run(org)
     live.begin_followup(run, "질문")
@@ -352,6 +386,44 @@ def test_app_progress_bar_and_background_followup(app_env):
     at = wait_for(lambda: (lambda a: a if any("[1] 자료가 근거" in m.value for m in a.markdown) else None)(_open().run()), 30)
     assert not at.exception, at.exception
     assert any(r.label == "채택할 안" for r in at.radio)  # 다시 결정 대기
+
+
+def test_app_shows_head_review_and_sends_extra_fixes(app_env, use_script):
+    """수정본 아래에 👔 부장 검토가 보이고, '추가로 고칠 점'을 버튼 하나로 다음 수정 요청으로 보낸다."""
+    from tests.fakes import make_critic, make_delegation, make_review
+    from tests.test_followup import edit, judge
+
+    gate, draft_gate = app_env
+    gate.set()
+    draft_gate.set()
+
+    def delegation(messages):
+        text = messages[-1].content
+        return make_delegation("gm_research", "gm_action") if "gm_research" in text else make_delegation("am_fact", "staff_draft")
+
+    script = use_script(Script(
+        text="초안 [1]", Delegation=delegation, ReviewResult=make_review(verdict="approve", score=9, answer="보완안"),
+        CriticResult=make_critic(5), FollowupResult=[edit("수정본 하나"), edit("수정본 둘", ["기준일 추가"])],
+        RevisionCritic=[judge(5, extra=["표 제목에 기준일 넣기"]), judge(5)]))
+    at = _open().run()
+    at = at.selectbox(key="dept_task_research").set_value("general:free").run()
+    at.text_area(key="q_text").input("양자컴퓨팅 요약")
+    at = next(b for b in at.button if b.label == "맡기기").click().run()
+    assert not at.exception, at.exception
+    at = wait_for(lambda: (lambda a: a if any("💬 결과에 대해 묻기" in m.value for m in a.markdown) else None)(_open().run()), 60)
+    at.text_area(key=next(t.key for t in at.text_area if t.placeholder and "3번 근거" in t.placeholder)).input("정의를 줄여줘")
+    at = next(b for b in at.button if b.label == "💬 보내기").click().run()
+    assert not at.exception, at.exception
+    at = wait_for(lambda: (lambda a: a if any("추가로 고칠 점" in m.value for m in a.markdown) else None)(_open().run()), 30)
+    assert not at.exception, at.exception
+    review = next(m.value for m in at.markdown if "추가로 고칠 점" in m.value)
+    assert "부장" in review and "5/5" in review and "합격" in review and "표 제목에 기준일 넣기" in review
+    at = next(b for b in at.button if b.label.startswith("🛠")).click().run()
+    assert not at.exception, at.exception
+    at = wait_for(lambda: (lambda a: a if any("수정본 v2" in m.value for m in a.markdown) else None)(_open().run()), 30)
+    assert not at.exception, at.exception
+    assert "표 제목에 기준일 넣기" in script.prompts("FollowupResult")[1]  # 부장이 찾은 점이 다음 수정 요청으로 갔다
+    assert not any(b.label.startswith("🛠") for b in at.button)  # 고칠 점이 없으면 버튼도 없다
 
 
 def test_saving_monitor_after_restart_keeps_older_calls():

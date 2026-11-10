@@ -297,16 +297,24 @@ def build_units(plan: Plan, run: dict, records, now: float | None = None) -> tup
 
 
 def followup_units(plan: Plan, run: dict, records, now: float | None = None) -> tuple[list[Unit], int]:
-    """💬 추가 질문 하나 — 답 1번 (+ 하네스 실패로 다시 고친 만큼)."""
+    """💬 추가 질문 하나 — 팀장 답 1번 (+ 하네스 실패로 다시 고친 만큼) + 수정본이면 👔 부장 검토 (+ 불합격이면 다시 고침·다시 검토).
+
+    수정본인지는 팀장 답이 와야 알므로, 부장 검토는 시작된 뒤에 단계로 세고 그 전에는 '최대'(worst)에만 넣는다.
+    """
     now = time.time() if now is None else now
     started_at = (run.get("followup_pending") or {}).get("started_at", 0.0)
-    recs = [r for r in records if _rget(r, "kind") == "followup" and (_rget(r, "queued_at") or 0) >= started_at]
-    model = plan.node_models.get(plan.root_id, "")
-    n = max(1, sum(_rget(r, "status") in (DONE, *ACTIVE) for r in recs))
-    done = sum(_rget(r, "status") == DONE for r in recs)
-    units = [Unit("followup", plan.root_id, model, done=i < done,
-                  running_sec=None if i < done else _running(recs, "followup", None, now)) for i in range(n)]
-    worst = max(0, plan.max_retries - (n - 1)) if plan.harness else 0
+    recs = [r for r in records if _rget(r, "kind") in ("followup", "critic", "self_correct")
+            and (_rget(r, "queued_at") or 0) >= started_at and _rget(r, "status") in (DONE, *ACTIVE)]
+    lead = plan.node_models.get(plan.root_id, "")
+    units = [Unit(_rget(r, "kind"), plan.root_id, plan.critic_model if _rget(r, "kind") == "critic" else lead,
+                  done=_rget(r, "status") == DONE,
+                  running_sec=None if _rget(r, "status") == DONE else _running([r], _rget(r, "kind"), None, now))
+             for r in recs] or [Unit("followup", plan.root_id, lead)]
+    kinds = [u.kind for u in units]
+    worst = max(0, plan.max_retries - (kinds.count("followup") - 1)) if plan.harness else 0
+    if plan.critic_enabled:  # 검토 1 + (다시 고침 1 + 다시 검토 1) × 상한
+        worst += (max(0, 1 + plan.max_self_corrections - kinds.count("critic"))
+                  + max(0, plan.max_self_corrections - kinds.count("self_correct")))
     return units, worst
 
 

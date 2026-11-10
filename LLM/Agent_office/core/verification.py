@@ -148,9 +148,15 @@ def critique(
 ) -> Critique:
     """비평가 호출. chain = 비평가 모델 후보 (없으면 models.critic → utility, core/dept_heads.critic_plan 참고)."""
     messages = build_critic_messages(question, reviewed_input, review, criteria, rules, evidence, persona, answer_chars)
+    return run_critic(messages, models, chain, who)
+
+
+def run_critic(messages: list, models: ModelsConfig, chain: RankModels | None = None, who: str = "비평가",
+               schema: type[CriticResult] = CriticResult) -> Critique:
+    """만들어 둔 비평 프롬프트로 비평가를 부른다 — 본 업무(critique)와 💬 수정본 검토(core/followup.py)가 함께 쓴다."""
     chain = chain or models.critic or models.utility
     try:
-        call = llm_factory.invoke_structured(chain, models, CriticResult, messages, who)
+        call = llm_factory.invoke_structured(chain, models, schema, messages, who)
     except NoAvailableModelError as e:
         return Critique(None, [f"비평가 호출 실패 → 비평 생략: {e}"])
     critic: CriticResult = call.parsed
