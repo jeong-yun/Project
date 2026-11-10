@@ -65,7 +65,8 @@ def lesson_rows(storage) -> list[dict]:
     hidden = private_teams()
     return [
         {"team_id": r["team_id"], "agent_id": r["agent_id"], "kind": r["kind"], "lesson": public_lesson(r["lesson"]),
-         "active": bool(r["active"]), "created_at": r["created_at"], "run_id": r["run_id"] or ""}
+         "active": bool(r["active"]), "created_at": r["created_at"], "run_id": r["run_id"] or "",
+         **({"hits": r["hits"]} if r["hits"] > 1 else {})}  # 반복 횟수는 2회 이상일 때만 (기존 줄이 바뀌지 않게)
         for r in rows if r["team_id"] not in hidden
     ]
 
@@ -117,7 +118,8 @@ def readable(lessons: list[dict], decisions: list[dict]) -> str:
         for agent in sorted(by_team.get(team, {})):
             lines.append(f"### {agent}")
             for item in sorted(by_team[team][agent], key=lambda x: x["created_at"], reverse=True):
-                text = f"{'👍' if item['kind'] == 'praise' else '🔧'} {item['lesson']} ({item['created_at'][:10]})"
+                hits = f" · 피드백 {item['hits']}회 반복" if item.get("hits", 1) > 1 else ""
+                text = f"{'👍' if item['kind'] == 'praise' else '🔧'} {item['lesson']} ({item['created_at'][:10]}{hits})"
                 lines.append(f"- {text}" if item["active"] else f"- ~~{text}~~")
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"

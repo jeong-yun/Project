@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS lessons (
     kind        TEXT NOT NULL,              -- praise | improve
     lesson      TEXT NOT NULL,
     active      INTEGER NOT NULL DEFAULT 1, -- 0 이면 프롬프트에 주입하지 않음
-    created_at  TEXT NOT NULL
+    created_at  TEXT NOT NULL,
+    hits        INTEGER NOT NULL DEFAULT 1  -- 같은 지시를 피드백에서 받은 횟수 (겹치는 교훈을 합칠 때 더한다 → 프롬프트에서 강조)
 );
 CREATE INDEX IF NOT EXISTS idx_lessons_team_agent ON lessons(team_id, agent_id, active);
 CREATE TABLE IF NOT EXISTS usage (
@@ -129,6 +130,9 @@ class Storage:
         if "rank_id" in columns("lessons"):
             conn.execute("ALTER TABLE lessons RENAME COLUMN rank_id TO agent_id")
             conn.execute("DROP INDEX IF EXISTS idx_lessons_team_rank")
+        lesson_columns = columns("lessons")
+        if lesson_columns and "hits" not in lesson_columns:  # 반복 횟수 칸 추가 (예전 교훈은 1회)
+            conn.execute("ALTER TABLE lessons ADD COLUMN hits INTEGER NOT NULL DEFAULT 1")
         if "start_rank" in columns("runs"):
             conn.execute("ALTER TABLE runs RENAME TO runs_legacy")
         usage_columns = columns("usage")
@@ -274,14 +278,15 @@ class Storage:
 
     # ─── lessons ─────────────────────────────────────────────────
 
-    def add_lessons(self, team_id: str, run_id: str | None, lessons: list[Lesson]) -> list[int]:
-        """교훈을 넣고 새 번호(id)를 넣은 순서대로 돌려준다 (교훈 정리 제안이 '새 교훈'을 가리킬 때 쓴다)."""
+    def add_lessons(self, team_id: str, run_id: str | None, lessons: list[Lesson], hits: int = 1) -> list[int]:
+        """교훈을 넣고 새 번호(id)를 넣은 순서대로 돌려준다 (교훈 정리 제안이 '새 교훈'을 가리킬 때 쓴다).
+        hits: 같은 지시를 받은 횟수 — 겹치는 교훈을 합친 교훈이면 원래 교훈들의 횟수 합."""
         now = _now()
         with closing(self._connect()) as conn, conn:
             ids = [
                 conn.execute(
-                    "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, created_at) VALUES (?,?,?,?,?,?)",
-                    (team_id, l.agent_id, run_id, l.kind, l.lesson, now),
+                    "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, created_at, hits) VALUES (?,?,?,?,?,?,?)",
+                    (team_id, l.agent_id, run_id, l.kind, l.lesson, now, hits),
                 ).lastrowid
                 for l in lessons
             ]
@@ -292,9 +297,9 @@ class Storage:
         """knowledge/ 에서 가져온 교훈을 그대로 넣는다 (작성 시각·켜짐 여부 보존, 동기화는 부르지 않음)."""
         with closing(self._connect()) as conn, conn:
             conn.executemany(
-                "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, active, created_at) VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, active, created_at, hits) VALUES (?,?,?,?,?,?,?,?)",
                 [(i["team_id"], i["agent_id"], i.get("run_id") or None, i["kind"], i["lesson"], int(i.get("active", True)),
-                  i["created_at"]) for i in items],
+                  i["created_at"], int(i.get("hits", 1))) for i in items],
             )
 
     def recent_lessons(self, team_id: str, agent_id: str, limit: int) -> list[str]:
