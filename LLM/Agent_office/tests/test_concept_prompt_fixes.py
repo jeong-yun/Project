@@ -7,6 +7,7 @@ R2: 관련 기존 항목은 발췌(1절·6절 앞부분)만 들어간다 → 발
 """
 
 from core import harness, verification
+from core.config import TEAMS_DIR
 from core.workflow import build_office_graph, stream_office
 from tests.fakes import Script, make_critic, make_delegation, make_review
 from tests.test_concept_speed import _edit_team, edits
@@ -69,3 +70,14 @@ def test_edit_team_integration_of_several_results_is_unchanged(org, ranks, team,
     graph = build_office_graph(org, ranks, _edit_team(team), models, SETTINGS, CRITIC_ON)
     list(stream_office(graph, org, "질문", "dgm_research", brief=BRIEF))
     assert _last_feedback(script, "ReviewResult") == verification.correction_message(critic)
+
+
+# ─── R1 ───────────────────────────────────────────────────────────────
+
+
+def test_skill_expansion_rule_adds_only_what_the_evidence_confirms():
+    skill = (TEAMS_DIR / "concept" / "skills" / "it_concept_prompt.md").read_text(encoding="utf-8")
+    line = next(l for l in skill.splitlines() if l.startswith("4. 능동적 지식 확장"))
+    assert "반드시 추가하라" not in line and "내부 지식망" not in line
+    assert "근거 자료" in line and "미확인 후보" in line and "URL" in line
+    assert "아키텍처 변형(Variants)" in line and "논쟁(Controversies)" in line  # 무엇을 찾아볼지는 그대로
