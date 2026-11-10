@@ -45,7 +45,7 @@ from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
 from core.config import load_skills, parent_map, subtree
 from core.dept_heads import DeptHead
-from core.feedback import active_lessons, generate_lessons, lesson_budget, propose_cleanup, team_lessons
+from core.feedback import absorb_duplicates, active_lessons, generate_lessons, lesson_budget, propose_cleanup, team_lessons
 from core.member_models import team_rank_models
 from core.schemas import AgentAnswer, CleanupProposal, HumanDecision, Lesson, ModelsConfig, OrgNode, Rank, Team, ToolResult
 from core.search import WebContext
@@ -76,7 +76,8 @@ class OfficeState(TypedDict, total=False):
     steps: Annotated[list[AgentAnswer], operator.add]  # 타임라인 (모든 단계, 누적)
     decision: HumanDecision
     lessons: list[Lesson]
-    cleanup: list[CleanupProposal]  # 새 교훈과 겹치거나 충돌하는 옛 교훈 — 정리 제안 (사용자가 고르기 전에는 안 바꿈)
+    merged: list[CleanupProposal]  # 새 교훈과 겹쳐 결정 직후 자동으로 합친 것 (merged_id = 합친 교훈, 되돌리기 가능)
+    cleanup: list[CleanupProposal]  # 새 교훈과 충돌하는 옛 교훈 — 사용자가 고르기 전에는 안 바꿈
     notes: list[str]
     # 🔀 단계마다 확인 (core/step_mode.py) — 끄면(기본) 아래 값은 쓰지 않는다
     step_mode: bool
@@ -146,9 +147,10 @@ def build_office_graph(
 
     # ── 작은 도우미 ──────────────────────────────────────────────
 
-    def lessons_for(node_id: str) -> list[str] | None:
-        """프롬프트에 넣을 교훈 — 화면의 📜 프롬프트 보기(core/feedback.team_prompts)와 같은 함수로 고른다."""
-        pick = team_lessons(storage, team.id, lesson_chars).get(node_id) if storage else None
+    def lessons_for(node_id: str, question: str = "") -> list[str] | None:
+        """프롬프트에 넣을 교훈 — 화면의 📜 프롬프트 보기(core/feedback.team_prompts)와 같은 함수로 고른다.
+        question: 글자 한도를 넘을 때 이 질문과 관련 높은 세부 코멘트부터 넣는다 (규칙 문장은 모두 들어감)."""
+        pick = team_lessons(storage, team.id, lesson_chars, question).get(node_id) if storage else None
         return pick.texts if pick else None
 
     def evidence_parts(state: OfficeState) -> list[str]:
@@ -475,7 +477,7 @@ def build_office_graph(
                     return  # 이미 실패했거나 사람이 중단한 실행 — 새 일은 시작하지 않는다
                 if op == "integrate" and phase == "visit":
                     return  # 통합은 사람이 초안을 확인한 뒤 (check_drafts → integrate 노드)
-                lessons = lessons_for(node_id)  # 저장소 조회는 메인 스레드에서
+                lessons = lessons_for(node_id, state["question"])  # 저장소 조회는 메인 스레드에서
                 if op == "integrate":
                     children = [results[cid] for cid in assigned[node_id]]
                     future = pool.submit(as_agent(integrate, node_id), state, node_id, tasks[node_id], children, lessons)
@@ -569,7 +571,7 @@ def build_office_graph(
             with usage.scope(agent_id=root), call_monitor.purpose("directions"):
                 call = llm_factory.invoke_structured(
                     agent.rank_models, models, step_mode.DirectionOptions,
-                    step_mode.direction_messages(agent.system_prompt(lessons_for(root)), state["brief"].as_prompt(state["question"])),
+                    step_mode.direction_messages(agent.system_prompt(lessons_for(root, state["question"])), state["brief"].as_prompt(state["question"])),
                     agent.name,
                 )
             return {"directions": call.parsed.options[:3]}
@@ -591,7 +593,7 @@ def build_office_graph(
             return {"root_plan": None}
         try:
             with usage.scope(agent_id=root):
-                chosen, plan = plan_children(state, root, state["tasks"][root], lessons_for(root))
+                chosen, plan = plan_children(state, root, state["tasks"][root], lessons_for(root, state["question"]))
         except call_monitor.CallCancelled:
             return {"root_plan": None}
         if plan is not None:
@@ -638,14 +640,16 @@ def build_office_graph(
         lessons, notes = generate_lessons(
             state["question"], state["steps"], state["decision"], names, parents, team, models
         )
-        cleanup = []
+        merged, cleanup = [], []
         if storage:
             run_id = config.get("configurable", {}).get("thread_id")
             new_ids = dict(zip((l.agent_id for l in lessons), storage.add_lessons(team.id, run_id, lessons)))
-            # 새 교훈과 겹치거나 충돌하는 옛 교훈을 찾아 '정리 제안'만 만든다 — 바꾸는 것은 사용자가 화면에서 고른 뒤
-            cleanup, more = propose_cleanup(team, active_lessons(storage, team.id), names, models, new_ids)
+            # 새 교훈과 겹치거나 충돌하는 옛 교훈을 찾는다 — 겹치면 바로 합쳐 '피드백 N회 반복'으로 강조(원래 교훈은 끔),
+            # 충돌은 어느 쪽이 맞는지 사람만 알므로 바꾸지 않고 화면에서 고르게 한다
+            proposals, more = propose_cleanup(team, active_lessons(storage, team.id), names, models, new_ids)
+            merged, cleanup = absorb_duplicates(storage, proposals)
             notes = [*notes, *more]
-        return {"lessons": lessons, "cleanup": cleanup, "notes": notes}
+        return {"lessons": lessons, "merged": merged, "cleanup": cleanup, "notes": notes}
 
     def stepwise(state: OfficeState) -> bool:
         return bool(with_human and state.get("step_mode"))
@@ -734,7 +738,9 @@ def _events(graph, inputs, config) -> Iterator[tuple[str, object]]:
                 yield "research", update.get("web")
             elif node == "feedback":
                 yield "lessons", update["lessons"]
-                if update.get("cleanup"):  # 정리 제안이 있을 때만
+                if update.get("merged"):  # 자동으로 합친 것이 있을 때만
+                    yield "merged", update["merged"]
+                if update.get("cleanup"):  # 충돌이 있을 때만
                     yield "cleanup", update["cleanup"]
                 for note in update.get("notes", []):
                     yield "note", note
@@ -846,7 +852,8 @@ def resume_with_decision(graph, org: OrgNode, decision: HumanDecision, thread_id
 
     Yields:
         ("lessons", list[Lesson]) — 저장된 에이전트별 교훈
-        ("cleanup", list[CleanupProposal]) — 새 교훈과 겹치거나 충돌하는 옛 교훈 정리 제안 (있을 때만, 아직 아무것도 안 바꿈)
+        ("merged", list[CleanupProposal])  — 새 교훈과 겹쳐 자동으로 합친 것 (있을 때만, 원래 교훈은 꺼 둠 — 되돌리기 가능)
+        ("cleanup", list[CleanupProposal]) — 새 교훈과 충돌하는 옛 교훈 (있을 때만, 아직 아무것도 안 바꿈 — 사용자가 고름)
         ("note", str)             — 피드백 생성 중 경고 (fallback 사용 등)
     """
     yield from _events(graph, Command(resume=decision.model_dump()), _config(org, thread_id))

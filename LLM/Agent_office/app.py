@@ -1320,7 +1320,7 @@ def start_background_followup(run: dict, request: str) -> None:
     turns = list(run.get("followups") or [])
     validators = list(dict.fromkeys([*team.harness.validators, *(run.get("extra_validators") or [])]))
     evidence = followup_evidence(run)
-    pick = team_lessons(storage, team_id, lesson_budget(settings)).get(root)  # 실행과 같은 교훈 고르기 (글자 한도)
+    pick = team_lessons(storage, team_id, lesson_budget(settings), run["question"]).get(root)  # 실행과 같은 교훈 고르기 (글자 한도·질문 관련도)
     lessons = pick.texts if pick else None
     options = {**team.harness.options, **check_options(run)}
 
@@ -1392,11 +1392,13 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
 
 def submit_decision(run: dict, decision: HumanDecision) -> None:
     """멈춰 있던 그래프를 사람의 결정으로 재개하고, 생성된 교훈을 기록한다."""
-    lessons, cleanup, notes = [], [], []
+    lessons, merged, cleanup, notes = [], [], [], []
     with st.spinner("결정을 반영하고 에이전트별 피드백을 정리하는 중…"),             usage.scope(team_id=team_id, run_id=run["run_id"], purpose="결정 반영·교훈"):
         for kind, payload in resume_with_decision(make_graph(), org, decision, run["run_id"]):
             if kind == "lessons":
                 lessons = payload
+            elif kind == "merged":
+                merged = payload
             elif kind == "cleanup":
                 cleanup = payload
             elif kind == "note":
@@ -1406,7 +1408,7 @@ def submit_decision(run: dict, decision: HumanDecision) -> None:
     if decision.action == "adopt":
         run["saved_files"] = save_adopted(run, decision)
     run.update(status="adopted" if decision.action == "adopt" else "rejected",
-               decision=decision, lessons=lessons, cleanup=cleanup, notes=run["notes"] + notes)
+               decision=decision, lessons=lessons, merged=merged, cleanup=cleanup, notes=run["notes"] + notes)
 
 
 def render_final_and_decision(run: dict, run_key: tuple) -> None:
@@ -1553,8 +1555,10 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
     for lesson in run["lessons"]:
         icon = "👍" if lesson.kind == "praise" else "🔧"
         st.markdown(f"- **{name_of(lesson.agent_id)}** {icon} {lesson.lesson}")
-    if run.get("cleanup"):  # 새 교훈과 겹치거나 어긋나는 옛 교훈 — 사용자가 고르기 전에는 아무것도 바꾸지 않는다
-        st.markdown("##### 🧹 교훈 정리 제안 — 새 교훈과 겹치거나 어긋나는 옛 교훈이 있습니다")
+    if run.get("merged"):  # 새 교훈과 겹친 옛 교훈 — 자동으로 합쳐 강조했다 (되돌리기 가능)
+        prompt_ui.render_merged(team, run["merged"], key=run["run_id"])
+    if run.get("cleanup"):  # 새 교훈과 충돌하는 옛 교훈 — 사용자가 고르기 전에는 아무것도 바꾸지 않는다
+        st.markdown("##### ⚖️ 서로 어긋나는 피드백 — 어느 쪽을 따를지 골라 주세요")
         prompt_ui.render_cleanup(team, run["cleanup"], key=run["run_id"])
     # 결정까지 끝난 업무는 닫으면 화면이 처음 상태(입력칸이 맨 위)로 돌아간다 — 기록은 사이드바 '🕘 지난 업무'에 남는다
     if st.button("✖ 이 결과 닫고 새 업무 시작", key=f"close_{run['run_id']}"):

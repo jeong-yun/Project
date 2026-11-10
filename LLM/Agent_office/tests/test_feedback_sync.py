@@ -92,3 +92,17 @@ def test_human_comment_is_cut_from_public_lessons_without_duplicating_on_import(
     assert "기준가를 먼저 확인한다" in text and "출처를 단다" in text
     assert len(Storage(tmp_path / "runs.db").list_lessons("stock")) == 2  # 같은 PC 에서 다시 켜도 코멘트 뗀 교훈을 중복으로 넣지 않는다
     assert "71,500" in storage.list_lessons("stock", "lead")[0]["lesson"]  # DB(로컬)의 원문은 그대로 — 프롬프트에는 계속 쓰인다
+
+
+def test_repeat_count_travels_with_knowledge_only_when_repeated(tmp_path, monkeypatch):
+    """겹치는 교훈을 합친 '피드백 N회 반복'도 다른 PC 로 이어진다. 1회짜리 줄은 예전 형식 그대로 (git 변경이 생기지 않게)."""
+    storage = seeded(tmp_path / "old.db")
+    storage.add_lessons("stock", None, [Lesson(agent_id="lead", kind="improve", lesson="기준일을 단다")], hits=3)
+    folder = tmp_path / "knowledge"
+    feedback_sync.export(storage, folder)
+    rows = [json.loads(line) for line in (folder / feedback_sync.LESSONS).read_text(encoding="utf-8").splitlines()]
+    assert [r.get("hits") for r in rows] == [None, None, 3]
+    assert "피드백 3회 반복" in (folder / feedback_sync.READABLE).read_text(encoding="utf-8")
+    monkeypatch.setenv(feedback_sync.ENV, str(folder))
+    fresh = Storage(tmp_path / "new.db")
+    assert {r["lesson"]: r["hits"] for r in fresh.list_lessons("stock")}["기준일을 단다"] == 3

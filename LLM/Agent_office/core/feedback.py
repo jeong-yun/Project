@@ -6,13 +6,17 @@
 → 어떤 경우에도 참여한 모든 에이전트가 피드백을 받고, 다음 실행 때 시스템 프롬프트에 주입된다.
 
 프롬프트에 넣는 교훈 (team_lessons)
-  켜 둔 교훈은 에이전트마다 글자 한도(settings.yaml feedback.lesson_chars_in_prompt) 안이면 모두 들어간다.
-  넘치면 오래된 것부터 빠지고, 화면(📜 프롬프트·📚 교훈)이 빠진 교훈을 알려 주며 정리를 제안한다 — 조용히 버리지 않는다.
-  실행(core/workflow.py)과 화면(prompt_ui.py)이 같은 함수(team_lessons · team_prompts)를 써서 보이는 것과 실제가 같다.
+  교훈 = 규칙 문장(짧은 일반 지침) + 세부 코멘트(끝에 붙은 '(사람 코멘트: …)' 원문 — 길다).
+  글자 한도(settings.yaml feedback.lesson_chars_in_prompt) 안에서 규칙 문장은 모두 넣고, 세부 코멘트는 이번 질문과 관련 높은 것 →
+  반복 많은 것 → 최신 순으로 붙인다. 같은 피드백을 여러 번 받은 교훈은 '[중요 — 피드백 N회 반복]'을 달아 맨 앞에 둔다.
+  빠진 것(세부 코멘트만 · 통째로)은 화면(📜 프롬프트·📚 교훈)이 이유와 함께 알린다 — 조용히 버리지 않는다.
+  실행(core/workflow.py)과 화면(prompt_ui.py)이 같은 함수(team_lessons · team_prompts)를 쓴다 (화면은 질문이 없어 반복·최신 순).
 
-교훈 정리 제안 (propose_cleanup → apply_cleanup)
-  같은 에이전트의 교훈 중 겹치거나 충돌하는 묶음을 보조 모델이 찾고, 코드가 번호·에이전트를 확인한다.
-  제안은 저장소를 바꾸지 않는다. 사용자가 화면에서 고른 것만 apply_cleanup 이 반영한다 (지우지 않고 끈다).
+결정 직후 정리 (propose_cleanup → absorb_duplicates)
+  새 교훈과 겹치거나 충돌하는 옛 교훈을 보조 모델이 찾고(실패하면 문장 비교), 코드가 번호·에이전트를 확인한다.
+  겹침 → 바로 1개로 합친다 (반복 횟수 합, 사람 코멘트 원문은 그대로, 원래 교훈은 끔 — 화면에서 되돌리기 가능).
+  충돌 → 바꾸지 않고, 교훈마다 원래 피드백을 보여 주며 사용자가 남길 쪽을 고른다 (apply_cleanup).
+  📚 교훈 관리의 '🧹 정리 제안 받기'(쌓인 교훈)는 예전처럼 사용자가 고른 것만 반영한다.
 """
 
 import re
@@ -24,7 +28,7 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from core import llm_factory
 from core.agent import OrgAgent
 from core.config import load_skills, team_org
-from core.feedback_sync import public_lesson
+from core.feedback_sync import COMMENT, public_lesson
 from core.llm_factory import NoAvailableModelError
 from core.schemas import (
     AgentAnswer, CleanupProposal, HumanDecision, Lesson, LessonGroup, LessonGroupSet, LessonSet, ModelsConfig, Rank, Team,
@@ -199,34 +203,81 @@ def lesson_budget(settings: dict) -> int:
     return int((settings.get("feedback") or {}).get("lesson_chars_in_prompt", DEFAULT_LESSON_CHARS))
 
 
+def split_lesson(text: str) -> tuple[str, str]:
+    """교훈 = (규칙 문장, 세부 코멘트). 세부 코멘트는 끝에 붙은 '(사람 코멘트: …)' 원문 — 없으면 빈 문자열.
+    규칙 문장은 짧은 일반 지침(개념 편집 팀 실측 평균 약 100자), 세부 코멘트는 그 업무의 구체 지적이라 길다(2천~6천 자)."""
+    m = COMMENT.search(text)
+    return (text, "") if not m else (text[:m.start()].rstrip(), text[m.start():])
+
+
+def comment_body(detail: str) -> str:
+    """세부 코멘트 ' (사람 코멘트: …)' 에서 괄호·머리말을 뗀 본문."""
+    body = detail.strip()
+    closed = body.startswith("(")
+    body = body.lstrip("(").removeprefix("사람 코멘트:").strip()
+    return body[:-1].rstrip() if closed and body.endswith(")") else body
+
+
+def emphasis(row: dict) -> str:
+    """같은 지시를 2번 이상 받은 교훈은 앞에 강조 표시를 단다 (겹치는 교훈을 합칠 때 횟수를 더함)."""
+    hits = row.get("hits", 1)
+    return f"[중요 — 피드백 {hits}회 반복] " if hits > 1 else ""
+
+
+def relevance(query: str, text: str) -> float:
+    """질문과 교훈의 관련도 (0~1) — 공백 뺀 글자 2개 묶음의 겹침(코사인). 임베딩 모델 없이 코드로 계산한다."""
+    q, t = ({s[i:i + 2] for i in range(len(s) - 1)} for s in (re.sub(r"\s+", "", x.lower()) for x in (query, text)))
+    return len(q & t) / ((len(q) * len(t)) ** 0.5) if q and t else 0.0
+
+
 @dataclass
 class PromptLessons:
     """한 에이전트의 프롬프트에 들어갈 교훈."""
 
-    kept: list[dict]  # 들어가는 교훈 (오래된 것 → 최신 — 프롬프트에 이 순서로 붙는다)
-    left_out: list[dict]  # 글자 한도를 넘어 빠진 교훈 (최신 → 오래된)
+    kept: list[dict]  # 들어가는 교훈 (프롬프트 순서: 반복 많은 것 먼저, 같으면 오래된 것 → 최신). r["prompt"] = 실제로 넣는 글
+    left_out: list[dict]  # 규칙 문장까지 글자 한도를 넘어 통째로 빠진 교훈 (최신 → 오래된)
     budget: int
 
     @property
     def texts(self) -> list[str]:
-        return [r["lesson"] for r in self.kept]
+        return [r["prompt"] for r in self.kept]
 
     @property
     def chars(self) -> int:
-        return sum(len(r["lesson"]) for r in self.kept)
+        return sum(map(len, self.texts))
+
+    @property
+    def cut(self) -> list[dict]:
+        """규칙 문장은 들어가고 세부 코멘트만 빠진 교훈."""
+        return [r for r in self.kept if r["cut"]]
 
 
-def fit_lessons(rows: list[dict], budget: int) -> PromptLessons:
-    """rows = 켜 둔 교훈 (최신 먼저). 최신부터 한도 안에 드는 것을 모두 넣는다.
-    넘치는 교훈은 건너뛰고 계속 채운다 — 긴 교훈 하나 때문에 짧은 옛 교훈까지 빠지지 않게."""
+def fit_lessons(rows: list[dict], budget: int, query: str = "") -> PromptLessons:
+    """rows = 켜 둔 교훈 (최신 먼저). 두 단계로 글자 한도(budget) 안을 채운다.
+
+    1) 규칙 문장(+반복 강조 표시)을 최신부터 모두 넣는다 — 짧아서 거의 항상 다 들어간다.
+       넘치는 교훈은 건너뛰고 계속 채운다 (긴 교훈 하나 때문에 짧은 옛 교훈까지 빠지지 않게).
+    2) 남은 글자 안에서 세부 코멘트를 붙인다. 순서: 이번 질문(query)과 관련 높은 것 → 반복 많은 것 → 최신.
+       못 붙인 세부 코멘트는 cut 으로 알린다 (조용히 버리지 않는다).
+    """
     kept, left_out, used = [], [], 0
     for row in rows:
-        if used + len(row["lesson"]) <= budget:
-            kept.append(row)
-            used += len(row["lesson"])
+        rule, detail = split_lesson(row["lesson"])
+        head = emphasis(row) + rule
+        if used + len(head) <= budget:
+            kept.append({**row, "prompt": head, "cut": bool(detail), "detail": detail})
+            used += len(head)
         else:
             left_out.append(row)
-    return PromptLessons(kept[::-1], left_out, budget)
+    order = sorted((r for r in kept if r["detail"]),
+                   key=lambda r: (relevance(query, r["lesson"]) if query else 0.0, r.get("hits", 1), r["id"]), reverse=True)
+    for r in order:
+        if used + len(r["detail"]) <= budget:
+            r["prompt"] += r["detail"]
+            r["cut"] = False
+            used += len(r["detail"])
+    kept.sort(key=lambda r: (-r.get("hits", 1), r["id"]))
+    return PromptLessons(kept, left_out, budget)
 
 
 def active_lessons(storage, team_id: str) -> dict[str, list[dict]]:
@@ -238,9 +289,10 @@ def active_lessons(storage, team_id: str) -> dict[str, list[dict]]:
     return dict(by_agent)
 
 
-def team_lessons(storage, team_id: str, budget: int) -> dict[str, PromptLessons]:
-    """팀 에이전트별 프롬프트 교훈 — 실행과 화면이 같이 쓴다. 교훈이 없는 에이전트는 빠져 있다."""
-    return {agent: fit_lessons(rows, budget) for agent, rows in active_lessons(storage, team_id).items()}
+def team_lessons(storage, team_id: str, budget: int, query: str = "") -> dict[str, PromptLessons]:
+    """팀 에이전트별 프롬프트 교훈 — 실행과 화면이 같이 쓴다. 교훈이 없는 에이전트는 빠져 있다.
+    query: 이번 질문 — 한도를 넘을 때 관련 높은 세부 코멘트부터 넣는다 (화면은 질문이 없어 반복·최신 순)."""
+    return {agent: fit_lessons(rows, budget, query) for agent, rows in active_lessons(storage, team_id).items()}
 
 
 @dataclass
@@ -326,8 +378,10 @@ def cleanup_messages(team: Team, targets: dict[str, list[dict]], names: dict[str
         "- 같은 에이전트의 교훈끼리만 묶는다 (agent_id 와 번호를 그대로 쓴다). 한 교훈은 한 묶음에만 넣는다.",
         "- 겹치거나 충돌하지 않는 교훈은 묶지 않는다. 묶을 것이 없으면 groups 를 비운다.",
         "- [새 교훈] 표시가 있는 에이전트는 그 새 교훈이 들어간 묶음만 만든다.",
-        "- merged: 묶음의 지시를 빠짐없이 담은 일반 행동 지침. 충돌이면 더 최근 교훈을 따른다.",
-        "- detail: 사람 코멘트에 적힌 구체 규칙(형식·기호·예시 등) 중 꼭 남길 것만 짧게. 없으면 빈 문자열.",
+        "- merged: 묶음의 지시를 빠짐없이 담은 일반 행동 지침 한두 문장. 충돌이면 더 최근 교훈을 따른다.",
+        "  사람 코멘트 원문은 코드가 그대로 붙이므로 merged 에 옮겨 적지 않는다.",
+        "- detail: 교훈에 사람 코멘트가 없을 때만, 꼭 남길 구체 규칙(형식·기호·예시 등)을 짧게. 그 밖에는 빈 문자열.",
+        "- 같은 방향의 지시를 다른 말로 되풀이하면 overlap, 한쪽을 따르면 다른 쪽을 어기게 되면 conflict 다. 애매하면 conflict 로 둔다.",
         "- reason: 왜 묶었는지 한 문장. 한국어로 쓴다.",
     ])
     blocks = []
@@ -341,6 +395,14 @@ def cleanup_messages(team: Team, targets: dict[str, list[dict]], names: dict[str
     return [SystemMessage(system), HumanMessage("\n\n".join(blocks))]
 
 
+def _merged_text(merged: str, detail: str, rows: list[dict]) -> str:
+    """합친 문장 = 모델이 낸 규칙 문장 + 원래 교훈들의 사람 코멘트 원문 (모델이 요약하다 빠뜨리지 않게 코드가 그대로 붙인다).
+    원래 교훈에 코멘트가 없을 때만 모델이 고른 detail 을 붙인다. '(사람 코멘트: …)' 부분은 공개 knowledge/ 로 나가지 않는다."""
+    comments = list(dict.fromkeys(b for b in (comment_body(split_lesson(r["lesson"])[1]) for r in rows) if b))
+    tail = " / ".join(comments) or detail.strip()
+    return split_lesson(merged.strip())[0] + (f" (사람 코멘트: {tail})" if tail else "")
+
+
 def _proposals(team_id: str, groups: list[LessonGroup], targets: dict[str, list[dict]], new_ids: dict[str, int],
                by: str) -> list[CleanupProposal]:
     """모델이 낸 묶음을 코드로 확인 — 그 에이전트의 켜 둔 교훈 번호만, 2개 이상, 한 교훈은 한 묶음, 새 교훈이 있으면 그것이 낀 묶음만."""
@@ -349,14 +411,15 @@ def _proposals(team_id: str, groups: list[LessonGroup], targets: dict[str, list[
         rows = {r["id"]: r for r in targets.get(g.agent_id, [])}
         ids = [i for i in dict.fromkeys(g.ids) if i in rows]
         new = new_ids.get(g.agent_id)
-        if len(ids) < 2 or used & set(ids) or (new_ids and new not in ids) or not g.merged.strip():
+        if len(ids) < 2 or used & set(ids) or (new_ids and new not in ids) or not split_lesson(g.merged.strip())[0]:
             continue
         used |= set(ids)
-        detail = g.detail.strip()
+        picked = [rows[i] for i in sorted(ids)]
         out.append(CleanupProposal(
             team_id=team_id, agent_id=g.agent_id, ids=sorted(ids), new_id=new, relation=g.relation,
-            kind="improve" if any(rows[i]["kind"] == "improve" for i in ids) else "praise",
-            merged=g.merged.strip() + (f" (사람 코멘트: {detail})" if detail else ""), reason=g.reason.strip(), by=by,
+            kind="improve" if any(r["kind"] == "improve" for r in picked) else "praise",
+            merged=_merged_text(g.merged, g.detail, picked), reason=g.reason.strip(), by=by,
+            hits=sum(r.get("hits", 1) for r in picked),
         ))
     return out
 
@@ -386,26 +449,75 @@ def propose_cleanup(
         return _proposals(team.id, similar_groups(targets, new_ids), targets, new_ids, "code"), notes
 
 
-def apply_cleanup(storage, proposal: CleanupProposal, choice: str, text: str = "") -> str:
+def merge_lessons(storage, proposal: CleanupProposal, text: str = "") -> int:
+    """묶인 교훈을 합친 교훈 1개로 — 새 교훈을 넣고(반복 횟수는 합) 원래 교훈은 지우지 않고 끈다. 새 교훈 번호를 돌려준다."""
+    text = (text or proposal.merged).strip()
+    new_id = storage.add_lessons(proposal.team_id, None, [Lesson(agent_id=proposal.agent_id, kind=proposal.kind, lesson=text)],
+                                 hits=proposal.hits)[0]
+    for i in proposal.ids:
+        storage.update_lesson(i, active=False)
+    return new_id
+
+
+def apply_cleanup(storage, proposal: CleanupProposal, choice: str, text: str = "", keep: int | None = None) -> str:
     """사용자가 화면에서 고른 정리를 반영한다 (버튼을 누를 때만 부른다). 지우지 않고 끈다(active=0). 화면에 보일 한 줄을 돌려준다.
 
     keep    : 아무것도 바꾸지 않음
     merge   : 합친 문장(text — 사용자가 고친 것, 없으면 제안 그대로)을 새 교훈으로 넣고 묶인 교훈을 모두 끔
     off_old : 새 교훈은 두고 묶인 옛 교훈만 끔 (새 교훈이 없는 정리 제안에서는 쓰지 않음)
+    only    : 충돌하는 교훈 중 keep 번호 하나만 남기고 나머지를 끔
     """
     if choice == "keep":
         return "그대로 두었습니다."
-    if choice == "off_old":
-        old = [i for i in proposal.ids if i != proposal.new_id]
-        for i in old:
+    if choice in ("off_old", "only"):
+        stay = proposal.new_id if choice == "off_old" else keep
+        off = [i for i in proposal.ids if i != stay]
+        for i in off:
             storage.update_lesson(i, active=False)
-        return f"옛 교훈 {len(old)}개를 껐습니다. 지운 것이 아니라서 📚 교훈 관리에서 다시 켤 수 있습니다."
+        return (f"교훈 #{stay}만 남기고 {len(off)}개를 껐습니다. 지운 것이 아니라서 📚 교훈 관리에서 다시 켤 수 있습니다."
+                if choice == "only" else f"옛 교훈 {len(off)}개를 껐습니다. 지운 것이 아니라서 📚 교훈 관리에서 다시 켤 수 있습니다.")
     if choice == "merge":
-        text = (text or proposal.merged).strip()
-        if not text:
+        if not (text or proposal.merged).strip():
             return "합친 문장이 비어 있어 바꾸지 않았습니다. 문장을 적고 다시 눌러 주세요."
-        storage.add_lessons(proposal.team_id, None, [Lesson(agent_id=proposal.agent_id, kind=proposal.kind, lesson=text)])
-        for i in proposal.ids:
-            storage.update_lesson(i, active=False)
+        merge_lessons(storage, proposal, text)
         return f"교훈 {len(proposal.ids)}개를 1개로 합쳤습니다. 원래 교훈은 꺼 두었습니다 (📚 교훈 관리에서 다시 켤 수 있음)."
     raise ValueError(f"모르는 선택: {choice}")
+
+
+# ─── 결정 직후: 겹치면 자동으로 합쳐 강조 · 충돌은 사용자에게 ─────────────────────
+
+
+def absorb_duplicates(storage, proposals: list[CleanupProposal]) -> tuple[list[CleanupProposal], list[CleanupProposal]]:
+    """결정 직후 정리 제안 중 겹침(overlap)은 바로 합친다 — 같은 지시를 또 받았다는 뜻이라 반복 횟수를 더해 강조한다.
+    충돌(conflict)은 어느 쪽이 맞는지 사람만 알므로 바꾸지 않고 돌려준다.
+    Returns: (자동으로 합친 것 — merged_id 가 채워짐, 사용자가 고를 충돌)"""
+    merged, conflicts = [], []
+    for p in proposals:
+        if p.relation == "overlap":
+            merged.append(p.model_copy(update={"merged_id": merge_lessons(storage, p)}))
+        else:
+            conflicts.append(p)
+    return merged, conflicts
+
+
+def undo_merge(storage, proposal: CleanupProposal) -> str:
+    """자동 합치기 되돌리기 — 원래 교훈을 다시 켜고 합친 교훈을 끈다 (어느 것도 지우지 않는다)."""
+    for i in proposal.ids:
+        storage.update_lesson(i, active=True)
+    if proposal.merged_id:
+        storage.update_lesson(proposal.merged_id, active=False)
+    return f"합치기를 되돌렸습니다. 원래 교훈 {len(proposal.ids)}개를 다시 켜고 합친 교훈 #{proposal.merged_id}은(는) 꺼 두었습니다."
+
+
+def lesson_origin(storage, row: dict) -> dict:
+    """교훈이 나온 원래 피드백 — 충돌을 고를 때 보여 준다. 실행 기록이 없으면(합친 교훈·가져온 교훈) 날짜만."""
+    run = storage.get_run(row["run_id"]) if row.get("run_id") else None
+    decision = run and run["decision"]
+    return {
+        "date": ((run and run["decided_at"]) or row["created_at"])[:16].replace("T", " "),
+        "run_id": row.get("run_id") or "",
+        "question": run["question"] if run else "",
+        "action": ("채택" if decision.action == "adopt" else "반려") if decision else "",
+        "score": decision.score if decision else None,
+        "comment": decision.comment if decision else comment_body(split_lesson(row["lesson"])[1]),
+    }

@@ -10,7 +10,7 @@ from streamlit.testing.v1 import AppTest
 from core.feedback import (
     active_lessons, apply_cleanup, fit_lessons, lesson_budget, propose_cleanup, team_lessons, team_prompts,
 )
-from core.schemas import HumanDecision, Lesson, LessonGroup, LessonGroupSet, LessonSet
+from core.schemas import CleanupProposal, HumanDecision, Lesson, LessonGroup, LessonGroupSet, LessonSet
 from core.storage import Storage
 from core.workflow import build_office_graph, resume_with_decision, stream_office
 from tests.fakes import Script, make_review
@@ -171,23 +171,82 @@ def test_cleanup_falls_back_to_text_compare_when_model_fails(team, models, stora
     assert any("문장이 거의 같은" in n for n in notes)
 
 
-def test_decision_proposes_cleanup_without_changing_lessons(org, ranks, team, models, storage, use_script):
-    """결정 → 새 교훈 저장 → 겹치는 옛 교훈 정리 제안만 (모든 교훈은 켜진 그대로)."""
-    old = add(storage, team.id, "staff_case", "출처를 단다")[0]
+def _decide(org, ranks, team, models, storage, use_script, groups, lesson="모든 주장에 출처를 단다", comment=""):
+    """사원 1명 업무 → 채택 결정. groups(msgs) 가 교훈 정리 모델의 답. 결정 뒤 나온 이벤트를 돌려준다."""
     use_script(Script(
         text="초안", ReviewResult=make_review(answer="보완안"),
-        LessonSet=LessonSet(lessons=[Lesson(agent_id="staff_case", kind="improve", lesson="모든 주장에 출처를 단다")]),
-        LessonGroupSet=lambda msgs: LessonGroupSet(groups=[LessonGroup(
-            agent_id="staff_case", ids=[old, max(r["id"] for r in storage.list_lessons(team.id))], relation="overlap",
-            merged="모든 주장에 출처를 단다", detail="", reason="같은 지시")]),
+        LessonSet=LessonSet(lessons=[Lesson(agent_id="staff_case", kind="improve", lesson=lesson)]),
+        LessonGroupSet=lambda msgs: LessonGroupSet(groups=groups(max(r["id"] for r in storage.list_lessons(team.id)))),
     ))
     graph = build_office_graph(org, ranks, team, models, SETTINGS, NO_CRITIC, storage=storage, checkpointer=MemorySaver())
     list(stream_office(graph, org, "질문", "staff_case", thread_id="r1", brief=BRIEF))
-    events = dict(resume_with_decision(graph, org, HumanDecision(action="adopt", adopted_node_id="staff_case",
-                                                                  final_answer="초안", score=4), "r1"))
-    cleanup = events["cleanup"]
-    assert len(cleanup) == 1 and old in cleanup[0].ids and cleanup[0].new_id is not None
+    return dict(resume_with_decision(graph, org, HumanDecision(action="adopt", adopted_node_id="staff_case", final_answer="초안",
+                                                               score=4, comment=comment), "r1"))
+
+
+def test_decision_merges_overlap_automatically_and_emphasizes(org, ranks, team, models, storage, use_script):
+    """결정 → 새 교훈이 옛 교훈과 겹치면 바로 1개로 합친다: 반복 횟수 합 · 프롬프트 맨 앞 강조 · 원래 교훈은 끔(지우지 않음)."""
+    old = add(storage, team.id, "staff_case", "출처를 단다 (사람 코멘트: 링크는 원문 주소로)")[0]
+    other = add(storage, team.id, "staff_case", "표로 정리한다")[0]
+    events = _decide(org, ranks, team, models, storage, use_script, lambda new: [LessonGroup(
+        agent_id="staff_case", ids=[old, new], relation="overlap", merged="모든 주장에 출처 링크를 단다", detail="", reason="같은 지시")])
+
+    assert "cleanup" not in events  # 사용자에게 고르라고 하지 않는다
+    [m] = events["merged"]
+    rows = {r["id"]: r for r in storage.list_lessons(team.id)}
+    assert len(rows) == 4 and not rows[old]["active"] and not rows[m.new_id]["active"]  # 원래 교훈은 꺼 둠 (지우지 않음)
+    merged = rows[m.merged_id]
+    assert merged["active"] and merged["hits"] == 2
+    assert merged["lesson"] == "모든 주장에 출처 링크를 단다 (사람 코멘트: 링크는 원문 주소로)"  # 사람 코멘트 원문은 코드가 그대로
+    pick = team_lessons(storage, team.id, 20000)["staff_case"]
+    assert pick.texts[0].startswith("[중요 — 피드백 2회 반복] 모든 주장에")  # 반복된 지시가 맨 앞
+    assert pick.texts[1] == "표로 정리한다" and rows[other]["active"]
+
+    from core.feedback import undo_merge
+    undo_merge(storage, m)  # 되돌리기 — 원래대로
+    on = {r["id"] for r in storage.list_lessons(team.id) if r["active"]}
+    assert on == {old, m.new_id, other}
+
+
+def test_decision_conflict_waits_for_user(org, ranks, team, models, storage, use_script):
+    """서로 반대 지시는 자동으로 고치지 않는다 — 충돌로 알리기만 하고, 사용자가 고른 하나만 남긴다."""
+    old = add(storage, team.id, "staff_case", "결론을 맨 앞에 쓴다")[0]
+    events = _decide(org, ranks, team, models, storage, use_script, lambda new: [LessonGroup(
+        agent_id="staff_case", ids=[old, new], relation="conflict", merged="결론 위치를 질문에 맞춘다", detail="",
+        reason="결론 위치가 반대")], lesson="결론은 맨 끝에 쓴다", comment="결론은 끝에")
+    assert "merged" not in events
+    [c] = events["cleanup"]
+    assert c.relation == "conflict" and old in c.ids
     assert all(r["active"] for r in storage.list_lessons(team.id))  # 아무것도 끄지 않음
+    apply_cleanup(storage, c, "only", keep=old)
+    assert [r["id"] for r in storage.list_lessons(team.id) if r["active"]] == [old]
+
+
+def test_rules_always_fit_and_details_follow_relevance():
+    """한도를 넘으면 규칙 문장은 모두 넣고, 세부 코멘트는 질문과 관련 높은 것부터 — 못 넣은 것은 cut 으로 알린다."""
+    rows = [  # 최신 먼저
+        {"id": 3, "lesson": "형식을 지킨다 (사람 코멘트: " + "표 형식 " * 20 + ")", "created_at": "2026-11-03"},
+        {"id": 2, "lesson": "원전을 단다 (사람 코멘트: FlashAttention 원전 논문 " + "가" * 100 + ")", "created_at": "2026-11-02"},
+        {"id": 1, "lesson": "짧게 쓴다", "created_at": "2026-11-01"},
+    ]
+    pick = fit_lessons(rows, 200, query="FlashAttention 정리")
+    assert [r["id"] for r in pick.kept] == [1, 2, 3] and not pick.left_out  # 규칙 문장은 모두
+    assert [r["id"] for r in pick.cut] == [3]  # 질문과 관련 낮은 최신 교훈의 세부 코멘트가 빠짐
+    assert "FlashAttention 원전" in pick.texts[1] and pick.texts[2] == "형식을 지킨다"
+    assert pick.chars <= 200
+    assert [r["id"] for r in fit_lessons(rows, 200).cut] == [2]  # 질문이 없으면(화면) 최신 세부 코멘트부터
+
+
+def test_old_db_gets_hits_column(tmp_path):
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    with sqlite3.connect(db) as conn:  # 반복 횟수 칸이 없던 예전 DB
+        conn.execute("CREATE TABLE lessons (id INTEGER PRIMARY KEY AUTOINCREMENT, team_id TEXT NOT NULL, agent_id TEXT NOT NULL,"
+                     " run_id TEXT, kind TEXT NOT NULL, lesson TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,"
+                     " created_at TEXT NOT NULL)")
+        conn.execute("INSERT INTO lessons (team_id, agent_id, kind, lesson, created_at) VALUES ('concept','lead','improve','옛 교훈','2026-10-01')")
+    assert Storage(db).list_lessons("concept")[0]["hits"] == 1  # 교훈은 그대로, 1회로
 
 
 def test_cleanup_panel_waits_for_click(tmp_path):
@@ -217,6 +276,62 @@ def test_cleanup_panel_waits_for_click(tmp_path):
     assert [(r["lesson"], r["active"]) for r in rows][0] == ("형식 A·B 를 꼭 지킨다", 1)
     assert [r["active"] for r in rows[1:]] == [0, 0]
     assert any("1개로 합쳤습니다" in s.value for s in at.success)
+
+
+def test_conflict_panel_shows_original_feedback_and_keeps_the_pick(tmp_path):
+    """충돌: 교훈마다 원래 피드백(결정·만족도·코멘트)을 보여 주고, '#번호만 남기기'를 눌러야 나머지를 끈다."""
+    db = tmp_path / "runs.db"
+    storage = Storage(db)
+    storage.create_run("r9", "concept", "lead", "FlashInfer 정리")
+    storage.save_decision("r9", HumanDecision(action="adopt", adopted_node_id="lead", score=2, comment="절 번호는 붙이지 마"))
+    a = add(storage, "concept", "lead", "절 번호를 붙인다")[0]
+    b = storage.add_lessons("concept", "r9", [Lesson(agent_id="lead", kind="improve", lesson="절 번호를 붙이지 않는다")])[0]
+    proposal = CleanupProposal(team_id="concept", agent_id="lead", ids=[a, b], new_id=b, relation="conflict", kind="improve",
+                               merged="절 번호는 문서 형식을 따른다", reason="절 번호가 반대", by="model")
+
+    def page(db, proposal):
+        import prompt_ui
+        from core.config import load_models, load_ranks, load_team
+        from core.storage import Storage
+
+        prompt_ui.configure(prompt_ui.Ctx(storage=Storage(db), ranks=load_ranks(), models=load_models()))
+        prompt_ui.render_cleanup(load_team("concept"), [proposal], key="r")
+
+    at = AppTest.from_function(page, args=(db, proposal), default_timeout=30).run()
+    assert not at.exception, at.exception
+    captions = " ".join(c.value for c in at.caption)
+    assert "채택 (만족도 2/5)" in captions and "FlashInfer 정리" in captions and "r9" in captions  # 원래 피드백
+    assert any("절 번호는 붙이지 마" in t.value for t in at.text)  # 그때 남긴 코멘트
+    assert all(r["active"] for r in Storage(db).list_lessons("concept"))  # 보여 주기만
+    at = at.button(key=f"cleanup_only_r_concept_lead_{a}-{b}_{b}").click().run()
+    assert [r["id"] for r in Storage(db).list_lessons("concept") if r["active"]] == [b]
+    assert any(f"#{b}만 남기고" in s.value for s in at.success)
+
+
+def test_merged_notice_can_be_undone(tmp_path):
+    """자동으로 합친 교훈 — 무엇을 합쳤는지 알리고 '되돌리기'를 누르면 원래대로 (지우지 않음)."""
+    from core.feedback import merge_lessons
+
+    db = tmp_path / "runs.db"
+    ids = add(Storage(db), "concept", "lead", "형식 A 를 지킨다", "형식 A 를 꼭 지킨다")
+    p = CleanupProposal(team_id="concept", agent_id="lead", ids=ids, new_id=ids[1], relation="overlap", kind="improve",
+                        merged="형식 A 를 지킨다", reason="같은 지시", by="model", hits=2)
+    p = p.model_copy(update={"merged_id": merge_lessons(Storage(db), p)})
+
+    def page(db, merged):
+        import prompt_ui
+        from core.config import load_models, load_ranks, load_team
+        from core.storage import Storage
+
+        prompt_ui.configure(prompt_ui.Ctx(storage=Storage(db), ranks=load_ranks(), models=load_models()))
+        prompt_ui.render_merged(load_team("concept"), merged, key="r")
+
+    at = AppTest.from_function(page, args=(db, [p]), default_timeout=30).run()
+    assert not at.exception, at.exception
+    assert any(f"#{p.merged_id}" in m.value and "2회" in m.value for m in at.markdown)
+    at = at.button[0].click().run()
+    assert {r["id"] for r in Storage(db).list_lessons("concept") if r["active"]} == set(ids)
+    assert len(Storage(db).list_lessons("concept")) == 3 and len(at.button) == 0
 
 
 # ─── 📚 교훈 관리 화면 ───────────────────────────────────────────────────
