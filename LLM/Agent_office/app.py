@@ -1237,6 +1237,7 @@ def revisions(run: dict) -> list[tuple[followup.FollowupTurn, AgentAnswer]]:
             out.append((t, AgentAnswer(
                 node_id=final.node_id, rank_id=final.rank_id, kind=final.kind, content=t.content,
                 model=t.model or final.model, harness=t.harness, verification_log=t.log, elapsed_sec=t.elapsed_sec,
+                critic=t.critic, critic_model=t.critic_model, critic_by=t.critic_by,  # 👔 부장 검토 — 채택하면 기록에 남는다
             )))
     return out
 
@@ -1276,7 +1277,11 @@ def render_followup(run: dict) -> None:
     turns: list[followup.FollowupTurn] = run.setdefault("followups", [])
     st.markdown("#### 💬 결과에 대해 묻기 · 수정 요청")
     st.caption(f"궁금한 점을 묻거나 고칠 점을 말하면 **{name_of(root)}**이(가) 답하거나 수정본을 만듭니다. "
-               "질문인지 수정인지는 에이전트가 판단하고, 수정본은 아래 '채택할 안'에 추가됩니다.")
+               "질문인지 수정인지는 에이전트가 판단하고, 수정본은 아래 '채택할 안'에 추가됩니다. "
+               f"수정본은 **{dept_head.name}**이(가) 마지막으로 검토하고 추가로 고칠 점도 찾아 줍니다.")
+    pending = run.get("followup_pending")
+    newest = next((t for t in reversed(turns) if t.revised), None)  # 지금 결과인 수정본 — 여기에만 '다음 수정 요청' 버튼
+    send_fixes = ""
     for t in turns:
         with st.chat_message("user"):
             st.markdown(t.request)
@@ -1289,14 +1294,23 @@ def render_followup(run: dict) -> None:
                 st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
             meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
             st.caption(meta + "".join(f" · {x}" for x in t.log))
-    pending = run.get("followup_pending")
+            if t.critic:  # 👔 부장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 추가로 고칠 점
+                st.markdown(followup.head_review_markdown(t, critic_badge(t)))
+                fixes = followup.next_request(t) if t is newest and not pending else ""
+                if fixes and st.button(f"🛠 {dept_head.name}이(가) 짚은 점을 고쳐 달라고 요청",
+                                       key=f"send_fixes_{run['run_id']}_{t.version}",
+                                       help="위 지적과 '추가로 고칠 점'을 그대로 다음 수정 요청으로 보냅니다. 누르지 않으면 고치지 않습니다."):
+                    send_fixes = fixes
+    if send_fixes:
+        start_background_followup(run, send_fixes)
+        st.rerun()
     if pending:  # 💬 백그라운드에서 답하는 중 — 사무실·⏱ 호출 모니터가 계속 움직인다 (바꾸기·중단도 거기서)
         with st.chat_message("user"):
             st.markdown(pending["request"])
         with st.chat_message("assistant", avatar=avatar_for_chat(root, working=True)):
             st.markdown(f"**{name_of(root)}** · 💬 추가 질문 답하는 중…")
             st.caption("위 진행 막대와 **⏱ 호출 모니터**에서 진행을 보고, 느리면 다른 모델로 바꾸거나 중단할 수 있습니다. "
-                       "답이 오면 이 화면이 저절로 바뀝니다.")
+                       f"수정본이면 {dept_head.name}의 검토까지 끝난 뒤 답이 오고, 이 화면이 저절로 바뀝니다.")
         return
     if run.get("followup_error"):
         st.warning(run["followup_error"])
@@ -1323,10 +1337,15 @@ def start_background_followup(run: dict, request: str) -> None:
     pick = team_lessons(storage, team_id, lesson_budget(settings), run["question"]).get(root)  # 실행과 같은 교훈 고르기 (글자 한도·질문 관련도)
     lessons = pick.texts if pick else None
     options = {**team.harness.options, **check_options(run)}
+    brief = run.get("brief")
+    head = followup.HeadReview(  # 👔 수정본은 부서 부장이 마지막으로 검토 — 본 업무의 비평과 같은 모델·설정·검토 기준
+        plan=dept_heads.critic_plan(models, team, member_chains, org.id, dept_head, dept_store.get(dept.id)),
+        cfg=verification.critic_settings(verification_cfg, team.verification),
+        criteria=[*team.review_criteria, *(brief.success_criteria if brief else [])])
 
     def work():
         return followup.respond(agent, run["question"], current.content, request, turns, evidence, lessons,
-                                validators, options, team.harness.max_retries)
+                                validators, options, team.harness.max_retries, head)
 
     def on_finish(r: dict) -> None:
         storage.set_status(r["run_id"], "awaiting_human")

@@ -150,9 +150,16 @@ def _controls(ctx: Ctx, run: dict, recs, now) -> None:
     if run["done"]:
         return
     ctl = call_monitor.control(rid)
-    if run.get("status") == "followup_running":  # 💬 추가 질문 — 비평·하네스 건너뛰기는 없고 중단만
-        if st.button("⏹ 추가 질문 중단", key=f"stop_followup_{rid}", disabled=ctl.stopped, use_container_width=True,
-                     help="답하고 있는 호출을 끊습니다. 결과는 그대로 두고 결정 대기로 돌아갑니다."):
+    if run.get("status") == "followup_running":  # 💬 추가 질문 — 👔 부장 검토 건너뛰기 · 중단
+        c1, c2 = st.columns(2)
+        if c1.button("⛔ 부장 검토 건너뛰기" if "critic" not in ctl.skips else "⛔ 부장 검토 건너뜀", key=f"skip_head_{rid}",
+                     disabled="critic" in ctl.skips, use_container_width=True,
+                     help="수정본에 대한 부장 검토와 그에 따른 재수정을 건너뜁니다 (진행 중인 검토 호출도 끊음). 수정본은 그대로 나옵니다."):
+            n = call_monitor.skip(rid, "critic")
+            st.toast(f"⛔ 부장 검토를 건너뜁니다 (끊은 호출 {n}개)")
+        if c2.button("⏹ 추가 질문 중단", key=f"stop_followup_{rid}", disabled=ctl.stopped, use_container_width=True,
+                     help="진행 중인 호출을 끊습니다. 팀장이 답하는 중이면 결과는 그대로 두고 결정 대기로 돌아가고, "
+                          "부장이 검토하는 중이면 이미 쓴 수정본을 검토 없이 냅니다."):
             n = call_monitor.stop(rid, "💬 추가 질문 중단")
             st.toast(f"⏹ 추가 질문을 중단합니다 (끊은 호출 {n}개)")
         return

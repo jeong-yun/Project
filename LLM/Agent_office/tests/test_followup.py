@@ -179,10 +179,10 @@ def test_review_text_for_screen_and_next_request():
     text = followup.head_review_markdown(turn, "🔬 연구부 부장 (gpt-5.5)")
     for part in ("🔬 연구부 부장 (gpt-5.5)", "4/5", "합격", "2장 숫자에 출처가 없음", "추가로 고칠 점", "표 제목에 기준일 넣기"):
         assert part in text
-    request = followup.next_request(turn)  # 합격 — 추가로 고칠 점만 다음 수정 요청으로
-    assert "표 제목에 기준일 넣기" in request and "용어 통일" in request and "출처가 없음" not in request
-    turn.critic_passed = False  # 불합격으로 남았으면 지적도 함께 보낸다
-    assert "출처가 없음" in followup.next_request(turn) and "불합격" in followup.head_review_markdown(turn, "부장")
+    request = followup.next_request(turn)  # 부장이 짚은 것(지적 + 추가로 고칠 점)을 다음 수정 요청으로
+    assert "표 제목에 기준일 넣기" in request and "용어 통일" in request and "출처가 없음" in request
+    turn.critic_passed = False
+    assert "불합격" in followup.head_review_markdown(turn, "부장")
     turn.critic, turn.critic_passed = judge(5), True
     assert followup.next_request(turn) == ""  # 고칠 점이 없으면 버튼도 없다
     assert followup.head_review_markdown(followup.FollowupTurn(request="q", reply="a"), "") == ""
