@@ -106,3 +106,45 @@ def test_repeat_count_travels_with_knowledge_only_when_repeated(tmp_path, monkey
     monkeypatch.setenv(feedback_sync.ENV, str(folder))
     fresh = Storage(tmp_path / "new.db")
     assert {r["lesson"]: r["hits"] for r in fresh.list_lessons("stock")}["기준일을 단다"] == 3
+
+
+def test_other_pc_follows_merged_lessons_instead_of_keeping_both(tmp_path, monkeypatch):
+    """한 PC 에서 겹치는 교훈을 합치면(원래 교훈 끔 + 합친 교훈 추가) 다른 PC 도 가져올 때 원래 교훈을 끈다.
+
+    전에는 '없는 교훈만 넣기'라 다른 PC 에는 원래 교훈이 켜진 채 남아 합친 교훈과 함께 프롬프트에 들어갔고,
+    그 PC 를 켜면 knowledge/lessons.jsonl 의 켜짐 값이 다시 뒤집혔다 (2026-11-10 점검).
+    규칙: 켜짐은 '꺼진 쪽'을 따르고(끄기는 지우지 않으므로 되돌릴 수 있다), 반복 횟수는 큰 쪽을 따른다.
+    """
+    from core.feedback import merge_lessons
+    from core.schemas import CleanupProposal
+
+    folder = tmp_path / "knowledge"
+    monkeypatch.setenv(feedback_sync.ENV, str(folder))
+    a = Storage(tmp_path / "a.db")
+    ids = a.add_lessons("general", None, [Lesson(agent_id="lead", kind="improve", lesson="출처를 단다"),
+                                          Lesson(agent_id="lead", kind="improve", lesson="출처 링크를 붙인다")])
+    Storage(tmp_path / "b.db")  # 다른 PC — 켤 때 두 교훈을 가져온다
+    merge_lessons(a, CleanupProposal(team_id="general", agent_id="lead", ids=ids, new_id=ids[-1], relation="overlap",
+                                     kind="improve", merged="모든 주장에 출처 링크를 단다", reason="같은 지시", by="model", hits=2))
+    written_by_a = (folder / feedback_sync.LESSONS).read_text(encoding="utf-8")
+
+    b = Storage(tmp_path / "b.db")  # 다른 PC 를 다시 켠다 (git pull 로 knowledge/ 를 받은 뒤)
+    assert {r["lesson"]: (bool(r["active"]), r["hits"]) for r in b.list_lessons("general")} == {
+        "출처를 단다": (False, 1), "출처 링크를 붙인다": (False, 1), "모든 주장에 출처 링크를 단다": (True, 2)}
+    assert b.recent_lessons("general", "lead", 5) == ["모든 주장에 출처 링크를 단다"]  # 프롬프트에는 합친 교훈만
+    assert (folder / feedback_sync.LESSONS).read_text(encoding="utf-8") == written_by_a  # 파일이 뒤집히지 않는다
+    assert b.last_feedback_sync["aligned"] == 2 and b.last_feedback_sync["changed"] == []
+
+
+def test_import_never_turns_a_lesson_back_on_or_lowers_the_count(tmp_path, monkeypatch):
+    """가져오기는 끄기만 한다 — 이 PC 에서 꺼 둔 교훈을 파일이 '켜짐'이라고 해서 다시 켜지 않고, 반복 횟수도 줄이지 않는다."""
+    folder = tmp_path / "knowledge"
+    a = Storage(tmp_path / "a.db")
+    [lid] = a.add_lessons("general", None, [Lesson(agent_id="lead", kind="improve", lesson="출처를 단다")], hits=3)
+    feedback_sync.export(a, folder)  # 파일: 켜짐 · 3회
+    a.update_lesson(lid, active=False)
+    a._run_sql("UPDATE lessons SET hits=5 WHERE id=?", (lid,))
+    monkeypatch.setenv(feedback_sync.ENV, str(folder))
+    again = Storage(tmp_path / "a.db")
+    [row] = again.list_lessons("general")
+    assert not row["active"] and row["hits"] == 5 and again.last_feedback_sync["aligned"] == 0

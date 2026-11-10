@@ -135,21 +135,39 @@ def export(storage, dest: Path) -> dict:
     return {"lessons": len(lessons), "decisions": len(decisions), "changed": changed}
 
 
-def import_lessons(storage, src: Path) -> int:
-    """knowledge/lessons.jsonl 의 교훈 중 DB 에 없는 것을 넣는다 (팀·에이전트·문장·작성 시각이 같으면 같은 교훈). 넣은 개수."""
+def import_lessons(storage, src: Path, aligned: list | None = None) -> int:
+    """knowledge/lessons.jsonl 의 교훈 중 DB 에 없는 것을 넣는다 (팀·에이전트·문장·작성 시각이 같으면 같은 교훈). 넣은 개수.
+
+    이미 있는 교훈은 켜짐·반복 횟수만 맞춘다 (바꾼 교훈 번호를 aligned 에 담는다):
+      켜짐 = 꺼진 쪽을 따른다 — 파일이 '꺼짐'이면 이 PC 에서도 끈다. 파일이 '켜짐'이라고 해서 이 PC 에서 꺼 둔 것을 다시 켜지는 않는다.
+             (다른 PC 에서 겹치는 교훈을 합치면 원래 교훈이 꺼진다 → 여기서도 꺼야 합친 교훈과 함께 들어가지 않는다. 끄기는 지우지 않아 되돌릴 수 있다)
+      반복 횟수 = 큰 쪽 (횟수는 합칠 때만 늘어난다).
+    """
     path = src / LESSONS
     if not path.exists():
         return 0
-    have = {(r["team_id"], r["agent_id"], r["lesson"], r["created_at"]) for r in lesson_rows(storage)}  # 코멘트 뗀 문장끼리 비교
+    have: dict[tuple, list] = {}  # 코멘트 뗀 문장끼리 비교
+    for r in storage._run_sql("SELECT id, team_id, agent_id, lesson, created_at, active, hits FROM lessons", ()):
+        have.setdefault((r["team_id"], r["agent_id"], public_lesson(r["lesson"]), r["created_at"]), []).append(r)
     new, hidden = [], private_teams()
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         item = json.loads(line)
+        if item["team_id"] in hidden:
+            continue
         key = (item["team_id"], item["agent_id"], item["lesson"], item["created_at"])
-        if key not in have and item["team_id"] not in hidden:
-            have.add(key)
+        if key not in have:
+            have[key] = []
             new.append(item)
+            continue
+        for r in have[key]:
+            active = bool(r["active"]) and bool(item.get("active", True))
+            hits = max(r["hits"], int(item.get("hits", 1)))
+            if (active, hits) != (bool(r["active"]), r["hits"]):
+                storage._run_sql("UPDATE lessons SET active=?, hits=? WHERE id=?", (int(active), hits, r["id"]))
+                if aligned is not None:
+                    aligned.append(r["id"])
     if new:
         storage.insert_lessons_raw(new)
     return len(new)
@@ -161,7 +179,8 @@ def sync(storage, folder: Path | None = None, *, pull: bool = False) -> dict | N
     if folder is None:
         return None
     try:
-        imported = import_lessons(storage, folder) if pull else 0
-        return {**export(storage, folder), "imported": imported}
+        aligned: list = []
+        imported = import_lessons(storage, folder, aligned) if pull else 0
+        return {**export(storage, folder), "imported": imported, "aligned": len(aligned)}
     except Exception as e:  # noqa: BLE001 — 동기화 실패가 업무·결정을 막지 않게
         return {"error": f"{type(e).__name__}: {e}"}

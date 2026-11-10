@@ -248,8 +248,12 @@ class PromptLessons:
 
     @property
     def cut(self) -> list[dict]:
-        """규칙 문장은 들어가고 세부 코멘트만 빠진 교훈."""
+        """규칙 문장은 들어가고 세부 코멘트가 다 들어가지 못한 교훈 (r["partial"] = 들어간 앞부분 글자 수, 0 이면 통째로 빠짐)."""
         return [r for r in self.kept if r["cut"]]
+
+
+MIN_PARTIAL_CHARS = 200  # 남은 자리가 이보다 작으면 세부 코멘트를 잘라 넣지 않는다 (몇 낱말만 들어가면 뜻이 통하지 않음 — 추정값)
+CUT_NOTE = " …(뒤는 글자 한도로 생략)"  # 잘라 넣은 세부 코멘트 끝에 붙여 모델이 '여기서 끊겼다'를 알게 한다
 
 
 def fit_lessons(rows: list[dict], budget: int, query: str = "") -> PromptLessons:
@@ -258,14 +262,16 @@ def fit_lessons(rows: list[dict], budget: int, query: str = "") -> PromptLessons
     1) 규칙 문장(+반복 강조 표시)을 최신부터 모두 넣는다 — 짧아서 거의 항상 다 들어간다.
        넘치는 교훈은 건너뛰고 계속 채운다 (긴 교훈 하나 때문에 짧은 옛 교훈까지 빠지지 않게).
     2) 남은 글자 안에서 세부 코멘트를 붙인다. 순서: 이번 질문(query)과 관련 높은 것 → 반복 많은 것 → 최신.
-       못 붙인 세부 코멘트는 cut 으로 알린다 (조용히 버리지 않는다).
+       통째로 들어가는 것을 먼저 붙이고, 그래도 남은 자리에는 못 붙인 세부 코멘트의 앞부분을 같은 순서로 잘라 넣는다
+       (합친 교훈은 코멘트 여러 개가 한 덩어리라 '전부 아니면 빼기'만 하면 통째로 사라진다 — 2026-11-10 점검).
+       다 못 붙인 세부 코멘트는 cut 으로 알린다 (조용히 버리지 않는다).
     """
     kept, left_out, used = [], [], 0
     for row in rows:
         rule, detail = split_lesson(row["lesson"])
         head = emphasis(row) + rule
         if used + len(head) <= budget:
-            kept.append({**row, "prompt": head, "cut": bool(detail), "detail": detail})
+            kept.append({**row, "prompt": head, "cut": bool(detail), "detail": detail, "partial": 0})
             used += len(head)
         else:
             left_out.append(row)
@@ -276,6 +282,12 @@ def fit_lessons(rows: list[dict], budget: int, query: str = "") -> PromptLessons
             r["prompt"] += r["detail"]
             r["cut"] = False
             used += len(r["detail"])
+    for r in order:
+        if r["cut"] and budget - used >= MIN_PARTIAL_CHARS:
+            tail = CUT_NOTE + (")" if r["detail"].rstrip().endswith(")") else "")
+            r["partial"] = budget - used - len(tail)
+            r["prompt"] += r["detail"][:r["partial"]] + tail
+            used = budget
     kept.sort(key=lambda r: (-r.get("hits", 1), r["id"]))
     return PromptLessons(kept, left_out, budget)
 
@@ -397,8 +409,9 @@ def cleanup_messages(team: Team, targets: dict[str, list[dict]], names: dict[str
 
 def _merged_text(merged: str, detail: str, rows: list[dict]) -> str:
     """합친 문장 = 모델이 낸 규칙 문장 + 원래 교훈들의 사람 코멘트 원문 (모델이 요약하다 빠뜨리지 않게 코드가 그대로 붙인다).
-    원래 교훈에 코멘트가 없을 때만 모델이 고른 detail 을 붙인다. '(사람 코멘트: …)' 부분은 공개 knowledge/ 로 나가지 않는다."""
-    comments = list(dict.fromkeys(b for b in (comment_body(split_lesson(r["lesson"])[1]) for r in rows) if b))
+    원래 교훈에 코멘트가 없을 때만 모델이 고른 detail 을 붙인다. '(사람 코멘트: …)' 부분은 공개 knowledge/ 로 나가지 않는다.
+    코멘트는 최신 교훈 것부터 붙인다 — 프롬프트 글자 한도로 뒤가 잘려도(fit_lessons) 최신 피드백이 남게."""
+    comments = list(dict.fromkeys(b for b in (comment_body(split_lesson(r["lesson"])[1]) for r in reversed(rows)) if b))
     tail = " / ".join(comments) or detail.strip()
     return split_lesson(merged.strip())[0] + (f" (사람 코멘트: {tail})" if tail else "")
 

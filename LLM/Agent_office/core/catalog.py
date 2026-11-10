@@ -553,10 +553,12 @@ def pending_commit_message(diff: str) -> str:
 
 
 def git_commit(repo: Path, subdir: str, message: str) -> tuple[bool, str]:
+    """카탈로그 폴더(subdir)만 커밋한다 — 폴더 안은 새 파일까지 모두, 폴더 밖에서 미리 `git add` 해 둔 파일은 넣지 않는다
+    (화면의 '커밋 안 된 변경' 목록은 폴더 안만 보여 주므로, 목록에 없는 파일이 GitHub 에 올라가지 않게)."""
     ok, log = git(repo, "add", "--", subdir)
     if not ok:
         return ok, log
-    return git(repo, "commit", "-m", message)
+    return git(repo, "commit", "-m", message, "--", subdir)
 
 
 def git_push(repo: Path) -> tuple[bool, str]:

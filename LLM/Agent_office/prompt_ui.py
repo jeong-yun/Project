@@ -22,7 +22,8 @@ from core.schemas import CleanupProposal, ModelsConfig, Rank, ReviewResult, Team
 
 RELATION = {"overlap": "겹침", "conflict": "충돌"}
 DROP_ORDER = ("한도를 넘으면 규칙 문장(교훈 한 문장)은 끝까지 남기고, 세부 코멘트(사람 코멘트 원문)부터 뺍니다. "
-              "빼는 순서: ① 이번 질문과 관련이 낮은 것 ② 같은 피드백을 받은 횟수가 적은 것 ③ 오래된 것.")
+              "빼는 순서: ① 이번 질문과 관련이 낮은 것 ② 같은 피드백을 받은 횟수가 적은 것 ③ 오래된 것. "
+              "그래도 자리가 남으면 빠진 세부 코멘트의 앞부분을 잘라 넣습니다.")
 KIND = {"praise": "👍 유지할 점", "improve": "🔧 고칠 점"}
 PRIVATE_NOTE = "'(사람 코멘트: …)' 뒤의 글은 공개 저장소 knowledge/ 파일에 올라가지 않습니다 (개인 정보 보호)."
 
@@ -68,9 +69,9 @@ def _show_flash(key: str) -> None:
 
 
 def _dropped(pick: PromptLessons) -> str:
-    """빠진 것 한 줄 — '빠진 교훈 N개' (규칙 문장까지 통째로) · '세부 코멘트만 빠진 교훈 N개'."""
+    """빠진 것 한 줄 — '빠진 교훈 N개' (규칙 문장까지 통째로) · '세부 코멘트가 다 못 들어간 교훈 N개' (빠지거나 앞부분만)."""
     parts = [f"빠진 교훈 {len(pick.left_out)}개" if pick.left_out else "",
-             f"세부 코멘트만 빠진 교훈 {len(pick.cut)}개" if pick.cut else ""]
+             f"세부 코멘트가 다 못 들어간 교훈 {len(pick.cut)}개" if pick.cut else ""]
     return " · ".join(p for p in parts if p)
 
 
@@ -120,8 +121,9 @@ def member_prompts(team: Team, key: str, manage: bool = False) -> None:
             lines.append(f"교훈 {len(ap.lessons.left_out)}개가 글자 한도를 넘어 규칙 문장까지 아래 프롬프트에 들어가지 않습니다: "
                          + ", ".join(f"#{r['id']}" for r in ap.lessons.left_out))
         if ap.lessons.cut:
-            lines.append(f"교훈 {len(ap.lessons.cut)}개는 규칙 문장만 들어가고 세부 코멘트가 빠집니다: " + ", ".join(
-                f"#{r['id']}({r['created_at'][:10]}, {len(r['detail']):,}자)" for r in ap.lessons.cut))
+            lines.append(f"교훈 {len(ap.lessons.cut)}개는 규칙 문장은 들어가고 세부 코멘트가 다 들어가지 못합니다: " + ", ".join(
+                f"#{r['id']}({r['created_at'][:10]}, {len(r['detail']):,}자 중 "
+                + (f"앞 {r['partial']:,}자만 들어감)" if r["partial"] else "모두 빠짐)") for r in ap.lessons.cut))
         lines += [DROP_ORDER, "이 화면은 질문이 없어 반복 횟수·최신 순으로 고릅니다. 실제 업무에서는 그 질문과 관련 높은 세부 "
                   "코멘트가 먼저 들어가므로 빠지는 것이 다를 수 있습니다. '📚 교훈 관리'에서 필요 없는 교훈을 꺼 주세요."]
         st.warning("  \n".join(lines))
@@ -182,7 +184,7 @@ def render_lessons(team: Team, ap: AgentPrompt, key: str) -> None:
     _show_flash(key)
     rows = ctx.storage.list_lessons(team.id, ap.node_id)  # 최신 먼저 (꺼진 것 포함)
     kept = {r["id"] for r in ap.lessons.kept}
-    cut = {r["id"] for r in ap.lessons.cut}
+    cut = {r["id"]: r["partial"] for r in ap.lessons.cut}  # 세부 코멘트가 다 못 들어간 교훈 → 들어간 앞부분 글자 수 (0 = 모두 빠짐)
     st.caption(f"켜 둔 교훈 {sum(bool(r['active']) for r in rows)}개 · 꺼 둔 교훈 {sum(not r['active'] for r in rows)}개 · "
                f"프롬프트에 넣는 교훈 {len(kept)}개 ({ap.lessons.chars:,}자 / 한도 {ap.lessons.budget:,}자)")
     store = f"cleanup_{team.id}_{ap.node_id}"
@@ -196,8 +198,9 @@ def render_lessons(team: Team, ap: AgentPrompt, key: str) -> None:
             st.caption("겹치거나 어긋나는 교훈을 찾지 못했습니다.")
     for row in rows:
         lid = row["id"]
-        state = ("✂ 규칙 문장만 들어감 (세부 코멘트는 한도 넘어 빠짐)" if lid in cut else "✅ 프롬프트에 들어감" if lid in kept
-                 else "⚠️ 한도 넘어 빠짐") if row["active"] else "⏸ 꺼 둠"
+        state = ((f"✂ 규칙 문장 + 세부 코멘트 앞 {cut[lid]:,}자만 들어감 (한도 넘음)" if cut[lid]
+                  else "✂ 규칙 문장만 들어감 (세부 코멘트는 한도 넘어 빠짐)") if lid in cut
+                 else "✅ 프롬프트에 들어감" if lid in kept else "⚠️ 한도 넘어 빠짐") if row["active"] else "⏸ 꺼 둠"
         hits = f" · 🔁 같은 피드백 {row['hits']}회" if row.get("hits", 1) > 1 else ""
         with st.container(border=True):
             st.caption(f"#{lid} · {row['created_at'][:10]} · {KIND.get(row['kind'], row['kind'])} · {state}{hits} · {len(row['lesson']):,}자")
