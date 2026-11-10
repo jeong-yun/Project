@@ -287,6 +287,11 @@ streamlit run app.py
 
 브라우저에서 http://localhost:8501 이 열립니다. 포트를 바꾸려면 `streamlit run app.py --server.port 8600`.
 
+**이 폴더(`Agent_office`)에서 켜세요.** Streamlit 은 앱을 켠 폴더의 `.streamlit/config.toml` 만 읽습니다 — 다른 폴더에서
+`streamlit run LLM/Agent_office/app.py` 처럼 켜면 이 설정이 빠집니다. 지금 들어 있는 설정은 하나입니다:
+큰 화면 조각(1만 바이트 이상)을 '해시만' 보내지 않고 항상 통째로 보내기 (`global.minCachedMessageSize`) —
+브라우저 "Connection error … 404" 창을 막습니다 (아래 12. 트러블슈팅, `tests/test_config.py` 가 적용 여부를 확인).
+
 ## 5. 화면 보는 법
 
 왼쪽 위 **화면**에서 🏠 메인 / 🏢 부서 업무를 고릅니다 (주소 `?view=home|dept&dept=<부서 id>`, 처음에는 🏠 메인).
@@ -1609,3 +1614,4 @@ git push
 | `503 ... high demand` (요청 폭주) | 해당 모델 서버가 일시적으로 붐빔 — 앱이 자동으로 2초·5초 뒤 같은 모델로 다시 시도하고, 그래도 안 되면 대안 모델로 처음부터 다시 씁니다. 실무자 한 명이 끝내 실패해도 "⚠️ 작성 실패" 로 표시하고 팀은 계속 진행합니다 |
 | 웹 검색 자료 0건 | 네트워크 확인. 검색 실패해도 답변은 계속 진행됩니다 (자료 없이) |
 | 업데이트 후 화면에 AttributeError | 코드가 바뀌는 중에 실행한 경우 — 앱을 재시작하세요 |
+| 브라우저에 `Connection error — Failed to process a Websocket message (AxiosError: Request failed with status code 404)` | 브라우저를 새로 고침(F5)하세요 — 서버는 켜져 있고 저장된 내용도 그대로입니다. 다시 안 나게 `.streamlit/config.toml` 에서 '해시만 보내기'를 꺼 두었습니다 — 이 설정은 앱을 `Agent_office` 폴더에서 켜야 읽힙니다. 그래도 또 나오면 앱을 켠 창(터미널)에 `HTTP request for cached message could not be fulfilled` 줄이 있는지 봐 주세요 |

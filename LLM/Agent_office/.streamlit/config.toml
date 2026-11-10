@@ -1,0 +1,9 @@
+# Streamlit 설정 — 앱을 이 폴더(LLM/Agent_office)에서 켤 때 읽힌다 (`streamlit run app.py`).
+
+[global]
+# 큰 화면 조각(1만 바이트 이상)을 '해시만' 보내는 기능을 끈다 — 항상 내용을 통째로 보낸다.
+# 이유: Streamlit 1.43 은 브라우저에 그 조각이 없으면 서버에 다시 달라고 하는데(/_stcore/message), 그때 서버도 이미
+# 지웠으면 404 → 화면에 "Connection error — Failed to process a Websocket message (AxiosError … 404)" 창이 뜬다 (2026-11-10).
+# 값은 바이트. 웹소켓으로 보낼 수 있는 가장 큰 메시지(server.maxMessageSize 200MB)보다 커서 해시만 보내는 일이 없다.
+# Streamlit 문서·`streamlit config show` 에 안 나오는 숨은 옵션이라 tests/test_config.py 가 실제로 적용되는지 확인한다.
+minCachedMessageSize = 1000000000
