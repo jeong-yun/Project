@@ -309,7 +309,12 @@ def test_old_db_gets_hits_column(tmp_path):
                      " run_id TEXT, kind TEXT NOT NULL, lesson TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,"
                      " created_at TEXT NOT NULL)")
         conn.execute("INSERT INTO lessons (team_id, agent_id, kind, lesson, created_at) VALUES ('concept','lead','improve','옛 교훈','2026-10-01')")
-    assert Storage(db).list_lessons("concept")[0]["hits"] == 1  # 교훈은 그대로, 1회로
+    [row] = Storage(db).list_lessons("concept")
+    assert row["hits"] == 1 and row["active_at"] is None and row["lesson"] == "옛 교훈"  # 교훈은 그대로, 1회 · 켜짐을 바꾼 적 없음
+    Storage(db).update_lesson(row["id"], active=True)  # 이미 켜진 것을 켜면 바뀐 것이 아니다 → 시각을 남기지 않는다
+    assert Storage(db).list_lessons("concept")[0]["active_at"] is None
+    Storage(db).update_lesson(row["id"], active=False)
+    assert Storage(db).list_lessons("concept")[0]["active_at"]  # 실제로 바뀔 때만 남긴다
 
 
 def test_cleanup_panel_waits_for_click(tmp_path):

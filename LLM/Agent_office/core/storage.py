@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS lessons (
     lesson      TEXT NOT NULL,
     active      INTEGER NOT NULL DEFAULT 1, -- 0 이면 프롬프트에 주입하지 않음
     created_at  TEXT NOT NULL,
-    hits        INTEGER NOT NULL DEFAULT 1  -- 같은 지시를 피드백에서 받은 횟수 (겹치는 교훈을 합칠 때 더한다 → 프롬프트에서 강조)
+    hits        INTEGER NOT NULL DEFAULT 1, -- 같은 지시를 피드백에서 받은 횟수 (겹치는 교훈을 합칠 때 더한다 → 프롬프트에서 강조)
+    active_at   TEXT                        -- 켜짐을 마지막으로 바꾼 시각 (없으면 바꾼 적 없음) — PC 두 대가 다를 때 나중 것을 따른다 (feedback_sync)
 );
 CREATE INDEX IF NOT EXISTS idx_lessons_team_agent ON lessons(team_id, agent_id, active);
 CREATE TABLE IF NOT EXISTS usage (
@@ -133,6 +134,8 @@ class Storage:
         lesson_columns = columns("lessons")
         if lesson_columns and "hits" not in lesson_columns:  # 반복 횟수 칸 추가 (예전 교훈은 1회)
             conn.execute("ALTER TABLE lessons ADD COLUMN hits INTEGER NOT NULL DEFAULT 1")
+        if lesson_columns and "active_at" not in lesson_columns:  # 켜짐을 바꾼 시각 칸 추가 (예전 교훈은 비어 있음)
+            conn.execute("ALTER TABLE lessons ADD COLUMN active_at TEXT")
         if "start_rank" in columns("runs"):
             conn.execute("ALTER TABLE runs RENAME TO runs_legacy")
         usage_columns = columns("usage")
@@ -297,9 +300,10 @@ class Storage:
         """knowledge/ 에서 가져온 교훈을 그대로 넣는다 (작성 시각·켜짐 여부 보존, 동기화는 부르지 않음)."""
         with closing(self._connect()) as conn, conn:
             conn.executemany(
-                "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, active, created_at, hits) VALUES (?,?,?,?,?,?,?,?)",
+                "INSERT INTO lessons (team_id, agent_id, run_id, kind, lesson, active, created_at, hits, active_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?)",
                 [(i["team_id"], i["agent_id"], i.get("run_id") or None, i["kind"], i["lesson"], int(i.get("active", True)),
-                  i["created_at"], int(i.get("hits", 1))) for i in items],
+                  i["created_at"], int(i.get("hits", 1)), i.get("active_at")) for i in items],
             )
 
     def recent_lessons(self, team_id: str, agent_id: str, limit: int) -> list[str]:
@@ -333,8 +337,9 @@ class Storage:
         """agent_id: 교훈을 받을 팀원 바꾸기 — 조직도가 바뀌어 지금 없는 팀원 id 로 남은 교훈을 옮길 때 (화면에서 사용자가 고름)."""
         if lesson is not None:
             self._execute("UPDATE lessons SET lesson=? WHERE id=?", (lesson, lesson_id))
-        if active is not None:
-            self._execute("UPDATE lessons SET active=? WHERE id=?", (int(active), lesson_id))
+        if active is not None:  # 실제로 바뀔 때만 '바꾼 시각'을 남긴다 — 다른 PC 와 다를 때 나중에 바꾼 쪽을 따르는 근거
+            self._execute("UPDATE lessons SET active=?, active_at=? WHERE id=? AND active<>?",
+                          (int(active), _now(), lesson_id, int(active)))
         if agent_id is not None:
             self._execute("UPDATE lessons SET agent_id=? WHERE id=?", (agent_id, lesson_id))
         self._sync_feedback()

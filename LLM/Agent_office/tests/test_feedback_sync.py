@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from core import feedback_sync
 from core.schemas import AgentAnswer, HumanDecision, Lesson, ModelSpec
 from core.storage import Storage
@@ -113,7 +115,7 @@ def test_other_pc_follows_merged_lessons_instead_of_keeping_both(tmp_path, monke
 
     전에는 '없는 교훈만 넣기'라 다른 PC 에는 원래 교훈이 켜진 채 남아 합친 교훈과 함께 프롬프트에 들어갔고,
     그 PC 를 켜면 knowledge/lessons.jsonl 의 켜짐 값이 다시 뒤집혔다 (2026-11-10 점검).
-    규칙: 켜짐은 '꺼진 쪽'을 따르고(끄기는 지우지 않으므로 되돌릴 수 있다), 반복 횟수는 큰 쪽을 따른다.
+    규칙: 켜짐은 더 나중에 바꾼 쪽을 따르고(합치기가 원래 교훈을 끈 시각이 남는다), 반복 횟수는 큰 쪽을 따른다.
     """
     from core.feedback import merge_lessons
     from core.schemas import CleanupProposal
@@ -136,8 +138,8 @@ def test_other_pc_follows_merged_lessons_instead_of_keeping_both(tmp_path, monke
     assert b.last_feedback_sync["aligned"] == 2 and b.last_feedback_sync["changed"] == []
 
 
-def test_import_never_turns_a_lesson_back_on_or_lowers_the_count(tmp_path, monkeypatch):
-    """가져오기는 끄기만 한다 — 이 PC 에서 꺼 둔 교훈을 파일이 '켜짐'이라고 해서 다시 켜지 않고, 반복 횟수도 줄이지 않는다."""
+def test_import_keeps_a_later_local_off_and_never_lowers_the_count(tmp_path, monkeypatch):
+    """이 PC 에서 나중에 끈 교훈을 그 전에 쓴 파일('켜짐')이 다시 켜지 않고, 반복 횟수도 줄이지 않는다."""
     folder = tmp_path / "knowledge"
     a = Storage(tmp_path / "a.db")
     [lid] = a.add_lessons("general", None, [Lesson(agent_id="lead", kind="improve", lesson="출처를 단다")], hits=3)
@@ -148,3 +150,90 @@ def test_import_never_turns_a_lesson_back_on_or_lowers_the_count(tmp_path, monke
     again = Storage(tmp_path / "a.db")
     [row] = again.list_lessons("general")
     assert not row["active"] and row["hits"] == 5 and again.last_feedback_sync["aligned"] == 0
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    """부를 때마다 1초씩 가는 가짜 시계 — 켜고 끄기가 같은 초에 일어나면 어느 쪽이 나중인지 가릴 수 없다."""
+    import itertools
+    from datetime import datetime, timedelta
+
+    from core import storage
+
+    ticks = itertools.count()
+    monkeypatch.setattr(storage, "_now", lambda: (datetime(2026, 11, 11, 9) + timedelta(seconds=next(ticks))).isoformat(timespec="seconds"))
+
+
+def _state(storage, team="general"):
+    return {r["lesson"]: bool(r["active"]) for r in storage.list_lessons(team)}
+
+
+def test_turning_a_lesson_back_on_reaches_the_other_pc_and_stays_on(tmp_path, monkeypatch, clock):
+    """한 PC 에서 껐다가 다시 켠 교훈은 다른 PC 에서도 켜지고, PC 를 한 바퀴 돌아도 조용히 다시 꺼지지 않는다.
+
+    '꺼진 쪽을 따른다'만으로는 다른 PC 가 꺼진 채 남아 파일을 다시 '꺼짐'으로 쓰고, 처음 PC 가 그것을 가져와 다시 꺼졌다 (2026-11-11 검토).
+    """
+    folder = tmp_path / "knowledge"
+    monkeypatch.setenv(feedback_sync.ENV, str(folder))
+    a = Storage(tmp_path / "a.db")
+    [lid] = a.add_lessons("general", None, [Lesson(agent_id="lead", kind="improve", lesson="출처를 단다")])
+    Storage(tmp_path / "b.db")  # PC B 가 가져온다
+    a.update_lesson(lid, active=False)  # A 에서 끔
+    assert _state(Storage(tmp_path / "b.db")) == {"출처를 단다": False}  # B 도 꺼진다
+    a.update_lesson(lid, active=True)  # A 에서 다시 켬 (📚 교훈 관리)
+    written_by_a = (folder / feedback_sync.LESSONS).read_text(encoding="utf-8")
+    assert _state(Storage(tmp_path / "b.db")) == {"출처를 단다": True}  # B 도 다시 켜진다
+    assert (folder / feedback_sync.LESSONS).read_text(encoding="utf-8") == written_by_a  # B 가 파일을 '꺼짐'으로 되돌려 쓰지 않는다
+    assert _state(Storage(tmp_path / "a.db")) == {"출처를 단다": True}  # A 를 다시 켜도 그대로 켜져 있다
+
+
+def test_undoing_a_merge_reaches_the_other_pc(tmp_path, monkeypatch, clock):
+    """합치기 '↩ 되돌리기'도 다른 PC 로 전해진다 — 원래 교훈이 다시 켜지고 합친 교훈이 꺼진다 (둘 다 꺼진 채 남지 않는다)."""
+    from core.feedback import merge_lessons, undo_merge
+    from core.schemas import CleanupProposal
+
+    folder = tmp_path / "knowledge"
+    monkeypatch.setenv(feedback_sync.ENV, str(folder))
+    a = Storage(tmp_path / "a.db")
+    ids = a.add_lessons("general", None, [Lesson(agent_id="lead", kind="improve", lesson="출처를 단다"),
+                                          Lesson(agent_id="lead", kind="improve", lesson="출처 링크를 붙인다")])
+    p = CleanupProposal(team_id="general", agent_id="lead", ids=ids, new_id=ids[-1], relation="overlap", kind="improve",
+                        merged="모든 주장에 출처 링크를 단다", reason="같은 지시", by="model", hits=2)
+    p = p.model_copy(update={"merged_id": merge_lessons(a, p)})
+    merged_on = {"출처를 단다": False, "출처 링크를 붙인다": False, "모든 주장에 출처 링크를 단다": True}
+    assert _state(Storage(tmp_path / "b.db")) == merged_on  # B: 합친 상태를 따른다 (원래 고치려던 문제)
+    undo_merge(a, p)
+    undone = {"출처를 단다": True, "출처 링크를 붙인다": True, "모든 주장에 출처 링크를 단다": False}
+    assert _state(Storage(tmp_path / "b.db")) == undone
+    assert _state(Storage(tmp_path / "a.db")) == undone  # 한 바퀴 돌아도 A 의 되돌리기가 그대로
+
+
+def test_older_knowledge_file_does_not_override_a_later_choice(tmp_path, monkeypatch, clock):
+    """파일이 이 PC 의 마지막 선택보다 오래됐으면(git 으로 옛 파일을 받음 등) 이 PC 의 선택을 따른다 — 켠 것도, 끈 것도."""
+    folder = tmp_path / "knowledge"
+    a = Storage(tmp_path / "a.db")  # 동기화를 켜지 않은 채로
+    on, off = a.add_lessons("general", None, [Lesson(agent_id="lead", kind="improve", lesson="켤 교훈"),
+                                              Lesson(agent_id="lead", kind="improve", lesson="끌 교훈")])
+    a.update_lesson(on, active=False)
+    feedback_sync.export(a, folder)  # 옛 파일: '켤 교훈' 꺼짐 · '끌 교훈' 켜짐
+    a.update_lesson(on, active=True)
+    a.update_lesson(off, active=False)
+    monkeypatch.setenv(feedback_sync.ENV, str(folder))
+    again = Storage(tmp_path / "a.db")
+    assert _state(again) == {"켤 교훈": True, "끌 교훈": False} and again.last_feedback_sync["aligned"] == 0
+
+
+def test_records_without_change_time_fall_back_to_the_off_side(tmp_path, monkeypatch):
+    """켜짐을 바꾼 시각이 양쪽 다 없는 옛 기록(이 칸이 생기기 전에 합친 것 등)은 꺼진 쪽을 따른다 — 끄기는 지우지 않아 되돌릴 수 있다."""
+    folder = tmp_path / "knowledge"
+    a = Storage(tmp_path / "a.db")
+    [lid] = a.add_lessons("general", None, [Lesson(agent_id="lead", kind="improve", lesson="출처를 단다")])
+    feedback_sync.export(a, folder)
+    b = Storage(tmp_path / "b.db")
+    assert feedback_sync.import_lessons(b, folder) == 1
+    a._run_sql("UPDATE lessons SET active=0 WHERE id=?", (lid,))  # 옛 버전이 끈 것 — 시각이 없다
+    feedback_sync.export(a, folder)
+    assert "active_at" not in (folder / feedback_sync.LESSONS).read_text(encoding="utf-8")  # 바꾼 적 없는 줄은 예전 형식 그대로
+    aligned: list = []
+    assert feedback_sync.import_lessons(b, folder, aligned) == 0 and len(aligned) == 1
+    assert _state(b) == {"출처를 단다": False}
