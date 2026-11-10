@@ -6,7 +6,10 @@ R1: 스킬의 '능동적 지식 확장'이 기억에서 꺼낸 내용을 "반드
 R2: 관련 기존 항목은 발췌(1절·6절 앞부분)만 들어간다 → 발췌임을 알리고 잘린 곳을 표시한다.
 """
 
-from core import harness, verification
+from datetime import date
+
+from core import catalog as cat
+from core import concept, harness, verification
 from core.config import TEAMS_DIR
 from core.workflow import build_office_graph, stream_office
 from tests.fakes import Script, make_critic, make_delegation, make_review
@@ -81,3 +84,18 @@ def test_skill_expansion_rule_adds_only_what_the_evidence_confirms():
     assert "반드시 추가하라" not in line and "내부 지식망" not in line
     assert "근거 자료" in line and "미확인 후보" in line and "URL" in line
     assert "아키텍처 변형(Variants)" in line and "논쟁(Controversies)" in line  # 무엇을 찾아볼지는 그대로
+
+
+# ─── R2 ───────────────────────────────────────────────────────────────
+
+
+def test_related_entries_are_marked_as_excerpts():
+    long_text = ("[Perf]긴 항목(Long Entry) (작성일: 26.01.01)\n1. 정의 및 개념\n" + " - 정의 문장 하나.\n" * 60
+                 + "2. 작동 원리\n - 보이지 않는 절.\n6. 관계\n" + " - 대상: 유사: 가 / 차이: 나\n" * 40 + "7. 참고 문헌\n - 끝")
+    short_text = "[Perf]짧은 항목(Short Entry) (작성일: 26.01.01)\n1. 정의 및 개념\n - 한 줄.\n6. 관계\n - 대상: 유사: 가 / 차이: 나"
+    long_entry, short_entry = cat.parse_entries(long_text, "AI-Model")[0], cat.parse_entries(short_text, "AI-Model")[0]
+    assert concept.entry_digest(long_entry).count(concept.CUT_MARK) == 2 and "보이지 않는 절" not in concept.entry_digest(long_entry)
+    assert concept.CUT_MARK not in concept.entry_digest(short_entry)  # 다 들어간 절에는 표시하지 않는다
+    q, brief = concept.build_concept_request("add", "DAPO", "초안", [long_entry, short_entry], None, date(2026, 11, 10))
+    assert "발췌" in q and "직접 확인 필요" in q and concept.CUT_MARK in q
+    assert "발췌에 보이는" in brief.output_format  # 다른 항목 수정(edits)의 find 는 발췌에 보이는 문장으로

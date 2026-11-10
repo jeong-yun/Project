@@ -49,7 +49,7 @@ PLAN_EXAMPLE = {
         "absorb": [],
         "summary": {"emoji": "🧠", "name": "English Name(약어)", "keywords": "핵심 키워드", "one_line": "개조식 한 줄 정의(비교·한계 포함)"},
         "basic_terms": [{"term": "용어(English)", "definition": "한 줄 정의"}],
-        "edits": [{"entry": "수정할 다른 기존 항목 이름", "find": "그 항목 본문에 있는 바꿀 문장 그대로", "replace": "교체문", "reason": "이유"}],
+        "edits": [{"entry": "수정할 다른 기존 항목 이름", "find": "그 항목 발췌에 보이는 바꿀 문장 그대로", "replace": "교체문", "reason": "이유"}],
     }
 }
 
@@ -617,10 +617,16 @@ def expected_header(target: Entry, d: date | None = None) -> str:
 # ─── 요청 만들기 ────────────────────────────────────────────────────────
 
 
+CUT_MARK = "…(이하 생략)"  # 발췌에서 잘린 절의 끝 — 모델이 보지 못한 문장을 '본문 그대로'라며 지어내지 않게
+
+
 def entry_digest(entry: Entry, limit: int = 900) -> str:
-    """관련 항목 요약 — 제목 + 1.정의 앞부분 + 6.관계 앞부분 (무료 모델 토큰 한도를 고려해 짧게)."""
-    definition = entry.section(1)[: limit // 2]
-    relation = entry.section(6)[: limit // 2]
+    """관련 항목 발췌 — 제목 + 1.정의 앞부분 + 6.관계 앞부분 (무료 모델 토큰 한도를 고려해 짧게). 잘린 절 끝에는 CUT_MARK.
+
+    수정 대상 항목은 발췌가 아니라 전문(<original>)으로 들어간다 — 발췌는 비교 대상 후보일 뿐이다.
+    """
+    half = limit // 2
+    definition, relation = (s[:half] + (CUT_MARK if len(s) > half else "") for s in (entry.section(1), entry.section(6)))
     return f"[{entry.category}] {entry.header}\n{definition}\n{relation}".strip()
 
 
@@ -663,7 +669,11 @@ def build_concept_request(
     elif target:
         parts.append(f"- 기존 카탈로그 항목(수정 대상 전문, 분류 {target.category}):\n{target.text}")
     if related:
-        parts.append("- 관련 기존 카탈로그 항목 (1단계 비교 대상 후보 — 제목·정의·관계 발췌):\n\n" + "\n\n".join(entry_digest(e) for e in related))
+        # 발췌임을 알린다 — 스킬은 기존 항목에서 '고칠 위치를 빠짐없이' 내라 하고 edits 의 find 는 본문 그대로여야 반영되는데, 보이는 것은 일부다
+        parts.append(f"- 관련 기존 카탈로그 항목 (1단계 비교 대상 후보 — 발췌: 제목 + 1절·6절 앞부분만 있고 잘린 곳은 '{CUT_MARK}', "
+                     "다른 절은 보이지 않는다. 이 항목들을 고쳐야 하면 발췌에 보이는 문장만 적용 계획 edits 의 find 에 쓰고, "
+                     "보이지 않는 곳은 <review_log> 에 '직접 확인 필요: 「항목명」 §절'로 적는다):\n\n"
+                     + "\n\n".join(entry_digest(e) for e in related))
     parts.append(f"{PROMPT_LINE}{prompt_version()['label']}")  # 어느 판 프롬프트로 만든 결과인지 — 질문과 함께 저장된다
     question = "\n".join(parts)
     context = (
