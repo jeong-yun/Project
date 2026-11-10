@@ -421,6 +421,22 @@ def test_tool_reads_uploads_jd_and_questions(tmp_path):
     assert "3년 이상" in opts["career_reference"]
 
 
+def test_dept_head_sees_the_whole_uploaded_document(tmp_path):
+    """부장(비평가)이 받는 근거 자료 한도 = 올린 문서 전체 한도 — 문서 뒤쪽의 경력을 '문서에 없다'고 보지 않게."""
+    from core import verification
+    from core.config import load_verification
+
+    cfg = verification.critic_settings(load_verification(), load_team("career").verification)
+    assert cfg["evidence_chars"] >= career_docs.MAX_TOTAL
+    long_doc = tmp_path / "ab12cd34_긴요약.md"
+    long_doc.write_text("# 경력 요약\n" + "- 가상 문단이다. 로그 분석 규칙을 정리했다.\n" * 700 + "- 마지막 줄: 침해 대응 훈련을 이끌었다.\n",
+                        encoding="utf-8")
+    res = career_docs.run("질문", {"docs": [str(long_doc)], "docs_names": ["긴요약.md"], "career_kind": "portfolio", "role": "보안"}, None)
+    part = f"## {res.title}\n{res.content}"
+    assert "침해 대응 훈련을 이끌었다" in verification.trim_evidence([part], cfg["evidence_chars"])
+    assert "침해 대응 훈련을 이끌었다" not in verification.trim_evidence([part], 6000)  # 기본 한도였다면 잘려 나갔을 줄
+
+
 def test_tool_sample_and_portfolio_role(tmp_path):
     res = career_docs.run("질문", {"use_sample": True, "career_kind": "portfolio", "role": "기타 (아래에 직접 입력)",
                                    "role_custom": "보안 데이터 분석가"}, None)
