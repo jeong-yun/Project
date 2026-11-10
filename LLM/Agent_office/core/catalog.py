@@ -536,6 +536,22 @@ def git_diff(repo: Path, subdir: str) -> str:
     return git(repo, "diff", "--", subdir)[1]
 
 
+def pending_commit_message(diff: str) -> str:
+    """커밋 안 된 변경의 커밋 메시지 — git diff 에서 더해지거나 빠진 항목 제목 줄로 'Term: 이름 추가/수정/삭제 (외 N개)'.
+
+    같은 이름이 빠지고 더해졌으면 수정. 요약(0. Summary.md)의 '* **…:**' 줄·본문 줄은 제목이 아니라 세지 않는다.
+    """
+    signs: dict[str, set[str]] = {}  # 이름 → {'+', '-'} (나온 순서 유지)
+    for line in diff.splitlines():
+        if line[:1] in ("+", "-") and not line.startswith(("+++", "---")) and is_header(line[1:]):
+            signs.setdefault(parse_header(line[1:])[1], set()).add(line[0])
+    if not signs:
+        return "Term: 카탈로그 변경 반영"
+    name, seen = next(iter(signs.items()))
+    action = "수정" if len(seen) == 2 else "추가" if "+" in seen else "삭제"
+    return f"Term: {name} {action}" + (f" 외 {len(signs) - 1}개" if len(signs) > 1 else "")
+
+
 def git_commit(repo: Path, subdir: str, message: str) -> tuple[bool, str]:
     ok, log = git(repo, "add", "--", subdir)
     if not ok:

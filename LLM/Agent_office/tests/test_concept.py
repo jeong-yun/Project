@@ -545,3 +545,66 @@ def test_sidebar_fetch_is_cached(monkeypatch, tmp_path):
     concept_ui.refresh_git()  # 커밋·푸시 버튼으로는 다시 받지 않음
     concept_ui.fetch_remote(tmp_path)
     assert calls == [True]  # TTL 안에서는 한 번만, 터미널 질문 끔
+
+
+# ─── 사이드바: 커밋 안 된 변경 올리기 (앱을 다시 켜 채택 직후의 커밋 상자가 사라졌을 때) ──────────
+
+
+def test_pending_commit_message_names_entries_from_diff():
+    added = "+[Perf]플래시인퍼(FlashInfer) (작성일: 26.11.09)\n+1. 정의 및 개념\n+* **[Perf]FlashInfer:** 요약 줄"
+    assert cat.pending_commit_message(added) == "Term: 플래시인퍼(FlashInfer) 추가"
+    updated = ("-[Perf]X(Y) (작성일: 26.01.01)\n+[Perf]X(Y) (작성일: 26.01.01)(수정일: 26.11.10)\n"
+               "+[Gov]Z(W) (작성일: 26.11.10)")
+    assert cat.pending_commit_message(updated) == "Term: X(Y) 수정 외 1개"
+    assert cat.pending_commit_message("-[Perf]X(Y) (작성일: 26.01.01)") == "Term: X(Y) 삭제"
+    assert cat.pending_commit_message("+ - 본문 한 줄만 고침") == "Term: 카탈로그 변경 반영"
+
+
+def test_sidebar_commits_and_pushes_leftover_changes(clones):
+    from streamlit.testing.v1 import AppTest
+
+    origin, work, _ = clones
+    root = work / "Term" / "Every_day"
+    path = root / cat.CATEGORY_FILES["AI-Model"]
+    path.write_text(GOOD_ENTRY + "\n\n" + path.read_text(encoding="utf-8"), encoding="utf-8")  # 채택 후 커밋 안 함
+
+    def page(root):
+        import concept_ui
+
+        concept_ui.refresh_git()
+        concept_ui.sidebar({"concept": {"catalog_dir": root}})
+
+    at = AppTest.from_function(page, kwargs={"root": str(root)}, default_timeout=60).run()
+    assert not at.exception, at.exception
+    name = cat.parse_header(GOOD_ENTRY.splitlines()[0])[1]
+    assert at.text_input(key="msg_sidebar").value == f"Term: {name} 추가"
+    at = at.button(key="push_sidebar").click().run()
+    assert not at.exception, at.exception
+    assert _log(origin, "main") == [f"Term: {name} 추가", "첫 커밋"]
+    assert cat.git_status(work, "Term/Every_day") == ""
+
+
+def test_sidebar_and_adopted_commit_panels_do_not_double_commit(clones):
+    """채택 직후 본문 상자와 사이드바 상자가 함께 보여도 한쪽에서 커밋하면 다른 쪽은 '변경 없음' (캐시를 비우지 않아도)."""
+    from streamlit.testing.v1 import AppTest
+
+    _, work, _ = clones
+    root = work / "Term" / "Every_day"
+    path = root / cat.CATEGORY_FILES["AI-Model"]
+    path.write_text(GOOD_ENTRY + "\n\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # page 안에는 한글을 쓰지 않는다 — AppTest 가 함수 원본을 다시 읽을 때 Windows 에서 깨져 빈 화면이 된다
+    def page(root, message):
+        import concept_ui
+
+        ctx = concept_ui.sidebar({"concept": {"catalog_dir": root}})
+        concept_ui.git_panel(ctx, "run1", message)
+
+    at = AppTest.from_function(page, kwargs={"root": str(root), "message": "Term: 본문 상자"}, default_timeout=60).run()
+    assert not at.button(key="commit_sidebar").disabled and not at.button(key="commit_run1").disabled
+    at = at.button(key="commit_run1").click().run()
+    assert not at.exception, at.exception
+    at = at.run()  # 다음 화면: 사이드바 상자는 사라지고 본문 상자는 '변경 없음'
+    assert "commit_sidebar" not in [b.key for b in at.button]
+    assert at.button(key="commit_run1").disabled
+    assert _log(work) == ["Term: 본문 상자", "첫 커밋"]

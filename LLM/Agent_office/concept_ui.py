@@ -111,6 +111,7 @@ def sidebar(settings: dict) -> CatalogContext | None:
     if catalog.legacy:  # AI 를 나누기 전 카탈로그 — 옛 AI 파일 항목도 보이게
         counts += f" · AI(나누기 전) {len(catalog.by_category('AI'))}"
     st.caption(f"항목: {counts}")
+    ctx = CatalogContext(root, repo, subdir, catalog)
     if repo is None:
         st.warning("git 저장소가 아닙니다 — 반영은 되지만 커밋·푸시는 할 수 없습니다.")
     else:
@@ -122,6 +123,12 @@ def sidebar(settings: dict) -> CatalogContext | None:
         if info.last_commit:
             st.caption(f"마지막 커밋: {info.last_commit}")
         st.caption("커밋 안 된 변경 없음" if not status else f"커밋 안 된 변경:\n```\n{status}\n```")
+        if status:
+            # git_panel 안에 'git diff' 접기 상자가 있어 접기 상자 안에 넣을 수 없다 (Streamlit 은 겹쳐 접기를 막음)
+            with st.container(border=True):
+                st.markdown("**📝 커밋 안 된 변경 올리기**")
+                st.caption("앱을 다시 켜서 채택 직후의 커밋 상자가 사라졌어도 여기서 커밋하고 GitHub 에 올릴 수 있습니다.")
+                git_panel(ctx, "sidebar", cat.pending_commit_message(git_diff_status(ctx)[0]))
         if info.behind > 0:
             # GitHub 웹에서 직접 고친 것 등 — 먼저 받아 두면 푸시가 거절되지 않는다 (푸시할 때도 자동으로 합침)
             st.warning(f"⬇️ GitHub 에 이 PC 에 없는 커밋 {info.behind}개 — '⬇️ 최신 받기'를 먼저 눌러 주세요")
@@ -137,7 +144,7 @@ def sidebar(settings: dict) -> CatalogContext | None:
             refresh_git()
             _rerun_with(sync_messages(sync) or [("success", "이미 최신입니다.")])
         show_messages(st.session_state.pop(SIDEBAR_MSGS, []))
-    return CatalogContext(root, repo, subdir, catalog)
+    return ctx
 
 
 SIDEBAR_MSGS = "concept_sidebar_msgs"
