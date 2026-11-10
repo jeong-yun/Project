@@ -66,7 +66,8 @@ def lesson_rows(storage) -> list[dict]:
     return [
         {"team_id": r["team_id"], "agent_id": r["agent_id"], "kind": r["kind"], "lesson": public_lesson(r["lesson"]),
          "active": bool(r["active"]), "created_at": r["created_at"], "run_id": r["run_id"] or "",
-         **({"hits": r["hits"]} if r["hits"] > 1 else {})}  # 반복 횟수는 2회 이상일 때만 (기존 줄이 바뀌지 않게)
+         **({"hits": r["hits"]} if r["hits"] > 1 else {}),  # 반복 횟수는 2회 이상일 때만 (기존 줄이 바뀌지 않게)
+         **({"active_at": r["active_at"]} if r["active_at"] else {})}  # 켜짐을 바꾼 시각은 바꾼 적이 있을 때만
         for r in rows if r["team_id"] not in hidden
     ]
 
@@ -135,21 +136,47 @@ def export(storage, dest: Path) -> dict:
     return {"lessons": len(lessons), "decisions": len(decisions), "changed": changed}
 
 
-def import_lessons(storage, src: Path) -> int:
-    """knowledge/lessons.jsonl 의 교훈 중 DB 에 없는 것을 넣는다 (팀·에이전트·문장·작성 시각이 같으면 같은 교훈). 넣은 개수."""
+def import_lessons(storage, src: Path, aligned: list | None = None) -> int:
+    """knowledge/lessons.jsonl 의 교훈 중 DB 에 없는 것을 넣는다 (팀·에이전트·문장·작성 시각이 같으면 같은 교훈). 넣은 개수.
+
+    이미 있는 교훈은 켜짐·반복 횟수만 맞춘다 (바꾼 교훈 번호를 aligned 에 담는다):
+      켜짐 = 더 나중에 바꾼 쪽을 따른다 (active_at — 켜고 끌 때마다 남기는 시각). 파일이 더 나중이면 이 PC 를 파일에 맞추고,
+             이 PC 가 더 나중이면 그대로 둔다 (곧이어 내보내기가 파일을 이 PC 상태로 쓴다).
+             → 다른 PC 에서 합친 것(원래 교훈 끔)도, 다시 켠 것·합치기 되돌리기도 전해지고, 옛 파일이 나중 선택을 덮지 않는다.
+             두 쪽 다 시각이 없거나(이 칸이 생기기 전 기록) 같으면 꺼진 쪽 — 끄기는 지우지 않아 되돌릴 수 있다.
+      반복 횟수 = 큰 쪽 (횟수는 합칠 때만 늘어난다).
+    """
     path = src / LESSONS
     if not path.exists():
         return 0
-    have = {(r["team_id"], r["agent_id"], r["lesson"], r["created_at"]) for r in lesson_rows(storage)}  # 코멘트 뗀 문장끼리 비교
+    have: dict[tuple, list] = {}  # 코멘트 뗀 문장끼리 비교
+    for r in storage._run_sql("SELECT id, team_id, agent_id, lesson, created_at, active, hits, active_at FROM lessons", ()):
+        have.setdefault((r["team_id"], r["agent_id"], public_lesson(r["lesson"]), r["created_at"]), []).append(r)
     new, hidden = [], private_teams()
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         item = json.loads(line)
+        if item["team_id"] in hidden:
+            continue
         key = (item["team_id"], item["agent_id"], item["lesson"], item["created_at"])
-        if key not in have and item["team_id"] not in hidden:
-            have.add(key)
+        if key not in have:
+            have[key] = []
             new.append(item)
+            continue
+        for r in have[key]:
+            mine, theirs = r["active_at"] or "", item.get("active_at") or ""  # ISO 시각 글자 — 글자 비교가 곧 시간 순서
+            active, active_at = bool(r["active"]), r["active_at"]
+            if theirs > mine:
+                active, active_at = bool(item.get("active", True)), theirs
+            elif theirs == mine:
+                active = active and bool(item.get("active", True))
+            hits = max(r["hits"], int(item.get("hits", 1)))
+            if (active, hits, active_at) != (bool(r["active"]), r["hits"], r["active_at"]):
+                storage._run_sql("UPDATE lessons SET active=?, hits=?, active_at=? WHERE id=?",
+                                 (int(active), hits, active_at, r["id"]))
+                if aligned is not None:
+                    aligned.append(r["id"])
     if new:
         storage.insert_lessons_raw(new)
     return len(new)
@@ -161,7 +188,8 @@ def sync(storage, folder: Path | None = None, *, pull: bool = False) -> dict | N
     if folder is None:
         return None
     try:
-        imported = import_lessons(storage, folder) if pull else 0
-        return {**export(storage, folder), "imported": imported}
+        aligned: list = []
+        imported = import_lessons(storage, folder, aligned) if pull else 0
+        return {**export(storage, folder), "imported": imported, "aligned": len(aligned)}
     except Exception as e:  # noqa: BLE001 — 동기화 실패가 업무·결정을 막지 않게
         return {"error": f"{type(e).__name__}: {e}"}

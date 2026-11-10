@@ -608,3 +608,28 @@ def test_sidebar_and_adopted_commit_panels_do_not_double_commit(clones):
     assert "commit_sidebar" not in [b.key for b in at.button]
     assert at.button(key="commit_run1").disabled
     assert _log(work) == ["Term: 본문 상자", "첫 커밋"]
+
+
+def test_commit_takes_only_the_catalog_folder(clones):
+    """커밋은 카탈로그 폴더만 — 폴더 밖에서 미리 `git add` 해 둔 파일은 넣지 않는다 (화면 목록에 안 보이는 파일이 GitHub 에 올라가지 않게).
+
+    폴더 안에 새로 생긴 파일은 전처럼 함께 커밋한다 (새 분류 파일 — 화면 목록에 '??' 로 보인다).
+    """
+    import subprocess
+
+    _, work, _ = clones
+    root = work / "Term" / "Every_day"
+    path = root / cat.CATEGORY_FILES["AI-Model"]
+    path.write_text(GOOD_ENTRY + "\n\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+    (root / "new_file.md").write_text("새 파일\n", encoding="utf-8")
+    (work / "outside.txt").write_text("폴더 밖에서 하던 다른 작업\n", encoding="utf-8")
+    _git("add", "outside.txt", cwd=work)  # 사용자가 터미널에서 미리 add 해 둔 것
+    assert "outside.txt" not in cat.git_status(work, "Term/Every_day")  # 화면 목록에는 안 보인다
+
+    ok, log = cat.git_commit(work, "Term/Every_day", "Term: 범위 확인")
+    assert ok, log
+    files = subprocess.run(["git", "-c", "core.quotepath=false", "show", "--name-only", "--format=", "HEAD"], cwd=work,
+                           capture_output=True, text=True, encoding="utf-8").stdout.splitlines()  # 파일 이름에 공백이 있다
+    assert sorted(files) == sorted(["Term/Every_day/" + cat.CATEGORY_FILES["AI-Model"], "Term/Every_day/new_file.md"])
+    assert cat.git_status(work, "Term/Every_day") == ""  # 폴더 안은 모두 커밋됨
+    assert cat.git_status(work, "outside.txt").startswith("A ")  # 폴더 밖 파일은 add 된 채 그대로 남는다

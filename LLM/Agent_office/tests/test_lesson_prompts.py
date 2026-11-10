@@ -85,6 +85,33 @@ def test_over_budget_warning_on_screen(tmp_path):
     assert "나" * 30 in at.code[0].value and "가" * 30 not in at.code[0].value  # 최신만 들어감
 
 
+def test_screen_says_how_much_of_a_cut_comment_went_in(tmp_path):
+    """세부 코멘트가 앞부분만 들어간 교훈은 화면이 '몇 자 중 앞 몇 자만'이라고 알린다 (모두 빠진 것과 구분)."""
+
+    def page(db):
+        import prompt_ui
+        from core.config import load_models, load_ranks, load_team
+        from core.storage import Storage
+
+        prompt_ui.configure(prompt_ui.Ctx(storage=Storage(db), ranks=load_ranks(), models=load_models(), budget=500))
+        team = load_team("concept")
+        prompt_ui.budget_warning([team], "x")
+        prompt_ui.member_prompts(team, key="t", manage=True)
+
+    db = tmp_path / "runs.db"
+    text = "출처를 단다 (사람 코멘트: " + "가" * 1000 + ")"
+    [lid] = add(Storage(db), "concept", "lead", text)
+    whole = len(text) - len("출처를 단다")  # 세부 코멘트 길이
+    at = AppTest.from_function(page, args=(db,), default_timeout=30).run()
+    assert not at.exception, at.exception
+    warnings = [w.value for w in at.warning]
+    assert any("세부 코멘트가 다 못 들어간 교훈 1개" in w for w in warnings)  # 부서 화면 경고
+    assert any(f"#{lid}" in w and f"{whole:,}자 중 앞" in w and "자만 들어감" in w for w in warnings)  # 팀원 프롬프트 보기
+    at = at.radio(key="prompt_view_t").set_value(at.radio(key="prompt_view_t").options[1]).run()  # 📚 교훈 관리로
+    assert not at.exception, at.exception
+    assert any(f"#{lid}" in c.value and "세부 코멘트 앞" in c.value and "자만 들어감" in c.value for c in at.caption)
+
+
 # ─── 프롬프트 보기 = 실행 때 실제 프롬프트 ─────────────────────────────────────
 
 
@@ -237,6 +264,42 @@ def test_rules_always_fit_and_details_follow_relevance():
     assert [r["id"] for r in fit_lessons(rows, 200).cut] == [2]  # 질문이 없으면(화면) 최신 세부 코멘트부터
 
 
+def test_detail_over_budget_gets_the_leftover_room_instead_of_dropping_whole():
+    """통째로는 못 넣는 세부 코멘트도 남은 글자만큼 앞부분을 넣는다 — 전부 넣거나 전부 빼기만 하면 긴 코멘트(합친 교훈)가 통째로 사라진다."""
+    rows = [  # 최신 먼저
+        {"id": 2, "lesson": "출처를 단다 (사람 코멘트: " + "가" * 3000 + ")", "created_at": "2026-11-02", "hits": 3},
+        {"id": 1, "lesson": "짧게 쓴다 (사람 코멘트: 두 문장으로)", "created_at": "2026-11-01"},
+    ]
+    pick = fit_lessons(rows, 1000)
+    long, short = pick.kept  # 반복 많은 것이 앞
+    assert short["prompt"] == "짧게 쓴다 (사람 코멘트: 두 문장으로)" and not short["cut"]  # 통째로 들어가는 것이 먼저
+    assert long["prompt"].startswith("[중요 — 피드백 3회 반복] 출처를 단다 (사람 코멘트: 가가가")
+    assert long["cut"] and 800 < long["partial"] < 3000  # 다 못 넣었다고 알리고, 몇 자 넣었는지 남긴다
+    assert "글자 한도" in long["prompt"][-30:] and long["prompt"].endswith(")")  # 잘린 자리를 모델도 알 수 있게
+    assert 990 <= pick.chars <= 1000  # 한도를 넘지 않고, 남기지도 않는다
+    tiny = fit_lessons(rows, 150)  # 남은 자리가 너무 작으면(뜻이 안 통함) 잘라 넣지 않는다
+    assert tiny.kept[0]["prompt"] == "[중요 — 피드백 3회 반복] 출처를 단다" and tiny.kept[0]["partial"] == 0
+
+
+def test_merged_lesson_keeps_newest_comment_first_and_still_reaches_the_prompt(storage):
+    """합친 교훈의 사람 코멘트는 최신 것부터 붙인다 → 한도로 뒤가 잘려도 최신 피드백이 남는다. 합쳤다고 프롬프트에서 통째로 빠지지 않는다."""
+    from core import feedback
+    from core.feedback import merge_lessons
+
+    ids = add(storage, "t", "lead", *(f"출처를 단다 {i} (사람 코멘트: " + mark * 8000 + ")" for i, mark in enumerate("가나다")))
+    rows = {r["id"]: r for r in storage.list_lessons("t")}
+    [p] = feedback._proposals("t", [LessonGroup(agent_id="lead", ids=ids, relation="overlap", merged="출처를 단다", detail="", reason="같음")],
+                              {"lead": list(rows.values())}, {}, "model")
+    assert p.merged.index("다다다") < p.merged.index("나나나") < p.merged.index("가가가")  # 최신(다) → 오래된(가)
+    before = fit_lessons(active_lessons(storage, "t")["lead"], 20000)
+    assert sum(not r["cut"] for r in before.kept) == 2  # 합치기 전: 코멘트 3개 중 2개가 들어간다
+    merge_lessons(storage, p)
+    after = fit_lessons(active_lessons(storage, "t")["lead"], 20000)
+    [merged] = after.kept
+    assert "다" * 8000 in merged["prompt"] and "나" * 8000 in merged["prompt"]  # 합친 뒤에도 최신 2개는 온전히
+    assert merged["cut"] and after.chars > 19900  # 가장 오래된 것만 뒤가 잘린다 (전에는 23자만 들어갔다)
+
+
 def test_old_db_gets_hits_column(tmp_path):
     import sqlite3
 
@@ -246,7 +309,12 @@ def test_old_db_gets_hits_column(tmp_path):
                      " run_id TEXT, kind TEXT NOT NULL, lesson TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,"
                      " created_at TEXT NOT NULL)")
         conn.execute("INSERT INTO lessons (team_id, agent_id, kind, lesson, created_at) VALUES ('concept','lead','improve','옛 교훈','2026-10-01')")
-    assert Storage(db).list_lessons("concept")[0]["hits"] == 1  # 교훈은 그대로, 1회로
+    [row] = Storage(db).list_lessons("concept")
+    assert row["hits"] == 1 and row["active_at"] is None and row["lesson"] == "옛 교훈"  # 교훈은 그대로, 1회 · 켜짐을 바꾼 적 없음
+    Storage(db).update_lesson(row["id"], active=True)  # 이미 켜진 것을 켜면 바뀐 것이 아니다 → 시각을 남기지 않는다
+    assert Storage(db).list_lessons("concept")[0]["active_at"] is None
+    Storage(db).update_lesson(row["id"], active=False)
+    assert Storage(db).list_lessons("concept")[0]["active_at"]  # 실제로 바뀔 때만 남긴다
 
 
 def test_cleanup_panel_waits_for_click(tmp_path):
