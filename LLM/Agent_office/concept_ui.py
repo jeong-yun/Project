@@ -5,12 +5,15 @@
   - 사이드바: 카탈로그(GitHub jeong-yun/CS 의 Term/Every_day) 위치·git 상태
   - 업무 입력: ✍️ 작성(기존에 있으면 수정 · 없으면 추가 — 자동 판정) / 🗑 삭제
   - 최종 결과: 최종본·검증 로그·GitHub 요약·적용 계획 탭, 형식 검사
+    · 기존 항목 수정이면 맨 앞에 '✏️ 변경 제안' 탭 — 변경마다 고치기 전 → 고친 뒤와 근거를 보고 반영할지 고른다 (원본은 그대로,
+      고른 변경만 코드가 끼워 넣는다. 근거 글은 화면에만 — 카탈로그·커밋 메시지에는 들어가지 않는다)
   - 📜 적용된 프롬프트: 입력칸 아래·결과 위 — 스킬(IT 개념 프롬프트) 판·전문, 보낸 업무 브리프, 에이전트별 시스템 프롬프트
   - 채택 후: 📚 카탈로그 반영 → 💾 커밋 → 🚀 푸시 (GitHub 에 이 PC 에 없는 커밋이 있으면 먼저 자동 rebase, 충돌하면 되돌리고 중단)
 """
 
 import json
 import time
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -236,7 +239,9 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
         if matches:
             m0 = matches[0]
             st.info(f"기존에 있는 개념입니다 → **수정**으로 진행합니다: {ctx.label(m0.entry.name)}"
-                    + (f"  \n(다른 항목의 7.변형 소절 '{m0.detail}' 로 편입되어 있어 그 부모 항목을 수정합니다)" if m0.kind == "하위" else ""))
+                    + (f"  \n(다른 항목의 7.변형 소절 '{m0.detail}' 로 편입되어 있어 그 부모 항목을 수정합니다)" if m0.kind == "하위" else "")
+                    + "  \n원본 항목은 그대로 두고, 근거가 있거나 형식에 어긋난 곳만 변경 제안으로 받습니다. "
+                      "결과 화면에서 변경마다 근거를 읽고 반영할지 고르면 됩니다.")
             status = concept.app_status(m0.entry) if m0.entry.category == "AI-App" else None
             if status:
                 st.caption(f"🧩 Agent Office 적용 현황: {STATUS_ICON.get(status.get('status'), '❔')} — {status.get('note', '')}")
@@ -261,8 +266,9 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
     return {
         "question": question, "brief": brief, "auto_brief": False, "use_web": bool(use_web and web_available),
         "tool_inputs": {}, "extra_validators": [],
-        # 수정이면 제목 줄 날짜(기존 이력 + 오늘 수정일)를 하네스가 확인한다
-        "harness_options": {"concept_header": concept.expected_header(target)} if action == "update" and target else {},
+        # 수정이면 원본 전문(변경 제안을 여기에 적용)과 제목 줄 날짜(기존 이력 + 오늘 수정일)를 하네스·결과 화면이 쓴다
+        "harness_options": ({"concept_header": concept.expected_header(target), "concept_original": target.text}
+                            if action == "update" and target else {}),
         "concept": {"action": action, "title": name.strip(), "target": target.name if target else "",
                     "prompt": concept.prompt_version()["hash"]},
     }
@@ -349,9 +355,70 @@ def applied_prompt(question: str, brief, used: str = "", key: str = "") -> None:
 # ─── 최종 결과 · 결정 · 반영 ─────────────────────────────────────────────
 
 
+def change_options(run: dict) -> dict:
+    """형식 검사·결과 나누기에 넘길 옵션. 기존 항목 수정이면 원본 전문(concept_original)이 들어 있다.
+    앱을 다시 켜 되살린 실행은 옵션이 비어 있어 요청 글의 <original> 에서 원본을 되찾는다."""
+    opts = dict(run.get("harness_options") or {})
+    if not opts.get("concept_original"):
+        original = concept.original_of(run.get("question") or "")
+        if original:
+            opts["concept_original"] = original
+    return opts
+
+
+def read_result(content: str, run: dict) -> concept.ConceptResult:
+    """결과 나누기 — 채택한 뒤에는 사람이 확정한 최종본(<final>)을 그대로 읽는다."""
+    return concept.parse_result(content, change_options(run), adopted=run.get("status") == "adopted")
+
+
+def change_key(run: dict, content: str, i: int) -> str:
+    """변경 제안 체크 상자의 키 — 안(수정본 v1·v2 …)마다 따로 기억한다."""
+    return f"cc_{run.get('run_id', '')}_{zlib.crc32(content.encode('utf-8')):08x}_{i}"
+
+
+def picked_changes(res: concept.ConceptResult, run: dict, content: str) -> list[bool]:
+    """변경마다 반영할지 — 화면의 체크 상태. 아직 화면에 그리지 않은 안은 기본값(적용할 수 있고 근거가 있는 변경)."""
+    return [c.usable and bool(st.session_state.get(change_key(run, content, i), c.default_on)) for i, c in enumerate(res.changes)]
+
+
+def change_list(res: concept.ConceptResult, run: dict, content: str, decided: bool) -> list[bool]:
+    """✏️ 변경 제안 — 변경마다 종류 · 고치기 전 → 고친 뒤 · 근거를 보여 주고 반영할지 고르게 한다. 돌려주는 값 = 변경마다 고름 여부."""
+    if not res.changes:
+        st.info("팀이 고칠 곳을 찾지 못했습니다 — 원본 그대로입니다. 고칠 점이 있으면 아래 '💬 결과에 대해 묻기 · 수정 요청'에 적어 주세요.")
+        return []
+    if decided:
+        st.caption("팀이 냈던 변경 제안입니다 (참고용). 채택할 때 고른 변경만 반영됐고, 실제로 바뀐 곳은 아래 '변경 내용 (git diff)'에서 볼 수 있습니다.")
+    else:
+        st.caption("원본 항목은 그대로 두고, 여기서 체크한 변경만 반영합니다. 근거를 읽고 반영하지 않을 변경은 체크를 푸세요 → "
+                   "'📄 최종본'에서 결과 확인 → 아래 '👤 최종 결정'에서 채택. "
+                   "근거 글은 이 화면과 이 PC 의 실행 기록에만 남고 GitHub 에는 올라가지 않습니다.")
+    picked = []
+    for i, c in enumerate(res.changes):
+        with st.container(border=True):
+            label = f"변경 {i + 1} · {concept.CHANGE_KINDS[c.kind]}"  # '1. …' 로 쓰면 화면이 번호 목록으로 읽어 번호가 사라진다
+            if decided:
+                st.markdown(f"**{label}**")
+                on = False
+            else:
+                on = st.checkbox(f"{label} — 반영", value=c.default_on, disabled=not c.usable, key=change_key(run, content, i))
+            if c.problem:
+                st.error(f"적용할 수 없습니다 — {c.problem}. 이 부분은 원본 그대로 둡니다. 필요하면 아래 '수정 요청'으로 다시 받아 보세요.")
+            elif c.no_evidence:
+                st.warning(f"근거 없음 — {c.no_evidence}. 기본으로 반영하지 않습니다 (그래도 반영하려면 체크하세요).")
+            before, after = st.columns(2)
+            before.caption("고치기 전 (원본)")
+            before.code(c.find or "(비어 있음)", language=None, wrap_lines=True)
+            after.caption("고친 뒤")
+            after.code(c.replace or "(삭제)", language=None, wrap_lines=True)
+            st.markdown("**근거** — " + (c.evidence or "(없음)") + (f"  \n**출처** — {c.source}" if c.source else ""))
+            picked.append(bool(on) and c.usable)
+    return picked
+
+
 def result_tabs(content: str, run: dict) -> None:
-    """최종 결과를 탭으로 — 최종본(카탈로그에 들어갈 글) / 검증 로그 / GitHub 요약 / 적용 계획."""
-    res = concept.parse_result(content)
+    """최종 결과를 탭으로 — (기존 항목 수정이면 변경 제안 /) 최종본(카탈로그에 들어갈 글) / 검증 로그 / GitHub 요약 / 적용 계획."""
+    opts = change_options(run)
+    res = read_result(content, run)
     info = run.get("concept") or {}
     plan = res.plan or {}
     decided = {"add": "🆕 추가", "update": "✏️ 수정", "delete": "🗑 삭제"}.get(plan.get("action"), "판정 없음")
@@ -361,12 +428,29 @@ def result_tabs(content: str, run: dict) -> None:
                + (f" · 넣을 곳: **{plan['category']}**" if plan.get("category") else ""))
     applied_prompt(run.get("question", ""), run.get("brief"), concept.used_prompt_version(run.get("question", "")),
                    key=f"res_{run.get('run_id', '')}")
-    problems = concept.check_answer(content, run.get("harness_options"))
+    changing = res.changes is not None  # 기존 항목 수정 — 원본 + 변경 제안
+    decided = run.get("status") in ("adopted", "rejected")
+    # 채택한 수정 기록에는 사람이 확정한 <final> 이 들어 있다 — 팀이 쓴 것이 아니므로 '수정은 <final> 을 쓰지 않는다'로 다시 따지지 않는다
+    problems = [] if changing and run.get("status") == "adopted" else concept.check_answer(content, opts)
     if problems:
         st.warning("형식 검사에서 남은 문제 (채택 전 아래에서 직접 고칠 수 있습니다):\n" + "\n".join(f"- {p}" for p in problems))
-    tabs = st.tabs(["📄 최종본", "🧠 검증 로그", "🐙 GitHub 요약", "🧾 적용 계획"])
+    tabs = st.tabs(([f"✏️ 변경 제안 ({len(res.changes)})"] if changing else []) + ["📄 최종본", "🧠 검증 로그", "🐙 GitHub 요약", "🧾 적용 계획"])
+    final_entry = res.final_entry
+    if changing:
+        with tabs[0], st.container(height=420):
+            picked = change_list(res, run, content, decided)
+        tabs = tabs[1:]
+        if not decided:
+            final_entry = concept.assemble(res.original, res.changes, picked, opts.get("concept_header", ""))
     with tabs[0], st.container(height=420):
-        st.text(res.final_entry or "(최종본 없음 — <final> 블록이 없습니다)")
+        if changing and not decided:
+            st.caption(f"원본에 고른 변경 {sum(picked)}개를 반영한 글입니다. 변경 제안에 없는 곳은 원본과 글자 그대로 같고, "
+                       "제목 줄의 수정일은 코드가 붙였습니다." + ("" if any(picked) else " 고른 변경이 없어 이대로 채택하면 수정일만 바뀝니다."))
+            left = concept.check_entry(final_entry, opts.get("concept_header", ""))
+            if left:  # 원본에 원래 있던 형식 문제 — 하네스가 막지는 않지만 알려 준다
+                st.caption(f"원본에 원래 있던 형식 문제 {len(left)}건이 남아 있습니다 (이번 변경 제안으로는 고쳐지지 않음): "
+                           + " / ".join(x[:40] for x in left[:4]) + (" …" if len(left) > 4 else ""))
+        st.text(final_entry or "(최종본 없음 — <final> 블록이 없습니다)")
     with tabs[1], st.container(height=420):
         if res.change_notes:  # 최종본에서 떼어 낸 🔧수정·➕추가 표시와 이유 — 확인용 (카탈로그에는 들어가지 않음)
             notes = "\n".join(f"- {n}" for n in res.change_notes)
@@ -375,18 +459,51 @@ def result_tabs(content: str, run: dict) -> None:
     with tabs[2], st.container(height=420):
         st.markdown(res.summary_md or "(요약 없음)")
     with tabs[3], st.container(height=420):
-        st.json(plan)
+        st.json({k: v for k, v in plan.items() if k != "changes"} if changing else plan)  # 변경 제안은 첫 탭에서 본다
         for e in plan.get("edits") or []:
             st.caption(f"✏️ 다른 항목 수정 — {e.get('entry')}: {e.get('reason', '')}")
 
 
-def decision_fields(content: str, key: str) -> tuple[str, str]:
-    """채택 폼 안의 입력칸 — 최종본과 적용 계획을 고칠 수 있게 나눠 보여 준다."""
-    res = concept.parse_result(content)
-    entry = st.text_area("최종본 (카탈로그에 들어갈 글 — 필요하면 수정)", value=res.final_entry, height=300, key=f"ce_{key}")
-    plan = st.text_area("적용 계획 JSON (필요하면 수정)", value=json.dumps(res.plan, ensure_ascii=False, indent=2),
+def decision_fields(content: str, key: str, run: dict | None = None) -> tuple[str, str]:
+    """채택 폼 안의 입력칸 — 최종본과 적용 계획을 고칠 수 있게 나눠 보여 준다.
+
+    기존 항목 수정이면 최종본 = 원본 + 위 '✏️ 변경 제안'에서 고른 변경 (고름이 바뀌면 입력칸을 새 글로 다시 채운다).
+    """
+    run = run or {}
+    res = read_result(content, run)
+    entry_value, plan = res.final_entry, res.plan
+    if res.changes is not None:
+        picked = picked_changes(res, run, content)
+        entry_value = concept.assemble(res.original, res.changes, picked, change_options(run).get("concept_header", ""))
+        key += "_" + "".join("1" if on else "0" for on in picked)
+        plan = {k: v for k, v in plan.items() if k != "changes"}  # 변경 제안·근거는 위에서 고른다 (카탈로그 반영에는 쓰이지 않음)
+        shown = not res.changes or change_key(run, content, 0) in st.session_state
+        st.caption((f"위 '✏️ 변경 제안'에서 고른 변경 {sum(picked)}개" if shown else
+                    f"이 안의 변경 제안 가운데 근거가 있는 {sum(picked)}개(기본값 — 변경을 하나씩 고르려면 가장 최근 안을 고르세요)")
+                   + "를 원본에 반영한 글입니다. 여기서 직접 고치면 고친 글이 그대로 들어갑니다 "
+                     "(변경을 다시 고르면 직접 고친 내용은 지워집니다).")
+    entry = st.text_area("최종본 (카탈로그에 들어갈 글 — 필요하면 수정)", value=entry_value, height=300, key=f"ce_{key}")
+    plan = st.text_area("적용 계획 JSON (필요하면 수정)", value=json.dumps(plan, ensure_ascii=False, indent=2),
                         height=180, key=f"cp_{key}")
     return entry, plan
+
+
+def human_edited(content: str, entry: str, run: dict) -> bool:
+    """채택 기록의 '✍️ 직접 수정' 표시. 기존 항목 수정은 코드가 내놓은 기본 최종본과 다를 때 (변경을 빼거나 더 켰거나 직접 고침)."""
+    res = read_result(content, run)
+    if res.changes is None:
+        return concept.replace_final(content, entry).strip() != content.strip()
+    return entry.strip() != res.final_entry.strip()
+
+
+def followup_original(run: dict) -> str:
+    """💬 수정 요청에 붙일 원본 전문. 후속 대화는 요청 글을 앞 4천 자만 보여 줘(core/followup.py) 긴 항목은 원본이 잘리는데,
+    변경 제안의 find 는 원본에서 글자 그대로 복사해야 한다 → 근거 자료 맨 앞에 통째로 싣는다. 추가·예전 결과면 ''."""
+    original = change_options(run).get("concept_original")
+    if not original:
+        return ""
+    return ("## 기존 카탈로그 항목 — 수정 대상 원본 전문 (변경 제안 changes 의 find 는 여기서 글자 그대로 복사한다)\n"
+            f"<{concept.ORIGINAL_TAG}>\n{original}\n</{concept.ORIGINAL_TAG}>")
 
 
 def check_adoptable(entry: str, plan_text: str) -> tuple[dict | None, str]:
@@ -399,7 +516,7 @@ def check_adoptable(entry: str, plan_text: str) -> tuple[dict | None, str]:
         return None, "적용 계획 JSON 은 { … } 객체여야 합니다."
     plan, _ = concept.normalize_plan(plan)  # 사람이 고친 계획도 absorb·edits 모양을 맞춘다 (모양 문제는 결과 화면에서 이미 알림)
     if not entry.strip() and plan.get("action") != "delete":
-        return None, "최종본이 비어 있습니다 — 최종 통합안(<final> 이 있는 안)을 고르세요."
+        return None, "최종본이 비어 있습니다 — '채택할 안'에서 최종 통합안(편집장·부장의 안)을 고르세요."
     if plan.get("action") == "add" and plan.get("category") in cat.LEGACY_FILES:  # 옛 결과 — 새 항목은 넣을 AI 파일을 정해야 한다
         return None, ("AI 는 두 파일로 나뉘었습니다 — 적용 계획 JSON 의 category 를 \"AI-App\"(LLM 앱에서 바로 적용) 또는 "
                       "\"AI-Model\"(앱 적용 불가 — 모델·학습·GPU) 로 고친 뒤 채택해 주세요.")
@@ -413,6 +530,15 @@ def apply_adopted(ctx: CatalogContext, run: dict, entry: str, plan: dict) -> Non
     # 팀이 '수정'으로 판정했는데 대상 이름을 빠뜨렸거나 못 찾는 이름이면, 화면에서 판정한 기존 항목을 쓴다
     if plan.get("action") == "update" and info.get("target") and not fresh.find(str(plan.get("target", ""))):
         plan["target"] = info["target"]
+    original = change_options(run).get("concept_original")
+    if original and plan.get("action") == "update":
+        # 기존 항목 수정(원본 + 변경 제안) — 대상은 언제나 그 원본 항목이고, 원본이 그 사이 바뀌었으면 덮어쓰지 않는다
+        name = cat.parse_header(original.partition("\n")[0])[1]
+        target = fresh.find(name)
+        if target is None or target.text != original:
+            raise ValueError("카탈로그의 원본 항목이 이 결과를 만든 뒤에 바뀌었습니다 (다른 채택이나 GitHub 에서 받은 변경). "
+                             "바뀐 내용을 덮어쓰지 않도록 멈췄습니다. 같은 개념을 다시 맡겨 주세요")
+        plan["target"] = name
     run["concept_changes"] = cat.apply_plan(fresh, plan, entry)
     run["concept_edit_logs"] = concept.apply_edits(cat.Catalog.load(ctx.root), plan.get("edits") or [])
     run["concept_commit"] = f"Term: {plan.get('title') or info.get('title', '')} {concept.ACTIONS.get(plan.get('action'), '정리')}"
