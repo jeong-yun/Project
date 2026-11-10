@@ -40,7 +40,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from core import call_monitor, dept_heads, harness, llm_factory, model_recs, search, step_mode, usage, verification
-from core.agent import OrgAgent, chunk_text, with_feedback
+from core.agent import EDIT_RETRY_NOTE, OrgAgent, chunk_text, with_feedback
 from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
 from core.config import load_skills, parent_map, subtree
@@ -361,6 +361,8 @@ def build_office_graph(
         def again(feedback: str, previous: AgentAnswer) -> AgentAnswer:
             # 고칠 곳(edits) 방식이면 모델이 마지막으로 본 글(직전 결과)에 적용한다
             base = previous.content if agent.edit_mode else None
+            if agent.edit_mode and len(children) == 1 and rewrite_answer:  # edits 로 고치는 회차 (agent.review 와 같은 조건)
+                feedback = f"{feedback}\n{EDIT_RETRY_NOTE}"  # 앞서 낸 edits 는 이미 반영됐다 — 지금 글 기준으로 새로 고칠 곳만
             return agent.review(with_feedback(messages, previous.review.model_dump_json(), feedback), children, rewrite_answer, base)
 
         # 비평가(Critic): 검토 과정의 논리 비약을 채점 → 불합격이면 자가 교정

@@ -79,6 +79,16 @@ def apply_text_edits(text: str, edits) -> tuple[str, list[str]]:
     return text, skipped
 
 
+# '고칠 곳만 바꾸기'(review_mode: edit) 검토를 다시 하는 회차(부장 불합격·형식 검사 실패)에 되돌림 글 끝에 붙인다.
+# 되돌림 글은 "다시 작성하라"로 끝나는데 앞서 낸 edits 는 이미 글에 적용돼 있다 — 이 말이 없으면 모델이 예전 edits 를 다시 적어
+# 대부분 '찾지 못함'이 된다 (2026-11-10 실행 기록 14건: 첫 검토 174개 중 173개 적용, 다시 쓰는 회차 136개 중 43개).
+EDIT_RETRY_NOTE = (
+    "주의: 앞서 낸 edits 는 이미 반영됐다. 방금 네 출력의 revised_answer 가 그 edits 를 적용한 지금 글이다. "
+    "'다시 작성하라'는 전문을 다시 쓰라는 뜻이 아니다 — 지금 글을 기준으로 새로 고칠 곳만 edits 에 쓴다. "
+    "find 는 지금 글에 있는 글자 그대로 쓰고, 앞서 낸 edits 는 다시 적지 않는다 (전문은 전면 재작성이 꼭 필요할 때만)."
+)
+
+
 def with_feedback(messages: list[BaseMessage], previous_output: str, feedback: str) -> list[BaseMessage]:
     """이전 출력 + 피드백을 대화 뒤에 붙인다 — 자가 교정·하네스 재시도(Backtracking)에 쓴다.
 
