@@ -237,6 +237,20 @@ def test_head_review_call_is_monitored_and_can_be_cut(org, ranks, team, models, 
     call_monitor.reset()
 
 
+def test_followup_progress_counts_auto_fix_within_same_limit(org):
+    """부장이 추가로 고칠 점을 직접 고치는 것도 '🔁 자가 교정'(self_correct)으로 세고, 최대 단계 수는 상한(1회) 그대로다."""
+    run = waiting_run(org)
+    run["followup_pending"] = {"request": "줄여줘", "started_at": 0.0}
+    plan = plan_for(org, harness=False)
+    assert progress.followup_units(plan, run, [])[1] == 3  # 시작 전 최대: 검토 1 + (다시 고침 1 + 다시 검토 1)
+    recs = [rec("followup", org.id, end=5), rec("critic", org.id, start=6, end=9),
+            rec("self_correct", org.id, status="running", start=10)]
+    units, worst = progress.followup_units(plan, run, recs, now=20)
+    assert [u.kind for u in units] == ["followup", "critic", "self_correct"] and worst == 1  # 남은 최대 = 다시 검토 1
+    recs.append(rec("critic", org.id, start=30, end=35))
+    assert progress.followup_units(plan, run, recs, now=40)[1] == 0  # 상한에 닿음 — 더 늘지 않는다
+
+
 def test_interrupted_followup_is_recovered(org):
     run = waiting_run(org)
     live.begin_followup(run, "질문")
@@ -389,7 +403,8 @@ def test_app_progress_bar_and_background_followup(app_env):
 
 
 def test_app_shows_head_review_and_sends_extra_fixes(app_env, use_script):
-    """수정본 아래에 👔 부장 검토가 보이고, '추가로 고칠 점'을 버튼 하나로 다음 수정 요청으로 보낸다."""
+    """수정본 아래에 👔 부장 검토와 '부장이 직접 고친 점'이 보이고, 상한에 닿고도 남은 점만 버튼으로 다음 수정 요청으로 보낸다."""
+    from core.followup import HeadFix
     from tests.fakes import make_critic, make_delegation, make_review
     from tests.test_followup import edit, judge
 
@@ -403,8 +418,10 @@ def test_app_shows_head_review_and_sends_extra_fixes(app_env, use_script):
 
     script = use_script(Script(
         text="초안 [1]", Delegation=delegation, ReviewResult=make_review(verdict="approve", score=9, answer="보완안"),
-        CriticResult=make_critic(5), FollowupResult=[edit("수정본 하나"), edit("수정본 둘", ["기준일 추가"])],
-        RevisionCritic=[judge(5, extra=["표 제목에 기준일 넣기"]), judge(5)]))
+        CriticResult=make_critic(5),
+        FollowupResult=[edit("수정본 하나"), edit("수정본 셋", ["용어 통일"])], HeadFix=HeadFix(revised_answer="부장이 고친 수정본"),
+        # 첫 검토: 추가 점 → 부장이 직접 고침 → 다시 검토: 새 추가 점 (기본 상한 1회에 닿음) → 버튼 → 세 번째 검토: 없음
+        RevisionCritic=[judge(5, extra=["표 제목에 기준일 넣기"]), judge(5, extra=["용어 통일"]), judge(5)]))
     at = _open().run()
     at = at.selectbox(key="dept_task_research").set_value("general:free").run()
     at.text_area(key="q_text").input("양자컴퓨팅 요약")
@@ -417,12 +434,17 @@ def test_app_shows_head_review_and_sends_extra_fixes(app_env, use_script):
     at = wait_for(lambda: (lambda a: a if any("추가로 고칠 점" in m.value for m in a.markdown) else None)(_open().run()), 30)
     assert not at.exception, at.exception
     review = next(m.value for m in at.markdown if "추가로 고칠 점" in m.value)
-    assert "부장" in review and "5/5" in review and "합격" in review and "표 제목에 기준일 넣기" in review
+    assert "부장" in review and "5/5" in review and "합격" in review
+    fixed, left = review.split("**추가로 고칠 점**")  # 부장이 직접 고친 점 / 상한에 닿고도 남은 점
+    assert "부장" in fixed and "추가로 고칠 점 1개를 직접 고쳤습니다" in fixed and "표 제목에 기준일 넣기" in fixed
+    assert "용어 통일" in left
+    assert "표 제목에 기준일 넣기" in script.prompts("HeadFix")[0]  # 버튼을 누르지 않아도 부장이 직접 고쳤다
+    assert len(script.prompts("FollowupResult")) == 1 and not any("수정본 v2" in m.value for m in at.markdown)  # 같은 v1 안에서
     at = next(b for b in at.button if b.label.startswith("🛠")).click().run()
     assert not at.exception, at.exception
     at = wait_for(lambda: (lambda a: a if any("수정본 v2" in m.value for m in a.markdown) else None)(_open().run()), 30)
     assert not at.exception, at.exception
-    assert "표 제목에 기준일 넣기" in script.prompts("FollowupResult")[1]  # 부장이 찾은 점이 다음 수정 요청으로 갔다
+    assert "용어 통일" in script.prompts("FollowupResult")[1]  # 남은 점이 다음 수정 요청으로 갔다
     assert not any(b.label.startswith("🛠") for b in at.button)  # 고칠 점이 없으면 버튼도 없다
 
 

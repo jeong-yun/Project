@@ -11,7 +11,8 @@
     불합격으로 🔁 자가 교정이 시작되면 그때마다 (교정 1 + 다시 비평 1) 을 더한다 → 남은 단계가 늘어난다
   🧪 하네스 재작성이 실제로 일어나면 그만큼 더한다
   '최대' = 비평이 매번 불합격하고 하네스가 매번 실패할 때 (max_self_corrections · max_retries 끝까지)
-  💬 추가 질문(결정 전 문의·수정) 중에는 그 한 번만 센다 (답 1 + 하네스 실패 시 다시 고침)
+  💬 추가 질문(결정 전 문의·수정) 중에는 그 한 번만 센다 (답 1 + 하네스 실패 시 다시 고침 + 수정본이면 부장 검토,
+    불합격이면 팀장이 다시 고침 · 추가로 고칠 점이 있으면 부장이 직접 고침 → 다시 검토 — followup_units)
 
 남은 시간 (추정)
   단계 종류·모델마다 '걸린 시간의 중앙값'을 쓴다 — 같은 팀의 지난 실행 기록(runs.db 의 ⏱ 호출 기록) + 이번 실행에서 끝난 호출.
@@ -297,9 +298,12 @@ def build_units(plan: Plan, run: dict, records, now: float | None = None) -> tup
 
 
 def followup_units(plan: Plan, run: dict, records, now: float | None = None) -> tuple[list[Unit], int]:
-    """💬 추가 질문 하나 — 팀장 답 1번 (+ 하네스 실패로 다시 고친 만큼) + 수정본이면 👔 부장 검토 (+ 불합격이면 다시 고침·다시 검토).
+    """💬 추가 질문 하나 — 팀장 답 1번 (+ 하네스 실패로 다시 고친 만큼) + 수정본이면 👔 부장 검토
+    (+ 불합격이면 팀장이 다시 고침, 합격인데 추가로 고칠 점이 있으면 부장이 직접 고침 → 부장이 다시 검토 — 둘을 합쳐 max_self_corrections 번까지).
 
     수정본인지는 팀장 답이 와야 알므로, 부장 검토는 시작된 뒤에 단계로 세고 그 전에는 '최대'(worst)에만 넣는다.
+    부장의 직접 수정도 팀장의 다시 고침과 같은 종류(self_correct)로 기록되고 상한을 함께 쓰므로 '최대' 계산은 하나다.
+    (남은 시간 추정은 그 단계를 팀장 모델의 기록으로 어림한다 — 부장 모델이 다르면 조금 어긋날 수 있다.)
     """
     now = time.time() if now is None else now
     started_at = (run.get("followup_pending") or {}).get("started_at", 0.0)
@@ -312,7 +316,7 @@ def followup_units(plan: Plan, run: dict, records, now: float | None = None) -> 
              for r in recs] or [Unit("followup", plan.root_id, lead)]
     kinds = [u.kind for u in units]
     worst = max(0, plan.max_retries - (kinds.count("followup") - 1)) if plan.harness else 0
-    if plan.critic_enabled:  # 검토 1 + (다시 고침 1 + 다시 검토 1) × 상한
+    if plan.critic_enabled:  # 검토 1 + (팀장 다시 고침 또는 부장 직접 수정 1 + 다시 검토 1) × 상한
         worst += (max(0, 1 + plan.max_self_corrections - kinds.count("critic"))
                   + max(0, plan.max_self_corrections - kinds.count("self_correct")))
     return units, worst
