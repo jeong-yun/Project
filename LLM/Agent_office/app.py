@@ -1434,6 +1434,12 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
     final, version = current_result(run)  # 결정 전에 수정을 요청했으면 가장 최근 수정본
     if final and run["status"] in DECIDED:
         final, version = final_answer(run), ""
+        decision = run.get("decision")
+        if decision and decision.action == "adopt" and decision.final_answer.strip():
+            # 채택한 뒤에는 채택한 내용(수정본·직접 고친 글)을 보여 준다 — 원래 결과로 되돌리면 '수정이 반영 안 됨'으로 보인다
+            final = final.model_copy(update={"node_id": decision.adopted_node_id or final.node_id,
+                                             "content": decision.final_answer})
+            version = "✅ 채택한 안"
     if final:
         st.markdown(f"#### 📌 최종 결과 — {name_of(final.node_id)}" + (f" · {version}" if version else ""))
         if is_concept:
