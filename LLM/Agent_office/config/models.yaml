@@ -127,6 +127,8 @@ utility:
 # 비용·한도: claude_cli 는 청구는 없지만 구독 사용 한도를 쓴다 (사람이 쓰는 Claude·Claude Code 와 공유, 동시 호출 1개).
 #   업무 하나에 비평 1번 + 불합격이면 (자가 교정 + 다시 비평) × 최대 max_self_corrections 번, 그리고 팀이 둘 이상인 부서는
 #   🧭 팀 배정 1번 (모델 1회 호출 — 실패할 때만 낱말 비교). 한도가 걱정되면 화면에서 부장 모델을 gpt-5.4 등으로 고르면 된다.
+#   💬 수정 요청: 수정본마다 검토 1번 + 추가로 고칠 점이 있으면 (부장 직접 수정 + 다시 검토), 불합격이면 (팀장 다시 고침 + 다시 검토)
+#   — 둘을 합쳐 최대 max_self_corrections 번. 부장의 직접 수정도 이 모델(구독 한도)을 쓴다.
 critic:
   primary:  { provider: claude_cli, model: claude-opus-5-5 }
   fallback:
