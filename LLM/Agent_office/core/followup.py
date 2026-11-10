@@ -8,6 +8,7 @@
   👔 수정본은 그 팀이 속한 부서의 부장(비평가)이 마지막으로 검토한다 (질문에 답만 했으면 부르지 않는다) — HeadReview
      · 본 업무의 비평(core/workflow.py integrate)과 같은 부장 모델·관점·검토 기준·비평 설정(꺼져 있으면 부르지 않음)을 쓴다
      · 보는 것 ① 사람의 수정 요청이 제대로 반영됐는가 (지적) ② 요청과 별개로 수정본에서 추가로 고칠 점 (extra_fixes)
+     · 긴 글은 비평 글자 한도까지만 넣되, <final> 최종본부터 끝까지는 자르지 않고 그 앞의 검증 로그만 줄인다 (verification.trim_keep_final)
      · 불합격이면 팀장이 지적을 받아 다시 고친다 (고친 뒤 하네스도 다시) → 부장이 다시 검토
      · 합격인데 '추가로 고칠 점'이 있으면 부장이 그 점들만 직접 고친다 (HeadFix — 완성 전문, 하네스는 검사만) → 부장이 다시 검토
        - 사람에게 버튼으로 묻지 않는다 (2026-11-10 사용자 요청: 추가로 고칠 점이 나올 때마다 버튼을 누르기 불편하다 → 부장이 고치고 다시 검토)
@@ -151,6 +152,7 @@ def revision_messages(head: HeadReview, question: str, before: str, request: str
 
     head_fixed = 앞선 검토에서 부장이 짚어 직접 고친 '추가로 고칠 점'. 다시 검토도 같은 기준의 온전한 검토이고,
     이 목록은 그 수정으로 바뀐 곳을 '요청과 무관한 변경'으로 잘못 지적하지 않게 알려 주는 것뿐이다.
+    글이 한도(input_chars·answer_chars)보다 길면 줄이되, <final> 최종본부터 끝까지는 통째로 넣는다 (verification.trim_keep_final).
     """
     cfg, rules = head.cfg, head.cfg.get("rules")
     system = "\n".join(
@@ -178,11 +180,11 @@ def revision_messages(head: HeadReview, question: str, before: str, request: str
     human = "\n\n".join(
         [
             f"[원래 질문]\n{question[:QUESTION_CHARS]}" + ("…" if len(question) > QUESTION_CHARS else ""),
-            f"[수정 전 결과]\n{verification.trim_middle(before, cfg['input_chars'])}",
+            f"[수정 전 결과]\n{verification.trim_keep_final(before, cfg['input_chars'])}",
             f"[사용자의 수정 요청]\n{request}",
             "[팀장이 밝힌 바뀐 점]\n" + ("\n".join(f"- {c}" for c in out.changes) or f"- {out.reply}"),
             *(["[부장이 직접 고친 점]\n" + "\n".join(f"- {p}" for p in head_fixed)] if head_fixed else []),
-            f"[수정본]\n{verification.trim_middle(out.revised_answer.strip(), cfg['answer_chars'])}",
+            f"[수정본]\n{verification.trim_keep_final(out.revised_answer.strip(), cfg['answer_chars'])}",
             "[검토 기준]\n" + ("\n".join(f"- {c}" for c in head.criteria) or "- (없음)"),
             *([f"[근거 자료 — 데이터 툴·웹 검색 (숫자·출처·날짜 대조용)]\n{evidence}"] if evidence else []),
         ]

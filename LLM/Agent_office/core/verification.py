@@ -26,6 +26,7 @@ DEFAULT_CRITIC = {
     "evidence_chars": 6000,  # 비평가에게 넘기는 근거 자료(데이터 툴·웹 검색) 최대 글자 수
     # 비평가에게 넘기는 검토 대상(하위 결과 모음)·수정 답변 최대 글자 수 — 팀장 통합본(출력 4만 토큰)과 하위 결과를
     # 그대로 넘기면 입력이 너무 커져 느리고 멈췄다 (2026-11-04 실측). 앞·뒤를 남기고 가운데를 줄인다.
+    # 💬 수정본 검토(core/followup.py)는 같은 한도로 줄이되 <final> 최종본은 자르지 않는다 (trim_keep_final).
     "input_chars": 16000,
     "answer_chars": 24000,
 }
@@ -59,6 +60,26 @@ def trim_middle(text: str, budget: int) -> str:
     head = budget * 2 // 3
     tail = budget - head
     return f"{text[:head].rstrip()}\n…(가운데 {len(text) - budget:,}자 생략 — 비평 입력 한도)…\n{text[-tail:].lstrip()}"
+
+
+def trim_keep_final(text: str, budget: int) -> str:
+    """trim_middle 과 같되, 글에 <final> 이 있으면 거기부터 끝까지는 통째로 두고 그 앞(검증 로그)만 줄인다.
+
+    개념 편집 팀 결과는 검증 로그 → <final> 최종본 → 요약·적용 계획 순(core/concept.py 출력 계약)이라, 가운데를 줄이면
+    사람이 실제로 받는 최종본이 빠진다 (2026-11-10 실제 채택본 31,524자: 최종본의 55% 가 빠졌다).
+    <final> 부터 끝까지가 budget 보다 길면 앞부분을 통째로 빼고 최종본은 그대로 둔다 (이때만 budget 을 넘는다).
+    <final> 이 없는 글(다른 팀)은 trim_middle 그대로다.
+    """
+    start = text.lower().find("<final>")
+    if budget <= 0 or len(text) <= budget or start < 0:
+        return trim_middle(text, budget)
+    front, kept = text[:start], text[start:]
+    left = budget - len(kept)
+    if left > 0:
+        front = trim_middle(front, left)
+    elif front:
+        front = f"…(최종본 앞부분 {len(front):,}자 생략 — 비평 입력 한도)…"
+    return f"{front.rstrip()}\n{kept}" if front else kept
 
 
 def trim_evidence(parts: list[str], budget: int, what: str = "근거 자료") -> str:
