@@ -85,6 +85,33 @@ def test_over_budget_warning_on_screen(tmp_path):
     assert "나" * 30 in at.code[0].value and "가" * 30 not in at.code[0].value  # 최신만 들어감
 
 
+def test_screen_says_how_much_of_a_cut_comment_went_in(tmp_path):
+    """세부 코멘트가 앞부분만 들어간 교훈은 화면이 '몇 자 중 앞 몇 자만'이라고 알린다 (모두 빠진 것과 구분)."""
+
+    def page(db):
+        import prompt_ui
+        from core.config import load_models, load_ranks, load_team
+        from core.storage import Storage
+
+        prompt_ui.configure(prompt_ui.Ctx(storage=Storage(db), ranks=load_ranks(), models=load_models(), budget=500))
+        team = load_team("concept")
+        prompt_ui.budget_warning([team], "x")
+        prompt_ui.member_prompts(team, key="t", manage=True)
+
+    db = tmp_path / "runs.db"
+    text = "출처를 단다 (사람 코멘트: " + "가" * 1000 + ")"
+    [lid] = add(Storage(db), "concept", "lead", text)
+    whole = len(text) - len("출처를 단다")  # 세부 코멘트 길이
+    at = AppTest.from_function(page, args=(db,), default_timeout=30).run()
+    assert not at.exception, at.exception
+    warnings = [w.value for w in at.warning]
+    assert any("세부 코멘트가 다 못 들어간 교훈 1개" in w for w in warnings)  # 부서 화면 경고
+    assert any(f"#{lid}" in w and f"{whole:,}자 중 앞" in w and "자만 들어감" in w for w in warnings)  # 팀원 프롬프트 보기
+    at = at.radio(key="prompt_view_t").set_value(at.radio(key="prompt_view_t").options[1]).run()  # 📚 교훈 관리로
+    assert not at.exception, at.exception
+    assert any(f"#{lid}" in c.value and "세부 코멘트 앞" in c.value and "자만 들어감" in c.value for c in at.caption)
+
+
 # ─── 프롬프트 보기 = 실행 때 실제 프롬프트 ─────────────────────────────────────
 
 
