@@ -1055,6 +1055,21 @@
   4. 근거가 부족하면 다시 찾기 (에이전틱 RAG·Self-RAG) — 비용: 부족할 때만 보조 모델 +1·검색 +1. 측정: evals 사실 항목 통과율·비평가 '근거 부족' 지적 수. 파일: `core/search.py`
   5. 교훈·지시문 자동 채점 (DSPy) — 평가 세트로 후보를 채점해 좋은 것만 남김. 비용: 실제 모델 평가 실행(사용자 동의 필요). 측정: evals 전후. 파일: `evals/run_eval.py`·`core/feedback.py`
 
+## 2026-11-10
+
+**개념 카탈로그: 앱을 다시 켜도 커밋 안 된 변경을 사이드바에서 올리기**
+- 배경: 2026-11-09 채택한 '플래시인퍼(FlashInfer)'가 카탈로그 파일에만 반영되고 커밋되지 않은 채 남았다. 커밋·푸시 상자는 채택 직후 그 실행 화면에만 있어
+  앱을 다시 켜면 사라지고, 사이드바는 '커밋 안 된 변경' 목록만 보여 앱에서 올릴 방법이 없었다 (사용자는 "사라졌다"고 느낌, 터미널에서 대신 올림 — CS 750b972).
+- 작업:
+  - `core/catalog.py` `pending_commit_message(diff)` — git diff 에서 더해지거나 빠진 항목 제목 줄(`is_header`·`parse_header`)로
+    채택 직후와 같은 형식 `Term: 이름 추가/수정/삭제` (빠지고 더해졌으면 수정, 여럿이면 '외 N개', 제목 줄이 없으면 'Term: 카탈로그 변경 반영').
+  - `concept_ui.sidebar`: 커밋 안 된 변경이 있으면 테두리 상자 '📝 커밋 안 된 변경 올리기' + 안내 한 줄 + 기존 `git_panel` (키 `sidebar`).
+    `git_panel` 안에 'git diff' 접기 상자가 있어 접기 상자 대신 테두리 상자를 씀(Streamlit 은 접기 상자 겹치기를 막음). diff 는 기존 캐시(`git_diff_status`).
+  - 본문(채택 직후)과 사이드바 상자가 함께 보여도 한쪽에서 커밋하면 다음 화면에서 사이드바 상자는 사라지고 본문 상자는 '커밋하지 않은 변경 없음'(커밋 버튼 꺼짐).
+- 알게 된 것: `AppTest.from_function` 에 넘기는 함수 안에 한글(문자열·주석)이 있으면 Windows 에서 오류 없이 빈 화면이 된다 → 한글은 kwargs 로 넘김.
+- 성과: 새 테스트 3건(커밋 메시지 만들기, 사이드바에서 커밋·푸시해 임시 GitHub 역할 저장소에 올라감, 두 상자 중복 커밋 없음 — 모두 임시 git 저장소).
+- 아직: 실행 중인 앱 화면에서 확인 안 함. 사이드바에서 커밋·푸시하면 결과 문구는 바로 나오지만 위의 '커밋 안 된 변경' 목록은 다음 화면부터 바뀐다(본문 상자와 같은 동작).
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

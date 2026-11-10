@@ -582,3 +582,29 @@ def test_sidebar_commits_and_pushes_leftover_changes(clones):
     assert not at.exception, at.exception
     assert _log(origin, "main") == [f"Term: {name} 추가", "첫 커밋"]
     assert cat.git_status(work, "Term/Every_day") == ""
+
+
+def test_sidebar_and_adopted_commit_panels_do_not_double_commit(clones):
+    """채택 직후 본문 상자와 사이드바 상자가 함께 보여도 한쪽에서 커밋하면 다른 쪽은 '변경 없음' (캐시를 비우지 않아도)."""
+    from streamlit.testing.v1 import AppTest
+
+    _, work, _ = clones
+    root = work / "Term" / "Every_day"
+    path = root / cat.CATEGORY_FILES["AI-Model"]
+    path.write_text(GOOD_ENTRY + "\n\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # page 안에는 한글을 쓰지 않는다 — AppTest 가 함수 원본을 다시 읽을 때 Windows 에서 깨져 빈 화면이 된다
+    def page(root, message):
+        import concept_ui
+
+        ctx = concept_ui.sidebar({"concept": {"catalog_dir": root}})
+        concept_ui.git_panel(ctx, "run1", message)
+
+    at = AppTest.from_function(page, kwargs={"root": str(root), "message": "Term: 본문 상자"}, default_timeout=60).run()
+    assert not at.button(key="commit_sidebar").disabled and not at.button(key="commit_run1").disabled
+    at = at.button(key="commit_run1").click().run()
+    assert not at.exception, at.exception
+    at = at.run()  # 다음 화면: 사이드바 상자는 사라지고 본문 상자는 '변경 없음'
+    assert "commit_sidebar" not in [b.key for b in at.button]
+    assert at.button(key="commit_run1").disabled
+    assert _log(work) == ["Term: 본문 상자", "첫 커밋"]
