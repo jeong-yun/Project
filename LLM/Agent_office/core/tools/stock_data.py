@@ -4,6 +4,7 @@
   1) 종목 찾기: 업무 입력(stock, holdings)과 질문에서 종목을 찾아 Yahoo 티커로 바꾼다.
      - 6자리 숫자 코드면 코드로 바로 (005930 → 005930.KS, 없으면 .KQ)
      - 이름이면 보조 모델이 티커를 추정 (삼성전자 → 005930.KS) → 실제 조회로 검증, 실패 시 .KS/.KQ 를 바꿔 재시도
+       (확실히 모르면 비워 두게 하고 그 종목은 조회하지 않는다. 조회한 종목은 '입력 → 조회된 종목'을 근거 자료에 보여 준다)
   2) 1년 일봉을 받아 기준일 종가·기간별 수익률·52주 고저·이동평균·변동성을 '코드로' 계산
   3) 종목 식별(시장·업종), 재무 지표(EPS·ROE·이익률·부채비율·배당성향 등), 애널리스트 컨센서스(목표가)
      - 컨센서스 평균이 현재가와 너무 멀거나 최고·최저 차이가 크면 '극단값 주의' 표시 (평균만 믿지 않게)
@@ -39,7 +40,8 @@ class TickerItem(BaseModel):
     query: str = Field(description="사용자가 쓴 종목 이름 또는 코드 그대로")
     name: str = Field(description="정식 종목명")
     ticker: str = Field(
-        description="Yahoo Finance 티커. 한국 코스피는 6자리코드.KS, 코스닥은 6자리코드.KQ, 미국은 심볼 (예: 005930.KS, 247540.KQ, AAPL)"
+        description="Yahoo Finance 티커. 한국 코스피는 6자리코드.KS, 코스닥은 6자리코드.KQ, 미국은 심볼 (예: 005930.KS, 247540.KQ, AAPL). "
+        "확실히 모르면 빈 문자열"
     )
     quantity: float = Field(description="보유 수량이 적혀 있으면 그 수, 없으면 0")
     buy_price: float = Field(description="평균 매입가가 적혀 있으면 그 값(숫자만), 없으면 0")
@@ -97,6 +99,7 @@ def resolve(question: str, inputs: dict, models: ModelsConfig) -> tuple[list[Tic
         SystemMessage(
             "너는 증권 데이터 담당이다. 입력에 나온 종목마다 Yahoo Finance 티커를 찾는다. "
             "한국 코스피는 '6자리코드.KS', 코스닥은 '6자리코드.KQ', 미국 주식은 심볼을 쓴다. "
+            "티커는 확실히 아는 종목만 적는다. 확실하지 않으면 지어내지 말고 ticker 를 빈 문자열로 둔다. "
             "보유 수량·평균 매입가가 적혀 있으면 숫자만 뽑고, 없으면 0 으로 둔다."
         ),
         HumanMessage(text),
@@ -176,6 +179,8 @@ def summarize(item: TickerItem, history, info: dict) -> str:
     sector = " / ".join(x for x in (info.get("sector"), info.get("industry")) if x) or "확인 불가"
     text = (
         f"### {name} ({item.ticker})\n"
+        # 보조 모델이 다른 회사 코드를 적었을 때 사람·모델이 알아볼 수 있게 입력과 조회 결과를 나란히 보여 준다
+        f"입력 '{item.query}' → 조회된 종목 {name} ({item.ticker}) — 입력한 종목과 다른 회사면 아래 숫자를 쓰지 말고 '종목 확인 필요'라고 밝힌다\n"
         f"[종목 식별] {name} / {item.ticker.split('.')[0]} / {market} / 업종 {sector} (기준일 {last_date})\n\n"
         f"| 항목 | 값 |\n|---|---|\n{table}"
     )
@@ -275,7 +280,7 @@ def position_block(item: "Holding", last: float, currency: str) -> str:
             f"{_num(limit, currency)} (현재가로 약 {int(limit // last):,}주)"
         )
     elif weight <= 0:
-        text += "\n- 비중: 미정 (전체 예산 대비 비중을 모르므로 추가 매수 한도는 보수적으로 제시해야 한다)"
+        text += "\n- 비중: 미정 (전체 예산 대비 비중을 모르므로 추가 매수 한도 금액은 계산할 수 없다 — 금액을 만들지 말고 비율로만 쓴다)"
     rows = []
     for ratio in (0.25, 0.5, 1.0):
         add = max(round(item.quantity * ratio), 1)
@@ -297,6 +302,9 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
         return None
     sections, options = [], {}
     for item in items:
+        if not item.ticker.strip():  # 보조 모델이 코드를 확실히 몰라 비워 둔 종목 — 다른 회사 숫자가 근거가 되지 않게 조회하지 않는다
+            notes.append(f"'{item.query}' 종목 코드를 확실히 찾지 못해 시세를 조회하지 않음 — 6자리 종목코드나 정식 종목명으로 다시 입력하세요")
+            continue
         history = _load(item)
         if len(history) == 0:
             notes.append(f"'{item.query}' 시세를 찾지 못함 (티커 {item.ticker}) — 종목명·코드를 확인하세요")
@@ -311,7 +319,7 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     header = (
         f"출처: Yahoo Finance 일별 시세 (조회일 {date_label(today())}). 지연·누락이 있을 수 있으며 "
         "아래 숫자는 코드로 계산한 값이므로 그대로 인용한다 (직접 다시 계산하지 않는다). "
-        f"인용할 때는 [Yahoo Finance, {today().isoformat()}] 처럼 출처와 기준일을 붙인다."
+        "인용할 때는 '(시장 데이터, 기준일)'처럼 출처와 기준일을 붙인다 — 기준일은 각 종목 표의 '기준일 종가'에 적힌 날짜(마지막 거래일)이고 조회일이 아니다."
     )
     content = header + "\n\n" + "\n\n".join(sections) if sections else ""
     return ToolResult(
