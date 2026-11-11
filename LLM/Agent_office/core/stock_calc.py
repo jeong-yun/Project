@@ -74,8 +74,8 @@ def json_blocks(answer: str) -> list:
 
 
 def find_block(answer: str, key: str) -> dict | None:
-    """key 를 가진 첫 JSON 객체."""
-    return next((b for b in json_blocks(answer) if isinstance(b, dict) and key in b), None)
+    """key 를 가진 마지막 JSON 객체 — 요약 블록은 '답변 맨 끝'에 쓰게 되어 있어, 통합본에 하위 결과의 블록이 섞여도 맨 끝 것을 검산한다."""
+    return next((b for b in reversed(json_blocks(answer)) if isinstance(b, dict) and key in b), None)
 
 
 def _num(x) -> float | None:
