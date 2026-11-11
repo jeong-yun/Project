@@ -569,9 +569,9 @@ def review_problems(text: str, course: learning.Course | None, count: object = N
         return problems
     for qid, ref in review_refs(text).items():
         if not ref:
-            problems.append(f"{qid}: ref(복습한 단어·표현)가 없다 — 근거 자료 '복습 대상'의 글을 그대로 쓴다")
+            problems.append(f"{qid}: ref(복습한 단어·표현)가 없다 — 근거 자료 '복습 대상' 줄에서 '=' 앞의 단어·표현만 글자 그대로 쓴다")
         elif course is not None and find_item(course, ref) is None:
-            problems.append(f"{qid}: ref '{ref}' 가 과목 단어장·표현에 없다 — '복습 대상'의 글을 글자 그대로 쓴다")
+            problems.append(f"{qid}: ref '{ref}' 가 과목 단어장·표현에 없다 — '복습 대상' 줄에서 '=' 앞의 단어·표현만 글자 그대로 쓴다")
     return problems
 
 
@@ -653,7 +653,7 @@ def _review_lines(course: learning.Course, key: str, limit: int = 15) -> list[st
     due = [it for k, it in due_items(course, None, 100) if k == key][:limit]
     if not due:
         return []
-    return ["", "**🔁 복습 대상 (먼저 낼 것부터 — 복습 퀴즈의 ref 는 아래 글을 그대로)**",
+    return ["", "**🔁 복습 대상 (먼저 낼 것부터 — 복습 퀴즈의 ref 는 아래 줄에서 '=' 앞의 단어·표현만 글자 그대로)**",
             *(f"- {it.get(front)} = {it.get('meaning')}" + (" (외움 — 오래됨)" if it.get("known") else "") for it in due)]
 
 

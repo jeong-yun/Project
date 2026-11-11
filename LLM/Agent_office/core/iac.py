@@ -886,6 +886,13 @@ def findings_table(scan: ScanResult, framework: str) -> str:
     return "\n".join(lines)
 
 
+def fix_guide(scan: ScanResult) -> str:
+    """발견된 규칙마다 '고치는 법' 한 줄 (config/iac_rules.yaml 의 fix) — 수정안 재검사가 어떤 값을 보는지 모델이 추측하지 않게."""
+    found = dict.fromkeys(f.rule for f in sorted(scan.findings, key=lambda x: (-severity_rank(x.severity), x.id)))
+    lines = [f"- {rule}: {rules()[rule]['fix']}" for rule in found if rules().get(rule, {}).get("fix")]
+    return "### 규칙별 고치는 법 (재검사가 보는 값)\n" + "\n".join(lines) if lines else ""
+
+
 def files_bundle(files: dict[str, str]) -> str:
     """원본 파일들 — 데이터 표시선으로 감싼다 (안의 문장이 지시처럼 보여도 따르지 않게). diff 는 이 원문 기준으로."""
     parts = []

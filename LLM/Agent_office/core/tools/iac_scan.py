@@ -65,8 +65,17 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
         return None
     framework = str(inputs.get("framework") or "").strip() or FRAMEWORKS[0]
     files, source, notes = collect(inputs)
+    # 경고(notes)는 화면에만 간다 — 모델이 알아야 하는 것(검사하지 못한 글·뺀 파일)은 근거 자료 본문에도 넣는다
+    skipped = [n for n in notes if "빼고 검사했습니다" in n]
+    warning = ("### ⚠️ 너무 길어 빼고 검사했다 — 아래 파일의 발견을 지어내지 않는다 (본문에 '검사하지 못한 파일'로 적는다)\n"
+               + "\n".join(f"- {n}" for n in skipped)) if skipped else ""
     if not files:
-        return ToolResult(tool="iac_scan", title="🏗️ IaC 점검", content="", notes=notes or ["검사할 IaC 파일이 없습니다."])
+        pasted = str(inputs.get("iac") or "").strip()
+        if pasted:  # 종류를 몰라 규칙 검사를 못 한 글 — 질문에는 넣지 않으므로 여기서 '데이터' 표시선 안에 보여 준다
+            warning = ("### ⚠️ 붙여 넣은 글의 종류(Terraform·쿠버네티스·Dockerfile)를 몰라 코드 규칙으로 검사하지 못했다\n"
+                       "발견 번호(F01…)를 지어내지 않는다. 글에서 보이는 위험은 '참고'로만 쓰고, 파일 이름(main.tf · deploy.yaml · Dockerfile)을 "
+                       "적어 다시 맡겨 달라고 안내한다.\n\n" + iac.files_bundle({"붙여 넣은 글": pasted[: iac.MAX_FILE_CHARS]}))
+        return ToolResult(tool="iac_scan", title="🏗️ IaC 점검", content=warning, notes=notes or ["검사할 IaC 파일이 없습니다."])
     scan = iac.scan_files(files)
     counts = scan.counts()
     sev = " · ".join(f"{s} {counts[s]}" for s in reversed(iac.SEVERITIES) if counts[s])
@@ -74,6 +83,7 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
              + (f" ({sev})" if sev else "")
              + "\n발견 목록·ID·심각도·통제 대응은 코드가 정했다. 설명과 수정안은 이 표의 ID(F01…)로만 가리킨다.\n\n"
              + (iac.findings_table(scan, framework) if scan.findings else "발견 없음")]
+    parts += [p for p in (iac.fix_guide(scan), warning) if p]
     if scan.errors:
         parts.append("### 구문 오류 (이 파일은 규칙 검사를 못 했다)\n" + "\n".join(f"- {f}: {e}" for f, e in scan.errors.items()))
     use_external = inputs.get("external", True) is not False and os.getenv("AGENT_OFFICE_IAC_EXTERNAL", "1") != "0"

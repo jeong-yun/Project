@@ -24,6 +24,12 @@ def results_dir() -> Path:
     return BASE_DIR / load_settings().get("storage", {}).get("results_dir", "results")
 
 
+def _no_drawing(note: str, standards: str) -> ToolResult:
+    """도면을 못 구했다 — 경고(notes)는 화면에만 가므로, 모델이 알아야 할 말은 근거 자료 본문에도 넣는다."""
+    return ToolResult(tool="floorplan_input", title="📐 도면 자료 (읽기 실패)", notes=[note],
+                      content=f"**도면을 읽지 못했다** ({note}) 사용자의 요청 문장만으로 새로 설계하고, 그 사실을 가정(assumptions)에 적어라.\n\n{standards}")
+
+
 def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     standards = "### 📏 방 종류별 최소 치수 (코드 검증 기준)\n" + standards_table()
     path = Path(str(inputs["attachment"])) if inputs.get("attachment") else None
@@ -32,12 +38,11 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
         path = latest_saved_layout(results_dir())
         source_name = path.name if path else ""
         if path is None:
-            return ToolResult(tool="floorplan_input", title="📐 도면 자료", content=standards,
-                              notes=["저장된 설계안(results/design/*_layout.json)이 없습니다 — 먼저 평면도를 만들어 채택하세요."])
+            return _no_drawing("저장된 설계안(results/design/*_layout.json)이 없습니다 — 먼저 평면도를 만들어 채택하세요.", standards)
     if path is None:
         return ToolResult(tool="floorplan_input", title="📏 설계 기준표", content=standards)
     if not path.exists():
-        return ToolResult(tool="floorplan_input", title="📐 도면 자료", content=standards, notes=[f"첨부 파일을 찾지 못했습니다: {path}"])
+        return _no_drawing(f"첨부 파일을 찾지 못했습니다: {path}", standards)
 
     result = import_file(path, models)
     lines = [f"- 첨부: `{source_name}` → 읽은 방법: **{result.method}**"]

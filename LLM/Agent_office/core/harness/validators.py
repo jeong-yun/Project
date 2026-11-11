@@ -310,7 +310,7 @@ class FloorplanValidator(Validator):
                 "레이아웃 검증 실패: " + " / ".join(report.errors[:8])
                 + (" (참고: " + " / ".join(hints + metrics) + ")" if hints or metrics else "")
                 + " — 좌표를 직접 고치기 어렵다면 그 층의 rect 를 모두 빼고 방 목록·목표 면적·구역(zone)·이웃(adjacent)·typology 만 써서 "
-                "코드(배치 엔진)가 배치하게 하라."
+                "코드(배치 엔진)가 배치하게 하라. 도면 수정 업무라면 본문과 needs_check 에 '그 층은 코드가 다시 배치함'이라고 적는다."
             )
         floors = len(layout.floors)
         rooms = sum(len(f.rooms) for f in layout.floors)
@@ -366,7 +366,8 @@ class EvidenceQuotesValidator(Validator):
             problems.append(f"인용 없이 판정한 항목 {len(result.no_evidence)}건: {', '.join(result.no_evidence[:8])}")
         if problems:
             return self.fail(" / ".join(problems) + " — evidence 에는 증적 원문을 한 글자도 바꾸지 말고 그대로 복사해 넣어라 "
-                             "(요약·번역·고쳐 쓰기 금지, 떨어진 두 곳은 '…'로 잇는다). 인용할 증적이 없으면 status 를 '확인 불가'로 쓴다.")
+                             "(요약·번역·고쳐 쓰기 금지, 떨어진 두 곳은 '…'로 잇는다. diff 에서 가져온 줄은 맨 앞의 +/- 기호를 뺀다). "
+                             "인용할 증적이 없으면 status 를 '확인 불가'로 쓴다.")
         return self.ok(f"인용 {result.checked}건 모두 입력 증적에 있음")
 
 
@@ -416,7 +417,8 @@ class CareerFactsValidator(Validator):
         if result.no_evidence:
             problems.append("JSON evidence(본문 주장마다 문서 원문 인용)가 없다")
         if problems:
-            return self.fail(" / ".join(problems) + " — quote 에는 근거 자료 '올린 문서 원문'을 한 글자도 바꾸지 말고 복사하고, 숫자는 문서에 "
+            return self.fail(" / ".join(problems) + " — quote 에는 근거 자료에서 '원문'이라고 적힌 내 문서 절(올린 문서 원문 · 내 요약 문서 원문 · "
+                             "최신 요약 문서 원문 · 지금 포트폴리오)의 글을 한 글자도 바꾸지 말고 복사하고, 숫자는 문서에 "
                              "적힌 값·단위 그대로 쓴다. 문서에 없는 경험·숫자는 지우거나 그 문장 끝에 [확인 필요]를 붙이고 needs_check 에 적는다.")
         return self.ok(f"인용 {result.quotes_checked}건 모두 문서에 있음 · 본문 숫자 모두 문서·JD·문항에 있음")
 
@@ -432,12 +434,14 @@ class CharLimitsValidator(Validator):
         questions = [career.Question(**q) for q in options.get("career_questions") or []]
         if not questions:
             return self.ok("검사할 자소서 문항 없음")
-        problems = career.check_char_limits(answer, questions, float(options.get("min_fill_ratio", 0.5)))
+        ratio = float(options.get("min_fill_ratio", 0.5))
+        problems = career.check_char_limits(answer, questions, ratio)
         if problems:
             return self.fail("자소서 글자 수·문항 오류: " + " / ".join(problems))
         rows = career.limit_rows(answer, questions)
         return self.ok("문항별 글자 수 통과: " + ", ".join(
-            f"{r.no}번 {r.counted:,}/{r.limit:,}자" if r.limit else f"{r.no}번 {r.with_spaces:,}자" for r in rows))
+            (f"{r.no}번 {r.counted:,}/{r.limit:,}자" + (" (근거 부족으로 짧음)" if r.counted < r.limit * ratio else ""))
+            if r.limit else f"{r.no}번 {r.with_spaces:,}자" for r in rows))
 
 
 @register

@@ -233,7 +233,13 @@ def verify(files: dict[str, str], answer: str, require_fix: bool = False, cover_
 
     patches = parse_patches(answer)
     if require_fix and not patches:
-        problems.append("수정안 diff 가 없음 — 고칠 수 있는 발견마다 ```diff 블록(unified diff)을 붙인다")
+        # 고칠 수 있는 발견이 하나도 없으면(모두 사람이 값을 정할 것) diff 가 없어도 된다 — 발견마다 이유가 not_attempted 에 있을 때만
+        explained = {norm_id(x.get("id")) for x in data.get("not_attempted") or []
+                     if isinstance(x, dict) and str(x.get("reason") or "").strip()}
+        left = [f.id for f in before.findings if f.id not in explained]
+        if left:
+            problems.append("수정안 diff 가 없음 — 고칠 수 있는 발견마다 ```diff 블록(unified diff)을 붙인다. 고칠 수 있는 발견이 하나도 없으면 "
+                            f"모든 발견을 not_attempted 에 이유와 함께 적는다 (이유가 빠진 발견: {', '.join(left)})")
     patched = dict(files)
     outcomes: dict[str, FileOutcome] = {}
     for p in patches:

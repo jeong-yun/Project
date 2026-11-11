@@ -75,7 +75,7 @@ def test_jd_is_optional_and_coverage_required_only_with_jd(tmp_path):
     sample = career_docs.run("q", {**request(tmp_path).tool_inputs, "use_sample": True}, None)
     assert sample.harness_options["career_requirements"] == []  # 샘플을 켜도 JD 를 몰래 넣지 않는다
     req = request(tmp_path, jd=JD)
-    assert "[JD 붙여 넣기]" in req.question
+    assert "가 회사 보안 분석가" not in req.question and "'📋 JD 원문'" in req.question  # JD 원문은 근거 자료에만 (질문에는 가리키는 말만)
     with_jd = career_docs.run(req.question, req.tool_inputs, None)
     ids = with_jd.harness_options["career_requirements"]
     assert ids == ["R1", "R2"] and "같은 구분 안에서만" in with_jd.content and "가 회사 보안 분석가" in with_jd.harness_options["career_reference"]
