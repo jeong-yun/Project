@@ -1297,7 +1297,7 @@ def render_followup(run: dict) -> None:
                 st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
             meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
             st.caption(meta + "".join(f" · {x}" for x in t.log))
-            if t.critic or t.auto_fixed:  # 👔 부장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부장이 직접 고친 점, 남은 추가로 고칠 점
+            if t.critic or t.auto_fixed or t.auto_fixed_earlier:  # 👔 부장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부장이 직접 고친 점, 남은 추가로 고칠 점
                 st.markdown(followup.head_review_markdown(t, critic_badge(t) or dept_head.name))
                 fixes = followup.next_request(t) if t is newest and not pending else ""  # 부장이 직접 고친 뒤에도 남은 것만
                 if fixes and st.button(f"🛠 {dept_head.name}이(가) 짚은 점을 고쳐 달라고 요청",

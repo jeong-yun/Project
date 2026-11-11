@@ -366,3 +366,59 @@ def test_screen_note_follows_team_settings():
     off = verification.critic_settings({"critic": {"enabled": False}})
     assert "검토 없이" in followup.review_note("연구부 부장", off) and "연구부 부장" not in followup.review_note("연구부 부장", off)
     assert "검토" not in followup.review_note("연구부 부장", off, waiting=True)
+
+# ─── 부장 직접 수정의 가장자리 (2026-11-10 점검 4·5·7번) ──────────────────────────
+
+
+def _broken_model(messages):
+    raise RuntimeError("부장 모델 고장")
+
+
+def test_leftover_after_head_fix_is_not_shown_as_simply_fixed(org, ranks, team, models, use_script):
+    """다시 검토가 같은 점을 다른 말로 '아직 남음'이라고 하면 — '직접 고쳤습니다'와 '남은 점'이 설명 없이 함께 나오지 않는다."""
+    use_script(Script(FollowupResult=edit("수정본 A"), HeadFix=fix("부장이 고친 수정본"),
+                      RevisionCritic=[judge(5, extra=["용어를 통일한다"]), judge(5, extra=["용어가 아직 통일되지 않음"])]))
+    turn = followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "줄여줘", [], head=head_review(org, team, models))
+    assert turn.auto_fixed == ["용어를 통일한다"] and turn.critic.extra_fixes == ["용어가 아직 통일되지 않음"]
+    fixed, left = followup.head_review_markdown(turn, "부장").split("**추가로 고칠 점**")
+    assert "직접 고쳤습니다" in fixed and "다시 검토에서 아래 '추가로 고칠 점'이 남았습니다" in fixed
+    assert "다시 검토에서 남은 점" in left and "덜 고쳐진" in left and "직접 고치지 못하고" not in left
+    # 부장이 고친 것이 없을 때(상한 0 · 고치지 못함)는 전과 같은 문구
+    plain = followup.FollowupTurn(request="q", reply="a", revised=True, content="x", version=1, critic=judge(5, extra=["용어 통일"]))
+    assert "(부장이 직접 고치지 못하고 남은 점입니다)" in followup.head_review_markdown(plain, "부장")
+
+
+def test_recheck_model_failure_goes_back_to_the_revision_that_passed(org, ranks, team, models, use_script):
+    """부장이 직접 고친 뒤 다시 검토를 모델 실패로 못 하면 — 검토받지 않은 부장 수정본 대신, 검토에서 합격한 직전 수정본을 낸다."""
+    script = use_script(Script(FollowupResult=edit("수정본 A"), HeadFix=fix("부장이 고친 수정본"),
+                               RevisionCritic=[judge(5, extra=["용어 통일"]), _broken_model]))
+    turn = followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "줄여줘", [], head=head_review(org, team, models))
+    assert len(script.prompts("HeadFix")) == 1
+    assert turn.content == "수정본 A" and turn.critic.score == 5 and turn.critic_passed  # 첫 검토의 점수·분석도 그대로 보인다
+    assert turn.auto_fixed == [] and "용어 통일" in followup.next_request(turn)  # 고친 글을 버렸으니 남은 점으로
+    assert any("다시 검토를 하지 못했습니다" in x and "합격한 직전 수정본" in x for x in turn.log), turn.log
+
+
+def test_recheck_model_failure_without_a_passed_revision_keeps_the_rewrite(org, ranks, team, models, use_script):
+    """불합격 → 팀장 다시 고침 → 다시 검토 실패: 돌아갈 합격본이 없으니 다시 고친 글을 검토 없이 내고, 불합격이었다는 것을 기록에 남긴다."""
+    use_script(Script(FollowupResult=[edit("수정본 A"), edit("수정본 B")],
+                      RevisionCritic=[judge(2, ["요청한 표가 빠짐"], severity="severe"), _broken_model]))
+    turn = followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "표 추가", [], head=head_review(org, team, models))
+    assert turn.content == "수정본 B" and turn.critic is None
+    assert any("불합격(2/5)" in x and "다시 고침" in x for x in turn.log)
+    assert any("부장 검토를 하지 못했습니다" in x and "요청한 표가 빠짐" in x for x in turn.log), turn.log
+
+
+def test_head_fixes_before_a_lead_rewrite_are_shown_as_earlier(org, ranks, team, models, use_script):
+    """상한 2 이상: 부장이 고침 → 다시 검토 불합격 → 팀장이 다시 씀. 최종 글은 팀장 글이므로 '부장이 직접 고쳤습니다'로 남기지 않는다."""
+    script = use_script(Script(FollowupResult=[edit("수정본 A"), edit("팀장이 다시 쓴 글")], HeadFix=fix("부장이 고친 수정본"),
+                               RevisionCritic=[judge(5, extra=["용어 통일"]), judge(2, ["요청이 빠짐"], severity="severe"), judge(5)]))
+    turn = followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "줄여줘", [],
+                            head=head_review(org, team, models, max_self_corrections=2))
+    assert turn.content == "팀장이 다시 쓴 글" and turn.critic_passed
+    assert turn.auto_fixed == [] and turn.auto_fixed_earlier == ["용어 통일"]
+    text = followup.head_review_markdown(turn, "부장")
+    assert "앞선 수정본에서" in text and "팀장이 글을 다시 썼습니다" in text and "용어 통일" in text
+    assert "개를 직접 고쳤습니다" not in text
+    # 다시 쓴 글의 검토에도 '부장이 직접 고친 점'은 알려 준다 (그 변경을 '요청과 무관한 변경'으로 지적하지 않게)
+    assert "[부장이 직접 고친 점]\n- 용어 통일" in script.prompts("RevisionCritic")[2]

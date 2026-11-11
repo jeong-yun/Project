@@ -19,7 +19,10 @@
        - 다시 고친 글이 불합격이면 앞선 수정본 중 나은 것을 낸다 (합격한 것 먼저, 그다음 verification.best_attempt)
        - 상한에 닿고도 남은 점만 화면에 보이고 버튼으로 다음 수정 요청에 넣을 수 있다 (next_request)
        - 요청 밖의 변경이므로 부장이 무엇을 직접 고쳤는지 FollowupTurn.auto_fixed 에 남겨 화면에 보여 준다
+       - 부장이 고친 뒤 불합격이 나와 팀장이 글을 다시 쓰면(상한 2 이상), 그 점들은 '앞선 수정본에서 고쳤던 점'으로 따로 보여 준다 (auto_fixed_earlier)
      · 부장 검토 호출이 실패하거나 사람이 건너뛰면(⏱ 호출 모니터) 수정본은 그대로 내고 이유를 log 에 남긴다
+       - 다만 '다시 검토'에서 부장 모델이 실패했고 앞에 검토에서 합격한 수정본이 있으면, 검토받지 않은 글은 버리고 그 수정본으로 돌아간다
+         (사람이 스스로 건너뛰거나 끊은 경우는 고친 글을 그대로 낸다 — 사용자가 고른 것)
      모델 호출: 수정 한 번에 부장 검토 +1. 불합격(팀장 다시 쓰기 1 + 부장 다시 검토 1)이나 추가로 고칠 점(부장 직접 수정 1 + 부장 다시 검토 1)이
        나온 회차마다 +2 — 상한 1회(기본)면 최대 +3, 2회면 최대 +5. 팀장이 다시 쓴 글이 하네스에 걸리면 재작성마다 +1 (부장의 직접 수정은 다시 쓰지 않는다).
   수정본은 채택 후보(수정본 v1, v2 …)가 되고, 사람이 그중 하나를 채택하거나 전부 버린다.
@@ -108,6 +111,8 @@ class FollowupTurn:
     critic_model: ModelSpec | None = None
     critic_passed: bool = True
     auto_fixed: list[str] = field(default_factory=list)  # 부장이 추가로 짚어 직접 고친 점 (이 수정본에 반영됨 — 사람이 요청하지 않은 변경)
+    # 부장이 앞선 수정본에 고쳐 넣었지만 그 뒤 팀장이 글을 다시 쓴 점 (상한 2 이상인 팀에서만 생긴다 — 다시 쓴 글에 남았는지는 모른다)
+    auto_fixed_earlier: list[str] = field(default_factory=list)
 
 
 def history_text(turns: list[FollowupTurn]) -> str:
@@ -316,10 +321,12 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
     reviewed: verification.Critique | None = None  # 지금 수정본(draft)에 대한 부장 검토
     passed = True
     fixed: list[str] = []  # 부장이 지금 수정본(draft)에 직접 고쳐 넣은 '추가로 고칠 점'
+    earlier: list[str] = []  # 부장이 고쳐 넣었지만 그 뒤 팀장이 글을 다시 쓴 점 — 최종 글은 팀장 글이라 '직접 고쳤습니다'로 내지 않는다
     if _is_revision(draft[0]) and head is not None and head.cfg["enabled"]:
         cfg = head.cfg
         log += [f"⚠️ {w}" for w in head.plan.warnings]
-        tried: list[tuple] = []  # 부장 검토를 받은 (수정본, 검토, 합격 여부, 부장이 직접 고친 점) — 처음 → 다시 고친 순
+        # 부장 검토를 받은 (수정본, 검토, 합격 여부, 부장이 직접 고친 점, 팀장이 다시 쓰기 전에 부장이 고친 점) — 처음 → 다시 고친 순
+        tried: list[tuple] = []
         for round_ in range(cfg["max_self_corrections"] + 1):
             reviewed = None
             if call_monitor.skipped("critic") or call_monitor.stopped():
@@ -328,7 +335,7 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
             try:
                 with call_monitor.purpose("critic"):
                     done = verification.run_critic(
-                        revision_messages(head, question, current, request, draft[0], evidence, fixed),
+                        revision_messages(head, question, current, request, draft[0], evidence, [*earlier, *fixed]),
                         agent.models, head.plan.chain, f"{head.plan.who} (비평가)", RevisionCritic)
             except call_monitor.CallCancelled:
                 log.append("⛔ 사용자가 부장 검토를 끊음 → 검토 없이 수정본을 냄")
@@ -337,13 +344,24 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
                 lines = (done.errors[0] if done.errors else "").splitlines()  # 첫 줄 = 요약, 다음 줄부터 모델별 오류
                 why = (f"{lines[1].split(': ', 1)[0]}: {llm_factory.failure_reason(lines[1])}" if len(lines) > 1
                        else lines[0].split(": ", 2)[-1] if lines else "모델 호출 실패")
-                log.append(f"👔 부장 검토를 하지 못했습니다 — {why[:200]} (수정본은 검토 없이 냈으니 채택 전에 직접 확인하세요)")
+                kept = [t for t in tried if t[2]]
+                if kept:  # 다시 검토를 못 했다 — 검토받지 않은 글(부장·팀장이 방금 고친 것) 대신 검토에서 합격한 직전 수정본으로 돌아간다
+                    draft, reviewed, passed, fixed, earlier = kept[-1]
+                    log.append(f"👔 다시 검토를 하지 못했습니다 — {why[:200]} → 방금 고친 글은 검토받지 못해 버리고, "
+                               "부장 검토에서 합격한 직전 수정본을 냅니다")
+                    break
+                before = ""
+                if tried:  # 돌아갈 합격본이 없다 — 다시 고친 글을 내되, 앞선 검토가 불합격이었다는 것과 그 지적을 남긴다
+                    last = tried[-1][1].critic
+                    before = (f" 앞선 검토는 불합격({last.score}/5)이었습니다 — 지적: "
+                              + " / ".join([*last.rule_violations, *last.logical_leaps] or [last.analysis])[:300] + ".")
+                log.append(f"👔 부장 검토를 하지 못했습니다 — {why[:200]} (수정본은 검토 없이 냈으니 채택 전에 직접 확인하세요.{before})")
                 break
             if done.is_fallback and done.spec:
                 log.append(f"부장 대안 모델 {done.spec.label} 로 검토")
             reviewed = done
             passed = verification.critic_passed(done.critic, cfg["min_score"], cfg["fail_on"])
-            tried.append((draft, done, passed, fixed))
+            tried.append((draft, done, passed, fixed, earlier))
             extras = done.critic.extra_fixes
             if (passed and not extras) or round_ == cfg["max_self_corrections"]:
                 break
@@ -370,17 +388,18 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
                 break
             log.append(f"{failed} → 팀장이 다시 고침 {round_ + 1}회")
             draft = again
+            earlier, fixed = [*earlier, *fixed], []  # 이제 최종 글은 팀장이 다시 쓴 글이다 (다음 검토에는 계속 알려 준다)
         if reviewed is not None and not passed and len(tried) > 1:
             # 다시 고쳐도 불합격 — 합격한 수정본이 앞에 있으면 그중에서, 없으면 전체에서 부장 점수가 가장 나은 것을 낸다 (본 업무처럼)
             pool = [t for t in tried if t[2]] or tried
             best = pool[verification.best_attempt([t[1].critic for t in pool])]
             if best[1] is not reviewed:
                 log.append(f"다시 고친 수정본이 나아지지 않아 {tried.index(best) + 1}번째로 쓴 수정본을 유지")
-                draft, reviewed, passed, fixed = best
+                draft, reviewed, passed, fixed, earlier = best
         if reviewed is not None and not passed:
             log.append("부장 검토 불합격 상태로 수정본을 냄 — 채택 전에 지적을 확인하세요")
         if reviewed is not None:  # 다시 검토가 그대로 '아직 남음'이라고 한 점은 고쳤다고 하지 않는다
-            fixed = [p for p in fixed if p not in reviewed.critic.extra_fixes]
+            fixed, earlier = ([p for p in points if p not in reviewed.critic.extra_fixes] for points in (fixed, earlier))
     out, call, results = draft
     revised = _is_revision(out)
     version = sum(t.revised for t in turns) + 1 if revised else 0
@@ -390,7 +409,7 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
         harness=results if revised else [], log=log, model=call.spec, elapsed_sec=call.elapsed_sec, version=version,
         critic=reviewed.critic if reviewed else None, critic_by=head.plan.who if reviewed else "",
         critic_model=reviewed.spec if reviewed else None, critic_passed=passed or reviewed is None,
-        auto_fixed=fixed,
+        auto_fixed=fixed, auto_fixed_earlier=earlier,
     )
 
 
@@ -407,11 +426,20 @@ def head_review_markdown(turn: FollowupTurn, by: str) -> str:
         points = [*c.rule_violations, *c.logical_leaps]
         if points:
             lines += ["", "**지적**", *(f"- {p}" for p in points)]
+    left = c.extra_fixes if c is not None else []
+    if turn.auto_fixed_earlier:
+        lines += ["", f"**{by or '부장'}이(가) 앞선 수정본에서 추가로 고칠 점 {len(turn.auto_fixed_earlier)}개를 직접 고쳤고, "
+                      "그 뒤 팀장이 글을 다시 썼습니다** (요청하신 것 밖의 변경이 남아 있을 수 있으니 채택하기 전에 확인하세요)",
+                  *(f"- {p}" for p in turn.auto_fixed_earlier)]
     if turn.auto_fixed:
-        lines += ["", f"**{by or '부장'}이(가) 추가로 고칠 점 {len(turn.auto_fixed)}개를 직접 고쳤습니다** "
-                      "(요청하신 것 밖의 변경이니 채택하기 전에 확인하세요)", *(f"- {p}" for p in turn.auto_fixed)]
-    if c is not None and c.extra_fixes:
-        lines += ["", "**추가로 고칠 점** (부장이 직접 고치지 못하고 남은 점입니다)", *(f"- {p}" for p in c.extra_fixes)]
+        # 다시 검토는 같은 점을 다른 말로 '아직 남음'이라고 할 수 있다 (글자가 같을 때만 코드가 뺀다) — 남은 점이 있으면 그렇다고 밝힌다
+        note = "요청하신 것 밖의 변경이니 채택하기 전에 확인하세요" + (" — 다시 검토에서 아래 '추가로 고칠 점'이 남았습니다" if left else "")
+        lines += ["", f"**{by or '부장'}이(가) 추가로 고칠 점 {len(turn.auto_fixed)}개를 직접 고쳤습니다** ({note})",
+                  *(f"- {p}" for p in turn.auto_fixed)]
+    if left:
+        why = ("부장이 직접 고친 뒤 다시 검토에서 남은 점입니다 — 위에서 고쳤다고 한 점이 다른 말로 다시 나왔다면 아직 덜 고쳐진 것입니다"
+               if turn.auto_fixed else "부장이 직접 고치지 못하고 남은 점입니다")
+        lines += ["", f"**추가로 고칠 점** ({why})", *(f"- {p}" for p in left)]
     return "\n".join(lines).strip()
 
 
