@@ -61,13 +61,24 @@ def empty_state() -> DesiredState:
     return DesiredState(goal="", context="", success_criteria=[], constraints=[], output_format="", assumptions=[])
 
 
-def draft_brief(question: str, models: ModelsConfig, partial: DesiredState | None = None) -> tuple[DesiredState, list[str]]:
+def draft_brief(question: str, models: ModelsConfig, partial: DesiredState | None = None,
+                use_web: bool = True) -> tuple[DesiredState, list[str]]:
     """질문(+사용자가 일부 채운 내용)으로 브리프를 완성한다. 사용자가 채운 항목은 그대로 둔다.
 
+    use_web = 이번 업무에서 웹 검색을 쓰는가. 꺼져 있으면 '출처를 제시한다'·'최신 동향(뉴스) 기준' 같은, 검색 없이는
+    지킬 수 없는 완료 기준을 넣지 않게 한다 (팀원이 출처를 지어내지 않게).
     모델 호출이 실패하면 최소 브리프(목표 = 질문)로 진행한다 — 답변을 막지 않는다.
     """
     partial = partial or empty_state()
     filled = partial.model_dump_json(indent=1) if not partial.is_empty() else "(없음)"
+    if use_web:
+        sources = ["- 사실 확인이 필요한 질문이면 '출처를 제시한다' 같은 기준을 포함한다."]
+        meanings = ["- 약어·용어가 여러 뜻일 수 있으면 완료 기준에 '가능한 의미를 구분하되, 최신 동향(뉴스)에서",
+                    "  가장 화제인 의미를 중심으로 설명한다' 를 넣는다."]
+    else:
+        sources = ["- 이번 업무는 웹 검색을 쓰지 않는다. 출처 링크나 최신 뉴스를 요구하는 완료 기준은 넣지 않는다 (지킬 수 없다).",
+                   "  사실 확인이 필요한 질문이면 대신 '확인하지 못한 내용은 확인 필요라고 밝힌다'를 넣는다."]
+        meanings = ["- 약어·용어가 여러 뜻일 수 있으면 완료 기준에 '가능한 의미를 구분해 설명한다' 를 넣는다."]
     messages = [
         SystemMessage(
             "\n".join(
@@ -76,10 +87,9 @@ def draft_brief(question: str, models: ModelsConfig, partial: DesiredState | Non
                     f"- 오늘 날짜: {date_label(today())} ('최근·현재'는 이 날짜 기준).",
                     "- 과정(1단계, 2단계…)을 지시하지 말고, 도달해야 할 결과물과 완료 기준을 정의한다.",
                     "- 완료 기준은 나중에 검토자가 '충족/미충족'을 판정할 수 있도록 구체적이고 검증 가능하게 쓴다.",
-                    "- 사실 확인이 필요한 질문이면 '출처를 제시한다' 같은 기준을 포함한다.",
+                    *sources,
                     "- 질문이 모호하면 가장 그럴듯한 해석을 assumptions 에 적는다 (약어는 여러 의미 가능성을 고려).",
-                    "- 약어·용어가 여러 뜻일 수 있으면 완료 기준에 '가능한 의미를 구분하되, 최신 동향(뉴스)에서",
-                    "  가장 화제인 의미를 중심으로 설명한다' 를 넣는다.",
+                    *meanings,
                     "- 사용자가 이미 채운 항목은 그 내용을 존중해 그대로 쓰고, 빈 항목만 채운다.",
                 ]
             )

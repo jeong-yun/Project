@@ -19,6 +19,7 @@
   📚 교훈 관리의 '🧹 정리 제안 받기'(쌓인 교훈)는 예전처럼 사용자가 고른 것만 반영한다.
 """
 
+import difflib
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -35,6 +36,7 @@ from core.schemas import (
 )
 
 ANSWER_PREVIEW_CHARS = 600
+EDIT_DIFF_CHARS = 2000  # 교훈 모델에 보낼 '사람이 고친 곳'의 최대 글자 수 (추정값 — 실제 모델로 재지 않음)
 KIND_LABELS = {"plan": "업무 분배", "draft": "초안 작성", "review": "검토", "integrate": "통합"}
 
 
@@ -64,6 +66,20 @@ def _step_summary(i: int, step: AgentAnswer, names: dict[str, str]) -> str:
     return f"{head}\n   결과: {preview}"
 
 
+def edited_lines(before: str, after: str) -> str:
+    """사람이 고친 줄만 뽑는다 ('- 고치기 전' / '+ 고친 뒤'). 고친 것이 없으면 빈 문자열.
+
+    교훈 모델에 최종 답변의 앞부분만 주면, 긴 결과의 뒤쪽을 고쳤을 때 무엇을 고쳤는지 볼 수 없다 (2026-11-10 점검 C6).
+    """
+    a, b = before.splitlines(), after.splitlines()
+    out: list[str] = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag != "equal":
+            out += [f"- {x}" for x in a[i1:i2]] + [f"+ {x}" for x in b[j1:j2]]
+    text = "\n".join(out)
+    return text if len(text) <= EDIT_DIFF_CHARS else text[:EDIT_DIFF_CHARS] + "\n…(고친 곳이 많아 뒤는 생략)"
+
+
 def build_feedback_messages(
     question: str, steps: list[AgentAnswer], decision: HumanDecision, names: dict[str, str], team: Team
 ) -> list[BaseMessage]:
@@ -73,7 +89,8 @@ def build_feedback_messages(
             "참여한 각 에이전트가 **다음 업무에서 바로 적용할 교훈**을 만든다.",
             "",
             "규칙:",
-            "- 참여한 에이전트마다 정확히 1개의 교훈을 만든다 (agent_id 는 괄호 안의 id 를 그대로 사용).",
+            "- 참여한 에이전트마다 교훈을 1개씩 만든다 (agent_id 는 괄호 안의 id 를 그대로 사용).",
+            "  이번 업무에서 배울 것이 없는 에이전트는 빼도 된다 — 억지로 문장을 만들지 않는다.",
             "- 이번 질문 내용에만 해당하는 말이 아니라, 같은 팀의 다른 업무에도 통하는 행동 지침 한 문장으로 쓴다.",
             "- 잘해서 유지할 점이면 kind=praise, 고칠 점이면 kind=improve.",
             "- 사람의 코멘트와 수정 내용을 가장 우선해서 반영한다.",
@@ -87,7 +104,12 @@ def build_feedback_messages(
         adopted = names.get(decision.adopted_node_id or "", decision.adopted_node_id)
         decision_text = f"채택 — {adopted}({decision.adopted_node_id}) 의 안을 최종안으로 채택"
         if decision.edited:
-            decision_text += f"\n사람이 직접 수정한 최종 답변:\n{decision.final_answer[:ANSWER_PREVIEW_CHARS * 2]}"
+            original = final_steps(steps).get(decision.adopted_node_id or "")
+            changed = edited_lines(original.content, decision.final_answer) if original else ""
+            if changed:  # 고친 줄만 — 결과가 길어도 사람이 어디를 어떻게 고쳤는지 보인다
+                decision_text += f"\n사람이 고친 곳 (채택한 안에서 바뀐 줄만. '-' 고치기 전 / '+' 고친 뒤):\n{changed}"
+            else:  # 채택한 안의 원래 글을 찾지 못하면 전처럼 최종 답변의 앞부분
+                decision_text += f"\n사람이 직접 수정한 최종 답변:\n{decision.final_answer[:ANSWER_PREVIEW_CHARS * 2]}"
     else:
         decision_text = "반려 — 어느 안도 채택하지 않음"
     human = "\n\n".join(
@@ -432,7 +454,8 @@ def _proposals(team_id: str, groups: list[LessonGroup], targets: dict[str, list[
             team_id=team_id, agent_id=g.agent_id, ids=sorted(ids), new_id=new, relation=g.relation,
             kind="improve" if any(r["kind"] == "improve" for r in picked) else "praise",
             merged=_merged_text(g.merged, g.detail, picked), reason=g.reason.strip(), by=by,
-            hits=sum(r.get("hits", 1) for r in picked),
+            # 겹침 = 같은 지시를 또 받았다 → 횟수를 더해 강조. 충돌은 되풀이가 아니므로 더하지 않고 큰 쪽 값만 잇는다
+            hits=(sum if g.relation == "overlap" else max)(r.get("hits", 1) for r in picked),
         ))
     return out
 
@@ -514,12 +537,27 @@ def absorb_duplicates(storage, proposals: list[CleanupProposal]) -> tuple[list[C
 
 
 def undo_merge(storage, proposal: CleanupProposal) -> str:
-    """자동 합치기 되돌리기 — 원래 교훈을 다시 켜고 합친 교훈을 끈다 (어느 것도 지우지 않는다)."""
-    for i in proposal.ids:
+    """자동 합치기 되돌리기 — 원래 교훈을 다시 켜고 합친 교훈을 끈다 (어느 것도 지우지 않는다). 화면에 보일 한 줄을 돌려준다.
+
+    되돌릴 수 있을 때만 바꾼다 (2026-11-10 점검 6번). 아니면 아무것도 바꾸지 않고 '⚠️'로 시작하는 안내를 돌려준다.
+      · 합친 교훈이 꺼졌거나 없음 = 그 뒤 다른 교훈과 또 합쳐졌다 → 원래 교훈을 켜면 최신 합친 교훈과 겹친다
+      · 원래 교훈이 모두 지워짐 → 합친 교훈까지 끄면 켜진 교훈이 하나도 남지 않는다
+    """
+    rows = {r["id"]: r for r in storage.list_lessons(proposal.team_id)}
+    merged = rows.get(proposal.merged_id)
+    if not merged or not merged["active"]:
+        return (f"⚠️ 되돌리지 않았습니다. 합친 교훈 #{proposal.merged_id}이(가) 그 뒤 다른 교훈과 또 합쳐졌거나 꺼져 있어서, "
+                "원래 교훈을 다시 켜면 지금 켜진 교훈과 겹칩니다. 📚 교훈 관리에서 켤 교훈과 끌 교훈을 직접 골라 주세요.")
+    left = [i for i in proposal.ids if i in rows]
+    if not left:
+        return (f"⚠️ 되돌리지 않았습니다. 원래 교훈이 모두 지워져 다시 켤 것이 없습니다. 합친 교훈 #{proposal.merged_id}은(는) "
+                "켜 둔 그대로입니다.")
+    for i in left:
         storage.update_lesson(i, active=True)
-    if proposal.merged_id:
-        storage.update_lesson(proposal.merged_id, active=False)
-    return f"합치기를 되돌렸습니다. 원래 교훈 {len(proposal.ids)}개를 다시 켜고 합친 교훈 #{proposal.merged_id}은(는) 꺼 두었습니다."
+    storage.update_lesson(proposal.merged_id, active=False)
+    gone = len(proposal.ids) - len(left)
+    return (f"합치기를 되돌렸습니다. 원래 교훈 {len(left)}개를 다시 켜고 합친 교훈 #{proposal.merged_id}은(는) 꺼 두었습니다."
+            + (f" (지워진 {gone}개는 다시 켜지 못했습니다.)" if gone else ""))
 
 
 def lesson_origin(storage, row: dict) -> dict:

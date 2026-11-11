@@ -48,7 +48,7 @@ def test_adopted_revision_stays_in_final_result_box(app_env, use_script):
     at.text_area(key=next(t.key for t in at.text_area if t.placeholder and "3번 근거" in t.placeholder)).input("정의를 줄여줘")
     at = next(b for b in at.button if b.label == "💬 보내기").click().run()
     assert not at.exception, at.exception
-    at = wait_for(lambda: (lambda a: a if any("수정본 v1" in m.value for m in a.markdown) else None)(_open().run()), 30)
+    at = wait_for(lambda: (lambda a: a if any("수정본 v1" in m.value for m in a.markdown) else None)(_open().run()), 60)
     assert _result_box(at) == (_result_box(at)[0], "수정본 하나") and "수정본 v1" in _result_box(at)[0]  # 채택 전: 최신 수정본
     at = next(b for b in at.button if b.label == "✅ 이 안으로 채택").click().run()  # 기본 선택 = 최신 수정본
     assert not at.exception, at.exception

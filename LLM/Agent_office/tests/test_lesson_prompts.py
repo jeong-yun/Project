@@ -401,6 +401,73 @@ def test_merged_notice_can_be_undone(tmp_path):
     assert {r["id"] for r in Storage(db).list_lessons("concept") if r["active"]} == set(ids)
     assert len(Storage(db).list_lessons("concept")) == 3 and len(at.button) == 0
 
+# ─── 되돌리기·충돌 합치기 (2026-11-10 점검 6·9번) ─────────────────────────────
+
+
+def _overlap(storage, ids, merged, hits=2):
+    """겹치는 교훈을 합친 뒤의 제안 (merged_id 가 채워진 것 — 결과 화면이 '↩ 되돌리기'에 넘기는 값)."""
+    from core.feedback import merge_lessons
+
+    p = CleanupProposal(team_id="t", agent_id="lead", ids=ids, new_id=ids[-1], relation="overlap", kind="improve",
+                        merged=merged, reason="같음", by="model", hits=hits)
+    return p.model_copy(update={"merged_id": merge_lessons(storage, p)})
+
+
+def test_undo_is_refused_when_the_merged_lesson_was_merged_again(storage):
+    """합친 교훈이 다음 결정에서 또 합쳐진 뒤 앞 결과 화면의 '되돌리기'를 누르면 — 원래 교훈을 다시 켜 최신 합친 교훈과 겹치게 하지 않는다."""
+    from core.feedback import undo_merge
+
+    first = _overlap(storage, add(storage, "t", "lead", "출처를 단다", "출처 링크를 붙인다"), "출처 링크를 단다")
+    third = add(storage, "t", "lead", "출처를 꼭 단다")[0]
+    second = _overlap(storage, [first.merged_id, third], "출처 링크를 반드시 단다", hits=3)
+    before = snapshot(storage, "t")
+    text = undo_merge(storage, first)
+    assert snapshot(storage, "t") == before and "되돌리지 않았습니다" in text and "교훈 관리" in text  # 아무것도 안 바꾸고 안내만
+    assert [r["id"] for r in storage.list_lessons("t") if r["active"]] == [second.merged_id]
+    assert "되돌렸습니다" in undo_merge(storage, second)  # 가장 최근 합치기는 되돌릴 수 있다
+    assert {r["id"] for r in storage.list_lessons("t") if r["active"]} == {first.merged_id, third}
+
+
+def test_undo_is_refused_when_the_originals_were_deleted(storage):
+    """원래 교훈을 📚 교훈 관리에서 지운 뒤 되돌리면 — 합친 교훈까지 꺼서 켜진 교훈이 하나도 없게 만들지 않는다."""
+    from core.feedback import undo_merge
+
+    ids = add(storage, "t", "lead", "출처를 단다", "출처 링크를 붙인다")
+    p = _overlap(storage, ids, "출처 링크를 단다")
+    for i in ids:
+        storage.delete_lesson(i)
+    text = undo_merge(storage, p)
+    assert "되돌리지 않았습니다" in text and "지워" in text
+    assert [(r["id"], r["active"]) for r in storage.list_lessons("t")] == [(p.merged_id, 1)]  # 합친 교훈은 켜진 그대로
+    # 하나만 지웠으면 남은 것만 다시 켜고, 몇 개를 못 켰는지 알린다
+    ids = add(storage, "t", "lead", "표로 정리한다", "표를 쓴다")
+    p = _overlap(storage, ids, "표로 정리한다")
+    storage.delete_lesson(ids[0])
+    text = undo_merge(storage, p)
+    assert "원래 교훈 1개를 다시 켜고" in text and "지워진 1개" in text
+    on = {r["id"] for r in storage.list_lessons("t") if r["active"]}
+    assert ids[1] in on and p.merged_id not in on
+
+
+def test_conflict_merged_by_hand_is_not_marked_as_repeated(storage):
+    """충돌을 '합친 문장으로 바꾸기'로 정리한 것은 같은 지시가 되풀이된 것이 아니다 — 반복 횟수를 더하지 않는다 (큰 쪽 값)."""
+    from core import feedback
+
+    a, b = add(storage, "t", "lead", "결론을 맨 앞에 쓴다", "결론은 맨 끝에 쓴다")
+    rows = storage.list_lessons("t")
+    group = dict(agent_id="lead", ids=[a, b], merged="결론 위치를 질문에 맞춘다", detail="", reason="반대")
+    [conflict] = feedback._proposals("t", [LessonGroup(relation="conflict", **group)], {"lead": rows}, {"lead": b}, "model")
+    [overlap] = feedback._proposals("t", [LessonGroup(relation="overlap", **group)], {"lead": rows}, {"lead": b}, "model")
+    assert (conflict.hits, overlap.hits) == (1, 2)  # 겹침은 전처럼 합
+    apply_cleanup(storage, conflict, "merge")
+    assert team_lessons(storage, "t", 20000)["lead"].texts == ["결론 위치를 질문에 맞춘다"]  # '[중요 — 피드백 2회 반복]' 없음
+    storage.update_lesson(a, active=True)  # 이미 3번 되풀이된 교훈이 낀 충돌이면 그 횟수는 남는다
+    storage._execute("UPDATE lessons SET hits=3 WHERE id=?", (a,))
+    rows = storage.list_lessons("t")
+    [again] = feedback._proposals("t", [LessonGroup(relation="conflict", **{**group, "ids": [a, rows[0]["id"]]})],
+                                  {"lead": [r for r in rows if r["active"]]}, {}, "model")
+    assert again.hits == 3
+
 
 # ─── 📚 교훈 관리 화면 ───────────────────────────────────────────────────
 

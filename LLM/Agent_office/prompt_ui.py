@@ -62,7 +62,7 @@ def _flash(key: str, text: str) -> None:
 def _show_flash(key: str) -> None:
     text = st.session_state.pop(f"prompt_msg_{key}", None)
     if text:
-        st.success(text)
+        (st.warning if text.startswith("⚠️") else st.success)(text)  # 바꾸지 않았다는 안내(되돌리기 거절)는 경고로
 
 
 # ─── 글자 한도 경고 (부서 화면 맨 위) ─────────────────────────────────────
@@ -398,7 +398,8 @@ def render_dept(dept, head, teams: list[Team], key: str) -> None:
     tabs = st.tabs([f"👔 {head.name}", *(f"{t.name}" for t in teams)])
     with tabs[0]:
         st.markdown(f"**비평·팀 배정 관점** — {head.persona}")
-        st.caption("부장은 팀의 최종 답변(검토 과정의 논리)을 채점하는 비평가입니다. 부장에게는 교훈이 들어가지 않습니다. "
+        st.caption("부장은 팀의 최종 답변을 마지막으로 확인하는 비평가입니다 — 검토자의 '지적 → 수정'이 논리적으로 이어지는지, "
+                   "수정 답변이 검토 기준·근거 자료·팀 규칙에 맞는지를 봅니다. 부장에게는 교훈이 들어가지 않습니다. "
                    "관점은 config/departments.yaml 의 head.persona 에서 바꿉니다.")
         pick = st.selectbox("어느 팀을 비평할 때", range(len(teams)), format_func=lambda i: teams[i].name, key=f"critic_team_{key}")
         st.code(critic_prompt(teams[pick], head), language="markdown", wrap_lines=True, height=300)

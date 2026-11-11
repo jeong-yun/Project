@@ -21,6 +21,7 @@ from core.llm_factory import NoAvailableModelError
 from core.schemas import (
     AgentAnswer, Delegation, ModelsConfig, ModelSpec, OrgNode, Rank, RankModels, ReviewEdits, ReviewResult, Team,
 )
+from core.search import WEB_BEGIN
 from core.verification import rubric_text
 
 __all__ = ["EmptyResponseError", "NoAvailableModelError", "OrgAgent", "AnswerStream", "chunk_text", "with_feedback"]
@@ -196,11 +197,17 @@ class OrgAgent:
     # ─── 맨 아래: 실무자 초안 ─────────────────────────────────────
 
     def draft_messages(
-        self, question: str, task: str, web_context: str = "", lessons: list[str] | None = None
+        self, question: str, task: str, web_context: str = "", lessons: list[str] | None = None, split: bool = False
     ) -> list[BaseMessage]:
+        """split = 상사가 업무를 나눠 준 것인가 (task 가 팀 전체 업무의 일부). 혼자 전부 맡았으면 완료 기준은 그대로 내 몫이다."""
         parts = [f"[업무 브리프]\n{question}"]
         if task and task != question:
             parts.append(f"[상사가 맡긴 업무 — 이 범위에 집중]\n{task}")
+            if split and not self.node.output_scope:
+                # 공통 규칙("[완료 기준]을 만족하는 것이 이 일의 끝")·브리프("모두 만족해야 함")와 '이 범위에 집중'이 함께 가면
+                # 실무자가 팀 전체 기준을 혼자 다 채우려 한다 — 산출물 범위가 없는 팀에도 아래 output_scope 와 같은 풀이를 붙인다
+                parts[-1] += ("\n업무 브리프의 [완료 기준]은 팀 전체 최종 답변의 기준이다 — 전체를 맞추는 일은 상사가 통합할 때 한다. "
+                              "나는 맡은 업무만 쓰고, 그 안에서 해당하는 기준을 지킨다.")
         if self.node.output_scope:
             # 브리프의 완료 기준·결과 형식은 팀 전체(최종 답변) 기준이다 — 실무자는 맡은 산출물만 쓰고 통합은 상사가 한다
             parts.append(
@@ -247,13 +254,16 @@ class OrgAgent:
             "취약점·논리적 오류·근거 없는 주장·[완료 기준] 미충족 항목을 먼저 찾아낸 뒤 판단한다.",
         ]
         if integrate:
+            # '웹 검색의 최신 뉴스 기준'은 웹 검색 결과를 받았을 때만 — 검색을 안 쓴 업무에서는 지킬 수 없는 지시다
+            leading = ("웹 검색의 최신 뉴스·동향 기준으로 가장 유력한 해석을 앞에 둔다" if WEB_BEGIN in web_context
+                       else "근거가 가장 뚜렷한 해석을 앞에 둔다")
             job = [
                 *stance,
                 "지금은 관리자로서 하위 에이전트들의 결과를 하나로 통합하는 단계다.",
                 "- 각 결과의 오류·중복·모순을 analysis 에 먼저 분석하고 issues 에 적는다.",
                 "- revised_answer 에 모든 결과를 통합한 **하나의 완성 답변 전문**을 쓴다 (verdict 는 revise).",
                 "- 하위 결과에 있는 사실·의미를 근거 없이 버리지 않는다. 하위끼리 해석이 다르면 모두 정리하고,",
-                "  웹 검색의 최신 뉴스·동향 기준으로 가장 유력한 해석을 앞에 둔다 (버린 내용이 있으면 이유를 issues 에 적는다).",
+                f"  {leading} (버린 내용이 있으면 이유를 issues 에 적는다).",
                 "- 출처 [번호] 표기는 유지한다.",
             ]
         else:

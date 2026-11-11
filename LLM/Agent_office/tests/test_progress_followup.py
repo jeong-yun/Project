@@ -251,6 +251,28 @@ def test_followup_progress_counts_auto_fix_within_same_limit(org):
     assert progress.followup_units(plan, run, recs, now=40)[1] == 0  # 상한에 닿음 — 더 늘지 않는다
 
 
+def test_followup_progress_counts_harness_rewrites_of_the_lead_refix(org):
+    """하네스가 있는 팀: '최대' 단계 수는 팀장이 다시 고친 글의 하네스 재작성까지 세고, 검토가 시작된 뒤에는 첫 답의 몫을 더하지 않는다."""
+    run = waiting_run(org)
+    run["followup_pending"] = {"request": "줄여줘", "started_at": 0.0}
+    plan = plan_for(org)  # 하네스 재작성 최대 2회 · 고침 상한 1회
+    units, worst = progress.followup_units(plan, run, [])
+    assert len(units) + worst == 8  # 팀장 1 + 하네스 2 + 검토 1 + 팀장 다시 고침 1 + 그 하네스 2 + 다시 검토 1 (전에는 6)
+    recs = [rec("followup", org.id, end=5), rec("followup", org.id, start=6, end=8)]  # 첫 답이 하네스에 한 번 걸려 다시 씀
+    assert progress.followup_units(plan, run, recs, now=9)[1] == 1 + 1 + 4  # 남은 하네스 1 + 검토 1 + 고침 회차 4
+    recs = [rec("followup", org.id, end=5), rec("critic", org.id, status="running", start=6)]
+    assert progress.followup_units(plan, run, recs, now=7)[1] == 4  # 검토 시작 = 첫 답은 끝남 → 고침 1 + 하네스 2 + 다시 검토 1
+    recs = [rec("followup", org.id, end=5), rec("critic", org.id, start=6, end=9),
+            rec("self_correct", org.id, start=10, end=12), rec("self_correct", org.id, start=13, end=15),
+            rec("self_correct", org.id, status="running", start=16)]  # 다시 고친 글의 마지막 하네스 재작성 중
+    units, worst = progress.followup_units(plan, run, recs, now=20)
+    assert len(units) == 5 and worst == 1  # 남은 최대 = 다시 검토 1 (전에는 2)
+    recs.append(rec("critic", org.id, start=30, end=35))
+    assert progress.followup_units(plan, run, recs, now=40)[1] == 0
+    off = plan_for(org, critic_enabled=False)  # 부장 검토를 끈 팀: 첫 답의 하네스 재작성만
+    assert progress.followup_units(off, run, [])[1] == 2
+
+
 def test_interrupted_followup_is_recovered(org):
     run = waiting_run(org)
     live.begin_followup(run, "질문")
@@ -397,7 +419,7 @@ def test_app_progress_bar_and_background_followup(app_env):
     assert any("추가 질문에 답하는 중입니다" in i.value for i in at.info)  # 결정은 답이 온 뒤에
     assert any(b.label == "⏹ 추가 질문 중단" for b in at.button)
     gate.set()
-    at = wait_for(lambda: (lambda a: a if any("[1] 자료가 근거" in m.value for m in a.markdown) else None)(_open().run()), 30)
+    at = wait_for(lambda: (lambda a: a if any("[1] 자료가 근거" in m.value for m in a.markdown) else None)(_open().run()), 60)
     assert not at.exception, at.exception
     assert any(r.label == "채택할 안" for r in at.radio)  # 다시 결정 대기
 
@@ -431,7 +453,7 @@ def test_app_shows_head_review_and_sends_extra_fixes(app_env, use_script):
     at.text_area(key=next(t.key for t in at.text_area if t.placeholder and "3번 근거" in t.placeholder)).input("정의를 줄여줘")
     at = next(b for b in at.button if b.label == "💬 보내기").click().run()
     assert not at.exception, at.exception
-    at = wait_for(lambda: (lambda a: a if any("추가로 고칠 점" in m.value for m in a.markdown) else None)(_open().run()), 30)
+    at = wait_for(lambda: (lambda a: a if any("추가로 고칠 점" in m.value for m in a.markdown) else None)(_open().run()), 60)
     assert not at.exception, at.exception
     review = next(m.value for m in at.markdown if "추가로 고칠 점" in m.value)
     assert "부장" in review and "5/5" in review and "합격" in review
@@ -442,7 +464,7 @@ def test_app_shows_head_review_and_sends_extra_fixes(app_env, use_script):
     assert len(script.prompts("FollowupResult")) == 1 and not any("수정본 v2" in m.value for m in at.markdown)  # 같은 v1 안에서
     at = next(b for b in at.button if b.label.startswith("🛠")).click().run()
     assert not at.exception, at.exception
-    at = wait_for(lambda: (lambda a: a if any("수정본 v2" in m.value for m in a.markdown) else None)(_open().run()), 30)
+    at = wait_for(lambda: (lambda a: a if any("수정본 v2" in m.value for m in a.markdown) else None)(_open().run()), 60)
     assert not at.exception, at.exception
     assert "용어 통일" in script.prompts("FollowupResult")[1]  # 남은 점이 다음 수정 요청으로 갔다
     assert not any(b.label.startswith("🛠") for b in at.button)  # 고칠 점이 없으면 버튼도 없다

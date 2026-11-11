@@ -254,7 +254,9 @@ def build_office_graph(
             return {"brief": partial.model_copy(update={"goal": partial.goal or state["question"]}), "notes": []}
         emit({"type": "start", "node": state["root_id"], "kind": "brief"})
         try:
-            brief, notes = draft_brief(state["question"], models, partial)
+            # 웹 검색을 안 쓰는 업무면 '출처·최신 뉴스' 완료 기준을 넣지 않게 알린다 (research_node 와 같은 조건)
+            brief, notes = draft_brief(state["question"], models, partial,
+                                       use_web=bool(state.get("use_web") and WEB_SEARCH_TOOL in team.tools))
         except call_monitor.CallCancelled:  # ⏹ 중단 → 질문을 그대로 목표로
             return {"brief": partial.model_copy(update={"goal": partial.goal or state["question"]}),
                     "notes": ["⏹ 사용자가 중단 — 요청 정리 생략"]}
@@ -322,7 +324,9 @@ def build_office_graph(
         """맨 아래: 실무자 초안 (+ 하네스)."""
         agent = agents[node_id]
         emit({"type": "start", "node": node_id, "kind": "draft"})
-        messages = agent.draft_messages(state["brief"].as_prompt(state["question"]), task, web_text(state), lessons)
+        # 맡은 업무가 최종 답변자의 업무(= 최종 목표)와 다르면 상사가 나눠 준 것 — '[완료 기준]은 팀 전체 기준'이라고 알린다
+        split = task != state["tasks"].get(state["root_id"])
+        messages = agent.draft_messages(state["brief"].as_prompt(state["question"]), task, web_text(state), lessons, split)
         tag = DRAFT_TAG + node_id
 
         def restart() -> None:
