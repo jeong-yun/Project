@@ -5,6 +5,7 @@
   json_keys     : ```json 블록이 올바른 JSON 인지 + 필수 키(단계 분할 키)를 모두 가졌는지 검사
   required_terms: 업무에 꼭 들어가야 할 항목(예: 시나리오·손절가·예산)이 답변에 있는지 검사
   itinerary_days: 여행 일정이 1일차~마지막 날까지 모든 날을 다루는지 검사 (일수는 코드가 계산)
+  budget_total  : 여행 계획서의 합계가 양식의 총예산을 넘는데 요약에서 밝히지 않았는지 (금액은 코드가 읽음, 확실할 때만)
   stock_plan    : 주식 점수표·매매 계획 JSON 을 코드로 검산 (core/stock_calc.py)
   concept_entry : 개념 카탈로그 결과 형식 검사 (core/concept.py)
   music_prompt  : 음악 팀 가사·Lyria 프롬프트 형식 검사 (core/music.py)
@@ -25,6 +26,7 @@ ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Vali
 """
 
 import json
+import re
 import sqlite3
 import time
 from datetime import date, timedelta
@@ -157,6 +159,73 @@ class ItineraryDaysValidator(Validator):
         if missing:
             return self.fail(f"여행 기간 {days}일 중 일정이 없는 날: {missing}. 모든 날의 일정을 'n일차(날짜)' 형식으로 작성하라.")
         return self.ok(f"{days}일 모두 일정 있음")
+
+
+_WON = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*만\s*(?:(\d)\s*천)?\s*원|(\d[\d,]{3,})\s*원")
+_NOT_A_TOTAL = re.compile(r"1인|인당|명당|1명|하루|1일|일당|1박|박당|제외|별도|빼고|각자|씩")  # 총액이 아닌 예산 표현
+_DAY_ONE = re.compile(r"(?<!\d)1\s*일\s*차|day\s*-?\s*1(?!\d)", re.IGNORECASE)
+
+
+def won(text: str) -> list[int]:
+    """글 속 원화 금액을 나온 순서대로 — '780,000원', '78만 원', '78만 5천원'. 단위(원)가 없는 숫자·외화는 뺀다."""
+    return [int(m.group(3).replace(",", "")) if m.group(3)
+            else round(float(m.group(1).replace(",", "")) * 10000) + int(m.group(2) or 0) * 1000 for m in _WON.finditer(text)]
+
+
+def _won_text(amount: int) -> str:
+    return f"{amount // 10000:,}만 원" if amount % 10000 == 0 else f"{amount:,}원"
+
+
+def _budget_limit(text: str) -> int | None:
+    """예산 칸에서 총예산(원) — '총 80만원'처럼 총액 표시가 있고 금액이 하나뿐일 때만 (1인·하루 기준, 항목 제외는 모름)."""
+    amounts = won(text)
+    if len(amounts) != 1 or not any(w in text for w in ("총", "전체", "합계", "합쳐", "모두")) or _NOT_A_TOTAL.search(text):
+        return None
+    return amounts[0]
+
+
+def _stated_total(answer: str) -> int | None:
+    """계획서가 밝힌 합계(원) — '합계' 줄에서 '합계' 뒤 첫 금액. 확실할 때만 돌려준다.
+
+    표의 합계 줄만 본다(표가 없으면 글의 합계 줄). 금액 앞에 다른 숫자가 있거나(외화·단위 없는 숫자) 합계 줄마다 금액이 다르면 모름.
+    """
+    lines = [line for line in answer.splitlines() if "합계" in line]
+    totals = set()
+    for line in [line for line in lines if line.lstrip().startswith("|")] or lines:
+        tail = line.split("합계", 1)[1]
+        m = _WON.search(tail)
+        if not m:
+            continue  # 금액 없는 합계 줄 (제목 등)
+        if re.search(r"\d", tail[: m.start()]):
+            return None
+        totals.add(won(m.group())[0])
+    return totals.pop() if len(totals) == 1 else None
+
+
+@register
+class BudgetTotalValidator(Validator):
+    name = "budget_total"
+    description = ("여행 예산 합계 — 양식의 예산이 '총 80만원'처럼 총액 하나이고 계획서 '합계' 줄의 원화 금액이 분명할 때, "
+                   "합계가 총예산을 넘으면 한 줄 요약(첫 일정 앞)에서 넘는다고 밝혔는지 (확실하지 않으면 통과)")
+
+    def check(self, answer: str, options: dict):
+        limit = _budget_limit(str(options.get("trip_budget") or ""))
+        if limit is None:
+            return self.ok("검사할 총예산 없음 (예산 칸이 '총 80만원'처럼 총액 하나일 때만 검사)")
+        total = _stated_total(answer)
+        if total is None:
+            return self.ok("합계 금액을 확실히 읽지 못해 검사 생략 ('합계' 줄의 원화 금액이 하나로 분명할 때만 검사)")
+        if total <= limit:
+            return self.ok(f"합계 {_won_text(total)} — 총예산 {_won_text(limit)} 안")
+        day_one = _DAY_ONE.search(answer)
+        if re.search("초과|넘", answer[: day_one.start()] if day_one else answer):
+            return self.ok(f"합계({_won_text(total)})가 총예산({_won_text(limit)})을 넘지만 요약에서 넘는다고 밝힘")
+        over = _won_text(total - limit)
+        return self.fail(
+            f"예산 표의 합계({_won_text(total)})가 총예산({_won_text(limit)})을 {over} 넘는데, 한 줄 요약(첫 일정 앞)에 넘는다는 말이 없다. "
+            f"항목을 줄여 합계를 {_won_text(limit)} 이하로 맞추고 표의 금액도 함께 고쳐라. 줄일 수 없으면 한 줄 요약에 "
+            f"'총예산 {_won_text(limit)}을 약 {over} 초과한다'고 밝히고, '예산 안에 든다'는 표현은 지워라."
+        )
 
 
 @register

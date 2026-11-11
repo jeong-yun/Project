@@ -52,6 +52,7 @@ from core.agent import OrgAgent  # noqa: E402
 from core.brief import DesiredState  # noqa: E402
 from core.config import load_models, load_ranks, load_settings, load_team, load_verification, team_org  # noqa: E402
 from core.harness.base import extract_code_blocks  # noqa: E402
+from core.harness.validators import won  # noqa: E402 — 글 속 원화 금액 (여행 예산 합계 검증기와 같은 코드)
 from core.schemas import AgentAnswer, ModelSpec, RankModels  # noqa: E402
 from core.tasks import build_request  # noqa: E402
 from core.workflow import build_office_graph, stream_office  # noqa: E402
@@ -495,14 +496,6 @@ def code_tests(answer: str) -> dict:
         return json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError):
         return {"코드 실행": f"실패 — {proc.stderr.strip()[-200:]}"}
-
-
-def won(text: str) -> list[int]:
-    """글 속 금액(원) — '780,000원', '78만 원', '78만 5천원'."""
-    out = [int(m.group(1).replace(",", "")) for m in re.finditer(r"(\d[\d,]{3,})\s*원", text)]
-    out += [int(float(m.group(1).replace(",", "")) * 10000) + int(m.group(2) or 0) * 1000
-            for m in re.finditer(r"(\d[\d,.]*)\s*만\s*(?:(\d)\s*천)?\s*원", text)]
-    return out
 
 
 def measure_one(q: dict, variant: str, ctx: Ctx) -> dict | None:

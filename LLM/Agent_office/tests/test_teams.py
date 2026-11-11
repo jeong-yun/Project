@@ -167,6 +167,62 @@ def test_itinerary_days_accepts_labels_or_dates():
     assert v.check("아무거나", {}).passed  # 일정 정보가 없으면 검사 생략
 
 
+def plan_text(summary: str, total_row: str, after: str = "") -> str:
+    """여행 계획서 모양 — 한 줄 요약 → 일정 → 예산 표(합계 줄) → 표 아래 글."""
+    return (f"# 부산 2박 3일\n## 한 줄 요약\n{summary}\n## 1일차 (12/4 금)\n| 오후 | 점심 | 약 4만원 |\n## 2일차\n…\n## 3일차\n…\n"
+            f"## 예산 표 (3인, 총 80만원 기준)\n| 항목 | 예상 금액 | 비고 |\n|---|---:|---|\n| KTX 왕복 | 약 30만원 | |\n"
+            f"| 숙박 2박 | 약 24만원 | |\n{total_row}\n{after}\n## 날씨·준비물\n…")
+
+
+OVER_ROW = "| **합계** | **약 85만원 (범위 약 78만~95만원)** | |"
+
+
+def test_budget_total_fails_when_stated_total_is_over_the_budget_and_summary_does_not_say_so():
+    """2026-11-10 실제 결과 모양: 총예산 80만 원인데 합계는 약 85만 원, 요약에는 '80만원 안에 들어오도록 설계'."""
+    v, opts = REGISTRY["budget_total"], {"trip_budget": "총 80만원"}
+    failed = v.check(plan_text("해운대 2박 가족 여행입니다. 80만원 안에 들어오도록 설계했습니다.", OVER_ROW), opts)
+    assert not failed.passed
+    assert "85만 원" in failed.log and "80만 원" in failed.log and "5만 원" in failed.log  # 합계·한도·넘는 금액
+    assert "줄여" in failed.log and "한 줄 요약" in failed.log  # 무엇을 고치면 되는지: 줄이거나, 요약에 넘는다고 밝히기
+    # 넘는다는 말이 예산 표 아래에만 있고 요약은 '안에 든다'인 글도 실패 (읽는 사람은 요약부터 본다)
+    late = plan_text("80만원 안에 들어오도록 설계했습니다.", OVER_ROW, "**판정**: 80만원을 약 5만원 초과할 수 있습니다. 초과 시 대안: 숙소 조정")
+    assert not v.check(late, opts).passed
+    # 요약에서 넘는다고 밝혔으면 통과 (도저히 못 맞추는 예산일 때 숫자를 억지로 낮추게 몰지 않는다)
+    honest = plan_text("총예산 80만원을 약 5만원 초과합니다 — 줄이는 방법은 예산 표 아래에 있습니다.", OVER_ROW)
+    said = v.check(honest, opts)
+    assert said.passed and "넘" in said.log
+    assert v.check(plan_text("예산을 5만원쯤 넘습니다.", "| 합계 | 850,000원 | |"), {"trip_budget": "총 800,000원"}).passed
+
+
+def test_budget_total_passes_when_within_or_when_it_cannot_be_sure():
+    v, opts = REGISTRY["budget_total"], {"trip_budget": "총 80만원"}
+    within = v.check(plan_text("80만원 안에 듭니다.", "| **합계** | **77만원** | **112만원** | |"), opts)  # 낮은 추정·높은 추정 두 칸 → 첫 금액
+    assert within.passed and "77만 원" in within.log
+    assert v.check(plan_text("요약", "| 합계 | 약 80만원 | |"), opts).passed  # 한도와 같으면 통과
+    over = plan_text("80만원 안에 듭니다.", OVER_ROW)
+    # 한도를 코드로 알 수 없으면 검사하지 않는다 — 빈 칸 · 1인 기준 · 금액 둘 · '총' 표시 없음 · 원화가 아님 · 항목 제외
+    for budget in ["", "1인 30만원", "총 60만원, 1인 30만원", "80만원", "총 500달러", "항공 제외 총 80만원"]:
+        assert v.check(over, {"trip_budget": budget}).passed, budget
+    assert v.check(over, {}).passed  # 자유 질문(양식 없음)
+    # 합계 금액을 확실히 읽을 수 없으면 통과 — 합계 줄 없음 · 금액 없음 · 단위 없는 숫자 · 외화가 먼저 · 합계 줄마다 금액이 다름
+    for row in ["| 총 | 약 85만원 | |", "| **합계** | **산출 불가** | |", "| **합계** | **850,000** | 약 77만~119만원 |",
+                "| 합계 | 약 9만엔 (약 85만원) | |", "| 1일차 합계 | 30만원 | |\n| 합계 | 85만원 | |"]:
+        assert v.check(plan_text("80만원 안에 듭니다.", row), opts).passed, row
+    assert not v.check(plan_text("요약", "| 합계 | 약 85만원 (약 9만엔) | |"), opts).passed  # 원화 합계가 먼저 분명하면 검사
+    # 표의 합계 줄이 있으면 글 속 '합계' 문장(예: 확인할 일 목록)은 보지 않는다
+    assert not v.check(plan_text("요약", OVER_ROW, "- 예매 뒤 합계가 80만원 이내인지 다시 계산"), opts).passed
+
+
+def test_travel_plan_form_passes_budget_to_the_harness():
+    for team_id in ["travel_domestic", "travel_abroad"]:
+        team = load_team(team_id)
+        dates = {"start_date": "2026-11-20", "end_date": "2026-11-22"}
+        req = build_request(team.tasks[0], {**dates, "budget": "총 80만원"})
+        assert req.harness_options["trip_budget"] == "총 80만원" and "budget_total" in req.validators
+        assert "budget_total" in team.harness.final_only  # 팀원 초안(맛집·준비물)에는 돌지 않는다
+        assert build_request(team.tasks[0], dates).harness_options["trip_budget"] == ""  # 예산을 비우면 검사 생략
+
+
 # ─── 워크플로우 연결 ───────────────────────────────────────────────────
 
 
@@ -185,7 +241,7 @@ def test_tool_results_reach_prompts_and_harness(ranks, models, travel, use_scrip
     assert "| 3일차 | 2026-11-22 | 일 | 귀가일 · 주말 |" in script.prompts("text")[0]  # 달력이 실무자 근거 자료로
     assert "오늘 날짜: 2026-10-19 (월)" in script.prompts("text")[0]  # 현 시점 기준
     draft = next(p for k, p in events if k == "step")
-    assert {h.validator for h in draft.harness} == {"itinerary_days", "required_terms"}
+    assert {h.validator for h in draft.harness} == {"itinerary_days", "required_terms", "budget_total"}
     assert all(h.passed for h in draft.harness)
 
 
@@ -193,12 +249,12 @@ def test_tool_results_reach_prompts_and_harness(ranks, models, travel, use_scrip
 def test_travel_final_checks_skip_member_drafts(team_id, ranks, models, use_script):
     """맛집·명소 담당 초안에는 최종 계획서용 검사(모든 날 일정·예산·숙소·교통)가 돌지 않는다 — 최종 답변에만."""
     team = load_team(team_id)
-    final = "1일차 출발\n2일차 관광\n3일차 귀가\n예산 표, 숙소, 교통, 입국 조건, 환전"
+    final = "1일차 출발\n2일차 관광\n3일차 귀가\n예산 표, 숙소, 교통, 입국 조건, 환전\n| 합계 | 약 75만원 |"
     use_script(Script(text="맛집 3곳: 순두부 마을, 중앙시장 닭강정, 안목해변 카페거리",
                       ReviewResult=make_review("revise", 8, answer=final),
                       Delegation=make_delegation("am_spots", "staff_food")))
     org = team_org(team, ranks)
-    req = build_request(team.tasks[0], {"start_date": "2026-11-20", "end_date": "2026-11-22"})
+    req = build_request(team.tasks[0], {"start_date": "2026-11-20", "end_date": "2026-11-22", "budget": "총 80만원"})
     graph = build_office_graph(org, ranks, team, models, {}, NO_CRITIC)
     events = list(stream_office(graph, org, req.question, "gm_itinerary", brief=req.brief, auto_brief=False,
                                 tool_inputs=req.tool_inputs, extra_validators=req.validators, harness_options=req.harness_options))
@@ -206,5 +262,7 @@ def test_travel_final_checks_skip_member_drafts(team_id, ranks, models, use_scri
     drafts = [s for s in steps if s.kind == "draft"]
     assert len(drafts) == 2 and all(not d.harness and d.attempts == 1 for d in drafts)  # 범위 밖 내용을 쓰라고 다시 시키지 않는다
     root = steps[-1]
-    assert root.node_id == "gm_itinerary" and {h.validator for h in root.harness} == {"itinerary_days", "required_terms"}
+    assert root.node_id == "gm_itinerary"
+    assert {h.validator for h in root.harness} == {"itinerary_days", "required_terms", "budget_total"}
     assert all(h.passed for h in root.harness)
+    assert "75만 원" in next(h.log for h in root.harness if h.validator == "budget_total")  # 예산 합계 검사는 최종 답변에만 돈다

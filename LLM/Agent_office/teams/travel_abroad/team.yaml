@@ -8,6 +8,7 @@
 #   - travel_calendar 툴: N박 M일, 날짜별 요일·주말, 계절(남반구 주의), D-day 를 '코드로' 계산
 #   - web_search      : 목적지의 그 시기 날씨·축제, 입국 조건, 환율, 항공·현지 교통, 숙소 지역, 맛집
 # 하네스: itinerary_days — 일정이 1일차~마지막 날까지 모든 날을 다루는지 코드로 검사
+#         budget_total   — 예산 칸이 '총 300만원'처럼 총액일 때, 계획서의 원화 합계가 그 예산을 넘는데 한 줄 요약에서 밝히지 않았는지
 
 id: travel_abroad
 name: 🌏 해외 여행팀
@@ -117,7 +118,7 @@ search:
 
 harness:
   validators: [itinerary_days, required_terms]
-  final_only: [itinerary_days, required_terms]   # 팀원(맛집·준비물 등)은 일부만 쓰므로 계획서 전체 검사는 최종 답변에만
+  final_only: [itinerary_days, required_terms, budget_total]   # 팀원(맛집·준비물 등)은 일부만 쓰므로 계획서 전체 검사는 최종 답변에만
   max_retries: 2
 
 tasks:
@@ -157,8 +158,9 @@ tasks:
       - "스타일: {style}"
       - "여권·비자: {passport}"
     output_format: "한 줄 요약 → (목적지 선정 이유) → 출국 준비 체크리스트 → 일자별 일정 표 → 항공·현지 교통·숙소 → 예산 표(현지 통화·원화) → 날씨·주의사항"
-    validators: [itinerary_days]
+    validators: [itinerary_days, budget_total]   # budget_total: 합계가 총예산을 넘는데 요약에서 안 밝혔는지
     harness_options:
+      trip_budget: "{budget}"   # '총 80만원'처럼 총액 하나일 때만 검사 (1인 기준·빈 칸은 생략)
       required_terms: ["예산", "숙소", "교통|이동", "입국|비자", "환전|환율"]
 
 disclaimer: "입국 조건·환율·요금·항공편은 바뀔 수 있으니 출발 전 외교부 해외안전여행·대사관·항공사 공식 사이트에서 다시 확인하세요."
