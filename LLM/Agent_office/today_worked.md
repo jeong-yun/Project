@@ -1559,6 +1559,12 @@
   - 여행: 예산 표의 항목 합과 합계가 같은지 코드로 검산 (지금은 합계가 총예산을 넘는지만 본다).
   - 공통(다른 작업 몫): 통합 지시의 "출처 [번호] 표기는 유지한다"·분배 지시의 "최소 1명"은 그대로라, 개념 편집 팀은 팀 글 쪽에서 반대로 적어 두었다.
 
+**작은 수정 4개 · 팀별 프롬프트 16건을 main 에 합치기 · 전체 테스트**
+- 합친 것: 작은 수정 4개(본 업무 비평의 최종본 잘림, 여행 예산 합계 검사, 웹 검색 결과 데이터 표시, bench_ui)와 예산 검사의 부정 표현 수정, 팀별 프롬프트 점검 중간 16건(기본·개념 편집·주식·여행).
+- 예산 검사는 합치기 전 검토에서 '넘지 않는다'고 쓴 초과 계획이 통과하는 것을 직접 돌려 찾았고(문장 4개 중 2개가 잘못 통과), 고친 뒤 문장 11개로 다시 확인했다.
+- 성과: 합친 main(`4a29fe0`)에서 전체 `python -m pytest -q` **1053 통과**, 15분 52초 (이 PC, 하단 작업 2개가 함께 도는 중). 앞서 작은 수정 4개만 합친 상태(`ffc6e4b`)에서는 1033 통과·1 실패(23분 54초, 하단 작업 4개와 겹침) — 실패한 `tests/test_concurrency.py` 는 0.2초짜리 동시 실행을 시간으로 확인하는 테스트로, 그 파일만 3번 다시 돌려 모두 통과했다(부하 탓으로 봄 — 실패 순간의 원인을 직접 확인한 것은 아님).
+- 아직: 실제 모델·실행 중인 앱 화면에서는 확인 안 함. 고친 프롬프트가 실제 결과를 낫게 하는지는 재지 못했다.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
