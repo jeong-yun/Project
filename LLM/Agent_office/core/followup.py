@@ -148,7 +148,7 @@ def build_messages(agent: OrgAgent, question: str, current: str, request: str, t
 
 def revision_messages(head: HeadReview, question: str, before: str, request: str, out: FollowupResult,
                       evidence: str = "", head_fixed: list[str] | None = None) -> list[BaseMessage]:
-    """부장에게 보내는 수정본 검토 프롬프트. 본 업무의 비평은 '검토 과정의 논리'만 보지만, 여기서는 수정본 자체를 본다.
+    """부장에게 보내는 수정본 검토 프롬프트. 본 업무의 비평은 검토자의 '지적 → 수정' 과정도 보지만, 여기서는 수정본 자체만 본다.
 
     head_fixed = 앞선 검토에서 부장이 짚어 직접 고친 '추가로 고칠 점'. 다시 검토도 같은 기준의 온전한 검토이고,
     이 목록은 그 수정으로 바뀐 곳을 '요청과 무관한 변경'으로 잘못 지적하지 않게 알려 주는 것뿐이다.
@@ -172,6 +172,7 @@ def revision_messages(head: HeadReview, question: str, before: str, request: str
             "extra_fixes 에는 사람의 요청과는 별개로, 수정본에서 추가로 고쳐야 할 점을 '어디를 → 어떻게' 한 줄씩 쓴다 (없으면 빈 목록).",
             "- 요청이 반영되지 않은 문제는 extra_fixes 가 아니라 rule_violations 에 쓴다.",
             "- extra_fixes 는 점수·등급에 넣지 않는다 — 사람에게 묻지 않고 네가 바로 직접 고치게 되니, 취향 차이는 빼고 고쳐야 할 것만 쓴다.",
+            verification.TRIM_NOTE,
             *(["[부장이 직접 고친 점]은 앞선 검토에서 네가 짚어 이 수정본에 직접 고쳐 넣은 것이다.",
                "- 그에 따라 바뀐 곳은 '요청과 무관한 변경'으로 보지 않는다. 이미 고쳐진 점은 extra_fixes 에 다시 쓰지 않는다."] if head_fixed else []),
             *(["[이 팀의 추가 비평 규칙 — 하나라도 어기면 rule_violations 에 넣는다]", *(f"- {r}" for r in rules)] if rules else []),

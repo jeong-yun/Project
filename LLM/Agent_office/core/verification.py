@@ -3,7 +3,7 @@
 검토자(관리자 에이전트)가 하위 결과를 채점·수정할 때 생기는 문제
   - 점수가 들쭉날쭉하다          → 루브릭 + 실제 고득점/저득점 예시(퓨샷)로 기준점을 맞춘다   (rubric_text)
   - 근거 없이 결론부터 낸다      → 스키마에서 analysis 를 점수보다 먼저 쓰게 한다            (core/schemas.py)
-  - '지적 → 수정' 과정이 비약한다 → 별도 비평가가 그 중간 과정만 채점한다                    (critique)
+  - '지적 → 수정' 과정이 비약한다 → 별도 비평가가 그 과정과, 수정 답변이 기준·근거 자료에 맞는지를 본다 (critique)
   - 비평가가 불합격을 주면        → "A 부분이 B 규칙에 어긋난다. 수정하라" 를 돌려줘 다시 쓴다 (correction_message)
 
 설정: config/verification.yaml (팀별 루브릭은 team.yaml 의 rubric)
@@ -46,12 +46,20 @@ def rubric_text(rubric: dict | None) -> str:
     lines += [f"- {level}" for level in rubric.get("levels", [])]
     examples = rubric.get("examples", [])
     if examples:
-        lines.append("[채점 예시 — 이 기준점에 맞춰 채점한다]")
+        # 예시는 점수 간격을 맞추는 본보기다 — 기본 예시는 용어 설명 질문이라, 가사·도면·계획서 같은 결과물에 형식까지 요구하지 않게 한다
+        lines.append("[채점 예시 — 점수 간격을 맞추는 본보기다. 무엇을 볼지는 [검토 기준]과 브리프의 [완료 기준]이 먼저이고, "
+                     "결과물 종류가 예시와 다르면 예시의 형식(출처 [번호] 등)을 요구하지 않는다]")
         for ex in examples:
             lines.append(
                 f"- 질문: {ex.get('question')}\n  답변: {ex.get('answer')}\n  → {ex.get('score')}점 (이유: {ex.get('reason')})"
             )
     return "\n".join(lines)
+
+
+# 부장에게 넘기는 글(하위 결과·수정 답변·근거 자료)은 아래 trim_* 함수가 글자 한도로 줄인다 — 줄여서 안 보이는 부분을
+# '버렸다·자료에 없다'로 판정하지 않게 부장 프롬프트(본 업무 비평 · 💬 수정본 검토)에 함께 넣는다
+TRIM_NOTE = ("'생략'이라고 표시된 곳('…(생략)', '…(가운데 N자 생략 …)…')은 글이 길어 줄여 넣은 것이다. "
+             "보이지 않는 부분에 있을 수 있는 내용을 근거로 '빠졌다·버렸다·자료에 없다'고 지적하지 않는다.")
 
 
 def trim_middle(text: str, budget: int) -> str:
@@ -118,7 +126,7 @@ def build_critic_messages(
     question: str, reviewed_input: str, review: ReviewResult, criteria: list[str], rules: list[str] | None = None,
     evidence: str = "", persona: str = "", answer_chars: int = 0,
 ) -> list:
-    """비평가 프롬프트. 최종 답변의 좋고 나쁨이 아니라 '검토 과정의 논리'만 보게 한다.
+    """비평가 프롬프트. ① 검토자의 '지적 → 수정' 과정의 논리 ② 수정 답변이 검토 기준·근거 자료·팀 규칙에 맞는지를 보게 한다.
 
     rules = 팀 전용 비평 규칙
     evidence = 근거 자료(데이터 툴·웹 검색) — '숫자에는 출처·기준일' 같은 규칙을 비평가가 실제로 대조할 수 있게 한다
@@ -128,7 +136,9 @@ def build_critic_messages(
     system = "\n".join(
         [
             *([persona] if persona else []),
-            "너는 비평가(Critic)다. 다른 검토자가 작성한 '검토 과정'의 논리만 전문적으로 채점한다.",
+            "너는 이 팀의 결과를 마지막으로 확인하는 비평가(Critic)다. 두 가지를 본다.",
+            "① 검토자의 '지적 → 수정' 과정이 논리적으로 이어지는가",
+            "② 수정 답변이 [검토 기준]과 (주어졌다면) [근거 자료]·팀 추가 규칙에 맞는가",
             "- 검토자가 찾은 문제점(issues)이 실제 검토 대상 답변에 근거하는가?",
             "- 수정 답변(revised_answer)이 그 문제점들을 실제로 해결했는가? 근거 없이 새 주장을 추가하지 않았는가?",
             "- 검토자의 점수가 분석·문제점과 일관되는가?",
@@ -146,6 +156,7 @@ def build_critic_messages(
             "- minor : 표현·형식·사소한 누락처럼 결론은 그대로 유효한 지적",
             "- severe: 사실 오류, 근거 자료와 어긋나는 숫자, 하위 결과의 올바른 사실을 버림, 결론을 뒤집는 비약",
             "사소한(minor) 지적만으로 점수를 크게 깎지 않는다.",
+            TRIM_NOTE,
             *(["[이 팀의 추가 비평 규칙 — 하나라도 어기면 rule_violations 에 넣는다]", *(f"- {r}" for r in rules)] if rules else []),
         ]
     )
