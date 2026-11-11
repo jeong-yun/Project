@@ -194,6 +194,22 @@ def test_budget_total_fails_when_stated_total_is_over_the_budget_and_summary_doe
     assert v.check(plan_text("예산을 5만원쯤 넘습니다.", "| 합계 | 850,000원 | |"), {"trip_budget": "총 800,000원"}).passed
 
 
+def test_budget_total_does_not_take_a_denial_as_saying_it_is_over():
+    """'넘지 않는다'·'초과하지 않는다'는 넘는다고 밝힌 것이 아니다 — 넘는데 안 넘는다고 쓴 계획이 이 검사가 잡으려는 바로 그 경우다."""
+    v, opts = REGISTRY["budget_total"], {"trip_budget": "총 80만원"}
+
+    def passed(summary: str) -> bool:
+        return v.check(plan_text(summary, "| 합계 | 850,000원 | |"), opts).passed
+
+    for denial in ["총예산 80만원을 넘지 않도록 구성했습니다.", "예산을 초과하지 않는 일정입니다.", "예산 초과 없이 다녀올 수 있습니다.",
+                   "80만원을 넘기지 않게 짰습니다.", "예산을 넘는 일이 없도록 했습니다.", "예산은 안 넘습니다.", "총예산을 초과하지는 않습니다."]:
+        assert not passed(denial), denial
+    assert not passed("100년 넘은 맛집과 파도가 넘실대는 해변을 담았습니다.")  # 돈 이야기가 아닌 '넘'도 밝힌 것이 아니다
+    for said in ["총예산을 약 5만 원 초과합니다.", "예산을 5만원쯤 넘습니다.", "예산 초과 예상입니다.", "총예산보다 약 5만 원 넘음",
+                 "숙소를 바꾸면 넘지 않지만 지금 안은 5만 원 초과입니다."]:  # 부정과 함께 있어도 초과를 밝힌 문장이 하나라도 있으면 통과
+        assert passed(said), said
+
+
 def test_budget_total_passes_when_within_or_when_it_cannot_be_sure():
     v, opts = REGISTRY["budget_total"], {"trip_budget": "총 80만원"}
     within = v.check(plan_text("80만원 안에 듭니다.", "| **합계** | **77만원** | **112만원** | |"), opts)  # 낮은 추정·높은 추정 두 칸 → 첫 금액
