@@ -174,3 +174,33 @@ def test_ticker_lookup_does_not_guess_and_shows_what_was_found(models, fake_mark
     assert "지어내지" in prompt and "빈 문자열" in prompt
     assert "입력 '에코프로비엠' → 조회된 종목 회사 247540.KQ (247540.KQ)" in result.content  # 다른 회사가 조회됐는지 알아볼 수 있게
     assert any("모르는회사" in n and "종목 코드" in n for n in result.notes)  # 코드를 모르는 종목은 조회하지 않고 알린다
+
+
+# ─── T4·T5·T12 여행 두 팀 ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("team_id", ["travel_domestic", "travel_abroad"])
+def test_travel_amounts_are_cited_or_marked_as_estimates(team_id, ranks, models):
+    agent = agents_of(team_id, ranks, models)["am_transport"]
+    line = skill_line(agent, "- 요금·가격대·예산 금액은")
+    assert "[n]" in line and "(추정)" in line and "추정 포함" in line and "계산:" in line
+    assert any("예산" in c and "추정" in c for c in load_team(team_id).review_criteria)
+    calendar = skill_line(agent, "- 날짜·요일·박수는")
+    assert "여행 달력이 없으면" in calendar and "자유 질문" in calendar and "'확인 필요'" in calendar
+
+
+def test_budget_check_still_reads_the_total_in_the_new_format():
+    # 스킬이 시키는 모양: 합계 줄에는 합계 금액과 '추정 포함', 더한 식은 표 아래 '계산:' 줄
+    plan = ("한 줄 요약: 강릉 1박 2일\n\n1일차 일정\n\n| 항목 | 금액 |\n|---|---|\n| 교통 | 약 30만 원(추정) |\n| 숙박 | 28만 원 [2] |\n"
+            "| 식비 | 약 20만 원(추정) |\n| 합계 | 78만 원 (추정 포함) |\n\n계산: 30만 원 + 28만 원 + 20만 원 = 78만 원")
+    within, over = (harness.run_validators(["budget_total"], plan, {"trip_budget": b})[0] for b in ("총 80만원", "총 70만원"))
+    assert within.passed
+    assert not over.passed and "78만 원" in over.log  # 합계를 78만 원으로 읽었다 (식의 첫 금액 30만 원이 아니라)
+
+
+def test_abroad_dates_follow_the_calendar_and_mark_local_date(ranks, models):
+    abroad = agents_of("travel_abroad", ranks, models)["staff_prep"]
+    time_line, entry = skill_line(abroad, "- 시차:"), skill_line(abroad, "- 입국 조건:")
+    assert "한국 출발일 기준" in time_line and "현지" in time_line and "도착)" in time_line  # 밤 비행·날짜변경선
+    assert "K-ETA" not in entry and "미국 ESTA" in entry  # K-ETA 는 외국인이 한국에 올 때 받는 허가
+    assert "현지 시각 기준, 시차 표시" in "\n".join(task_of("travel_abroad", "plan").success_criteria)  # 양식의 시각 기준은 그대로
