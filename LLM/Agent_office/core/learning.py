@@ -592,7 +592,7 @@ def course_context(course: Course, recent: int = 5) -> str:
         f"- 이름: **{t.name}**" + (f" · 전문 분야: {t.specialty}" if t.specialty else ""),
     ]
     if t.background:
-        lines.append(f"- 경력 설정: {t.background}")
+        lines.append(f"- 경력 설정(가상 — 말투·관점용이다. 경험담·합격 사례·통계의 근거로 쓰지 않는다): {t.background}")
     if t.teaching_style:
         lines.append(f"- 가르치는 방식: {t.teaching_style}")
     lines += [
@@ -650,7 +650,7 @@ class CurriculumPlan(BaseModel):
     """수준이 바뀐 뒤 남은 커리큘럼 (구조화 출력)."""
 
     analysis: str = Field(description="먼저 새 수준과 끝낸 단원을 보고 무엇을 바꿔야 하는지 1~2문장")
-    units: list[UnitDraft] = Field(description="끝낸 단원 다음부터 이어질 새 단원들 (4~8개)")
+    units: list[UnitDraft] = Field(description="끝낸 단원 다음부터 이어질 새 단원들 (바꾸기 전 남은 단원 수와 비슷하게)")
 
 
 def plan_messages(course: Course, to_level: str):
@@ -664,7 +664,11 @@ def plan_messages(course: Course, to_level: str):
         f"학습자의 수준이 {level_label(course.level, course.language)} → {level_label(to_level, course.language)} 로 바뀌었습니다.\n"
         f"새 수준의 규칙: {course.tutor.rule_for(to_level)}\n"
         "끝낸 단원은 그대로 두고, 그 다음부터 이어질 남은 커리큘럼을 새 수준에 맞게 다시 짜세요. "
-        f"주차는 {start_week}주차부터 이어 갑니다. 끝낸 내용을 반복하지 마세요."
+        f"주차는 {start_week}주차부터 이어 갑니다. 끝낸 내용을 반복하지 마세요.\n"
+        # 선생님 만들기(teams/_shared/education/teaching.md)와 같은 규칙 — 이 프롬프트에는 팀 스킬이 들어가지 않는다
+        "한국어로 쓴다. 한 주 분량은 " + (f"주당 학습 시간({course.weekly_hours:g}시간)" if course.weekly_hours else "주당 학습 시간")
+        + " 안에 끝낼 수 있게 짠다. 단원 제목·목표에 시험 일정·회사·제도 이름을 지어내 넣지 않는다. "
+        + (f"남은 단원 수는 바꾸기 전({len(left)}개)과 비슷하게(±2개) 한다." if left else "새 단원은 4~8개로 한다.")
     )
     human = "\n".join([
         f"과목: {course.topic} ({KINDS[course.kind]}) · 목표: {course.goal} · 주당 {course.weekly_hours:g}시간",

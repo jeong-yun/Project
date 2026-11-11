@@ -483,3 +483,30 @@ def test_app_create_course_quiz_level_up_and_rebuild_curriculum(edu_app):
     change = after.level_history[-1]
     assert change.how == "quiz" and change.score_pct == 100 and change.replaced_units == ["계정과 비밀번호", "네트워크 기초", "사고 대응 첫걸음"]
     assert any("입문(신규) → **초급**" in s.value for s in at.success)
+
+
+# ─── 프롬프트 점검(2026-11-10) E9·E10 ───────────────────────────────────────
+
+
+def test_tutor_background_is_marked_fictional_everywhere():
+    """E9 — 선생님의 가상 경력이 이후 업무에 '(가상)' 표시 없이 들어가 경험담·합격 사례의 근거로 쓰일 수 있었다."""
+    from core.config import load_skills, load_team
+
+    text = learning.course_context(make_course())
+    assert "경력 설정(가상" in text and "- 경력 설정: " not in text and "경험담" in text
+    for team_id in ("edu_career", "edu_hobby"):
+        skills = load_skills(team_id)
+        assert "가상 설정일 뿐" in skills and "경험담·합격 사례·통계를 지어내" in skills
+        assert "선생님 프로필(이름·경력 설정·가르치는 방식)과" not in skills  # 경력 설정을 '그대로 따른다'던 문장
+        create = next(t for t in load_team(team_id).tasks if t.id == "create_tutor")
+        assert any("실존 인물·회사 이름을 쓰지 않는다" in c for c in create.constraints)
+
+
+def test_replan_prompt_keeps_the_rules_of_the_first_curriculum():
+    """E10 — 수준이 바뀐 뒤 남은 커리큘럼을 다시 짜는 프롬프트에 주당 학습 시간·지어내기 금지·한국어·단원 수 기준이 빠져 있었다."""
+    c = make_course()
+    system = learning.plan_messages(c, "elementary")[0].content
+    left = sum(not u.done for u in c.curriculum)
+    assert "한국어로 쓴다" in system and f"주당 학습 시간({c.weekly_hours:g}시간)" in system
+    assert "시험 일정·회사·제도 이름을 지어내" in system and f"바꾸기 전({left}개)과 비슷하게" in system
+    assert "4~8개" not in learning.CurriculumPlan.model_fields["units"].description

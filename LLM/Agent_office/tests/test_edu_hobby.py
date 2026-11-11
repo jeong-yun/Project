@@ -533,3 +533,21 @@ def test_app_vocab_phrases_review_and_new_course(hobby_app):
     assert at.selectbox(key="dept_task_education").value == "edu_hobby:create_tutor"
     assert at.text_input(key="tf_edu_hobby_create_tutor_topic").value == "로마사 첫걸음"
     assert "이탈리아어" in at.text_input(key="tf_edu_hobby_create_tutor_goal").value
+
+
+def test_review_quiz_rules_agree_on_what_ref_is(data_env):
+    """프롬프트 점검 E11 — 공용 스킬 '복습 = 끝낸 단원'과 취미 스킬 '복습 대상 목록'이 한 프롬프트에 함께 있다 → 어느 업무의 규칙인지,
+    ref 에 무엇을 쓰는지('=' 앞의 단어·표현만)를 스킬·양식·근거 자료·검사 실패 글에서 같은 말로."""
+    from core.config import load_skills, load_team
+
+    skills = load_skills("edu_hobby")
+    assert "[퀴즈 — 🔁 단어·표현 복습 (이 업무에서만" in skills and "'복습 퀴즈'는 끝낸 단원에서 내고 ref 를 쓰지 않는다" in skills
+    review = next(t for t in load_team("edu_hobby").tasks if t.id == "review")
+    c = italian()
+    hobby.add_vocab(c, VOCAB)
+    data_env.save(c)
+    context = TOOLS["learning_course"]("q", {"course_id": c.id, "edu_kind": "hobby", "edu_task": "review"}, None).content
+    fail = REGISTRY["review_quiz"].check(review_answer(("없는 말", "grazie")), {"course_id": c.id}).log
+    for text in (skills, " ".join(review.success_criteria), review.instructions, context, fail):
+        assert "'=' 앞의 단어·표현만" in text, text[:120]
+    assert "'복습 대상' 글 그대로" not in " ".join(review.success_criteria) and "적힌 글 그대로" not in skills
