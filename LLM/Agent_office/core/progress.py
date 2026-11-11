@@ -303,6 +303,7 @@ def followup_units(plan: Plan, run: dict, records, now: float | None = None) -> 
 
     수정본인지는 팀장 답이 와야 알므로, 부장 검토는 시작된 뒤에 단계로 세고 그 전에는 '최대'(worst)에만 넣는다.
     부장의 직접 수정도 팀장의 다시 고침과 같은 종류(self_correct)로 기록되고 상한을 함께 쓰므로 '최대' 계산은 하나다.
+    '최대'에는 팀장이 다시 고친 글의 하네스 재작성도 넣는다 (하네스 2회·상한 1회 팀: 1 + 2 + 검토 1 + 고침 1 + 2 + 다시 검토 1 = 8).
     (남은 시간 추정은 그 단계를 팀장 모델의 기록으로 어림한다 — 부장 모델이 다르면 조금 어긋날 수 있다.)
     """
     now = time.time() if now is None else now
@@ -315,10 +316,19 @@ def followup_units(plan: Plan, run: dict, records, now: float | None = None) -> 
                   running_sec=None if _rget(r, "status") == DONE else _running([r], _rget(r, "kind"), None, now))
              for r in recs] or [Unit("followup", plan.root_id, lead)]
     kinds = [u.kind for u in units]
-    worst = max(0, plan.max_retries - (kinds.count("followup") - 1)) if plan.harness else 0
-    if plan.critic_enabled:  # 검토 1 + (팀장 다시 고침 또는 부장 직접 수정 1 + 다시 검토 1) × 상한
-        worst += (max(0, 1 + plan.max_self_corrections - kinds.count("critic"))
-                  + max(0, plan.max_self_corrections - kinds.count("self_correct")))
+    retries = plan.max_retries if plan.harness else 0  # 팀장이 쓴 글이 하네스에 걸려 다시 쓰는 최대 횟수 (같은 종류로 기록된다)
+    one_round = 2 + retries  # 고침 한 회차의 최대 = 고침 1 + 그 글의 하네스 재작성 + 다시 검토 1 (부장의 직접 수정은 재작성이 없어 덜 걸린다)
+    if "critic" not in kinds:  # 아직 팀장의 첫 답 — 남은 하네스 재작성 + (검토를 켰으면) 검토 1 + 고침 회차 × 상한
+        worst = max(0, retries - (kinds.count("followup") - 1))
+        if plan.critic_enabled:
+            worst += 1 + plan.max_self_corrections * one_round
+        return units, worst
+    # 검토가 시작됐다 = 첫 답은 끝났다 (첫 답의 하네스 몫은 더 세지 않는다). 고침 회차 = self_correct 가 이어진 묶음
+    rounds = sum(1 for i, k in enumerate(kinds) if k == "self_correct" and kinds[i - 1] != "self_correct")
+    worst = max(0, plan.max_self_corrections - rounds) * one_round
+    if kinds[-1] == "self_correct":  # 지금 고치는 회차에 남은 것: 하네스 재작성 + 다시 검토 1
+        in_round = len(kinds) - max(i for i, k in enumerate(kinds) if k != "self_correct") - 1
+        worst += max(0, retries - (in_round - 1)) + 1
     return units, worst
 
 
