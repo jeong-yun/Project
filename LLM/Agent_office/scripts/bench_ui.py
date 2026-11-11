@@ -1,4 +1,4 @@
-"""화면 전환 속도 측정 (Streamlit AppTest) — 🏠 메인·팀별 화면을 다시 그리는 데 걸리는 시간.
+"""화면 전환 속도 측정 (Streamlit AppTest) — 🏠 메인·부서장 창구·팀별 업무 화면을 다시 그리는 데 걸리는 시간.
 
 실행 (Agent_office 폴더에서):
     python scripts/bench_ui.py                     # 빈 임시 데이터로
@@ -9,7 +9,9 @@
   script : 스크립트(app.py) 실행 시간 — Streamlit 서버가 화면 한 번 다시 그릴 때 쓰는 시간과 같다
   total  : AppTest 가 결과를 받아 해석하는 시간까지 포함 (참고용)
   첫 방문 : 서버를 켠 뒤 그 화면을 처음 볼 때 (캐시가 비어 있음) / 다시 : 같은 화면을 다시 그릴 때 (중앙값)
-  전환   : 🏠 메인 → 팀 → 다른 팀 → 🏠 메인 … 을 차례로 고를 때 한 번의 중앙값
+  전환   : 🏠 메인 → 부서장 창구 → 팀 → 다른 부서 팀 → 🏠 메인 … 을 차례로 고를 때 한 번의 중앙값
+
+화면 이름 (VIEWS): home = 🏠 메인 / 팀 id = 🏢 그 팀이 속한 부서 업무 화면에서 그 팀의 첫 업무 / dept:부서 id = 그 부서의 👔 부서장 창구
 
 브라우저가 받은 화면을 그리는 시간·네트워크는 빠져 있다 (서버 쪽 시간만).
 API 키는 가짜 값('bench-key')을 넣어 키가 있을 때의 경로(FreeLLMAPI 연결 확인 등)를 탄다 — 모델 호출은 하지 않는다.
@@ -30,7 +32,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
 
-VIEWS = ["home", "general", "stock", "travel_domestic", "concept", "music", "design"]
+VIEWS = ["home", "dept:research", "general", "stock", "travel_domestic", "concept", "music", "design"]
 KEY_ENVS = ["OPENAI_API_KEY", "GOOGLE_API_KEY", "ANTHROPIC_API_KEY", "UPSTAGE_API_KEY", "FREELLM_API_KEY"]
 
 _timing = {"script": 0.0, "profile": None}
@@ -66,12 +68,27 @@ def patch_script_runner() -> None:
 
 
 def select(at, view: str) -> None:
-    """사이드바에서 화면·팀을 고른 것과 같게 위젯 값을 바꾼다."""
+    """사이드바·빌딩에서 화면을 고른 것과 같게 세션 값을 바꾼다 — app.py 의 go_to_team · go_to_dept 가 넣는 값과 같다.
+
+    앱은 부서 단위 화면이다: 부서(dept_pick) 안에서 지금 보는 팀(team_pick)과 업무(dept_task_<부서>)를 고른다.
+    팀만 바꾸면 앱이 그 부서의 팀으로 되돌리므로 부서도 함께 바꾼다.
+    """
     if view == "home":
         at.session_state["view"] = "home"
+        return
+    from core import building
+    from core.config import list_teams
+
+    teams = {t.id: t for t in list_teams()}
+    if view.startswith("dept:"):
+        dept, task = view.removeprefix("dept:"), "head"  # 👔 부서장에게 맡기기
     else:
-        at.session_state["view"] = "team"
+        dept = next(d.id for d in building.departments(list(teams), building.load_config()) if view in d.teams)
+        task = f"{view}:{teams[view].tasks[0].id if teams[view].tasks else 'free'}"  # 그 팀의 첫 업무 (없으면 자유 질문)
         at.session_state["team_pick"] = view
+    at.session_state["view"] = "dept"
+    at.session_state["dept_pick"] = dept
+    at.session_state[f"dept_task_{dept}"] = task
 
 
 def run(at) -> tuple[float, float]:
@@ -107,6 +124,7 @@ def main() -> None:
         shutil.copytree(args.data, data)
     os.environ["AGENT_OFFICE_DATA_DIR"] = str(data)
     os.environ["AGENT_OFFICE_RESULTS_DIR"] = str(tmp / "results")
+    os.environ.pop("AGENT_OFFICE_KNOWLEDGE_DIR", None)  # 임시 DB 의 교훈이 실제 knowledge/ 파일로 쓰이지 않게 (core/feedback_sync.py)
     for env in KEY_ENVS:
         os.environ.setdefault(env, "bench-key")
 
@@ -137,7 +155,7 @@ def main() -> None:
             print("— tottime —\n" + out.getvalue())
             return
 
-        print(f"\n{'화면':<8} {'첫 방문(ms)':>12} {'다시 script':>12} {'다시 total':>11}")
+        print(f"\n{'화면':<16} {'첫 방문(ms)':>12} {'다시 script':>12} {'다시 total':>11}")
         rows = {}
         for view in VIEWS:
             select(at, view)
@@ -146,9 +164,9 @@ def main() -> None:
             s = statistics.median(a[0] for a in again)
             t = statistics.median(a[1] for a in again)
             rows[view] = (first, s, t)
-            print(f"{view:<8} {first:>12.0f} {s:>12.0f} {t:>11.0f}")
+            print(f"{view:<16} {first:>12.0f} {s:>12.0f} {t:>11.0f}")
 
-        order = ["home", "general", "stock", "home", "travel_domestic", "concept", "home", "music", "design", "general"]
+        order = ["home", "dept:research", "general", "stock", "home", "travel_domestic", "concept", "home", "music", "design", "general"]
         switches = []
         for _ in range(max(1, args.n // 2)):
             for view in order:

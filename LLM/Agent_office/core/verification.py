@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from core import llm_factory
 from core.llm_factory import NoAvailableModelError
 from core.schemas import CriticResult, ModelsConfig, ModelSpec, RankModels, ReviewResult
+from core.search import WEB_END
 
 DEFAULT_CRITIC = {
     "enabled": True,
@@ -26,7 +27,7 @@ DEFAULT_CRITIC = {
     "evidence_chars": 6000,  # 비평가에게 넘기는 근거 자료(데이터 툴·웹 검색) 최대 글자 수
     # 비평가에게 넘기는 검토 대상(하위 결과 모음)·수정 답변 최대 글자 수 — 팀장 통합본(출력 4만 토큰)과 하위 결과를
     # 그대로 넘기면 입력이 너무 커져 느리고 멈췄다 (2026-11-04 실측). 앞·뒤를 남기고 가운데를 줄인다.
-    # 💬 수정본 검토(core/followup.py)는 같은 한도로 줄이되 <final> 최종본은 자르지 않는다 (trim_keep_final).
+    # 수정 답변(본 업무 비평)과 💬 수정본 검토(core/followup.py)는 한도로 줄이되 <final> 최종본은 자르지 않는다 (trim_keep_final).
     "input_chars": 16000,
     "answer_chars": 24000,
 }
@@ -98,8 +99,19 @@ def trim_evidence(parts: list[str], budget: int, what: str = "근거 자료") ->
     for n, i in enumerate(order):
         shares[i] = min(len(parts[i]), remaining // (len(order) - n))
         remaining -= shares[i]
-    trimmed = [p if shares[i] >= len(p) else p[: shares[i]].rstrip() + " …(생략)" for i, p in enumerate(parts)]
+    # 웹 검색 묶음은 잘려도 '데이터 끝' 표시선을 남긴다 (여는 표시선만 남으면 뒤 글까지 데이터로 읽힌다)
+    trimmed = [p if shares[i] >= len(p) else p[: shares[i]].rstrip() + " …(생략)" + (f"\n{WEB_END}" if p.endswith(WEB_END) else "")
+               for i, p in enumerate(parts)]
     return "\n\n".join(trimmed) + f"\n\n({what}가 길어 {total}자 중 약 {budget}자만 표시)"
+
+
+def trim_reviewed(parts: list[str], budget: int) -> str:
+    """검토 대상(하위 결과 모음)을 budget 글자 안으로 줄인다 — trim_evidence 와 같되, 하위 결과가 하나이고 <final> 이 있으면
+    최종본부터 끝까지는 자르지 않는다 (trim_keep_final). 개념 편집 팀 편집장이 받는 부장 결과가 이 모양이다
+    (실제 기록 22건 중 4건이 17,578~19,058자로 한도 16,000자를 넘어 최종본 끝·요약이 잘렸다, 2026-11-11 확인)."""
+    if len(parts) == 1 and "<final>" in parts[0].lower():
+        return trim_keep_final(parts[0], budget)
+    return trim_evidence(parts, budget, "검토 대상")
 
 
 def build_critic_messages(
@@ -111,7 +123,7 @@ def build_critic_messages(
     rules = 팀 전용 비평 규칙
     evidence = 근거 자료(데이터 툴·웹 검색) — '숫자에는 출처·기준일' 같은 규칙을 비평가가 실제로 대조할 수 있게 한다
     persona = 비평하는 부서 부장의 관점 (core/dept_heads.py) — 예: 보안부 부장은 보안 사실의 정확성을 먼저 본다
-    answer_chars = 수정 답변 최대 글자 수 (0 = 그대로)
+    answer_chars = 수정 답변 최대 글자 수 (0 = 그대로) — 넘으면 가운데를 줄이되 <final> 최종본부터 끝까지는 통째로 둔다 (trim_keep_final)
     """
     system = "\n".join(
         [
@@ -145,7 +157,7 @@ def build_critic_messages(
             f"[검토 기준]\n{criteria_text}",
             "[검토자의 출력]\n"
             f"분석: {review.analysis}\n문제점: {review.issues}\n점수: {review.score}\n판정: {review.verdict}\n"
-            f"수정 답변:\n{trim_middle(review.revised_answer, answer_chars) or '(승인 — 수정 없음)'}",
+            f"수정 답변:\n{trim_keep_final(review.revised_answer, answer_chars) or '(승인 — 수정 없음)'}",
             *([f"[근거 자료 — 데이터 툴·웹 검색 (숫자·출처·날짜 대조용)]\n{evidence}"] if evidence else []),
         ]
     )

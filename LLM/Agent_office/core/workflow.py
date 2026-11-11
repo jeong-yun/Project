@@ -369,7 +369,7 @@ def build_office_graph(
         use_critic = critic_cfg["enabled"] and (critic_cfg["scope"] == "all" or node_id == state["root_id"])
         if use_critic:
             # 입력이 너무 크면 비평이 느리고 멈춘다 (2026-11-04 실측: 팀장 통합본 4만 토큰) → 하위 결과를 몫대로 줄인다
-            reviewed_input = verification.trim_evidence([c.content for c in children], critic_cfg["input_chars"], "검토 대상")
+            reviewed_input = verification.trim_reviewed([c.content for c in children], critic_cfg["input_chars"])
             # 비평가도 근거 자료를 봐야 '숫자에는 출처·기준일' 같은 규칙을 실제로 대조할 수 있다 (길이는 예산 안으로)
             evidence = verification.trim_evidence(evidence_parts(state), critic_cfg["evidence_chars"])
             answer.verification_log = [*answer.verification_log, *(f"⚠️ {w}" for w in critic_plan.warnings)]
