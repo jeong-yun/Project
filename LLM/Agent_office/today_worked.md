@@ -1618,6 +1618,12 @@
   - `tests/test_edu_hobby.py::test_tool_context_shows_vocab_phrases_topics_and_review_targets` 는 `tests/test_education.py` 를 먼저 돌리면 실패한다 (고치기 전 커밋에서도 같음 — 전체 테스트의 기본 순서에서는 통과). 원인은 보지 않음.
 - 다음 할 일: 실제 실행 몇 건으로 다시 쓰기 횟수 비교, S6·S13 코드 쪽 제안 반영 여부 정하기, 낮음 항목(S14·S15·E12~E15).
 
+**공통 프롬프트 17건 · 팀별 프롬프트 19건을 main 에 합치기 · 전체 테스트**
+- 합친 것: 공통 조립 코드(프롬프트 점검 C3~C10 · 하루 작업 점검 4~12번)와 팀별 프롬프트 중간 19건(설계·보안 거버넌스·인프라 보안·포트폴리오·교육). 앞서 합친 팀별 16건(기본·개념 편집·주식·여행)과 함께 프롬프트 점검의 중간 항목은 모두 들어갔다 (낮음 23개는 남음).
+- 충돌은 이 파일에서만 — 양쪽 내용을 모두 살렸다.
+- 성과: 합친 main(`e5c1041`)에서 전체 `python -m pytest -q` **1100 통과**, 10분 58초 (이 PC, 다른 무거운 작업 없음).
+- 아직: 실제 모델·실행 중인 앱 화면에서는 확인 안 함. 고친 프롬프트(높음 11 · 중간 43)가 실제 결과를 낫게 하는지는 재지 못했다. 교훈 만들기 지시가 '에이전트마다 정확히 1개'에서 '배울 것이 없으면 빼도 된다'로 바뀌어 교훈이 전보다 적게 만들어질 수 있다.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
