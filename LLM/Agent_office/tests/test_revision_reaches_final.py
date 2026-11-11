@@ -9,9 +9,13 @@
 """
 
 from core import followup, verification
+from core.workflow import build_office_graph, stream_office
+from core.workflow import build_office_graph, stream_office
 from tests.fakes import Script, make_critic, make_delegation, make_review
 from tests.test_followup import edit, head_review, judge
 from tests.test_progress_followup import _open, app_env, wait_for  # noqa: F401 — app_env 는 pytest 준비 함수
+from tests.test_workflow import BRIEF, SETTINGS
+from tests.test_workflow import BRIEF, SETTINGS
 
 
 def _result_box(at) -> tuple[str, str]:
@@ -90,3 +94,47 @@ def test_trim_keep_final_only_shortens_what_comes_before_final():
     assert verification.trim_keep_final(rest, 1000) == rest  # 앞에 줄일 것이 없으면 그대로
     plain = "가" * 3000  # <final> 이 없는 글(다른 팀)은 전과 같이 가운데를 줄인다
     assert verification.trim_keep_final(plain, 1500) == verification.trim_middle(plain, 1500) != plain
+
+
+def test_main_run_critic_also_keeps_the_final_of_a_long_answer():
+    """본 업무의 부장 비평(verification.build_critic_messages)도 긴 수정 답변을 줄일 때 <final> 최종본은 자르지 않는다 (2026-11-11).
+
+    💬 수정본 검토만 고쳐 두었고 본 업무 비평은 가운데를 잘랐다 — 개념 편집 팀은 그 가운데가 최종본이다.
+    """
+    limit = verification.DEFAULT_CRITIC["answer_chars"]
+    body = "본문 한 줄\n" * (limit // 28)
+    answer = ("<review_log>\n" + "검증 로그 한 줄\n" * (limit // 20) + "</review_log>\n<final>\n" + body
+              + "세션 ID 사용 여부는 서버가 정한다\n" + body + "</final>\n" + "요약 한 줄\n" * (limit // 35))
+    assert len(answer) > limit
+
+    def prompt(text: str) -> str:
+        return verification.build_critic_messages("MCP 정리", "하위 결과", make_review(answer=text), [], answer_chars=limit)[-1].content
+
+    long = prompt(answer)
+    assert "세션 ID 사용 여부는 서버가 정한다" in long and answer[answer.index("<final>"):] in long  # 최종본·요약은 한 글자도 안 빠진다
+    assert "비평 입력 한도" in long and long.count("검증 로그 한 줄") < limit // 20  # 줄어드는 것은 앞의 검증 로그
+    plain = "가나다라마바사 " * (limit // 4)  # <final> 이 없는 다른 팀 글은 전과 글자 그대로 — 앞 2/3·뒤 1/3 을 남기고 가운데 생략
+    assert prompt(plain).endswith("수정 답변:\n" + verification.trim_middle(plain, limit)) and len(plain) > limit
+    assert prompt("짧은 답").endswith("수정 답변:\n짧은 답") and prompt("").endswith("수정 답변:\n(승인 — 수정 없음)")
+
+
+def test_main_run_critic_gets_the_final_of_a_long_child_result(org, ranks, team, models, use_script):
+    """검토 대상(하위 결과)이 하나이고 <final> 이 있으면, 한도(input_chars)를 넘어도 최종본부터 끝까지는 부장 프롬프트에 그대로 들어간다.
+
+    실제 기록 22건(2026-11-11): 개념 편집 팀 부장(gm_editor) 결과 4건이 17,578~19,058자로 한도 16,000자를 넘어 뒤쪽(최종본 끝·요약)이 잘렸다.
+    <final> 이 없는 글·하위 결과가 여럿인 팀은 전과 같다 (verification.trim_evidence 그대로).
+    """
+    limit = verification.DEFAULT_CRITIC["input_chars"]
+    rest = "<final>\n" + "본문 한 줄\n" * (limit // 16) + "</final>\n요약 끝"  # 최종본·요약 ≈ 한도의 7/16
+    text = "<review_log>\n" + "검증 로그 한 줄\n" * (limit // 14) + "</review_log>\n" + rest  # 로그 ≈ 한도의 5/7 → 합쳐서 한도의 약 1.15배
+    assert limit < len(text) < verification.DEFAULT_CRITIC["answer_chars"]
+    script = use_script(Script(text=text, ReviewResult=make_review(answer=text), CriticResult=make_critic(5)))
+    graph = build_office_graph(org, ranks, team, models, SETTINGS, {"critic": {"enabled": True, "max_self_corrections": 0}})
+    list(stream_office(graph, org, "질문", "am_action", brief=BRIEF))  # am_action 의 하위는 한 명
+    prompt = script.prompts("CriticResult")[0]
+    assert prompt.count(rest) == 2  # 검토 대상(하위 결과)에 한 번 + 수정 답변에 한 번
+    assert prompt.count("비평 입력 한도") == 1 and "검토 대상가 길어" not in prompt  # 줄어든 것은 하위 결과의 검증 로그뿐
+    plain, more = "가나다라마바사 " * (limit // 4), "나" * limit
+    assert verification.trim_reviewed([plain], limit) == verification.trim_evidence([plain], limit, "검토 대상") != plain
+    assert verification.trim_reviewed([text, more], limit) == verification.trim_evidence([text, more], limit, "검토 대상")
+    assert verification.trim_reviewed([rest], limit) == rest
