@@ -311,3 +311,30 @@ def test_both_travel_teams_show_their_old_records(seeded, team_id, mine, other):
     assert saved.label == "📂 저장된 결과 파일 (1)"  # 옛 results/travel 의 파일
     assert any(c.value.startswith("지금: 1명 직접 선택.") for c in at.caption)  # 옛 여행 팀의 팀원 모델 선택
     assert any("📚 팀 스킬:" in c.value and "travel_planning" in c.value for c in at.sidebar.caption)
+
+
+def test_bench_ui_select_opens_each_screen(seeded):
+    """scripts/bench_ui.py 의 화면 고르기가 지금 앱(부서 단위 화면)과 맞는지 — 팀을 바꿔 가며 골라도 그 팀·부서 화면이 열린다.
+
+    예전 방식(view=team + team_pick 만 바꿈)은 처음 고른 부서에 머물러, 다른 부서 팀을 재도 같은 화면을 쟀다.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("bench_ui", BASE_DIR / "scripts" / "bench_ui.py")
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+    at = AppTest.from_file(APP, default_timeout=90)
+    for view, dept, team, task in [("general", "research", "general", "general:free"), ("stock", "invest", "stock", None),
+                                   ("travel_abroad", "travel", "travel_abroad", "travel_abroad:plan"),
+                                   ("dept:creative", "creative", None, "head"), ("concept", "research", "concept", None)]:
+        bench.select(at, view)
+        at.run()
+        assert not at.exception, (view, at.exception)
+        assert at.session_state["view"] == "dept" and at.session_state["dept_pick"] == dept, view
+        assert team is None or at.session_state["team_pick"] == team, view
+        assert task is None or at.session_state[f"dept_task_{dept}"] == task, view  # 팀 = 그 팀의 첫 업무, 부서 = 부서장 창구
+    bench.select(at, "home")
+    at.run()
+    assert not at.exception and at.session_state["view"] == "home"
+    known = {t.id for t in list_teams()} | {f"dept:{d['id']}" for d in building.load_config()["departments"]} | {"home"}
+    assert set(bench.VIEWS) <= known  # 재는 화면 목록이 실제 팀·부서 id
