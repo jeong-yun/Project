@@ -62,7 +62,7 @@ def _flash(key: str, text: str) -> None:
 def _show_flash(key: str) -> None:
     text = st.session_state.pop(f"prompt_msg_{key}", None)
     if text:
-        st.success(text)
+        (st.warning if text.startswith("⚠️") else st.success)(text)  # 바꾸지 않았다는 안내(되돌리기 거절)는 경고로
 
 
 # ─── 글자 한도 경고 (부서 화면 맨 위) ─────────────────────────────────────

@@ -161,3 +161,50 @@ def test_worker_with_output_scope_gets_the_note_once(ranks, models):
     agent = OrgAgent(node, next(r for r in ranks if r.id == node.rank), concept, models, skills=load_skills("concept"))
     human = agent.draft_messages("브리프", "맡은 일", split=True)[-1].content
     assert "[내 산출물 범위 — 이것만 쓴다]" in human and human.count("팀 전체 최종 답변의 기준") == 1
+
+
+# ─── C6 교훈 만들기: 사람이 고친 곳을 코드가 뽑아 준다 (앞 1,200자만 주지 않는다) ───────
+
+
+def lesson_prompt(final: str, original: str, edited: bool = True) -> list[str]:
+    steps = [child("staff_case", original)]
+    decision = HumanDecision(action="adopt", adopted_node_id="staff_case", final_answer=final, edited=edited, score=3)
+    system, human = feedback.build_feedback_messages("질문", steps, decision, {"staff_case": "사원"}, load_team_general())
+    return [system.content, human.content]
+
+
+def load_team_general():
+    from core.config import load_team
+
+    return load_team("general")
+
+
+def test_lesson_prompt_shows_the_lines_the_human_changed_even_far_down():
+    lines = [f"{i}번 줄 — 본문 " + "가" * 40 for i in range(200)]  # 약 1만 자
+    original = "\n".join(lines)
+    changed = original.replace("180번 줄 — 본문", "180번 줄 — 사람이 고친 본문")
+    system, human = lesson_prompt(changed, original)
+    assert "사람이 고친 곳" in human
+    assert "- 180번 줄 — 본문" in human and "+ 180번 줄 — 사람이 고친 본문" in human  # 뒤쪽을 고쳐도 보인다
+    assert "3번 줄" not in human.split("사람이 고친 곳")[1]  # 바뀌지 않은 줄은 넣지 않는다
+    assert "사람이 직접 수정한 최종 답변" not in human
+    # 고친 곳이 아주 많으면 한도까지만 넣고 잘렸다고 알린다
+    many = "\n".join(line + " (고침)" for line in lines)
+    _, human = lesson_prompt(many, original)
+    shown = human.split("사람이 고친 곳")[1]
+    assert len(shown) < feedback.EDIT_DIFF_CHARS + 300 and "생략" in shown
+
+
+def test_lesson_prompt_without_a_usable_diff_falls_back_to_the_answer():
+    _, human = lesson_prompt("고친 답", "원래 답", edited=False)
+    assert "사람이 고친 곳" not in human and "사람이 직접 수정한 최종 답변" not in human  # 고치지 않았으면 없다
+    steps = [child("am_action", "다른 사람 결과")]  # 채택한 안의 원래 글을 찾지 못하면 전처럼 앞부분을 준다
+    decision = HumanDecision(action="adopt", adopted_node_id="staff_case", final_answer="고친 답", edited=True, score=3)
+    human = feedback.build_feedback_messages("질문", steps, decision, {}, load_team_general())[1].content
+    assert "사람이 직접 수정한 최종 답변:\n고친 답" in human
+
+
+def test_lesson_prompt_lets_the_model_skip_agents_with_nothing_to_learn():
+    system, _ = lesson_prompt("답", "답", edited=False)
+    assert "정확히 1개" not in system and "빼도 된다" in system
+    # 빠진 에이전트는 전처럼 규칙 기반 교훈으로 채워진다 (tests/test_feedback.py test_generate_lessons_fills_missing_and_keeps_comment)
