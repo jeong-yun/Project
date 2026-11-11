@@ -129,8 +129,14 @@ def limit_rows(answer: str, questions: list[Question]) -> list[LimitRow]:
     return rows
 
 
+def short_for_lack_of_evidence(answer: str, no: int) -> bool:
+    """JSON needs_check 에 '근거 부족 — 문항 N …'이라고 밝혔는가 — 문서에 더 쓸 근거가 없어 짧은 답변은 다시 쓰게 하지 않는다."""
+    notes = (answer_json(answer) or {}).get("needs_check")
+    return any("근거 부족" in str(n) and re.search(rf"문항\s*{no}(?!\d)", str(n)) for n in (notes if isinstance(notes, list) else []))
+
+
 def check_char_limits(answer: str, questions: list[Question], min_ratio: float = 0.5) -> list[str]:
-    """문항마다 답변이 있는지 · 제한을 넘지 않는지 · 너무 짧지 않은지(제한의 min_ratio 미만)."""
+    """문항마다 답변이 있는지 · 제한을 넘지 않는지 · 너무 짧지 않은지(제한의 min_ratio 미만 — '근거 부족'을 밝힌 문항은 제외)."""
     answers = split_answers(answer)
     problems = []
     for row in limit_rows(answer, questions):
@@ -143,9 +149,11 @@ def check_char_limits(answer: str, questions: list[Question], min_ratio: float =
         if row.counted > row.limit:
             problems.append(f"문항 {row.no} 이 {basis} {row.counted:,}자로 제한 {row.limit:,}자를 {row.counted - row.limit:,}자 넘는다 "
                             f"— 사례·문장을 줄여 {row.limit:,}자 이하로")
-        elif row.counted < row.limit * min_ratio:
+        elif row.counted < row.limit * min_ratio and not short_for_lack_of_evidence(answer, row.no):
+            # '[확인 필요]로 표시'하라고 안내하면 문서에 없는 경험을 표시만 달아 분량을 채우게 된다 (2026-11-10 프롬프트 점검 E5)
             problems.append(f"문항 {row.no} 이 {basis} {row.counted:,}자로 제한 {row.limit:,}자의 {int(min_ratio * 100)}%에 못 미친다 "
-                            "— 근거 문서의 사례를 더 구체적으로 (근거가 모자라면 [확인 필요]로 표시)")
+                            "— 근거 문서의 사례를 더 구체적으로 쓴다. 문서에 더 쓸 근거가 없으면 지어내지 말고 JSON needs_check 에 "
+                            f"'근거 부족 — 문항 {row.no} 은 {row.counted:,}자'라고 적는다 (그러면 짧아도 통과한다)")
     extra = sorted(set(answers) - {q.no for q in questions})
     if questions and extra:
         problems.append(f"없는 문항 번호의 답변: {extra} — 문항은 {len(questions)}개다")
@@ -376,6 +384,8 @@ NAME_PREFIX = re.compile(
     r"GDPR|Web|v|Ver|Version|Win|Excel|Word|Hadoop|Airflow|Terraform|Ansible|Docker|SQL|GPT|Claude|Gemini|Llama|BERT|YOLO|"
     r"Unity|Unreal|Cisco|Juniper|Fortinet|FortiGate|Palo|Layer|L|IEEE|Wi-Fi|WiFi|USB|PCIe|DDR|Ryzen|Core|Xeon|Grade|Lv\.)"
     r"[\s\-]?$", re.I)
+# 표준 번호 뒤의 판(연도) — 'ISO/IEC 27001:2022' · 'ISO 9001:2015' 의 2022·2015 도 표준 이름의 일부다 (스킬이 판을 정확히 쓰라고 한다)
+STANDARD_EDITION = re.compile(r"(?:ISO|IEC)[\s\-]?\d{3,5}(?:-\d+)?:$", re.I)
 NUMBER = re.compile(r"(?<![A-Za-z0-9_.\-/])(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d+))?(?![A-Za-z0-9_])")
 # 단위가 붙은 수는 단위까지 같아야 원문과 같은 사실이다 ('40개' 가 원문에 있어도 '40%' 는 다른 사실).
 # 날짜·기간(년·월·일·개월)은 쓰는 방식이 여러 가지라('2023.03' = '2023년 3월') 단위를 보지 않는다.
@@ -500,7 +510,7 @@ def unsourced_numbers(body: str, allowed: set[str]) -> list[str]:
         norm = normalize_text(sent)
         tokens = []
         for m in NUMBER.finditer(norm):
-            if NAME_PREFIX.search(norm[: m.start()][-14:]):
+            if NAME_PREFIX.search(norm[: m.start()][-14:]) or STANDARD_EDITION.search(norm[: m.start()][-20:]):
                 continue
             tokens.append((m, _norm_number(m.group(1), m.group(2)), _unit(norm[m.end():])))
         sourced = [float(v) for _, v, u in tokens if (v + u if u else v) in allowed and re.fullmatch(r"\d+(\.\d+)?", v)]
