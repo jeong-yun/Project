@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from core import llm_factory
 from core.llm_factory import NoAvailableModelError
 from core.schemas import CriticResult, ModelsConfig, ModelSpec, RankModels, ReviewResult
+from core.search import WEB_END
 
 DEFAULT_CRITIC = {
     "enabled": True,
@@ -98,7 +99,9 @@ def trim_evidence(parts: list[str], budget: int, what: str = "근거 자료") ->
     for n, i in enumerate(order):
         shares[i] = min(len(parts[i]), remaining // (len(order) - n))
         remaining -= shares[i]
-    trimmed = [p if shares[i] >= len(p) else p[: shares[i]].rstrip() + " …(생략)" for i, p in enumerate(parts)]
+    # 웹 검색 묶음은 잘려도 '데이터 끝' 표시선을 남긴다 (여는 표시선만 남으면 뒤 글까지 데이터로 읽힌다)
+    trimmed = [p if shares[i] >= len(p) else p[: shares[i]].rstrip() + " …(생략)" + (f"\n{WEB_END}" if p.endswith(WEB_END) else "")
+               for i, p in enumerate(parts)]
     return "\n\n".join(trimmed) + f"\n\n({what}가 길어 {total}자 중 약 {budget}자만 표시)"
 
 

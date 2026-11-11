@@ -487,12 +487,6 @@ class FeedDigest(BaseModel):
     cards: list[IdeaCardOut] = Field(description="Agent Office 개선 아이디어 카드")
 
 
-def _neutralize(text: str) -> str:
-    """수집 글 안의 표시선 위조·제어 문자를 막는다."""
-    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", text or "")
-    return text.replace("<<<", "‹‹").replace(">>>", "››")
-
-
 def _item_line(i: int, item: FeedItem) -> str:
     meta = [item.source, item.published]
     if item.source == "github":
@@ -501,8 +495,8 @@ def _item_line(i: int, item: FeedItem) -> str:
         meta.append(f"{item.score}점")
     if item.hype:
         meta.append("규칙 표시: " + "/".join(item.hype))
-    body = _neutralize(item.snippet)[:280]
-    return f"[{i}] ({' · '.join(m for m in meta if m)}) {_neutralize(item.title)[:160]}" + (f" — {body}" if body else "")
+    body = search.neutralize(item.snippet)[:280]  # 표시선 위조·제어 문자를 막는다 (웹 검색 결과와 같은 함수)
+    return f"[{i}] ({' · '.join(m for m in meta if m)}) {search.neutralize(item.title)[:160]}" + (f" — {body}" if body else "")
 
 
 def worklog_titles(path: Path = WORKLOG) -> list[str]:
