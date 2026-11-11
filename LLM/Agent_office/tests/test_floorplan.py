@@ -580,3 +580,63 @@ def test_also_at_must_name_final_only_validator_and_known_agent():
     broken = team.model_copy(update={"harness": team.harness.model_copy(update={"also_at": {"json_keys": ["nobody"]}})})
     with pytest.raises(ConfigError, match="also_at"):
         validate_config(load_ranks(), load_models(), [broken])
+
+
+# ─── 프롬프트 점검(2026-11-10) S6·S8·S9·S13 — 스킬·규칙·검사 안내가 서로 맞는지 ───────────────
+
+
+def _design_prompt(node_id: str, ranks, models) -> str:
+    """조립된 시스템 프롬프트 (모델 호출 없음)."""
+    from core.agent import OrgAgent
+    from core.config import load_skills, load_team, team_org
+
+    team = load_team("design")
+    node = next(n for n in team_org(team, ranks).walk() if n.id == node_id)
+    return OrgAgent(node, next(r for r in ranks if r.id == node.rank), team, models, skills=load_skills("design")).system_prompt()
+
+
+def test_skill_example_json_has_no_comments_and_follows_its_own_area_rule(ranks, models):
+    """S8 — 예시 JSON 을 그대로 따라 써도 파서가 읽는다 (// 주석 없음), 목표 면적 합 ≈ 바닥 × 0.9."""
+    import re
+
+    prompt = _design_prompt("dgm_layout", ranks, models)
+    block = re.search(r"## 3\. 레이아웃 JSON 형식.*?```\n(.*?)```", prompt, re.S).group(1)
+    assert "//" not in block and "JSON 안에는 주석" in prompt
+    layout = parse_layout(block)
+    indoor = sum(r.area for r in layout.floors[0].rooms if r.id != "yard")  # 마당은 바깥 공간
+    assert indoor / (layout.outline.w * layout.outline.h) == pytest.approx(0.9, abs=0.03)
+    assert "330㎡" not in block  # 가정(100평 = 330㎡)과 외곽(240㎡)이 어긋나던 예시
+
+
+def test_design_prompt_does_not_ask_for_metrics_reviewers_cannot_see(ranks, models):
+    """S13 — 검사가 통과하면 '설계 지표'는 화면에만 간다 → 본문 면적은 '목표 면적', 지표는 보일 때만."""
+    from core.config import load_team
+
+    for node_id in ("gm_review", "lead"):
+        prompt = _design_prompt(node_id, ranks, models)
+        assert "'목표 면적'이라고 적는다" in prompt and "보이지 않으면 실제 면적·지표 수치를 지어내지 않는다" in prompt
+        assert "본문의 수치는 이 값을 쓴다" not in prompt and "하네스의 설계 지표를 보며" not in prompt
+    rules = " ".join(load_team("design").verification["critic"]["rules"])
+    assert "검증표가 없으면" in rules
+
+
+def test_edit_task_rule_and_failure_hint_agree_on_code_relayout(ranks, models):
+    """S9 — 검사 실패 안내('그 층의 rect 를 모두 빼라')를 따라도 '요청 외 변경' 위반이 되지 않게 스킬·비평 규칙·실패 글을 맞춘다."""
+    from core.config import load_team
+
+    assert "코드가 다시 배치함" in _design_prompt("lead", ranks, models)
+    team = load_team("design")
+    assert "'코드가 다시 배치함'이라고 밝힌 층" in " ".join(team.verification["critic"]["rules"])
+    assert "코드 배치에 맡겼으면" in " ".join(next(t for t in team.tasks if t.id == "edit").success_criteria)
+    bad = {"outline": {"w": 10, "h": 8}, "floors": [{"rooms": [rect_room("a", "living", 0, 0, 12, 8)]}]}
+    log = REGISTRY["floorplan"].check(answer_with(bad), {}).log
+    assert "rect 를 모두 빼고" in log and "코드가 다시 배치함" in log
+
+
+def test_tool_tells_the_model_when_there_is_no_drawing(models, tmp_path, monkeypatch):
+    """S6 — 툴의 경고(notes)는 화면에만 간다. 모델이 알아야 하는 것은 근거 자료 본문에도 넣는다."""
+    monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path))
+    for inputs in ({"use_previous": True}, {"attachment": str(tmp_path / "없는파일.json")}):
+        result = floorplan_input.run("수정", inputs, models)
+        assert result.notes and "도면을 읽지 못했다" in result.content and "assumptions" in result.content
+        assert "읽기 실패" in result.title  # 양식 지침의 조건(근거 자료에 '읽기 실패')과 같은 말

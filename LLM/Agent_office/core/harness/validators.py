@@ -300,7 +300,7 @@ class FloorplanValidator(Validator):
                 "레이아웃 검증 실패: " + " / ".join(report.errors[:8])
                 + (" (참고: " + " / ".join(hints + metrics) + ")" if hints or metrics else "")
                 + " — 좌표를 직접 고치기 어렵다면 그 층의 rect 를 모두 빼고 방 목록·목표 면적·구역(zone)·이웃(adjacent)·typology 만 써서 "
-                "코드(배치 엔진)가 배치하게 하라."
+                "코드(배치 엔진)가 배치하게 하라. 도면 수정 업무라면 본문과 needs_check 에 '그 층은 코드가 다시 배치함'이라고 적는다."
             )
         floors = len(layout.floors)
         rooms = sum(len(f.rooms) for f in layout.floors)
