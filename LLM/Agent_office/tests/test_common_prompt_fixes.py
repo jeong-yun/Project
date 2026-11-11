@@ -12,6 +12,7 @@ from core.schemas import AgentAnswer, HumanDecision, ModelSpec
 from core.search import WEB_BEGIN, WEB_END
 from tests.fakes import Script, make_critic, make_review
 from tests.test_followup import ANSWER, edit, head_review, judge, lead_agent
+from tests.test_workflow import full_script, run
 
 SPEC = ModelSpec(provider="openai", model="x")
 
@@ -98,3 +99,65 @@ def test_main_correction_message_keeps_reasons_out_of_the_three_sentence_limit()
     text = verification.correction_message(make_critic(2, violations=["A 가 B 규칙에 어긋남"], severity="severe"))
     assert "A 가 B 규칙에 어긋남" in text and "점수는 마지막에 매긴다" in text  # 본 업무는 그대로
     assert "3문장 제한에 넣지 않는다" in text  # 지적이 많으면 'analysis 3문장 이내'와 부딪히던 것
+
+
+# ─── C7 요청 정리·통합: 웹 검색이 꺼져 있으면 출처·최신 뉴스 기준을 넣지 않는다 ──────
+
+
+def brief_system(script, models, **kw) -> str:
+    brief_mod.draft_brief("HBF 가 뭐야?", models, **kw)
+    return script.calls[-1][1][0].content
+
+
+def test_brief_does_not_ask_for_sources_when_web_search_is_off(models, use_script):
+    script = use_script(Script(DesiredState=DesiredState(goal="g", context="", success_criteria=["c"], constraints=[],
+                                                         output_format="", assumptions=[])))
+    on = brief_system(script, models, use_web=True)
+    assert "'출처를 제시한다'" in on and "최신 동향(뉴스)" in on  # 검색을 쓰면 전과 같다
+    assert brief_system(script, models) == on  # 기본값 = 전과 같은 글
+    off = brief_system(script, models, use_web=False)
+    assert "'출처를 제시한다' 같은 기준을 포함한다" not in off and "최신 동향(뉴스)" not in off
+    assert "웹 검색을 쓰지 않는다" in off and "확인 필요" in off
+
+
+def test_integration_mentions_web_news_only_when_web_results_are_given(org, ranks, team, models):
+    agent = node_agent(org, ranks, team, models, "gm_action")
+    kids = [child("am_action"), child("staff_case")]
+    web = f"## 🌐 웹 검색 결과\n{WEB_BEGIN}\n[1] 자료\n{WEB_END}"
+    assert "웹 검색의 최신 뉴스·동향 기준으로" in agent.review_messages("브리프", "업무", kids, web)[0].content
+    for no_web in ("", "## 시장 데이터\n현재가 100"):  # 검색을 안 썼거나 데이터 툴 결과만 있을 때
+        system = agent.review_messages("브리프", "업무", kids, no_web)[0].content
+        assert "웹 검색의 최신 뉴스" not in system and "근거가 가장 뚜렷한 해석을 앞에 둔다" in system
+
+
+# ─── C9 실무자: 업무를 나눠 받았으면 [완료 기준]은 팀 전체 기준이라고 알린다 ─────────
+
+
+def test_worker_with_a_delegated_task_knows_criteria_are_for_the_whole_team(org, ranks, team, models, use_script):
+    agent = node_agent(org, ranks, team, models, "staff_case")
+    assert not agent.node.output_scope  # 산출물 범위가 없는 팀 (기본 팀)
+    human = agent.draft_messages("브리프 [완료 기준 — 모두 만족해야 함]", "사례 두 개 찾기", split=True)[-1].content
+    assert "[상사가 맡긴 업무 — 이 범위에 집중]\n사례 두 개 찾기" in human
+    assert "[완료 기준]은 팀 전체 최종 답변의 기준" in human and "맡은 업무만 쓰고" in human
+    alone = agent.draft_messages("브리프", "목표")[-1].content  # 혼자 전부 맡으면 기준은 그대로 내 몫
+    assert "팀 전체 최종 답변의 기준" not in alone
+    # 실행에서: 팀장이 업무를 나눠 주면 실무자 초안에 붙고, 한 줄로 내려온 업무(대리 → 사원 1명)에는 붙지 않는다
+    script = use_script(full_script())
+    run(org, ranks, team, models)
+    drafts = script.prompts("text")
+    assert len(drafts) == 3 and all("팀 전체 최종 답변의 기준" in p for p in drafts)
+    script = use_script(full_script())
+    run(org, ranks, team, models, root="am_action")
+    [only] = script.prompts("text")
+    assert "[상사가 맡긴 업무 — 이 범위에 집중]\n목표" in only and "팀 전체 최종 답변의 기준" not in only
+
+
+def test_worker_with_output_scope_gets_the_note_once(ranks, models):
+    from core.config import load_skills, load_team, team_org
+
+    concept = load_team("concept")
+    org = team_org(concept, ranks)
+    node = next(n for n in org.walk() if n.output_scope)
+    agent = OrgAgent(node, next(r for r in ranks if r.id == node.rank), concept, models, skills=load_skills("concept"))
+    human = agent.draft_messages("브리프", "맡은 일", split=True)[-1].content
+    assert "[내 산출물 범위 — 이것만 쓴다]" in human and human.count("팀 전체 최종 답변의 기준") == 1
