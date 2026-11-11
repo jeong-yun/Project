@@ -356,7 +356,8 @@ class EvidenceQuotesValidator(Validator):
             problems.append(f"인용 없이 판정한 항목 {len(result.no_evidence)}건: {', '.join(result.no_evidence[:8])}")
         if problems:
             return self.fail(" / ".join(problems) + " — evidence 에는 증적 원문을 한 글자도 바꾸지 말고 그대로 복사해 넣어라 "
-                             "(요약·번역·고쳐 쓰기 금지, 떨어진 두 곳은 '…'로 잇는다). 인용할 증적이 없으면 status 를 '확인 불가'로 쓴다.")
+                             "(요약·번역·고쳐 쓰기 금지, 떨어진 두 곳은 '…'로 잇는다. diff 에서 가져온 줄은 맨 앞의 +/- 기호를 뺀다). "
+                             "인용할 증적이 없으면 status 를 '확인 불가'로 쓴다.")
         return self.ok(f"인용 {result.checked}건 모두 입력 증적에 있음")
 
 

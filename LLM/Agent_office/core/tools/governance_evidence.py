@@ -41,6 +41,8 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     if before.strip():  # 붙여 넣은 이전·현재 설정 — 같은 이름으로 두어야 줄 단위로 비교된다
         before_files["붙여 넣은 설정"] = before
         files = {**files, "붙여 넣은 설정": pasted}
+    elif pasted.strip():  # 붙여 넣은 증적도 올린 파일처럼 '데이터' 표시선 안에 넣는다 (질문에는 넣지 않는다 — team.yaml question)
+        files = {**files, "붙여 넣은 증적": pasted}
     is_drift = bool(before_files)
 
     parts = [governance.framework_prompt(fw)]
@@ -53,11 +55,14 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     bundle = governance.evidence_bundle(files)
     if len(bundle) > governance.MAX_EVIDENCE_CHARS:
         notes.append(f"증적이 {len(bundle):,}자라 앞 {governance.MAX_EVIDENCE_CHARS:,}자만 넣었습니다.")
-        bundle = bundle[: governance.MAX_EVIDENCE_CHARS]
+        # 경고(notes)는 화면에만 간다 — 모델이 알아야 하는 것은 근거 자료 본문에도 넣는다
+        bundle = (bundle[: governance.MAX_EVIDENCE_CHARS]
+                  + "\n\n⚠️ 증적이 길어 뒤쪽은 넣지 못했다. 여기 보이지 않는 파일·줄에 근거가 있을 항목은 '확인 불가'로 쓴다 (없다고 단정하지 않는다).")
     if files:
         parts.append(f"### 증적 파일 {len(files)}개 (인용은 이 원문에서 글자 그대로)\n" + bundle)
-    if not (files or pasted.strip()):
+    else:
         notes.append("증적이 없습니다 — 모든 항목이 '확인 불가'가 됩니다. 증적을 붙여 넣거나 샘플 증적을 켜세요.")
+        parts.append("### ⚠️ 증적 없음 — 판단할 증적이 없다. 모든 항목을 '확인 불가'로 쓰고 증적을 지어내지 않는다.")
 
     # 인용 문구 검증기가 비교할 원문 = 붙여 넣은 글 + 증적 파일 + 이전 설정 (drift 의 '이전 값' 인용도 허용)
     source = "\n\n".join([pasted, *files.values(), *before_files.values()])
