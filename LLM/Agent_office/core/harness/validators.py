@@ -166,6 +166,16 @@ _NOT_A_TOTAL = re.compile(r"1인|인당|명당|1명|하루|1일|일당|1박|박�
 _DAY_ONE = re.compile(r"(?<!\d)1\s*일\s*차|day\s*-?\s*1(?!\d)", re.IGNORECASE)
 
 
+# '초과'·'넘' 중 부정이 아닌 것 — 뒤에 '않·없·아니'가 바로 붙거나('넘지 않도록', '초과 없이', '넘는 일이 없도록') 앞이 '안·못'이면 뺀다
+_OVER = re.compile(r"(?<![안못] )(?:초과|넘)(?![^.\n]{0,7}(?:않|없|아니))")
+
+
+def _says_over(head: str) -> bool:
+    """요약이 예산을 넘는다고 분명히 밝혔는지 — '넘지 않는다'·'초과 없이' 같은 부정, 돈 이야기가 아닌 '넘'(100년 넘은 맛집)은 아니다."""
+    return any(m.group() == "초과" or re.search("예산|원|비용|한도", sentence)
+               for sentence in re.split(r"(?<=[.!?])\s+|\n", head) for m in _OVER.finditer(sentence))
+
+
 def won(text: str) -> list[int]:
     """글 속 원화 금액을 나온 순서대로 — '780,000원', '78만 원', '78만 5천원'. 단위(원)가 없는 숫자·외화는 뺀다."""
     return [int(m.group(3).replace(",", "")) if m.group(3)
@@ -206,7 +216,7 @@ def _stated_total(answer: str) -> int | None:
 class BudgetTotalValidator(Validator):
     name = "budget_total"
     description = ("여행 예산 합계 — 양식의 예산이 '총 80만원'처럼 총액 하나이고 계획서 '합계' 줄의 원화 금액이 분명할 때, "
-                   "합계가 총예산을 넘으면 한 줄 요약(첫 일정 앞)에서 넘는다고 밝혔는지 (확실하지 않으면 통과)")
+                   "합계가 총예산을 넘으면 한 줄 요약(첫 일정 앞)에서 넘는다고 밝혔는지 ('넘지 않는다' 같은 부정은 밝힌 것이 아님. 금액을 확실히 못 읽으면 통과)")
 
     def check(self, answer: str, options: dict):
         limit = _budget_limit(str(options.get("trip_budget") or ""))
@@ -218,7 +228,7 @@ class BudgetTotalValidator(Validator):
         if total <= limit:
             return self.ok(f"합계 {_won_text(total)} — 총예산 {_won_text(limit)} 안")
         day_one = _DAY_ONE.search(answer)
-        if re.search("초과|넘", answer[: day_one.start()] if day_one else answer):
+        if _says_over(answer[: day_one.start()] if day_one else answer):
             return self.ok(f"합계({_won_text(total)})가 총예산({_won_text(limit)})을 넘지만 요약에서 넘는다고 밝힘")
         over = _won_text(total - limit)
         return self.fail(
