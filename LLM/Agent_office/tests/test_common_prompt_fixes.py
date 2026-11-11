@@ -65,3 +65,36 @@ def test_review_rubric_puts_criteria_first_and_examples_as_score_anchors(org, ra
     assert "점수 간격" in head and "[검토 기준]" in head and "형식" in head  # 예시는 점수 간격만, 무엇을 볼지는 검토 기준
     assert "이 기준점에 맞춰 채점한다" not in system
     assert "HBM" in system  # 예시 자체는 그대로 (팀 전용 루브릭은 아직 없다)
+
+
+# ─── C4 수정 요청: 부장이 검토하는 기준을 팀장도 받는다 ────────────────────────
+
+
+def test_lead_gets_the_criteria_the_head_reviews_with(org, ranks, team, models, use_script):
+    script = use_script(Script(FollowupResult=edit("수정본"), RevisionCritic=judge(5)))
+    followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "줄여줘", [], head=head_review(org, team, models))
+    lead, head = script.prompts("FollowupResult")[0], script.prompts("RevisionCritic")[0]
+    assert "숫자에는 출처를 붙인다" in head  # 부장의 [검토 기준]
+    assert "[검토 기준" in lead and "숫자에는 출처를 붙인다" in lead  # 팀장도 같은 기준을 본다
+    # 기준이 없으면(부장 검토 없이 부르는 경우) 묶음도 없다
+    plain = followup.build_messages(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "줄여줘", [])[-1].content
+    assert "[검토 기준" not in plain
+
+
+# ─── C5 수정 요청: 부장 불합격 뒤 팀장에게 가는 글이 팀장의 출력 칸과 맞는다 ──────────
+
+
+def test_lead_refix_message_matches_followup_output_fields(org, ranks, team, models, use_script):
+    script = use_script(Script(FollowupResult=[edit("수정본 A"), edit("수정본 B")],
+                               RevisionCritic=[judge(2, ["요청한 표가 빠짐"], severity="severe"), judge(5)]))
+    followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "표 추가", [], head=head_review(org, team, models))
+    again = script.calls[2][1][-1].content  # 팀장 → 부장 → 팀장(다시 고침): 마지막 사람 메시지 = 되돌림 글
+    assert "요청한 표가 빠짐" in again and "changes" in again and "revised_answer" in again
+    assert "점수는 마지막에" not in again and "분석(analysis) 맨 앞" not in again  # 본 업무용 문구 (점수 칸이 없는 출력)
+    assert "사람의 수정 요청은 그대로" in again
+
+
+def test_main_correction_message_keeps_reasons_out_of_the_three_sentence_limit():
+    text = verification.correction_message(make_critic(2, violations=["A 가 B 규칙에 어긋남"], severity="severe"))
+    assert "A 가 B 규칙에 어긋남" in text and "점수는 마지막에 매긴다" in text  # 본 업무는 그대로
+    assert "3문장 제한에 넣지 않는다" in text  # 지적이 많으면 'analysis 3문장 이내'와 부딪히던 것

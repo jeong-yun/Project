@@ -232,15 +232,20 @@ def best_attempt(critics: list[CriticResult | None]) -> int:
     return max(range(len(critics)), key=rank)
 
 
-def correction_message(critic: CriticResult) -> str:
-    """자가 교정 프롬프트 — 비평 결과를 '어디가 어떤 규칙에 어긋나는지' 형태로 돌려준다."""
+def critic_problems(critic: CriticResult) -> str:
+    """비평 결과를 '어디가 어떤 규칙에 어긋나는지' 한 줄씩 — 다시 고치라고 돌려줄 때 쓴다 (본 업무 자가 교정 · 💬 수정 요청)."""
     problems = [*critic.rule_violations, *(f"{leap} 부분이 '근거 없는 비약 금지' 규칙에 어긋난다" for leap in critic.logical_leaps)]
     if not problems:
         problems = [f"비평 점수 {critic.score}/5 — {critic.analysis}"]
-    bullet = "\n".join(f"- {p}" for p in problems)
+    return "\n".join(f"- {p}" for p in problems)
+
+
+def correction_message(critic: CriticResult) -> str:
+    """본 업무의 자가 교정 프롬프트 (검토·통합 출력 ReviewResult 용 — 💬 수정 요청은 core/followup.refix_message)."""
     return (
         "너의 이전 단계 논리에서 다음 부분이 규칙에 어긋난다.\n"
-        f"{bullet}\n"
+        f"{critic_problems(critic)}\n"
         "분석(analysis) 맨 앞에 지적마다 '[지적된 부분] → 어떻게 고쳤는지' 교정 사유를 1문장씩 먼저 쓰고"
-        " (고칠 필요가 없다고 판단한 지적은 '수정 없음: 이유'), 그 다음 같은 형식으로 다시 작성하라. 점수는 마지막에 매긴다."
+        " (고칠 필요가 없다고 판단한 지적은 '수정 없음: 이유', 교정 사유는 analysis 3문장 제한에 넣지 않는다),"
+        " 그 다음 같은 형식으로 다시 작성하라. 점수는 마지막에 매긴다."
     )

@@ -1278,10 +1278,10 @@ def render_followup(run: dict) -> None:
     root = run["root_id"]
     turns: list[followup.FollowupTurn] = run.setdefault("followups", [])
     st.markdown("#### 💬 결과에 대해 묻기 · 수정 요청")
+    critic_cfg = verification.critic_settings(verification_cfg, team.verification)  # 비평을 껐거나 상한 0 인 팀은 안내가 다르다
     st.caption(f"궁금한 점을 묻거나 고칠 점을 말하면 **{name_of(root)}**이(가) 답하거나 수정본을 만듭니다. "
                "질문인지 수정인지는 에이전트가 판단하고, 수정본은 아래 '채택할 안'에 추가됩니다. "
-               f"수정본은 **{dept_head.name}**이(가) 마지막으로 검토하고, 추가로 고칠 점을 찾으면 직접 고친 뒤 다시 검토합니다 "
-               "(무엇을 고쳤는지는 수정본 아래에 적힙니다).")
+               + followup.review_note(dept_head.name, critic_cfg))
     pending = run.get("followup_pending")
     newest = next((t for t in reversed(turns) if t.revised), None)  # 지금 결과인 수정본 — 여기에만 '다음 수정 요청' 버튼
     send_fixes = ""
@@ -1314,8 +1314,7 @@ def render_followup(run: dict) -> None:
         with st.chat_message("assistant", avatar=avatar_for_chat(root, working=True)):
             st.markdown(f"**{name_of(root)}** · 💬 추가 질문 답하는 중…")
             st.caption("위 진행 막대와 **⏱ 호출 모니터**에서 진행을 보고, 느리면 다른 모델로 바꾸거나 중단할 수 있습니다. "
-                       f"수정본이면 {dept_head.name}의 검토(추가로 고칠 점이 있으면 직접 고치고 다시 검토)까지 끝난 뒤 답이 오고, "
-                       "이 화면이 저절로 바뀝니다.")
+                       + followup.review_note(dept_head.name, critic_cfg, waiting=True) + "이 화면이 저절로 바뀝니다.")
         return
     if run.get("followup_error"):
         st.warning(run["followup_error"])

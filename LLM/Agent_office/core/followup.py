@@ -119,7 +119,9 @@ def history_text(turns: list[FollowupTurn]) -> str:
 
 
 def build_messages(agent: OrgAgent, question: str, current: str, request: str, turns: list[FollowupTurn],
-                   evidence: str = "", lessons: list[str] | None = None) -> list[BaseMessage]:
+                   evidence: str = "", lessons: list[str] | None = None, criteria: list[str] | None = None) -> list[BaseMessage]:
+    """criteria = 부장이 수정본을 검토할 기준 (HeadReview.criteria — 팀 검토 기준 + 브리프의 완료 기준).
+    팀장은 원래 질문과 현재 결과만 받으므로, 이것을 주지 않으면 모르는 기준으로 불합격을 받는다."""
     system = "\n".join(
         [
             agent.system_prompt(lessons),
@@ -138,6 +140,9 @@ def build_messages(agent: OrgAgent, question: str, current: str, request: str, t
         f"[원래 질문]\n{question[:QUESTION_CHARS]}" + ("…" if len(question) > QUESTION_CHARS else ""),
         f"[현재 결과]\n{current}",
     ]
+    if criteria:
+        parts.append("[검토 기준 — 고친 부분도 이 기준을 지킨다 (부장이 이 기준으로 수정본을 검토한다)]\n"
+                     + "\n".join(f"- {c}" for c in criteria))
     if evidence:
         parts.append(f"[근거 자료]\n{evidence}")
     if turns:
@@ -191,6 +196,34 @@ def revision_messages(head: HeadReview, question: str, before: str, request: str
         ]
     )
     return [SystemMessage(system), HumanMessage(human)]
+
+
+def refix_message(critic: CriticResult) -> str:
+    """부장 불합격 뒤 팀장에게 돌려주는 글. 본 업무의 자가 교정 글(verification.correction_message)은 검토 출력용이라
+    '점수는 마지막에'·'analysis 맨 앞에 교정 사유'를 말하는데, 팀장의 출력(FollowupResult)에는 점수 칸이 없고 analysis 는 다른 뜻이다."""
+    return (
+        "부장 검토에서 네 수정본의 다음 부분이 지적됐다.\n"
+        f"{verification.critic_problems(critic)}\n"
+        "지적을 반영해 수정본을 다시 쓴다. 지적마다 어떻게 고쳤는지는 changes 에 한 줄씩 쓰고"
+        " (고칠 필요가 없다고 판단한 지적은 '수정 없음: 이유'), revised_answer 에는 고친 완성 전문만 쓴다."
+        " 사람의 수정 요청은 그대로 지킨다."
+    )
+
+
+def review_note(name: str, cfg: dict, waiting: bool = False) -> str:
+    """💬 수정 요청 화면의 안내 문구 — 이 팀 설정에서 부장(name)이 수정본에 실제로 하는 일.
+    비평을 끈 팀은 검토가 없고, 상한(max_self_corrections) 0 인 팀은 검토만 한다. waiting = 답을 기다리는 동안의 문구."""
+    if not cfg["enabled"]:
+        return "답이 오면 " if waiting else "이 팀은 부장 검토를 꺼 두어, 수정본은 검토 없이 나옵니다."
+    if cfg["max_self_corrections"] < 1:
+        if waiting:
+            return f"수정본이면 {name}의 검토까지 끝난 뒤 답이 오고, "
+        return (f"수정본은 **{name}**이(가) 마지막으로 검토만 합니다 — 지적이나 추가로 고칠 점이 나와도 다시 고치지 않고 "
+                "수정본 아래에 적어 둡니다.")
+    if waiting:
+        return f"수정본이면 {name}의 검토(추가로 고칠 점이 있으면 직접 고치고 다시 검토)까지 끝난 뒤 답이 오고, "
+    return (f"수정본은 **{name}**이(가) 마지막으로 검토하고, 추가로 고칠 점을 찾으면 직접 고친 뒤 다시 검토합니다 "
+            "(무엇을 고쳤는지는 수정본 아래에 적힙니다).")
 
 
 def _is_revision(out: FollowupResult) -> bool:
@@ -277,7 +310,7 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
     부장 검토가 불합격이면 팀장이 다시 고치고, 합격인데 '추가로 고칠 점'이 있으면 부장이 직접 고친다. 어느 쪽이든 부장이 다시 검토하고,
     두 가지 고침을 합쳐 max_self_corrections 번까지만 한다.
     """
-    messages = build_messages(agent, question, current, request, turns, evidence, lessons)
+    messages = build_messages(agent, question, current, request, turns, evidence, lessons, head.criteria if head else None)
     log: list[str] = []
     draft = _write(agent, messages, validators, options, max_retries, log)
     reviewed: verification.Critique | None = None  # 지금 수정본(draft)에 대한 부장 검토
@@ -325,11 +358,9 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
                 continue
             # 불합격 → 팀장이 지적을 받아 다시 고친다 (추가로 고칠 점은 넘기지 않는다 — 다음 검토 결과를 따른다)
             failed = f"부장 검토 불합격({done.critic.score}/5)"
-            fix = (verification.correction_message(done.critic)
-                   + "\n사람의 수정 요청은 그대로 지키고, revised_answer 에는 고친 완성 전문만 쓴다.")
             try:
                 with call_monitor.purpose("self_correct"):
-                    again = _write(agent, with_feedback(messages, draft[0].model_dump_json(), fix),
+                    again = _write(agent, with_feedback(messages, draft[0].model_dump_json(), refix_message(done.critic)),
                                    validators, options, max_retries, log)
             except (call_monitor.CallCancelled, NoAvailableModelError) as e:
                 log.append(f"{failed} — 다시 고치지 못해 직전 수정본을 유지 ({(str(e).splitlines() or [''])[0][:120]})")

@@ -352,3 +352,17 @@ def test_decision_note_leaves_out_head_review():
                                  critic=judge(4, extra=["용어 통일"]), critic_by="부장")
     note = followup.decision_note([turn])
     assert "줄여줘 → 수정본 v1" in note and "용어 통일" not in note and "요청 반영 점검" not in note
+
+
+def test_screen_note_follows_team_settings():
+    """💬 수정 요청 안내 문구 — 비평을 끈 팀·상한 0 인 팀에서는 '부장이 직접 고친 뒤 다시 검토'라고 하지 않는다."""
+    usual = verification.critic_settings({})
+    assert "직접 고친 뒤 다시 검토" in followup.review_note("연구부 부장", usual)
+    assert "직접 고치고 다시 검토" in followup.review_note("연구부 부장", usual, waiting=True)
+    only_review = verification.critic_settings({"critic": {"max_self_corrections": 0}})
+    note = followup.review_note("연구부 부장", only_review)
+    assert "**연구부 부장**" in note and "검토만" in note and "직접 고친 뒤" not in note
+    assert "직접 고치고" not in followup.review_note("연구부 부장", only_review, waiting=True)
+    off = verification.critic_settings({"critic": {"enabled": False}})
+    assert "검토 없이" in followup.review_note("연구부 부장", off) and "연구부 부장" not in followup.review_note("연구부 부장", off)
+    assert "검토" not in followup.review_note("연구부 부장", off, waiting=True)
