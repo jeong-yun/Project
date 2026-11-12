@@ -387,3 +387,203 @@ def test_app_update_flow_applies_only_picked_changes(app_env, use_script, root):
     assert any(t.value == expected for t in at.text)
     assert not any("형식 검사에서 남은 문제" in w.value for w in at.warning)  # 채택 기록의 <final> 을 형식 오류로 따지지 않는다
     assert any("직접 수정" in s.value for s in at.success)  # 변경을 하나 뺐으므로 '직접 수정'으로 기록된다
+
+
+# ─── 검증 로그 태그 앞에 쓴 글 (예: 수정 요청에 답한 '사용자 지적 판정' 표) — 화면에는 보이고 카탈로그에는 안 들어간다 ──────
+
+
+VERDICT = "## 사용자 지적 판정\n| 지적 | 판정 | 근거 |\n|---|---|---|\n| PPO 대체 서술 | 수용 | 원전 4.1절 |"
+
+
+def test_text_before_the_review_log_is_kept_for_the_screen():
+    res = concept.parse_result(f"{VERDICT}\n\n{answer([FACT])}", OPTIONS)
+    assert res.outside == VERDICT  # 버리지 않는다
+    assert "사용자 지적 판정" not in res.final_entry and "사용자 지적 판정" not in res.summary_md  # 카탈로그 글·GitHub 요약에는 없다
+    assert "사용자 지적 판정" not in res.thought and len(res.changes) == 1
+    assert concept.parse_result(answer([FACT]), OPTIONS).outside == ""  # 앞 글이 없으면 전과 같다
+
+
+def test_text_between_the_review_log_and_final_is_kept_too():
+    from tests.test_concept import GOOD_ENTRY
+    from tests.test_concept import PLAN as ADD_PLAN
+
+    body = (f"{VERDICT}\n<review_log>1단계 표</review_log>\n검토 메모: 6절 한 줄 보완\n<final>\n{GOOD_ENTRY}\n</final>\n## GitHub 요약\n- 요약\n"
+            f"```json\n{json.dumps({'concept_plan': ADD_PLAN}, ensure_ascii=False)}\n```")
+    res = concept.parse_result(body)
+    assert res.outside == f"{VERDICT}\n\n검토 메모: 6절 한 줄 보완"
+    assert "판정" not in res.final_entry and "검토 메모" not in res.summary_md and res.summary_md.startswith("## GitHub 요약")
+
+
+def test_screen_shows_text_written_before_the_review_log():
+    from streamlit.testing.v1 import AppTest
+
+    run = {"run_id": "r1", "question": "", "brief": None, "harness_options": dict(OPTIONS)}
+    at = AppTest.from_function(_page, kwargs={"content": f"{VERDICT}\n\n{answer([FACT])}", "run": run}, default_timeout=30).run()
+    assert not at.exception, at.exception
+    assert any("PPO 대체 서술" in m.value for m in at.markdown)  # '🧠 검증 로그' 탭에서 볼 수 있다
+    assert "사용자 지적 판정" not in at.session_state["out"]["entry"] and "사용자 지적 판정" not in at.session_state["out"]["plan"]
+    plain = AppTest.from_function(_page, kwargs={"content": answer([FACT]), "run": run}, default_timeout=30).run()
+    assert not any("태그 밖" in m.value for m in plain.markdown)  # 앞 글이 없으면 화면은 전과 같다
+
+
+def test_text_before_the_review_log_never_reaches_catalog_or_commit(root):
+    import concept_ui
+
+    ctx = concept_ui.CatalogContext(root, None, "", cat.Catalog.load(root))
+    content = f"{VERDICT}\n\n{answer([FACT])}"
+    run = {"run_id": "r1", "question": "", "harness_options": dict(OPTIONS), "concept": {"title": "GRPO", "target": "GRPO"}}
+    res = concept_ui.read_result(content, run)
+    concept_ui.apply_adopted(ctx, run, res.final_entry, {k: v for k, v in res.plan.items() if k != "changes"})
+    written = "\n".join(p.read_text(encoding="utf-8") for p in root.iterdir() if p.is_file())
+    assert FACT["replace"] in written and "사용자 지적 판정" not in written and "PPO 대체 서술" not in written
+    assert "판정" not in run["concept_commit"]
+
+
+# ─── '추가'로 맡겼는데 팀이 기존 항목 편입(수정)으로 판정한 경우 — 그 항목을 원본 기반 수정으로 다시 맡긴다 ──────────
+
+
+MERGE_NAME = "Dr.GRPO 플러스(Dr.GRPO Plus)"
+MERGE_PLAN = {**PLAN, "title": MERGE_NAME, "target": "GRPO"}  # 팀 판정: GRPO 에 편입(수정)
+
+
+def merged_answer(plan: dict = MERGE_PLAN) -> str:
+    """원본 전문 없이 받은 결과 — 팀이 항목 전체를 <final> 에 다시 썼다."""
+    return (f"<review_log>1단계: GRPO 에 편입</review_log>\n<final>\n{ORIGINAL.replace('편향 제거 변형', '편향 제거 변형 (플러스 포함)')}\n</final>\n"
+            f"## GitHub 요약\n- 요약\n```json\n{json.dumps({'concept_plan': plan}, ensure_ascii=False)}\n```")
+
+
+def test_merge_request_is_an_original_based_update(root):
+    grpo = cat.Catalog.load(root).find("GRPO")
+    q, brief = concept.build_concept_request("update", MERGE_NAME, "플러스 초안", [], grpo, D, merge=True)
+    assert concept.original_of(q) == grpo.text  # 편입도 원본 전문을 싣고
+    assert "편입" in q.splitlines()[1] and "전체를 다시 쓰지 않는다" in q.splitlines()[1]
+    assert "<final>" not in brief.output_format and "changes" in brief.as_prompt(q)  # 변경 제안만 받는다 (수정과 같은 브리프)
+    assert concept.request_inputs(q) == (MERGE_NAME, "플러스 초안")  # 결과 화면이 입력칸을 다시 채울 때 쓴다
+    plain, _ = concept.build_concept_request("update", "GRPO", "초안", [], grpo, D)
+    assert "편입" not in plain.splitlines()[1]  # 보통의 수정 요청은 전과 같다
+
+
+def _merge_page(content, run, root):
+    import streamlit as st
+
+    import concept_ui
+
+    st.session_state.setdefault("concept_root", root)
+    concept_ui.result_tabs(content, run)
+
+
+def test_result_screen_offers_original_based_rerun_when_the_team_merged(root):
+    from streamlit.testing.v1 import AppTest
+
+    related = cat.Catalog.load(root).find("GRPO")
+    question, _ = concept.build_concept_request("add", MERGE_NAME, "플러스 초안", [related], None, D)
+    run = {"run_id": "r1", "question": question, "brief": None, "harness_options": {}, "concept": {"action": "add", "title": MERGE_NAME}}
+    at = AppTest.from_function(_merge_page, kwargs={"content": merged_answer(), "run": run, "root": str(root)}, default_timeout=30).run()
+    assert not at.exception, at.exception
+    notice = " ".join(i.value for i in at.info)
+    assert "편입" in notice and "GRPO" in notice and "변경마다" in notice and "항목 전체" in notice  # 지금 결과로는 고를 수 없다는 것과 다음 할 일
+    at = at.button(key="cm_r1").click().run()
+    assert not at.exception, at.exception
+    assert at.session_state["cw_name_concept"] == MERGE_NAME and at.session_state["cw_draft_concept"] == "플러스 초안"
+    assert at.session_state["cw_merge_concept"] == {"name": MERGE_NAME, "target": related.name}
+
+    # 편입 대상을 카탈로그에서 못 찾으면: 다시 받기 버튼 없이, 전처럼 항목 전체를 쓰는 방식이라고 알려 준다
+    lost = AppTest.from_function(_merge_page, kwargs={"content": merged_answer({**MERGE_PLAN, "target": "없는 항목"}), "run": run,
+                                                      "root": str(root)}, default_timeout=30).run()
+    assert not lost.exception, lost.exception
+    assert any("찾지 못" in w.value and "항목 전체" in w.value for w in lost.warning) and not [b for b in lost.button if b.key == "cm_r1"]
+
+    # 진짜 새 항목 추가 · 원본 기반 수정 결과에는 안내가 없다 (전과 같음)
+    from tests.test_concept import GOOD_ENTRY, answer_with
+    from tests.test_concept import PLAN as ADD_PLAN
+
+    added = AppTest.from_function(_merge_page, kwargs={"content": answer_with(GOOD_ENTRY, ADD_PLAN), "run": run, "root": str(root)},
+                                  default_timeout=30).run()
+    assert not any("편입" in i.value for i in added.info) and not [b for b in added.button if b.key == "cm_r1"]
+    update_run = {"run_id": "r1", "question": "", "brief": None, "harness_options": dict(OPTIONS)}
+    changed = AppTest.from_function(_merge_page, kwargs={"content": answer([FACT]), "run": update_run, "root": str(root)}, default_timeout=30).run()
+    assert not [b for b in changed.button if b.key == "cm_r1"]
+
+
+def _form_page(root, merge):
+    import streamlit as st
+
+    import concept_ui
+    from core import catalog
+
+    st.session_state.setdefault("cw_merge_concept", merge)
+    ctx = concept_ui.CatalogContext(root, None, "", catalog.Catalog.load(root))
+    request = concept_ui.input_form(ctx, "write", "concept", False, False)
+    if request:
+        st.session_state["request"] = {k: request[k] for k in ("question", "harness_options", "concept")}
+
+
+def test_input_form_sends_the_merge_as_an_original_based_update(root):
+    from pathlib import Path
+
+    from streamlit.testing.v1 import AppTest
+
+    grpo = cat.Catalog.load(root).find("GRPO")
+    at = AppTest.from_function(_form_page, kwargs={"root": Path(root), "merge": {"name": MERGE_NAME, "target": grpo.name}}, default_timeout=60).run()
+    at = at.text_input(key="cw_name_concept").set_value(MERGE_NAME).run()
+    assert not at.exception, at.exception
+    assert any("편입" in i.value and "원본" in i.value for i in at.info)  # '추가'가 아니라 편입(원본 기반 수정)으로 진행한다고 알린다
+    at = at.button(key="cw_go_concept").click().run()
+    assert not at.exception, at.exception
+    request = at.session_state["request"]
+    assert request["concept"]["action"] == "update" and request["concept"]["target"] == grpo.name
+    assert request["harness_options"]["concept_original"] == grpo.text  # 결과 화면·형식 검사가 원본에 변경을 적용한다
+    assert concept.original_of(request["question"]) == grpo.text and "편입" in request["question"].splitlines()[1]
+
+    # 편입 표시가 없으면(보통의 새 개념) 전처럼 '추가'
+    plain = AppTest.from_function(_form_page, kwargs={"root": Path(root), "merge": {}}, default_timeout=60).run()
+    plain = plain.text_input(key="cw_name_concept").set_value(MERGE_NAME).run()
+    plain = plain.button(key="cw_go_concept").click().run()
+    assert plain.session_state["request"]["concept"]["action"] == "add" and plain.session_state["request"]["harness_options"] == {}
+
+
+def test_app_merge_flow_reruns_as_original_based_update(app_env, use_script, root):
+    """앱 전체 흐름: '추가'로 맡김 → 팀이 GRPO 에 편입으로 판정 → '원본 기반으로 다시 받기' → 다시 맡김 → 변경 제안 탭."""
+    from core.schemas import ReviewEdits
+    from tests.fakes import Script, make_critic, make_delegation, make_review
+    from tests.test_concept import GOOD_ENTRY, answer_with
+    from tests.test_progress_followup import wait_for
+
+    gate, draft_gate = app_env
+    gate.set()
+    draft_gate.set()
+    rewritten = answer_with(GOOD_ENTRY, {**MERGE_PLAN, "category": "AI-Model"})  # 첫 실행: 원본 전문 없이 항목 전체를 <final> 에
+    approve = ReviewEdits(analysis="ok", issues=[], score=9, verdict="approve", revised_answer="", comment="ok", edits=[])
+    script = use_script(Script(
+        text="draft",
+        Delegation=lambda m: make_delegation("gm_editor") if "gm_editor" in m[-1].content else make_delegation("am_fact", "dgm_lineage"),
+        ReviewResult=lambda m: make_review(verdict="approve", score=9,
+                                           answer=answer([FACT]) if "<original>" in m[-1].content else rewritten),
+        ReviewEdits=approve, CriticResult=make_critic(5)))
+    at = _open_concept(root).run()
+    at = at.selectbox(key="dept_task_research").set_value("concept:write").run()
+    at = at.text_input(key="cw_name_concept").set_value(MERGE_NAME).run()
+    assert any("추가" in s.value for s in at.success)  # 카탈로그에 없는 이름 → 추가로 진행
+    at = at.button(key="cw_go_concept").click().run()
+    assert not at.exception, at.exception
+
+    def rerun_button(a):
+        return next((b for b in a.button if (b.key or "").startswith("cm_")), None)
+
+    at = wait_for(lambda: (lambda a: a if rerun_button(a) else None)(_open_concept(root).run()), 90)
+    assert not at.exception, at.exception
+    assert not [b for b in at.checkbox if "반영" in b.label]  # 첫 결과는 항목 전체를 다시 쓴 글 — 변경마다 고를 수 없다
+    at = rerun_button(at).click().run()
+    at = at.selectbox(key="dept_task_research").set_value("concept:write").run()
+    assert not at.exception, at.exception
+    assert at.text_input(key="cw_name_concept").value == MERGE_NAME
+    assert any("편입" in i.value and "원본 기반 수정" in i.value for i in at.info)
+    at = at.button(key="cw_go_concept").click().run()
+    assert not at.exception, at.exception
+    at = wait_for(lambda: (lambda a: a if [b for b in a.checkbox if "반영" in b.label] else None)(_open_concept(root).run()), 90)
+    assert not at.exception, at.exception
+    asked = "\n".join(script.prompts("ReviewResult"))
+    assert f"<original>\n{ORIGINAL}\n</original>" in asked and "편입하기로 판정" in asked  # 두 번째 실행은 원본 전문을 받는다
+    assert len([b for b in at.checkbox if "반영" in b.label]) == 1 and not rerun_button(at)  # 변경 제안 탭 — 수정과 같은 화면
+    entry = next(t for t in at.text_area if (t.key or "").startswith("ce_")).value
+    assert entry == ORIGINAL.replace(FACT["find"], FACT["replace"]).replace(ORIGINAL.split("\n")[0], HEADER)  # 변경 밖은 원본 그대로

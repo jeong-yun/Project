@@ -13,6 +13,7 @@
 
 import json
 import math
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -75,7 +76,27 @@ class RouteResult(BaseModel):
 # ─── 1) 방문지 뽑기 ────────────────────────────────────────────────────
 
 
+PLAN_CHARS = 12000  # 방문지 추출에 넣는 계획서 글자 수
+
+
+def itinerary_part(plan_text: str) -> tuple[str, list[str]]:
+    """방문지 추출에 넣을 부분과 (잘렸을 때의) 안내. 한도를 넘는 계획서는 일정이 시작되는 '1일차' 줄부터 넣는다.
+
+    해외 계획서는 출국 준비 체크리스트가 일정 표보다 앞이라, 앞에서부터 자르면 뒤쪽 날짜가 지도에서 빠진다.
+    """
+    if len(plan_text) <= PLAN_CHARS:
+        return plan_text, []
+    first_day = re.search(r"(?<!\d)1\s*일\s*차", plan_text)
+    start = plan_text.rfind("\n", 0, first_day.start()) + 1 if first_day else 0
+    part = plan_text[start:start + PLAN_CHARS]
+    if len(plan_text) - start <= PLAN_CHARS:
+        return part, []
+    return part, [f"계획서가 길어 {'일정이 시작되는 곳부터 ' if start else '앞 '}{PLAN_CHARS:,}자만 지도에 반영했습니다 — "
+                  "뒤쪽 날짜의 방문지가 지도에서 빠졌을 수 있습니다."]
+
+
 def extract_itinerary(plan_text: str, models: ModelsConfig) -> tuple[Itinerary, list[str]]:
+    plan_text, notes = itinerary_part(plan_text)
     categories = ", ".join(f"{k}({v[1]})" for k, v in CATEGORIES.items())
     messages = [
         SystemMessage(
@@ -90,12 +111,12 @@ def extract_itinerary(plan_text: str, models: ModelsConfig) -> tuple[Itinerary, 
                 ]
             )
         ),
-        HumanMessage(plan_text[:12000]),
+        HumanMessage(plan_text),
     ]
     call = llm_factory.invoke_structured(models.utility, models, Itinerary, messages, "여행 경로 추출")
     itinerary: Itinerary = call.parsed
     itinerary.stops.sort(key=lambda s: (s.day, s.order))
-    return itinerary, call.errors
+    return itinerary, notes + call.errors
 
 
 # ─── 2) 좌표 확인 (OpenStreetMap) ──────────────────────────────────────

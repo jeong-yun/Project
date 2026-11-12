@@ -111,7 +111,7 @@ harness:
   validators: [floorplan, json_keys]
   final_only: [json_keys]
   also_at:
-    json_keys: [dgm_layout]  # 차장 단계부터 JSON 필수 — 대리(방 프로그램)는 JSON 을 쓰지 않는다
+    json_keys: [dgm_layout, gm_review]  # 차장 단계부터 JSON 필수 (부장이 고치다 빠뜨려도 그 단계에서 걸린다) — 대리(방 프로그램)는 JSON 을 쓰지 않는다
   max_retries: 2
   options:
     required_keys: [floors]

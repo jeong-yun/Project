@@ -182,7 +182,10 @@ def roadmap_drafts(road: dict) -> list[dict]:
 
 
 def apply_roadmap(course: learning.Course, road: dict, now: str | None = None) -> list[str]:
-    """채택 → extras['roadmap'] 저장 + 남은(안 끝낸) 커리큘럼을 로드맵 단계로 교체. 바뀐(지워진) 단원 제목을 돌려준다."""
+    """채택 → extras['roadmap'] 저장 + 남은(안 끝낸) 커리큘럼을 로드맵 단계로 교체. 바뀐(지워진) 단원 제목을 돌려준다.
+
+    모델은 주차를 1부터 쓰므로, 끝낸 단원 다음 주차부터 이어지도록 주차를 민다 (취미·교양 교육팀 save_curriculum 과 같은 규칙)."""
+    road = {**road, "steps": learning.continue_weeks(course, road.get("steps") or [])}
     course.extras["roadmap"] = {**road, "at": now or learning.now_text()}
     return learning.replace_remaining(course, roadmap_drafts(road), course.level)
 

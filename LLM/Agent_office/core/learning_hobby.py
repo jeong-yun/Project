@@ -204,11 +204,7 @@ def save_curriculum(course: learning.Course, data: object) -> list[str]:
     drafts = curriculum_units(data)
     if not drafts:
         raise ValueError("커리큘럼 단원이 없습니다")
-    start = max((u.week for u in course.curriculum if u.done), default=0) + 1
-    first = min(learning._int(d["week"]) for d in drafts)
-    for d in drafts:
-        d["week"] = learning._int(d["week"]) - first + start
-    return learning.replace_remaining(course, drafts, course.level)
+    return learning.replace_remaining(course, learning.continue_weeks(course, drafts), course.level)
 
 
 def week_hours(data: object) -> dict[int, str]:

@@ -79,7 +79,7 @@ def repo_state(repo: Path, subdir: str, root: Path) -> tuple[cat.RepoInfo, str]:
 
 
 def git_diff_status(ctx: "CatalogContext") -> tuple[str, str]:
-    """(git diff, git status) — 채택 후 커밋 패널용."""
+    """(git diff, git status) — 사이드바 커밋 상자와 본문 안내(commit_hint)용."""
     return _cache.get(("diff", str(ctx.repo), ctx.subdir), _git_sig(ctx.repo, ctx.root),
                       lambda: (cat.git_diff(ctx.repo, ctx.subdir), cat.git_status(ctx.repo, ctx.subdir)))
 
@@ -130,7 +130,7 @@ def sidebar(settings: dict) -> CatalogContext | None:
             # git_panel 안에 'git diff' 접기 상자가 있어 접기 상자 안에 넣을 수 없다 (Streamlit 은 겹쳐 접기를 막음)
             with st.container(border=True):
                 st.markdown("**📝 커밋 안 된 변경 올리기**")
-                st.caption("앱을 다시 켜서 채택 직후의 커밋 상자가 사라졌어도 여기서 커밋하고 GitHub 에 올릴 수 있습니다.")
+                st.caption("채택·삭제로 바뀐 카탈로그 파일을 여기서 커밋하고 GitHub 에 올립니다 (앱을 다시 켠 뒤에도 그대로 남아 있습니다).")
                 git_panel(ctx, "sidebar", cat.pending_commit_message(git_diff_status(ctx)[0]))
         if info.behind > 0:
             # GitHub 웹에서 직접 고친 것 등 — 먼저 받아 두면 푸시가 거절되지 않는다 (푸시할 때도 자동으로 합침)
@@ -216,7 +216,7 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
         if result:
             st.success(f"🗑 「{result['title']}」 을 old_term 으로 옮겼습니다.")
             render_changes(result["changes"], [])
-            git_panel(ctx, f"del_{result['title']}", f"Term: {result['title']} 삭제")
+            commit_hint(ctx)
         return None
 
     # ── ✍️ 작성: 추가/수정은 고르지 않는다 — 개념명으로 기존 항목을 찾아 자동 판정 ──
@@ -225,14 +225,19 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
                          placeholder="예: 그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO)")
     draft = st.text_area("초안", height=220, key=f"cw_draft_{team_id}",
                          placeholder="정의·작동 원리·장단점·참고 자료 등 초안을 붙여 넣으세요 (비워도 개념명으로 작성)")
-    target, sub_title, action = None, "", "add"
+    target, sub_title, action, merging = None, "", "add", False
     if name.strip():
         matches = cat.find_existing(ctx.catalog, name)
         ADD = "__add__"
+        # 결과 화면의 '원본 기반으로 다시 받기'(merge_notice)가 남긴 표시 — 팀이 이 개념을 그 기존 항목에 편입하기로 판정했다
+        merge = st.session_state.get(f"cw_merge_{team_id}") or {}
+        into = ctx.catalog.find(merge["target"]) if merge.get("name") == name.strip() and not matches else None
 
         def option_label(n: str) -> str:
             if n == ADD:
                 return "🆕 새 항목으로 추가"
+            if into and n == into.name:
+                return f"✏️ 편입 — {ctx.label(n)} 에 넣기 (원본 기반 수정)"
             m = next(m for m in matches if m.entry.name == n)
             return f"✏️ 수정 — {ctx.label(n)}" + (f" (7.변형 소절 '{m.detail[:40]}')" if m.kind == "하위" else "")
 
@@ -245,11 +250,16 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
             status = concept.app_status(m0.entry) if m0.entry.category == "AI-App" else None
             if status:
                 st.caption(f"🧩 Agent Office 적용 현황: {STATUS_ICON.get(status.get('status'), '❔')} — {status.get('note', '')}")
+        elif into:
+            st.info(f"팀이 기존 항목에 편입하기로 판정한 개념입니다 → 그 항목을 **원본 기반 수정**으로 진행합니다: {ctx.label(into.name)}"
+                    "  \n원본 항목은 그대로 두고, 편입에 필요한 곳만 변경 제안으로 받습니다. 결과 화면에서 변경마다 근거를 읽고 반영할지 고르면 됩니다.")
         else:
             st.success("카탈로그에 없는 개념입니다 → **추가**로 진행합니다. (검토 중 팀이 기존 개념의 하위라고 판단하면 편입으로 바꿉니다)")
-        picked = st.selectbox("판정 (필요하면 바꾸기)", [m.entry.name for m in matches] + [ADD], format_func=option_label,
-                              key=f"cw_pick_{team_id}_{hash(name)}")
-        if picked != ADD:
+        picked = st.selectbox("판정 (필요하면 바꾸기)", [m.entry.name for m in matches] + ([into.name] if into else []) + [ADD],
+                              format_func=option_label, key=f"cw_pick_{team_id}_{hash(name)}")
+        if into and picked == into.name:
+            target, action, merging = into, "update", True
+        elif picked != ADD:
             hit = next(m for m in matches if m.entry.name == picked)
             target, sub_title, action = hit.entry, (hit.detail if hit.kind == "하위" else ""), "update"
     suggested = [e.name for e, _ in cat.find_related(ctx.catalog, name, draft, related_limit) if not target or e.name != target.name]
@@ -258,7 +268,7 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
     use_web = st.checkbox("🌐 웹 검색으로 원전 확인", value=web_available, disabled=not web_available, key=f"cw_web_{team_id}")
     related = [e for e in ctx.catalog.entries if e.name in related_names]
     # 요청은 LLM 없이 코드로 만든다 → 맡기기 전에도 보낼 브리프를 그대로 보여 줄 수 있다
-    question, brief = (concept.build_concept_request(action, name.strip(), draft, related, target, sub_title=sub_title)
+    question, brief = (concept.build_concept_request(action, name.strip(), draft, related, target, sub_title=sub_title, merge=merging)
                        if name.strip() else ("", None))
     applied_prompt(question, brief, concept.used_prompt_version(question), key=f"in_{team_id}")
     if not st.button("맡기기", type="primary", disabled=busy or not name.strip(), key=f"cw_go_{team_id}"):
@@ -387,7 +397,7 @@ def change_list(res: concept.ConceptResult, run: dict, content: str, decided: bo
         st.info("팀이 고칠 곳을 찾지 못했습니다 — 원본 그대로입니다. 고칠 점이 있으면 아래 '💬 결과에 대해 묻기 · 수정 요청'에 적어 주세요.")
         return []
     if decided:
-        st.caption("팀이 냈던 변경 제안입니다 (참고용). 채택할 때 고른 변경만 반영됐고, 실제로 바뀐 곳은 아래 '변경 내용 (git diff)'에서 볼 수 있습니다.")
+        st.caption("팀이 냈던 변경 제안입니다 (참고용). 채택할 때 고른 변경만 반영됐고, 아직 커밋하지 않았다면 실제로 바뀐 곳을 왼쪽 사이드바의 '변경 내용 (git diff)'에서 볼 수 있습니다.")
     else:
         st.caption("원본 항목은 그대로 두고, 여기서 체크한 변경만 반영합니다. 근거를 읽고 반영하지 않을 변경은 체크를 푸세요 → "
                    "'📄 최종본'에서 결과 확인 → 아래 '👤 최종 결정'에서 채택. "
@@ -415,6 +425,36 @@ def change_list(res: concept.ConceptResult, run: dict, content: str, decided: bo
     return picked
 
 
+def merge_notice(run: dict, target_name: str) -> None:
+    """'추가'로 맡겼는데 팀이 기존 항목 편입(수정)으로 판정한 결과 — 그 항목을 원본 기반 수정으로 다시 맡기는 길을 안내한다.
+
+    추가 요청에는 그 항목의 원본 전문이 없어(관련 항목은 발췌만) 팀이 항목 전체를 <final> 에 다시 썼다 → 변경마다 근거를 보고 고를 수 없다.
+    버튼은 위 '✍️ 개념 작성' 입력칸만 채운다 (맡기기는 사람이 누른다 — 팀이 한 번 더 일한다). 대상을 못 찾으면 전처럼 <final> 방식뿐이라고 알린다.
+    """
+    root = st.session_state.get("concept_root") or ""
+    target = load_catalog(Path(root)).find(target_name) if root and target_name and Path(root).is_dir() else None
+    if target is None:
+        st.warning(f"팀이 이 개념을 기존 항목 「{target_name or '이름 없음'}」 에 편입(수정)하기로 판정했지만, 그 항목을 카탈로그에서 찾지 못했습니다. "
+                   "그래서 원본 기반(변경마다 고르기)으로 다시 받을 수 없습니다 — 채택하려면 아래 적용 계획 JSON 의 target 을 실제 항목 이름으로 "
+                   "고쳐야 하고, 채택하면 그 항목 전체가 '📄 최종본' 글로 바뀝니다.")
+        return
+    name, draft = concept.request_inputs(run.get("question", ""))
+    st.info(f"팀이 이 개념을 기존 항목 「{target.name}」 에 편입(수정)하기로 판정했습니다. 지금 '📄 최종본'은 그 항목 전체를 다시 쓴 글이라 "
+            "무엇이 왜 바뀌는지 변경마다 골라 반영할 수 없습니다 (이대로 채택하면 항목 전체가 이 글로 바뀝니다).  \n"
+            "아래 버튼을 누르면 위 '✍️ 개념 작성' 입력칸이 '기존 항목에 편입 — 원본 기반 수정'으로 채워집니다. 거기서 **맡기기**를 누르면 "
+            "원본은 그대로 두고 변경 제안(원문 → 바꿀 글 + 근거)으로 다시 받습니다 (팀이 한 번 더 일합니다).")
+    st.button("✏️ 원본 기반으로 다시 받기 — 입력칸 채우기", key=f"cm_{run.get('run_id', '')}", on_click=_prefill_merge,
+              args=(name or (run.get("concept") or {}).get("title", ""), draft, target.name))
+
+
+def _prefill_merge(name: str, draft: str, target_name: str) -> None:
+    """버튼 콜백 — 화면을 그리기 전에 실행되므로 '✍️ 개념 작성' 입력칸(input_form)의 값을 바꿀 수 있다."""
+    team_id = concept.TEAM_ID
+    st.session_state[f"cw_name_{team_id}"] = name
+    st.session_state[f"cw_draft_{team_id}"] = draft
+    st.session_state[f"cw_merge_{team_id}"] = {"name": name, "target": target_name}  # input_form 이 '편입 — 원본 기반 수정'을 고르게 한다
+
+
 def result_tabs(content: str, run: dict) -> None:
     """최종 결과를 탭으로 — (기존 항목 수정이면 변경 제안 /) 최종본(카탈로그에 들어갈 글) / 검증 로그 / GitHub 요약 / 적용 계획."""
     opts = change_options(run)
@@ -434,6 +474,9 @@ def result_tabs(content: str, run: dict) -> None:
     problems = [] if changing and run.get("status") == "adopted" else concept.check_answer(content, opts)
     if problems:
         st.warning("형식 검사에서 남은 문제 (채택 전 아래에서 직접 고칠 수 있습니다):\n" + "\n".join(f"- {p}" for p in problems))
+    asked_add = info.get("action") == "add" or "- 작업(코드 자동 판정): 추가 (add)" in run.get("question", "")
+    if asked_add and plan.get("action") == "update" and not changing and not decided:
+        merge_notice(run, str(plan.get("target") or ""))
     tabs = st.tabs(([f"✏️ 변경 제안 ({len(res.changes)})"] if changing else []) + ["📄 최종본", "🧠 검증 로그", "🐙 GitHub 요약", "🧾 적용 계획"])
     final_entry = res.final_entry
     if changing:
@@ -450,11 +493,15 @@ def result_tabs(content: str, run: dict) -> None:
             if left:  # 원본에 원래 있던 형식 문제 — 하네스가 막지는 않지만 알려 준다
                 st.caption(f"원본에 원래 있던 형식 문제 {len(left)}건이 남아 있습니다 (이번 변경 제안으로는 고쳐지지 않음): "
                            + " / ".join(x[:40] for x in left[:4]) + (" …" if len(left) > 4 else ""))
-        st.text(final_entry or "(최종본 없음 — <final> 블록이 없습니다)")
+        st.text(final_entry or "최종본이 없습니다 — 아래 '채택할 안'에서 편집장·부장의 안을 고르거나, 다시 맡겨 주세요.")
     with tabs[1], st.container(height=420):
         if res.change_notes:  # 최종본에서 떼어 낸 🔧수정·➕추가 표시와 이유 — 확인용 (카탈로그에는 들어가지 않음)
             notes = "\n".join(f"- {n}" for n in res.change_notes)
             st.markdown(f"**🔧 초안 대비 변경 요약** (최종본에는 넣지 않음)\n{notes}")
+        if res.outside:  # 검증 로그 태그 앞(또는 최종본 앞)에 쓴 글 — 수정 요청에 답한 판정 표 등. 어느 탭에도 안 나오던 글이다
+            st.markdown("**📝 검증 로그 태그 밖에 쓴 글** (팀이 답하며 덧붙인 글 — 이 화면에만 보이고 카탈로그·GitHub 에는 들어가지 않음)")
+            st.markdown(res.outside)
+            st.divider()
         st.markdown(res.thought or "(검증 로그 없음)")
     with tabs[2], st.container(height=420):
         st.markdown(res.summary_md or "(요약 없음)")
@@ -553,33 +600,52 @@ def render_changes(changes: list, edit_logs: list[str]) -> None:
 
 
 def git_panel(ctx: CatalogContext, key: str, message: str) -> None:
-    """변경 내용 확인 → 💾 커밋 → 🚀 푸시 (버튼을 눌러야만 실행)."""
-    if ctx.repo is None:
-        st.caption("git 저장소가 아니라 커밋·푸시는 할 수 없습니다.")
-        return
+    """변경 내용 확인 → 💾 커밋 → 🚀 푸시 (버튼을 눌러야만 실행). 사이드바의 '📝 커밋 안 된 변경 올리기' 상자 하나에서만 쓴다."""
     diff, pending = git_diff_status(ctx)
     with st.expander("변경 내용 (git diff)"):
         st.code(diff[:30000] or "(차이 없음 — 이미 커밋했거나 새 파일만 있음)", language="diff")
-    msg = st.text_input("커밋 메시지", value=message, key=f"msg_{key}")
+    st.text_input("커밋 메시지", value=message, key=f"msg_{key}")  # 값은 버튼 콜백(_commit_clicked)이 key 로 읽는다
     st.caption("📝 아직 커밋하지 않은 변경이 있습니다 — '🚀 커밋 후 푸시'를 누르면 커밋과 GitHub 업로드를 한 번에 합니다."
                if pending else "커밋하지 않은 변경 없음")
     c1, c2 = st.columns(2)
-    if c1.button("💾 커밋만", use_container_width=True, key=f"commit_{key}", disabled=not pending):
-        ok, log = cat.git_commit(ctx.repo, ctx.subdir, msg)
+    c1.button("💾 커밋만", use_container_width=True, key=f"commit_{key}", disabled=not pending,
+              on_click=_commit_clicked, args=(ctx, key, False))
+    c2.button("🚀 커밋 후 GitHub 에 푸시", type="primary", use_container_width=True, key=f"push_{key}",
+              on_click=_commit_clicked, args=(ctx, key, True))
+
+
+def _commit_clicked(ctx: CatalogContext, key: str, push: bool) -> None:
+    """커밋 버튼 콜백 — 화면을 그리기 전에 실행되므로 사이드바의 '커밋 안 된 변경' 목록과 본문 안내가 커밋 뒤 상태로 그려진다.
+
+    버튼을 그린 뒤에 커밋하면 옛 목록·상자가 화면에 남아 다시 누르게 되고, st.rerun() 으로 새로 그리면 그 아래 본문 입력칸의 선택이 사라진다.
+    결과 글은 SIDEBAR_MSGS 에 넘겨 사이드바 맨 아래에 보여 준다.
+    """
+    msgs: list[tuple[str, str]] = []
+    if cat.git_status(ctx.repo, ctx.subdir):  # 커밋 안 된 변경이 있으면 먼저 커밋 — 커밋 없이 푸시하면 아무것도 올라가지 않는다
+        ok, log = cat.git_commit(ctx.repo, ctx.subdir, st.session_state.get(f"msg_{key}", ""))
         refresh_git()
-        (st.success if ok else st.error)(log[-800:])
-    if c2.button("🚀 커밋 후 GitHub 에 푸시", type="primary", use_container_width=True, key=f"push_{key}"):
-        if pending:  # 커밋 안 된 변경이 있으면 먼저 커밋 — 커밋 없이 푸시하면 아무것도 올라가지 않는다
-            ok, log = cat.git_commit(ctx.repo, ctx.subdir, msg)
-            refresh_git()
-            if not ok:
-                st.error("커밋 실패: " + log[-800:])
-                return
-        show_messages(push_messages(ctx.repo, ctx.subdir, ctx.root))
+        msgs = [("success", log[-800:])] if ok else [("error", "커밋 실패: " + log[-800:])]
+        push = push and ok
+    if push:
+        msgs = push_messages(ctx.repo, ctx.subdir, ctx.root)
+    st.session_state[SIDEBAR_MSGS] = msgs
+
+
+def commit_hint(ctx: CatalogContext) -> None:
+    """반영 뒤 안내 — 커밋·푸시 상자는 사이드바 한 곳에만 둔다 (2026-11-12: 채택 직후 본문과 사이드바에 상자가 두 개 보여 헷갈렸다).
+
+    사이드바 상자는 커밋 안 된 변경이 있는 동안 어느 화면에서나, 앱을 다시 켠 뒤에도 보인다. 커밋만 한 뒤의 '🚀 지금 푸시'도 사이드바에 있다."""
+    if ctx.repo is None:
+        st.caption("git 저장소가 아니라 커밋·푸시는 할 수 없습니다.")
+    elif git_diff_status(ctx)[1]:
+        st.info("⬅️ 커밋하고 GitHub 에 올리려면 왼쪽 사이드바의 '📝 커밋 안 된 변경 올리기'를 쓰세요. "
+                "(사이드바가 접혀 있으면 화면 왼쪽 위의 화살표를 눌러 펼칩니다)")
+    else:
+        st.caption("커밋 안 된 변경 없음 — 이미 커밋했습니다. GitHub 에 올렸는지는 왼쪽 사이드바에서 볼 수 있습니다.")
 
 
 def adopted_section(ctx: CatalogContext | None, run: dict) -> None:
-    """채택 후 — 카탈로그 반영 결과 + 커밋·푸시."""
+    """채택 후 — 카탈로그 반영 결과 + 어디서 커밋·푸시하는지 안내 (상자는 사이드바에)."""
     st.markdown("##### 📚 카탈로그 반영")
     if run.get("concept_error"):
         st.error(run["concept_error"])
@@ -588,4 +654,4 @@ def adopted_section(ctx: CatalogContext | None, run: dict) -> None:
         return
     render_changes(run.get("concept_changes") or [], run.get("concept_edit_logs") or [])
     if run.get("concept_changes"):
-        git_panel(ctx, run["run_id"], run.get("concept_commit") or "Term: 개념 정리")
+        commit_hint(ctx)

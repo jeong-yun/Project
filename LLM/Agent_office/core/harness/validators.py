@@ -127,10 +127,10 @@ class RequiredTermsValidator(Validator):
     description = "업무 필수 항목(예: 시나리오·손절가·예산)이 답변에 있는지 검사"
 
     def check(self, answer: str, options: dict):
-        # 항목 하나에 "A|B" 처럼 대안을 적으면 그중 하나만 있어도 통과
+        # 항목 하나에 "A|B" 처럼 대안을 적으면 그중 하나만 있어도 통과. 띄어쓰기는 보지 않는다 ('분할 매수' = '분할매수')
         required = options.get("required_terms", [])
-        low = answer.lower()
-        missing = [term for term in required if not any(alt.strip().lower() in low for alt in term.split("|"))]
+        low = re.sub(r"\s+", "", answer.lower())
+        missing = [term for term in required if not any(re.sub(r"\s+", "", alt.lower()) in low for alt in term.split("|"))]
         if missing:
             return self.fail(f"반드시 들어가야 할 항목이 빠졌다: {missing}. 이 항목들을 다루는 내용을 추가하라.")
         return self.ok(f"필수 항목 {len(required)}개 포함" if required else "검사할 필수 항목 없음")
@@ -342,8 +342,8 @@ class ControlIdsValidator(Validator):
         if result.name_mismatch:
             problems.append("번호와 이름이 맞지 않음: " + " / ".join(result.name_mismatch[:6]))
         if problems:
-            return self.fail(" / ".join(problems) + " — 근거 자료의 '통제 번호 목록'에 있는 번호·이름만 쓰고, 맞는 번호를 모르면 "
-                             "control_id 를 비우고 이름만 써라 (번호를 지어내지 않는다).")
+            return self.fail(" / ".join(problems) + " — 근거 자료에 있는 통제 번호·이름만 쓰고(통제 번호 목록이나 점검 표의 통제 칸), "
+                             "맞는 번호를 모르면 번호를 비우고 이름만 써라 (번호를 지어내지 않는다).")
         return self.ok(f"{result.framework} 통제 번호 {result.checked}개 모두 목록에 있음")
 
 

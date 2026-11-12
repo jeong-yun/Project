@@ -30,7 +30,7 @@ MIME = {
     ".hwpx": "application/hwp+zip",
 }
 NOTICE = ("🔒 올린 문서·JD 는 이 PC 의 `data/uploads/`, 채택한 결과는 `results/career/` 에만 저장되고 GitHub 에 올라가지 않습니다 "
-          "(교훈 공유에서도 이 팀은 빠집니다). 다만 내용은 고른 LLM 회사로 전송됩니다.")
+          "(교훈 공유에서도 이 팀은 빠집니다). 다만 내용은 고른 AI 모델 회사로 전송됩니다.")
 
 
 VISION_NOTICE = ("🔒 그림은 고른 모델의 회사(OpenAI · Google · Anthropic)로 전송됩니다 — 이 팀은 비공개 팀이라 결과는 이 PC 에만 "

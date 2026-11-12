@@ -146,7 +146,7 @@ def check_recommend(answer: str, options: dict) -> CheckResult:
     res = CheckResult("recommend")
     data = find_block(answer, "candidates")
     if data is None:
-        res.problems.append('"candidates" 목록을 가진 ```json 블록이 없다 (Stage 1 스키마로 종목별 평가를 출력하라)')
+        res.problems.append('"candidates" 목록을 가진 ```json 블록이 없다 (업무 지침의 [JSON 요약] 형식으로 종목별 평가를 답변 맨 끝에 쓴다)')
         return res
     res.found = True
     candidates = data.get("candidates") or []

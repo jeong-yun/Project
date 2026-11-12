@@ -228,7 +228,7 @@ def test_design_team_config():
     assert [(n.id, n.rank) for n in team.org.walk()] == [
         ("lead", "team_lead"), ("gm_review", "gm"), ("dgm_layout", "deputy_gm"), ("am_program", "assistant_manager")
     ]
-    assert "json_keys" in team.harness.final_only and team.harness.also_at == {"json_keys": ["dgm_layout"]}
+    assert "json_keys" in team.harness.final_only and team.harness.also_at == {"json_keys": ["dgm_layout", "gm_review"]}
     edit = next(t for t in team.tasks if t.id == "edit")
     assert next(f for f in edit.fields if f.key == "attachment").type == "file"
 

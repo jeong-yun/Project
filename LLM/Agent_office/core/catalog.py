@@ -540,11 +540,15 @@ def pending_commit_message(diff: str) -> str:
     """커밋 안 된 변경의 커밋 메시지 — git diff 에서 더해지거나 빠진 항목 제목 줄로 'Term: 이름 추가/수정/삭제 (외 N개)'.
 
     같은 이름이 빠지고 더해졌으면 수정. 요약(0. Summary.md)의 '* **…:**' 줄·본문 줄은 제목이 아니라 세지 않는다.
+    old_term.txt 에 더해진 항목은 옮겨 온 것(삭제·통합)이라 '빠짐'으로 센다 — 삭제가 '수정'으로 적히지 않게.
     """
     signs: dict[str, set[str]] = {}  # 이름 → {'+', '-'} (나온 순서 유지)
+    moved = False  # 지금 읽는 파일이 old_term.txt 인가
     for line in diff.splitlines():
-        if line[:1] in ("+", "-") and not line.startswith(("+++", "---")) and is_header(line[1:]):
-            signs.setdefault(parse_header(line[1:])[1], set()).add(line[0])
+        if line.startswith("+++ "):
+            moved = line.rstrip().endswith(OLD_FILE)
+        elif line[:1] in ("+", "-") and not line.startswith("---") and is_header(line[1:]):
+            signs.setdefault(parse_header(line[1:])[1], set()).add("-" if moved else line[0])
     if not signs:
         return "Term: 카탈로그 변경 반영"
     name, seen = next(iter(signs.items()))
