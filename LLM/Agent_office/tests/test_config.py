@@ -104,3 +104,12 @@ def test_streamlit_config_sends_no_usage_stats():
     연결이 끊겼다 붙은 직후 이 메시지를 받으면 오류 창을 띄운다 (2026-11-12 재현: 켬 9/10 → 끔 0/10).
     """
     assert _streamlit_reads("config.get_option('browser.gatherUsageStats')") == "False"
+
+
+def test_streamlit_config_does_not_scan_module_files_for_new_sessions():
+    """`.streamlit/config.toml` — 코드 파일 감시를 끈다 (새 브라우저 세션마다 서버가 몇 초씩 멈추는 것을 막는다).
+
+    켜져 있으면 Streamlit 은 새 세션의 첫 화면 실행이 끝날 때 불러온 모듈 약 1,900개의 파일을 이벤트 루프 위에서 훑고,
+    그동안 모든 화면이 멈춘다 (2026-11-12 측정은 today_worked.md). 꺼 두면 코드를 고친 뒤 앱을 다시 켜야 반영된다.
+    """
+    assert _streamlit_reads("config.get_option('server.fileWatcherType')") == "none"
