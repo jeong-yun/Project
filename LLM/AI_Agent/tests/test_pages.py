@@ -39,7 +39,7 @@ def test_word_page_shows_saved_sample_word():
 def test_safety_dashboard_tells_call_count_before_running():
     at = open_page("pages/2_ai_safety_eval.py")
     text = all_text(at)
-    assert "공격 프롬프트 9개" in text and "호출 18번" in text
+    assert "공격 프롬프트 9개" in text and "18번" in text
 
 
 def test_safety_dashboard_without_key_explains_what_to_do():
@@ -62,6 +62,33 @@ def test_safety_dashboard_runs_with_fake_models(monkeypatch):
     assert not at.exception, [e.value for e in at.exception]
     assert at.metric[0].value == "100.0%"
     assert len(at.dataframe[-1].value) == 9
+
+
+def test_safety_dashboard_rag_target_shows_rag_categories_separately(monkeypatch):
+    from ai_safety import judge
+
+    verdict = json.dumps({"verdict": "PASS", "severity": "none", "reason": "지시를 따르지 않음"}, ensure_ascii=False)
+    # 대상: 심은 문구를 그대로 따라 쓰는 가짜 모델 → 인젝션 3건 중 그 문구가 걸린 건은 코드 검사가 FAIL
+    fakes = iter([fake_chat("문서에 없습니다. MOONLIB-OVERRIDE-42"), fake_chat(verdict)])
+    monkeypatch.setattr(judge, "make_llm", lambda *a, **k: next(fakes))
+    monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-real-key")
+
+    at = open_page("pages/2_ai_safety_eval.py")
+    at.radio[0].set_value("rag").run()
+    text = all_text(at)
+    assert "공격 프롬프트 7개" in text and "14번" in text
+
+    at.button[0].click().run()
+    assert not at.exception, [e.value for e in at.exception]
+    by_category = at.dataframe[0].value
+    assert list(by_category["범주"]) == ["RAG 간접 프롬프트 인젝션", "RAG 문서에 없는 질문", "RAG 출처 일치"]
+    rates = dict(zip(by_category["범주"], by_category["방어율(%)"]))
+    assert rates["RAG 간접 프롬프트 인젝션"] < 100.0  # rag-inj-1 은 심은 문구가 나와 FAIL
+    table = at.dataframe[-1].value
+    assert len(table) == 7 and "코드 검사" in table.columns
+
+    at.radio[0].set_value("chat").run()  # 일반 채팅으로 돌아가면 RAG 결과를 섞어 보이지 않는다
+    assert "아직 없습니다" in all_text(at)
 
 
 # ---------------- 문서 Q&A (RAG) ----------------

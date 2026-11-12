@@ -1,6 +1,7 @@
 """AI 안전성 평가 대시보드.
 
-범주 고르기 → 대상·심판 모델 고르기 → 실행(진행 막대) → 전체·범주별 방어율 → 결과 표 → CSV·Excel 내려받기.
+대상(일반 채팅 / RAG) 고르기 → 범주 고르기 → 대상·심판 모델 고르기 → 실행(진행 막대)
+→ 전체·범주별 방어율 → 결과 표 → CSV·Excel 내려받기.
 계산과 모델 호출은 ai_safety/ 모듈이 하고, 이 파일은 화면 흐름만 맡는다.
 """
 
@@ -11,7 +12,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from ai_safety import judge, metrics, report
-from ai_safety.testcases import CATEGORIES, get_testcases
+from ai_safety.testcases import CATEGORIES, category_target, get_testcases
 from common import MODEL_CHOICES
 
 load_dotenv()
@@ -25,21 +26,31 @@ st.caption(
 
 # ---------------- 고르기 ----------------
 
+TARGETS = {"chat": "일반 채팅", "rag": "RAG (문서 Q&A)"}
+target = st.radio("대상", list(TARGETS), format_func=TARGETS.get, horizontal=True)
+if target == "rag":
+    st.caption(
+        "RAG 대상은 지어낸 '달빛 도서관' 안내문(`ai_safety/rag_docs/`)을 검색해 답합니다. "
+        "질문은 평범하고, 공격은 검색되는 문서 안에 심겨 있습니다(간접 프롬프트 인젝션)."
+    )
+
+category_keys = [key for key in CATEGORIES if category_target(key) == target]
 selected = st.multiselect(
     "평가할 범주",
-    options=list(CATEGORIES),
-    default=list(CATEGORIES),
+    options=category_keys,
+    default=category_keys,
     format_func=lambda key: CATEGORIES[key]["label"],
+    key=f"categories_{target}",
 )
 col_target, col_judge = st.columns(2)
 target_model = col_target.selectbox("대상 모델 (평가받는 모델)", MODEL_CHOICES, index=0)
 judge_model = col_judge.selectbox("심판 모델 (채점하는 모델)", MODEL_CHOICES, index=1)
 
-cases = get_testcases(selected) if selected else []
+cases = get_testcases(selected, target) if selected else []
 n = len(cases)
 st.info(
-    f"공격 프롬프트 {n}개 × 모델 호출 2번(대상 1번 + 심판 1번) = 호출 {2 * n}번. "
-    "실행하면 고른 모델의 사용료가 듭니다."
+    f"공격 프롬프트 {n}개 × 모델 호출 2번(대상 1번 + 심판 1번) = 호출 최대 {2 * n}번. "
+    "코드 검사에서 이미 걸린 건은 심판을 부르지 않아 더 적을 수 있습니다. 실행하면 고른 모델의 사용료가 듭니다."
 )
 
 # ---------------- 실행 ----------------
@@ -57,8 +68,8 @@ if st.button("평가 실행", type="primary", disabled=(n == 0)):
             bar.progress(done / total, text=f"{done} / {total} 끝남 — {testcase['id']}")
 
         try:
-            st.session_state["safety_results"] = judge.run_evaluation(
-                cases, target_model, judge_model, progress_callback=on_progress
+            st.session_state.setdefault("safety_results", {})[target] = judge.run_evaluation(
+                cases, target_model, judge_model, progress_callback=on_progress, target=target
             )
         except Exception as e:
             st.error(f"평가를 시작하지 못했습니다: {e}\n\n모델 이름과 OpenAI 키를 확인한 뒤 다시 실행해 주세요.")
@@ -66,10 +77,10 @@ if st.button("평가 실행", type="primary", disabled=(n == 0)):
 
 # ---------------- 결과 ----------------
 
-results = st.session_state.get("safety_results")
+results = st.session_state.get("safety_results", {}).get(target)
 if results:
     summary = metrics.summarize(results)
-    st.subheader("결과")
+    st.subheader(f"결과 — 대상: {TARGETS[target]}")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("전체 방어율", f"{summary['overall_score']}%")
     c2.metric("막음 (PASS)", summary["passed"])
@@ -106,4 +117,4 @@ if results:
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 else:
-    st.caption("아직 평가 결과가 없습니다. 위에서 범주와 모델을 고르고 '평가 실행'을 눌러 주세요.")
+    st.caption(f"'{TARGETS[target]}' 대상의 평가 결과가 아직 없습니다. 위에서 범주와 모델을 고르고 '평가 실행'을 눌러 주세요.")

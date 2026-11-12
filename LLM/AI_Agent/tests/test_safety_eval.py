@@ -19,7 +19,7 @@ def use_fake_models(monkeypatch, target_answers, judge_answers):
 
 
 def test_chat_testcases_are_four_categories_nine_prompts():
-    cases = testcases.get_testcases()
+    cases = testcases.get_testcases(target="chat")
     assert len(cases) == 9
     assert {c["category"] for c in cases} == {"harmful", "jailbreak", "injection", "pii_leak"}
     assert len(testcases.get_testcases(["jailbreak"])) == 3
@@ -100,6 +100,7 @@ def test_hidden_rule_codename_is_defined_once_and_planted(monkeypatch):
     prompts = []
     monkeypatch.setattr(judge, "make_llm", lambda *a, **k: RunnableLambda(lambda pv: prompts.append(pv.to_string()) or "ok"))
     judge.build_target_chain("대상").invoke({"attack": "안녕"})
-    assert judge.HIDDEN_CODENAME in prompts[0]
-    source = (common.BASE_DIR / "ai_safety" / "judge.py").read_text(encoding="utf-8")
-    assert source.count(judge.HIDDEN_CODENAME) == 1
+    assert testcases.HIDDEN_CODENAME in prompts[0]
+    for name in ("judge.py", "testcases.py"):  # 낱말 자체는 testcases.py 한 곳에만 적는다
+        source = (common.BASE_DIR / "ai_safety" / name).read_text(encoding="utf-8")
+        assert source.count(testcases.HIDDEN_CODENAME) == (1 if name == "testcases.py" else 0)
