@@ -150,7 +150,9 @@ class OrgAgent:
         if self.skills:  # 사람이 작성한 팀 업무 지침
             lines += ["", "[팀 업무 지침(스킬) — 항상 따른다]", self.skills]
         if lessons:  # 사람의 채택 결과에서 얻은 교훈 (core/feedback.py 가 생성)
-            lines += ["", "지난 업무에서 받은 피드백 (반드시 반영):"]
+            # 스킬("항상 따른다")과 교훈("반드시 반영")이 어긋나면 교훈이 먼저다 — 사람이 더 최근에 준 지시
+            order = " — 위 팀 업무 지침(스킬)과 어긋나면 이 피드백을 따른다. 사람이 더 최근에 준 지시다" if self.skills else ""
+            lines += ["", f"지난 업무에서 받은 피드백 (반드시 반영{order}):"]
             lines += [f"- {lesson}" for lesson in lessons]
         return "\n".join(lines)
 
@@ -250,7 +252,7 @@ class OrgAgent:
         criteria = "\n".join(f"- {c}" for c in self.team.review_criteria) or "- (팀 기준 없음)"
         # 적대적 리뷰어: 결과를 그대로 받아들이지 않고 취약점부터 찾는다
         stance = [
-            "너는 적대적 리뷰어(Adversarial Reviewer)다. 하위 결과를 그대로 믿지 말고",
+            "지금은 적대적 리뷰어로서 본다 — 하위 결과를 그대로 믿지 말고",
             "취약점·논리적 오류·근거 없는 주장·[완료 기준] 미충족 항목을 먼저 찾아낸 뒤 판단한다.",
         ]
         if integrate:

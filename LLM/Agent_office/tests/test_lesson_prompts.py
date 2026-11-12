@@ -531,7 +531,7 @@ def test_dept_screen_shows_head_and_every_team_prompt(tmp_path, monkeypatch, set
     finally:
         st.cache_resource.clear()
     codes = [c.value for c in at.code]
-    assert any(c.startswith("너는 리서치·지식부 부장이다.") and "비평가(Critic)" in c for c in codes)  # 부장 비평 프롬프트
+    assert any(c.startswith("너는 리서치·지식부 부장이다.") and "마지막으로 확인하는 비평가" in c for c in codes)  # 부장 비평 프롬프트
     assert any("출처를 꼭 단다" in c and "지난 업무에서 받은 피드백" in c for c in codes)  # 일반 팀 팀장 + 교훈
     assert any("## 스킬:" in c for c in codes)  # 개념 편집 팀 (스킬 포함)
 

@@ -272,6 +272,10 @@ class TextEdit(BaseModel):
 class ReviewEdits(ReviewResult):
     """검토 결과 + 고칠 곳 목록 — 팀의 review_mode: edit (답변 전문을 다시 쓰지 않고 고칠 곳만 바꾼다)."""
 
+    # 부모(ReviewResult)의 칸 설명 "완성 답변 전문"은 시스템 지시("전문을 다시 쓰지 말고 edits 에")와 반대다 — 칸 설명도 모델에게 간다
+    revised_answer: str = Field(
+        description="보통은 빈 문자열 (고칠 곳은 edits 에 쓴다). 고칠 곳이 너무 많아 전면 재작성이 꼭 필요할 때만 완성 답변 전문"
+    )
     edits: list[TextEdit] = Field(
         description="revise 이면 고칠 곳마다 찾을 부분 → 바꿀 글. revised_answer 를 비웠을 때 이것을 검토 대상 답변에 차례로 적용한다"
     )

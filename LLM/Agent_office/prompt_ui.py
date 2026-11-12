@@ -239,6 +239,12 @@ def _apply(p: CleanupProposal, choice: str, widget: str, key: str, keep: int | N
     st.session_state.setdefault("cleanup_done", set()).add(_proposal_key(p))
 
 
+def _choice(where, label: str, p: CleanupProposal, choice: str, widget: str, key: str, keep: int | None = None, **look) -> None:
+    """정리 제안의 선택 버튼 하나 (충돌·겹침 패널이 함께 쓴다) — 누르면 _apply(p, choice). where = st 또는 열, keep = 남길 교훈 번호."""
+    name = f"cleanup_{choice.split('_')[0]}_{key}_{_proposal_key(p)}" + ("" if keep is None else f"_{keep}")  # off_old → cleanup_off_…
+    where.button(label, key=name, on_click=_apply, args=(p, choice, widget, key, keep), **look)
+
+
 def _origin_lines(row: dict) -> None:
     """충돌하는 교훈 한 개 — 교훈 문장 + 그 교훈이 나온 원래 피드백 (결정·날짜·실행·질문·코멘트)."""
     o = lesson_origin(_context().storage, row)
@@ -284,15 +290,13 @@ def render_cleanup(team: Team, proposals: list[CleanupProposal], key: str) -> in
                 for i in p.ids:
                     _origin_lines(active[i])
                 st.caption("따를 교훈을 골라 주세요. 고르지 않은 교훈은 지우지 않고 꺼 둡니다 (📚 교훈 관리에서 다시 켤 수 있음).")
-                cols = st.columns(len(p.ids))
-                for col, i in zip(cols, p.ids):
-                    col.button(f"#{i}만 남기기{' (새 교훈)' if i == p.new_id else ''}", key=f"cleanup_only_{key}_{pk}_{i}",
-                               on_click=_apply, args=(p, "only", widget, key, i), use_container_width=True)
+                for col, i in zip(st.columns(len(p.ids)), p.ids):
+                    _choice(col, f"#{i}만 남기기{' (새 교훈)' if i == p.new_id else ''}", p, "only", widget, key, i,
+                            use_container_width=True)
                 with st.expander("두 교훈을 한 문장으로 합치기 (직접 고쳐서)"):
                     st.text_area("합친 문장 (고쳐도 됩니다)", value=p.merged, key=widget, height=120)
-                    st.button("🔗 합친 문장으로 바꾸기", key=f"cleanup_merge_{key}_{pk}", on_click=_apply,
-                              args=(p, "merge", widget, key), use_container_width=True)
-                st.button("둘 다 유지", key=f"cleanup_keep_{key}_{pk}", on_click=_apply, args=(p, "keep", widget, key))
+                    _choice(st, "🔗 합친 문장으로 바꾸기", p, "merge", widget, key, use_container_width=True)
+                _choice(st, "둘 다 유지", p, "keep", widget, key)
                 continue
             with st.expander("원래 교훈 보기"):
                 for i in p.ids:
@@ -301,13 +305,11 @@ def render_cleanup(team: Team, proposals: list[CleanupProposal], key: str) -> in
             st.text_area("합친 문장 (고쳐도 됩니다)", value=p.merged, key=widget, height=120)
             st.caption(f"'합친 문장으로 바꾸기'를 누르면 이 문장이 새 교훈이 되고, 원래 교훈은 지우지 않고 꺼 둡니다. {PRIVATE_NOTE}")
             cols = st.columns(3 if p.new_id else 2)
-            cols[0].button("🔗 합친 문장으로 바꾸기", key=f"cleanup_merge_{key}_{pk}", on_click=_apply,
-                           args=(p, "merge", widget, key), type="primary", use_container_width=True)
+            _choice(cols[0], "🔗 합친 문장으로 바꾸기", p, "merge", widget, key, type="primary", use_container_width=True)
             if p.new_id:
-                cols[1].button("⏸ 옛 교훈만 끄기", key=f"cleanup_off_{key}_{pk}", on_click=_apply, args=(p, "off_old", widget, key),
-                               use_container_width=True, help="새 교훈은 그대로 두고, 겹치는 옛 교훈만 끕니다.")
-            cols[-1].button("둘 다 유지", key=f"cleanup_keep_{key}_{pk}", on_click=_apply, args=(p, "keep", widget, key),
-                            use_container_width=True)
+                _choice(cols[1], "⏸ 옛 교훈만 끄기", p, "off_old", widget, key, use_container_width=True,
+                        help="새 교훈은 그대로 두고, 겹치는 옛 교훈만 끕니다.")
+            _choice(cols[-1], "둘 다 유지", p, "keep", widget, key, use_container_width=True)
     return shown
 
 
@@ -394,7 +396,7 @@ def critic_prompt(team: Team, head) -> str:
 def render_dept(dept, head, teams: list[Team], key: str) -> None:
     """부서 화면 '📜 프롬프트·📚 교훈' — 👔 부장의 비평 관점 + 팀마다 팀원 프롬프트·교훈 관리."""
     st.caption("팀원마다 다음 업무에서 실제로 받는 시스템 프롬프트입니다 (실행과 같은 코드로 만듦). "
-               f"교훈은 팀원마다 {_context().budget:,}자 안에서 모두 들어가고, 넘치면 오래된 것부터 빠집니다.")
+               f"교훈은 팀원마다 {_context().budget:,}자 안에서 모두 들어가고, 넘치면 긴 세부 코멘트부터 빠집니다 (규칙 문장은 남습니다).")
     tabs = st.tabs([f"👔 {head.name}", *(f"{t.name}" for t in teams)])
     with tabs[0]:
         st.markdown(f"**비평·팀 배정 관점** — {head.persona}")

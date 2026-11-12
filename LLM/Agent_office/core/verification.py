@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from core import llm_factory
+from core.config import date_label, today
 from core.llm_factory import NoAvailableModelError
 from core.schemas import CriticResult, ModelsConfig, ModelSpec, RankModels, ReviewResult
 from core.search import WEB_END
@@ -60,6 +61,12 @@ def rubric_text(rubric: dict | None) -> str:
 # '버렸다·자료에 없다'로 판정하지 않게 부장 프롬프트(본 업무 비평 · 💬 수정본 검토)에 함께 넣는다
 TRIM_NOTE = ("'생략'이라고 표시된 곳('…(생략)', '…(가운데 N자 생략 …)…')은 글이 길어 줄여 넣은 것이다. "
              "보이지 않는 부분에 있을 수 있는 내용을 근거로 '빠졌다·버렸다·자료에 없다'고 지적하지 않는다.")
+
+
+def head_context() -> str:
+    """부장 프롬프트 3종(본 업무 비평 · 💬 수정본 검토 · 직접 수정)의 부장 관점 바로 뒤에 넣는 줄.
+    팀원 프롬프트(agent.system_prompt)에만 있던 오늘 날짜·언어 — 부장은 기준일·날짜·요일이 맞는지를 판정하는 사람이다."""
+    return f"오늘 날짜: {date_label(today())} — '현재·최근·향후'와 기준일·요일은 이 날짜 기준으로 본다. 한국어로 쓴다."
 
 
 def trim_middle(text: str, budget: int) -> str:
@@ -136,7 +143,8 @@ def build_critic_messages(
     system = "\n".join(
         [
             *([persona] if persona else []),
-            "너는 이 팀의 결과를 마지막으로 확인하는 비평가(Critic)다. 두 가지를 본다.",
+            head_context(),
+            "이 팀의 결과를 마지막으로 확인하는 비평가로서 두 가지를 본다.",
             "① 검토자의 '지적 → 수정' 과정이 논리적으로 이어지는가",
             "② 수정 답변이 [검토 기준]과 (주어졌다면) [근거 자료]·팀 추가 규칙에 맞는가",
             "- 검토자가 찾은 문제점(issues)이 실제 검토 대상 답변에 근거하는가?",
