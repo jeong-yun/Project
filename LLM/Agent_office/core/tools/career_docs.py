@@ -6,6 +6,8 @@
 jd_confirmed · docs_confirmed 로 들어온다. 그 글이 JD·사실의 출처가 된다 (사실 검사도 그 글과 대조).
 입력 (업무 양식)
   docs / docs_name     : 올린 요약 문서 경로 목록 (docx·pdf·hwp·hwpx·md·txt + 그림, 여러 개)
+  attachments / attachments_names / attachments_confirmed : 💬 자유 질문·부서장 창구의 첨부 (core/tools/attachments.py) —
+                         이 팀에서는 요약 문서와 똑같이 읽는다 (사실의 출처)
   use_sample           : 켜면 가상 인물 샘플 문서·JD 를 쓴다 (teams/career/samples — 실제 사람 아님)
   jd / jd_file         : 채용 공고 (붙여 넣기 / 파일 여러 개 — 글 파일·그림·PDF, 올린 순서대로)
   jd_confirmed         : 확인 단계에서 사람이 확인한 JD 파일 글 (있으면 jd_file 대신 이것을 쓴다)
@@ -216,8 +218,11 @@ def read_docs(inputs: dict) -> tuple[list[DocText], list[str]]:
     """올린 문서(+샘플) → 읽은 문서 목록, 읽지 못한 파일 안내."""
     docs, notes = [], []
     paths = _paths(inputs.get("docs"))
-    confirmed = inputs.get("docs_confirmed") or {}
-    for path, name in zip(paths, _names(inputs.get("docs_names") or inputs.get("docs_name"), len(paths))):
+    names = _names(inputs.get("docs_names") or inputs.get("docs_name"), len(paths))
+    attached = _paths(inputs.get("attachments"))  # 💬 자유 질문 첨부 — 요약 문서로 읽는다
+    paths, names = paths + attached, names + _names(inputs.get("attachments_names"), len(attached))
+    confirmed = {**(inputs.get("docs_confirmed") or {}), **(inputs.get("attachments_confirmed") or {})}
+    for path, name in zip(paths, names):
         shown = _shown(path, name)
         if path in confirmed:  # 그림·스캔 PDF — 사람이 확인한 글이 출처
             docs.append(DocText(shown, "그림(확인한 글)", str(confirmed[path]).strip(), "비전 모델이 옮기고 사람이 확인"))
@@ -552,11 +557,12 @@ def answers_block(inputs: dict) -> str:
             + "\n".join(f"- {a.get('question')} → **{a.get('answer')}**" for a in answers))
 
 
-# 자유 질문에는 파일 칸이 없어 툴 입력이 비어 있다 — 경고(notes)는 화면에만 가므로 모델이 볼 근거 자료에 적는다
+# 자유 질문에 첨부가 없으면 툴 입력이 비어 있다 — 경고(notes)는 화면에만 가므로 모델이 볼 근거 자료에 적는다
 NO_DOCS = ("### ⚠️ 올린 자료 없음 — 사실의 출처가 될 문서가 없다\n"
            "경력 사실(경험·회사·프로젝트·숫자·기간)이 들어갈 자리는 [확인 필요]로 비워 두고 지어내지 않는다. 쓰는 법·뼈대·점검 순서까지만 답한다. "
-           "숫자는 질문에 적힌 것만 쓴다 (코드가 문서·질문에 없는 숫자를 검사한다). 문서를 근거로 한 답변이 필요하면 업무 양식"
-           "(✍️ 자소서 작성 · 📁 포트폴리오 작성 · 🎯 업무(JD) 추천 · 🔄 포트폴리오 최신화)에 문서를 올려 달라고 안내한다.")
+           "숫자는 질문에 적힌 것만 쓴다 (코드가 문서·질문에 없는 숫자를 검사한다). 문서를 근거로 한 답변이 필요하면 자유 질문의 "
+           "'📎 첨부 파일' 칸이나 업무 양식(✍️ 자소서 작성 · 📁 포트폴리오 작성 · 🎯 업무(JD) 추천 · 🔄 포트폴리오 최신화)에 "
+           "문서를 올려 달라고 안내한다.")
 
 
 def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:

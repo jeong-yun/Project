@@ -35,7 +35,7 @@ NOTICE = ("🔒 올린 문서·JD 는 이 PC 의 `data/uploads/`, 채택한 결�
 
 VISION_NOTICE = ("🔒 그림은 고른 모델의 회사(OpenAI · Google · Anthropic)로 전송됩니다 — 이 팀은 비공개 팀이라 결과는 이 PC 에만 "
                  "저장되지만, 그림 읽기는 외부 호출입니다. 보내기 싫으면 '취소'하고 글로 붙여 넣거나 PDF(글자 층)·Word 로 올려 주세요.")
-FIELD_TITLES = {"jd": "JD (채용 공고)", "jds": "JD (파일마다 하나)", "docs": "요약 문서"}
+FIELD_TITLES = {"jd": "JD (채용 공고)", "jds": "JD (파일마다 하나)", "docs": "요약 문서", "attachments": "첨부 파일"}
 
 
 # ─── 맡기기 전 확인 단계 (그림·스캔 PDF → 글자) ───────────────────────────
@@ -103,7 +103,7 @@ def apply_confirmed(request: dict, items: dict[str, list], texts: dict[str, obje
     inputs = dict(request["tool_inputs"])
     if "jd" in items:
         inputs["jd_confirmed"] = str(texts.get("jd") or "")
-    for fld in ("docs", "jds"):  # 파일마다 따로 확인한 글 → {경로: 글}
+    for fld in ("docs", "jds", "attachments"):  # 파일마다 따로 확인한 글 → {경로: 글}
         if fld in items:
             confirmed = dict(inputs.get(f"{fld}_confirmed") or {})
             confirmed.update({f.path: str(t) for f, t in zip(items[fld], texts.get(fld) or [])})
@@ -122,15 +122,18 @@ def confirm_step(request: dict, team_id: str, task_id: str, models: ModelsConfig
     return web_step(vision_step(request, team_id, task_id, models, chains), team_id, task_id, models)
 
 
-def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig, chains: list[RankModels]) -> dict:
+def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig, chains: list[RankModels],
+                find=career_docs.vision_items, notice: str = VISION_NOTICE) -> dict:
     """그림·스캔 PDF 확인 단계. 그림·스캔 PDF 가 없으면 request 를 그대로 돌려준다.
+
+    find / notice: 확인할 파일을 찾는 함수와 전송 안내 — 📎 자유 질문 첨부(attach_ui.vision_step)가 자기 것을 넘겨 같은 상자를 쓴다.
 
     있으면 request 를 붙잡아 두고(세션) 아래 상자를 그린다 → '이 내용으로 진행'을 누른 실행에서 확인한 글을 넣은 request 를 돌려준다.
     chains: 이번 업무에 참여할 팀원들의 모델 후보 (아래 직급부터) — 여기서 그림을 볼 수 있고 지금 쓸 수 있는 모델만 고른다.
     """
     key = f"career_vision_{team_id}_{task_id}"
     if request:
-        items = career_docs.vision_items(request.get("tool_inputs") or {})
+        items = find(request.get("tool_inputs") or {})
         if not items:
             st.session_state.pop(key, None)
             return request
@@ -144,9 +147,10 @@ def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig,
     with st.container(border=True):
         st.markdown("##### 🖼 그림에서 읽은 글 확인 — 업무 시작 전")
         names = " · ".join(f"{FIELD_TITLES[f]}: {', '.join(i.name for i in files)}" for f, files in items.items())
+        what = "숫자·이름·날짜를" if "attachments" in items else "숫자·회사 이름·자격 요건을"
         st.caption(f"그림·스캔 PDF 가 있어 비전 모델로 글자를 옮깁니다 ({names}). 잘못 읽은 글자는 그대로 사실 검사의 근거가 되므로 "
-                   "**숫자·회사 이름·자격 요건을 원본과 대조해 고친 뒤** 진행하세요.")
-        st.caption(VISION_NOTICE)
+                   f"**{what} 원본과 대조해 고친 뒤** 진행하세요.")
+        st.caption(notice)
         pool = reader_pool(chains)
         usable = vision.usable_vision_models(models, pool)
         if not usable:
@@ -210,7 +214,8 @@ def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig,
                 st.caption(f"· {f.name}: {f.how}" + "".join(f" — ⚠️ 흐림: {u}" for r in f.reads for u in r.unclear[:3]))
             texts["jd"] = st.text_area("JD 글 (고칠 수 있음)", key=f"{wkey}_text_jd", height=260)
         for fld, intro in (("jds", "**JD (파일마다 하나)** — 확인한 글이 그 JD 가 됩니다 (요구사항·점수는 이 글로 계산)"),
-                           ("docs", "**요약 문서** — 확인한 글이 **사실의 출처**가 됩니다 (인용·숫자는 이 글과 대조합니다)")):
+                           ("docs", "**요약 문서** — 확인한 글이 **사실의 출처**가 됩니다 (인용·숫자는 이 글과 대조합니다)"),
+                           ("attachments", "**첨부 파일** — 확인한 글이 팀의 **근거 자료**로 들어갑니다")):
             if fld not in reads:
                 continue
             st.markdown(intro)

@@ -10,6 +10,8 @@
   iac_scan        : Terraform·쿠버네티스·Dockerfile 내장 규칙 점검 + 원본·diff 규칙 (인프라 보안 팀, 외부 스캐너는 설치돼 있으면)
   career_docs     : 올린 요약 문서(docx·pdf·hwp·hwpx·md·txt)·JD·자소서 문항 읽기 + JD 요구사항 1차 대응 (포트폴리오·자소서 팀, 외부 호출 없음)
   learning_course : 과목(course_id) → 선생님 프로필·수준 규칙·커리큘럼·진도·최근 기록 (교육부 두 팀 공용, core/learning.py)
+  attachments     : 📎 자유 질문·접수 창구·부서장 창구의 첨부 파일 → 근거 자료 (모든 팀 공통 — team.yaml 에 적지 않아도
+                    툴 입력에 첨부가 있으면 run_tools 가 팀 툴 뒤에 돌린다)
 
 새 툴 추가 방법
   1) 이 폴더에 run(question, inputs, models) -> ToolResult | None 함수를 만든다 (쓸 자료가 없으면 None)
@@ -20,7 +22,7 @@
 from collections.abc import Callable
 
 from core.schemas import ModelsConfig, ToolResult
-from core.tools import career_docs, floorplan_input, governance_evidence, iac_scan, learning_course, stock_data, travel_calendar
+from core.tools import attachments, career_docs, floorplan_input, governance_evidence, iac_scan, learning_course, stock_data, travel_calendar
 
 ToolFn = Callable[[str, dict, ModelsConfig], ToolResult | None]
 
@@ -32,15 +34,18 @@ TOOLS: dict[str, ToolFn] = {
     "iac_scan": iac_scan.run,
     "career_docs": career_docs.run,
     "learning_course": learning_course.run,
+    "attachments": attachments.run,
 }
+READS_ATTACHMENTS = {"career_docs"}  # 첨부를 스스로 읽는 툴 (첨부 = 요약 문서) — 공통 첨부 묶음을 또 넣지 않는다
 
 
 def run_tools(names: list[str], question: str, inputs: dict, models: ModelsConfig) -> list[ToolResult]:
     """팀에 등록된 툴을 차례로 실행한다. 한 툴이 실패해도 나머지는 계속 (실패는 결과 notes 에 기록)."""
     results = []
+    names = [n for n in names if n in TOOLS]
+    if inputs.get(attachments.KEY) and attachments.KEY not in names and not READS_ATTACHMENTS & set(names):
+        names.append(attachments.KEY)  # 📎 첨부 파일 — 어느 팀이든 근거 자료로
     for name in names:
-        if name not in TOOLS:
-            continue
         try:
             result = TOOLS[name](question, inputs, models)
         except Exception as e:  # noqa: BLE001 — 외부 데이터 오류가 답변을 막지 않게

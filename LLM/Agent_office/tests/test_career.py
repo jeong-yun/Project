@@ -635,14 +635,16 @@ def _career_prompt(node_id: str, ranks, models) -> str:
 
 
 def test_free_question_examples_do_not_assume_uploaded_documents():
-    """E2 — 자유 질문에는 파일 칸이 없다. 예시는 문서 없이 답할 수 있는 질문이고, 문서가 없다는 사실은 근거 자료에도 적힌다."""
+    """E2 — 자유 질문의 첨부는 선택이다. 예시는 문서 없이 답할 수 있는 질문이고, 첨부가 없으면 그 사실이 근거 자료에도 적힌다.
+    (첨부가 있으면 그 문서가 사실의 출처 — tests/test_attachments.py::test_career_free_question_uses_attached_documents_as_the_source)"""
     team = load_team("career")
     assert len(team.free_examples) == 4
     for ex in team.free_examples:
         assert not any(w in ex.question for w in ("올린", "내 경력 문서로", "붙여 넣은")), ex.question
     assert "업무 양식" in team.scope.summary
-    res = career_docs.run("지원 동기를 500자로 쓰는 순서를 알려줘", {}, None)  # 자유 질문 = 툴 입력이 비어 있다
+    res = career_docs.run("지원 동기를 500자로 쓰는 순서를 알려줘", {}, None)  # 첨부 없는 자유 질문 = 툴 입력이 비어 있다
     assert "올린 자료 없음" in res.content and "[확인 필요]" in res.content and "업무 양식" in res.content
+    assert "첨부 파일" in res.content  # 문서가 필요하면 자유 질문의 첨부 칸에도 올릴 수 있다고 안내한다
     # 질문에 적은 숫자(500자)는 답에 써도 '문서에 없는 숫자'가 아니다. 지어낸 경력 숫자는 여전히 걸린다
     assert check("career_facts", "500자 기준으로 세 문단을 권합니다.", **res.harness_options).passed
     assert not check("career_facts", "경력 15년 차라고 쓰면 됩니다.", **res.harness_options).passed

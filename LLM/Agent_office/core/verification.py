@@ -17,7 +17,6 @@ from core import llm_factory
 from core.config import date_label, today
 from core.llm_factory import NoAvailableModelError
 from core.schemas import CriticResult, ModelsConfig, ModelSpec, RankModels, ReviewResult
-from core.search import WEB_END
 
 DEFAULT_CRITIC = {
     "enabled": True,
@@ -98,6 +97,12 @@ def trim_keep_final(text: str, budget: int) -> str:
     return f"{front.rstrip()}\n{kept}" if front else kept
 
 
+def _end_mark(part: str) -> str:
+    """묶음의 마지막 줄이 '데이터 끝' 표시선(<<<… 끝>>>)이면 그 줄 — 웹 검색(core/search.WEB_END) · 첨부 파일(core/tools/attachments.END)."""
+    last = part.rsplit("\n", 1)[-1].strip()
+    return f"\n{last}" if last.startswith("<<<") and last.endswith("끝>>>") else ""
+
+
 def trim_evidence(parts: list[str], budget: int, what: str = "근거 자료") -> str:
     """근거 자료 묶음(툴 결과마다 1개 + 웹 검색 1개)을 budget 글자 안으로 줄인다.
 
@@ -114,9 +119,8 @@ def trim_evidence(parts: list[str], budget: int, what: str = "근거 자료") ->
     for n, i in enumerate(order):
         shares[i] = min(len(parts[i]), remaining // (len(order) - n))
         remaining -= shares[i]
-    # 웹 검색 묶음은 잘려도 '데이터 끝' 표시선을 남긴다 (여는 표시선만 남으면 뒤 글까지 데이터로 읽힌다)
-    trimmed = [p if shares[i] >= len(p) else p[: shares[i]].rstrip() + " …(생략)" + (f"\n{WEB_END}" if p.endswith(WEB_END) else "")
-               for i, p in enumerate(parts)]
+    # 웹 검색·첨부 파일 묶음은 잘려도 '데이터 끝' 표시선을 남긴다 (여는 표시선만 남으면 뒤 글까지 데이터로 읽힌다)
+    trimmed = [p if shares[i] >= len(p) else p[: shares[i]].rstrip() + " …(생략)" + _end_mark(p) for i, p in enumerate(parts)]
     return "\n\n".join(trimmed) + f"\n\n({what}가 길어 {total}자 중 약 {budget}자만 표시)"
 
 

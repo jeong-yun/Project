@@ -106,9 +106,12 @@ def router_check(question: str, team: Team, teams: list[Team], models, route=Non
     return _decision(False, picked, "router", pick.get("reason", ""), model=pick.get("model", ""))
 
 
-def check(question: str, team: Team, teams: list[Team], models, last_text: str = "", route=None) -> dict:
-    """자유 질문 범위 확인 — {in_scope, team_id(맞는 팀), stage, reason, model, note}."""
-    return heuristic(question, team, teams, last_text) or router_check(question, team, teams, models, route=route)
+def check(question: str, team: Team, teams: list[Team], models, last_text: str = "", route=None, extra: str = "") -> dict:
+    """자유 질문 범위 확인 — {in_scope, team_id(맞는 팀), stage, reason, model, note}.
+
+    extra = 질문 뒤에 붙일 참고 한 줄 (📎 첨부 파일 이름 — core/tools/attachments.hint). 낱말 확인은 질문만 보고,
+    애매해서 부서장 배정으로 넘어갈 때만 붙인다 → 질문만으로 분명한 것을 파일 이름이 뒤집지 않는다."""
+    return heuristic(question, team, teams, last_text) or router_check(question + extra, team, teams, models, route=route)
 
 
 def _decision(in_scope: bool, team_id: str, stage: str, reason: str, model: str = "", note: str = "") -> dict:

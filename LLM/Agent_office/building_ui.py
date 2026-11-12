@@ -23,6 +23,7 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 
+import attach_ui
 from core import building, dept_heads
 from core import scope as team_scope
 from core.config import team_org
@@ -104,7 +105,8 @@ def pop_assigned(team_id: str, use_web: bool) -> dict:
     text = st.session_state.pop(ASSIGNED_PREFIX + team_id, None)
     if not text:
         return {}
-    return {"question": text, "brief": None, "auto_brief": True, "use_web": use_web, "tool_inputs": {},
+    return {"question": text, "brief": None, "auto_brief": True, "use_web": use_web,
+            "tool_inputs": attach_ui.inputs_of(attach_ui.carried()),  # 📎 창구에서 넘어온 첨부가 팀까지 따라간다
             "extra_validators": [], "harness_options": {}}
 
 
@@ -277,8 +279,9 @@ def assign(text: str, dept: building.Department, by_id: dict[str, Team], all_tea
 
 
 def head_desk(dept: building.Department, by_id: dict[str, Team], models, dept_store, all_teams: list[Team],
-              go_to_dept: Callable[..., None]) -> None:
-    """👔 부서장 창구 — 요청을 읽고 하위 팀 하나를 고른다 → 이유·모델 → 다른 팀으로 바꾸기 → 바로 맡기기/다듬기."""
+              go_to_dept: Callable[..., None], data_dir: Path) -> None:
+    """👔 부서장 창구 — 요청을 읽고 하위 팀 하나를 고른다 → 이유·모델 → 다른 팀으로 바꾸기 → 바로 맡기기/다듬기.
+    📎 첨부(접수 창구에서 넘어온 것 + 여기서 올린 것)는 배정된 팀까지 따라간다 — 팀 고르기에는 파일 이름만 쓴다."""
     head = dept_heads.head_of(dept)
     model, source = head_model(models, dept_store, dept.id, dept_heads.dept_private(dept, by_id))
     st.caption("👔 부서장이 요청을 읽고 이 부서의 팀 하나를 골라 넘깁니다 — "
@@ -286,13 +289,15 @@ def head_desk(dept: building.Department, by_id: dict[str, Team], models, dept_st
                + f"  \n🎛 부서장 모델: {model} — {source} (아래 '🎛 부서별 모델 선택'에서 바꿉니다)")
     text = st.text_area(f"{head.name}에게 요청", key=DEPT_TEXT_KEY, height=80,
                         placeholder={"travel": "예: 다음 달 아이랑 2박 3일 강릉 가고 싶어"}.get(dept.id, "무엇을 원하는지 한두 문장으로"))
+    attach_ui.show_carried("dept_head_drop")
+    files = attach_ui.uploader("dept_head_files")
     auto = st.session_state.pop(AUTO_ROUTE_KEY, None) == dept.id and text.strip()
     clicked = st.button("👔 부서장에게 맡기기", key="dept_head_go", disabled=not text.strip(), type="primary",
                         help="팀이 둘 이상이면 부장 모델 1회로 고릅니다. 모델을 못 쓰면 낱말 비교로 고릅니다. "
                              "그다음 다른 부서 일인지 범위를 확인합니다.")
-    if clicked or auto:
+    if (clicked or auto) and not attach_ui.blocked(files):
         with st.spinner(f"{head.name}이(가) 요청을 읽고 알맞은 팀을 고르는 중…"):
-            pick = assign(text.strip(), dept, by_id, all_teams, models, dept_store)
+            pick = assign(text.strip() + attach_ui.hint(files), dept, by_id, all_teams, models, dept_store)
         st.session_state[ROUTE_KEY] = {**pick, "dept": dept.id, "text": text.strip()}
         st.session_state.pop("dept_head_team", None)  # 아래 '맡길 팀'을 새 추천으로
     pick = st.session_state.get(ROUTE_KEY)
@@ -321,11 +326,17 @@ def head_desk(dept: building.Department, by_id: dict[str, Team], models, dept_st
     assigned = {"head": head.name, "reason": pick["reason"], "how": how, "model": pick.get("model", ""), "changed": changed,
                 "scope": pick.get("scope", "")}
     b1, b2 = st.columns(2)
-    if b1.button(f"▶ {by_id[chosen].name}에 바로 맡기기", type="primary", key="dept_head_start", use_container_width=True,
-                 help="곧바로 시작합니다 — 팀장이 팀원에게 일을 나누고 결과를 모아 올립니다. 진행은 이 부서 사무실에서 보입니다."):
+    start = b1.button(f"▶ {by_id[chosen].name}에 바로 맡기기", type="primary", key="dept_head_start", use_container_width=True,
+                      help="곧바로 시작합니다 — 팀장이 팀원에게 일을 나누고 결과를 모아 올립니다. 진행은 이 부서 사무실에서 보입니다.")
+    refine = b2.button("✏️ 그 팀 자유 질문으로 다듬고 맡기기", key="dept_head_open", use_container_width=True,
+                       help="원하는 최종 상태(목표·완료 기준)를 직접 적고 맡깁니다.")
+    if (start or refine) and attach_ui.blocked(files):
+        return
+    if start or refine:
+        attach_ui.carry(files, data_dir)  # 여기서 올린 파일도 저장해 팀으로 넘긴다
+    if start:
         st.session_state.pop(ROUTE_KEY, None)
         navigate({"kind": "team", "id": chosen, "question": pick["text"], "start": True, "assigned": assigned})
-    if b2.button("✏️ 그 팀 자유 질문으로 다듬고 맡기기", key="dept_head_open", use_container_width=True,
-                 help="원하는 최종 상태(목표·완료 기준)를 직접 적고 맡깁니다."):
+    if refine:
         st.session_state.pop(ROUTE_KEY, None)
         navigate({"kind": "team", "id": chosen, "question": pick["text"], "assigned": assigned})
