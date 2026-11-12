@@ -1826,6 +1826,16 @@
 - 성과: 합친 main(`0c9d163`)에서 전체 `python -m pytest -q` **1151 통과**, 11분 22초 (이 PC, 다른 무거운 작업 없음). 앞서 수정 대화 저장까지만 합친 상태(`7f0fc90`)에서는 1114 통과·1 실패(24분 50초, 하단 작업 2개와 겹침) — 실패한 `tests/test_progress_followup.py::test_app_progress_bar_and_background_followup` 은 부하에 민감한 것으로 분류해 둔 테스트로, 그것만 3번 다시 돌려 모두 통과했다.
 - 아직: 실제 모델·실행 중인 앱 화면에서는 확인 안 함. 프롬프트 점검의 높음·중간·낮음을 모두 고쳤지만 실제 결과가 나아지는지는 재지 못했다. 말투 통일(C18)은 공통 코드 지시문까지만 — 팀별 페르소나 글은 그대로다.
 
+**GitHub 검사(check/main)에서 테스트 1회 실패 — 재현 시도**
+- 배경: `5a55279` 를 check/main 에 올렸더니 GitHub 의 'Run tests (load-sensitive ones deselected)' 단계가 실패해 main 에 반영되지 않았다 (3분 38초 — 지난 성공 3분 31초와 비슷). 실패 기록은 로그인해야 볼 수 있어 어느 테스트인지 읽지 못했다.
+- 같은 코드로 재현해 본 것 (모두 가짜 모델):
+  - 이 PC, Streamlit 1.43.2: 전체 1151 통과 (11분 22초).
+  - 이 PC, 임시 가상환경의 Streamlit 1.66.1: 전체 1151 통과 (15분 37초). langchain-core 0.3.86 까지 맞춘 관련 11개 파일 231 통과.
+  - 리눅스 컨테이너(`python:3.11-bookworm`, `requirements-dev.txt` 새로 설치, 나눔 글꼴, 부하 민감 9건 제외 — GitHub 검사와 같은 명령): CPU 제한 없이 1140 통과·2 실패(둘 다 재현 방식 탓 — 컨테이너에 git 저장소가 없어 `git check-ignore` 를 쓰는 테스트가 실패), git 저장소를 만들고 CPU 2개로 제한해 다시: **1142 통과**, 5분 3초.
+  - git 에 기록된 파일 이름과 디스크 이름의 대소문자 차이: 0개.
+- 결론: 재현되지 않았다 — 리눅스·패키지 버전 차이로 늘 실패하는 테스트는 아니다. GitHub 실행기에서 한 번 흔들린 것으로 **추정** (어느 테스트인지는 모름).
+- 다음 할 일: 다시 올려 GitHub 검사를 한 번 더 돌린다. 또 실패하면 GitHub 에 로그인해 실패한 테스트 이름을 보고 고친다.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
