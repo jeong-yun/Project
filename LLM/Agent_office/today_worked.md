@@ -1820,6 +1820,12 @@
   - 버튼은 입력칸만 채운다. 부서 업무 목록이 '✍️ 개념 작성'이 아니면 그 업무를 골라야 입력칸이 보인다 (업무 선택은 `app.py` 쪽이라 손대지 않음).
   - 되찾은 초안은 표시선·원본 태그 글자(`<<<`·`<original>`)가 바뀐 채다. 표시선이 없던 예전 요청은 초안을 되찾지 못해 빈칸으로 채운다.
 
+**하단 작업 셋을 main 에 합치기 · 전체 테스트** (프롬프트 낮음 23건 · 단순화 3건 · 수정 대화 저장 · 연결 끊김 오류 설정 · 개념 편집 2건)
+- 합친 것: 공통 프롬프트 낮음 C11~C18 과 단순화 2건, 💬 수정 대화를 실행 기록에 저장, 브라우저 'Bad message format' 창을 줄이는 설정(사용 통계 끄기), 팀별 프롬프트 낮음 14건·C19, 개념 카탈로그 커밋 상자 하나로, 검증 로그 태그 밖 글 표시, 편입 판정을 원본 기반 수정으로 다시 받기. 앱이 쓴 `knowledge/` 3개 파일(개념 편집 팀 교훈·결정 기록)도 내용을 확인한 뒤 커밋했다.
+- 충돌은 이 파일에서만 — 양쪽 내용을 모두 살렸다.
+- 성과: 합친 main(`0c9d163`)에서 전체 `python -m pytest -q` **1151 통과**, 11분 22초 (이 PC, 다른 무거운 작업 없음). 앞서 수정 대화 저장까지만 합친 상태(`7f0fc90`)에서는 1114 통과·1 실패(24분 50초, 하단 작업 2개와 겹침) — 실패한 `tests/test_progress_followup.py::test_app_progress_bar_and_background_followup` 은 부하에 민감한 것으로 분류해 둔 테스트로, 그것만 3번 다시 돌려 모두 통과했다.
+- 아직: 실제 모델·실행 중인 앱 화면에서는 확인 안 함. 프롬프트 점검의 높음·중간·낮음을 모두 고쳤지만 실제 결과가 나아지는지는 재지 못했다. 말투 통일(C18)은 공통 코드 지시문까지만 — 팀별 페르소나 글은 그대로다.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
