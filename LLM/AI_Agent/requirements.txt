@@ -15,5 +15,8 @@ xlsxwriter==3.2.9
 python-docx==1.2.0
 fpdf2==2.8.7
 
+# 문서 Q&A 에서 PDF 를 올릴 때만 필요 (없어도 .md·.txt 는 된다)
+# pypdf
+
 # 테스트
 pytest

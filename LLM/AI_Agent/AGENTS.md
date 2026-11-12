@@ -11,7 +11,9 @@
 
 ## 이 앱에서 이미 쓰는 방식 (새로 만들기 전에 재사용)
 
-- 기능은 모듈 패키지(`english_word_maker/`, `ai_safety/`)에, 화면은 `pages/` 에 둔다.
+- 기능은 모듈 패키지(`english_word_maker/`, `ai_safety/`, `rag/`)에, 화면은 `pages/` 에 둔다.
 - 폴더 경로·모델 만들기는 `common.py` 를 쓴다 (`BASE_DIR`, `PROMPTS_DIR`, `make_llm`). 화면에서 `ChatOpenAI` 를 직접 만들지 않는다.
 - 밖에서 온 글(모델 응답, 문서 조각)을 프롬프트에 넣을 때는 `common.as_data` 를 거쳐 표시선(`DATA_OPEN`~`DATA_CLOSE`) 안에 넣는다.
-- 모델이 낸 판정·숫자는 코드가 다시 확인한다 (예: `ai_safety/judge.py` 의 `_checked_verdict`). 모델에게 다시 물어 검증하지 않는다.
+- 모델이 낸 판정·숫자는 코드가 다시 확인한다 (예: `ai_safety/judge.py` 의 `_checked_verdict`, `rag/answer.py` 의 `check_citations`). 모델에게 다시 물어 검증하지 않는다.
+- 검색 관련 값(조각 크기 `rag/documents.py` `MAX_CHARS`, 낱말 나누기)을 바꿀 때는 `python -m rag.eval_retrieval` 로 전·후 숫자를 재고 README 의 표를 고친다.
+- 기본 문서 묶음(`LLM/train_set_making_by_rule(talos, et)/docs/ai_governance/`)은 읽기만 한다. 복사해 오거나 고치지 않는다.

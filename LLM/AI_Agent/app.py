@@ -21,7 +21,7 @@ st.title("홈 - 일반 질문")
 with st.sidebar:
     st.markdown("### 페이지")
     st.markdown("- 이 페이지: 일반 Q&A")
-    st.markdown("- 사이드바 상단 메뉴에서 **영어 단어장** · **AI 안전성 평가** 페이지로 이동할 수 있어요.")
+    st.markdown("- 사이드바 상단 메뉴에서 **영어 단어장** · **AI 안전성 평가** · **문서 Q&A** 페이지로 이동할 수 있어요.")
     option = st.selectbox(
         "Please Select Prompt",
         ("Basic", "Summary"),
@@ -84,6 +84,7 @@ if user_input:
 PAGE_LINKS = [
     ("pages/1_english_word_maker.py", "➡ 영어 단어장", "📖"),
     ("pages/2_ai_safety_eval.py", "➡ AI 안전성 평가", "🛡️"),
+    ("pages/3_rag_docs_qa.py", "➡ 문서 Q&A (RAG)", "📄"),
 ]
 try:
     for path, label, icon in PAGE_LINKS:
