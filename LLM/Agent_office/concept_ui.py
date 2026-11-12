@@ -79,7 +79,7 @@ def repo_state(repo: Path, subdir: str, root: Path) -> tuple[cat.RepoInfo, str]:
 
 
 def git_diff_status(ctx: "CatalogContext") -> tuple[str, str]:
-    """(git diff, git status) — 채택 후 커밋 패널용."""
+    """(git diff, git status) — 사이드바 커밋 상자와 본문 안내(commit_hint)용."""
     return _cache.get(("diff", str(ctx.repo), ctx.subdir), _git_sig(ctx.repo, ctx.root),
                       lambda: (cat.git_diff(ctx.repo, ctx.subdir), cat.git_status(ctx.repo, ctx.subdir)))
 
@@ -130,7 +130,7 @@ def sidebar(settings: dict) -> CatalogContext | None:
             # git_panel 안에 'git diff' 접기 상자가 있어 접기 상자 안에 넣을 수 없다 (Streamlit 은 겹쳐 접기를 막음)
             with st.container(border=True):
                 st.markdown("**📝 커밋 안 된 변경 올리기**")
-                st.caption("앱을 다시 켜서 채택 직후의 커밋 상자가 사라졌어도 여기서 커밋하고 GitHub 에 올릴 수 있습니다.")
+                st.caption("채택·삭제로 바뀐 카탈로그 파일을 여기서 커밋하고 GitHub 에 올립니다 (앱을 다시 켠 뒤에도 그대로 남아 있습니다).")
                 git_panel(ctx, "sidebar", cat.pending_commit_message(git_diff_status(ctx)[0]))
         if info.behind > 0:
             # GitHub 웹에서 직접 고친 것 등 — 먼저 받아 두면 푸시가 거절되지 않는다 (푸시할 때도 자동으로 합침)
@@ -216,7 +216,7 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
         if result:
             st.success(f"🗑 「{result['title']}」 을 old_term 으로 옮겼습니다.")
             render_changes(result["changes"], [])
-            git_panel(ctx, f"del_{result['title']}", f"Term: {result['title']} 삭제")
+            commit_hint(ctx)
         return None
 
     # ── ✍️ 작성: 추가/수정은 고르지 않는다 — 개념명으로 기존 항목을 찾아 자동 판정 ──
@@ -387,7 +387,7 @@ def change_list(res: concept.ConceptResult, run: dict, content: str, decided: bo
         st.info("팀이 고칠 곳을 찾지 못했습니다 — 원본 그대로입니다. 고칠 점이 있으면 아래 '💬 결과에 대해 묻기 · 수정 요청'에 적어 주세요.")
         return []
     if decided:
-        st.caption("팀이 냈던 변경 제안입니다 (참고용). 채택할 때 고른 변경만 반영됐고, 실제로 바뀐 곳은 아래 '변경 내용 (git diff)'에서 볼 수 있습니다.")
+        st.caption("팀이 냈던 변경 제안입니다 (참고용). 채택할 때 고른 변경만 반영됐고, 아직 커밋하지 않았다면 실제로 바뀐 곳을 왼쪽 사이드바의 '변경 내용 (git diff)'에서 볼 수 있습니다.")
     else:
         st.caption("원본 항목은 그대로 두고, 여기서 체크한 변경만 반영합니다. 근거를 읽고 반영하지 않을 변경은 체크를 푸세요 → "
                    "'📄 최종본'에서 결과 확인 → 아래 '👤 최종 결정'에서 채택. "
@@ -553,10 +553,7 @@ def render_changes(changes: list, edit_logs: list[str]) -> None:
 
 
 def git_panel(ctx: CatalogContext, key: str, message: str) -> None:
-    """변경 내용 확인 → 💾 커밋 → 🚀 푸시 (버튼을 눌러야만 실행)."""
-    if ctx.repo is None:
-        st.caption("git 저장소가 아니라 커밋·푸시는 할 수 없습니다.")
-        return
+    """변경 내용 확인 → 💾 커밋 → 🚀 푸시 (버튼을 눌러야만 실행). 사이드바의 '📝 커밋 안 된 변경 올리기' 상자 하나에서만 쓴다."""
     diff, pending = git_diff_status(ctx)
     with st.expander("변경 내용 (git diff)"):
         st.code(diff[:30000] or "(차이 없음 — 이미 커밋했거나 새 파일만 있음)", language="diff")
@@ -578,8 +575,21 @@ def git_panel(ctx: CatalogContext, key: str, message: str) -> None:
         show_messages(push_messages(ctx.repo, ctx.subdir, ctx.root))
 
 
+def commit_hint(ctx: CatalogContext) -> None:
+    """반영 뒤 안내 — 커밋·푸시 상자는 사이드바 한 곳에만 둔다 (2026-11-12: 채택 직후 본문과 사이드바에 상자가 두 개 보여 헷갈렸다).
+
+    사이드바 상자는 커밋 안 된 변경이 있는 동안 어느 화면에서나, 앱을 다시 켠 뒤에도 보인다. 커밋만 한 뒤의 '🚀 지금 푸시'도 사이드바에 있다."""
+    if ctx.repo is None:
+        st.caption("git 저장소가 아니라 커밋·푸시는 할 수 없습니다.")
+    elif git_diff_status(ctx)[1]:
+        st.info("⬅️ 커밋하고 GitHub 에 올리려면 왼쪽 사이드바의 '📝 커밋 안 된 변경 올리기'를 쓰세요. "
+                "(사이드바가 접혀 있으면 화면 왼쪽 위의 화살표를 눌러 펼칩니다)")
+    else:
+        st.caption("커밋 안 된 변경 없음 — 이미 커밋했습니다. GitHub 에 올렸는지는 왼쪽 사이드바에서 볼 수 있습니다.")
+
+
 def adopted_section(ctx: CatalogContext | None, run: dict) -> None:
-    """채택 후 — 카탈로그 반영 결과 + 커밋·푸시."""
+    """채택 후 — 카탈로그 반영 결과 + 어디서 커밋·푸시하는지 안내 (상자는 사이드바에)."""
     st.markdown("##### 📚 카탈로그 반영")
     if run.get("concept_error"):
         st.error(run["concept_error"])
@@ -588,4 +598,4 @@ def adopted_section(ctx: CatalogContext | None, run: dict) -> None:
         return
     render_changes(run.get("concept_changes") or [], run.get("concept_edit_logs") or [])
     if run.get("concept_changes"):
-        git_panel(ctx, run["run_id"], run.get("concept_commit") or "Term: 개념 정리")
+        commit_hint(ctx)

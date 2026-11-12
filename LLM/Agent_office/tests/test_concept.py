@@ -558,6 +558,9 @@ def test_pending_commit_message_names_entries_from_diff():
     assert cat.pending_commit_message(updated) == "Term: X(Y) 수정 외 1개"
     assert cat.pending_commit_message("-[Perf]X(Y) (작성일: 26.01.01)") == "Term: X(Y) 삭제"
     assert cat.pending_commit_message("+ - 본문 한 줄만 고침") == "Term: 카탈로그 변경 반영"
+    moved = ("--- a/Term/Every_day/2-2. AI-Model.txt\n+++ b/Term/Every_day/2-2. AI-Model.txt\n-[Perf]X(Y) (작성일: 26.01.01)\n"
+             f"--- a/Term/Every_day/{cat.OLD_FILE}\n+++ b/Term/Every_day/{cat.OLD_FILE}\n+[Perf]X(Y) (작성일: 26.01.01)")
+    assert cat.pending_commit_message(moved) == "Term: X(Y) 삭제"  # old_term 으로 옮긴 것은 수정이 아니라 삭제
 
 
 def test_sidebar_commits_and_pushes_leftover_changes(clones):
@@ -584,8 +587,8 @@ def test_sidebar_commits_and_pushes_leftover_changes(clones):
     assert cat.git_status(work, "Term/Every_day") == ""
 
 
-def test_sidebar_and_adopted_commit_panels_do_not_double_commit(clones):
-    """채택 직후 본문 상자와 사이드바 상자가 함께 보여도 한쪽에서 커밋하면 다른 쪽은 '변경 없음' (캐시를 비우지 않아도)."""
+def test_commit_box_is_only_in_the_sidebar_after_adoption(clones):
+    """채택 직후 커밋 상자는 사이드바 하나뿐이다 — 본문('📚 카탈로그 반영')은 바뀐 파일과 '사이드바에서 올리세요' 안내만 보여 준다."""
     from streamlit.testing.v1 import AppTest
 
     _, work, _ = clones
@@ -594,20 +597,24 @@ def test_sidebar_and_adopted_commit_panels_do_not_double_commit(clones):
     path.write_text(GOOD_ENTRY + "\n\n" + path.read_text(encoding="utf-8"), encoding="utf-8")
 
     # page 안에는 한글을 쓰지 않는다 — AppTest 가 함수 원본을 다시 읽을 때 Windows 에서 깨져 빈 화면이 된다
-    def page(root, message):
+    def page(root):
         import concept_ui
+        from core.catalog import Change
 
         ctx = concept_ui.sidebar({"concept": {"catalog_dir": root}})
-        concept_ui.git_panel(ctx, "run1", message)
+        concept_ui.adopted_section(ctx, {"run_id": "run1", "concept_changes": [Change("a.txt", "add", "x")], "concept_commit": "Term: run1"})
 
-    at = AppTest.from_function(page, kwargs={"root": str(root), "message": "Term: 본문 상자"}, default_timeout=60).run()
-    assert not at.button(key="commit_sidebar").disabled and not at.button(key="commit_run1").disabled
-    at = at.button(key="commit_run1").click().run()
+    at = AppTest.from_function(page, kwargs={"root": str(root)}, default_timeout=60).run()
     assert not at.exception, at.exception
-    at = at.run()  # 다음 화면: 사이드바 상자는 사라지고 본문 상자는 '변경 없음'
-    assert "commit_sidebar" not in [b.key for b in at.button]
-    assert at.button(key="commit_run1").disabled
-    assert _log(work) == ["Term: 본문 상자", "첫 커밋"]
+    assert [b.key for b in at.button if b.key.startswith(("commit_", "push_"))] == ["commit_sidebar", "push_sidebar"]
+    assert [t.key for t in at.text_input if t.key.startswith("msg_")] == ["msg_sidebar"]
+    assert any("사이드바" in i.value and "커밋 안 된 변경 올리기" in i.value for i in at.info)  # 본문은 어디서 올리는지만 알려 준다
+    at = at.button(key="commit_sidebar").click().run()
+    assert not at.exception, at.exception
+    at = at.run()  # 다음 화면: 사이드바 상자는 사라지고 본문 안내도 '커밋 안 된 변경 없음'
+    assert "commit_sidebar" not in [b.key for b in at.button] and not at.info
+    assert any("커밋 안 된 변경 없음" in c.value for c in at.caption)
+    assert len(_log(work)) == 2  # 커밋은 한 번만
 
 
 def test_commit_takes_only_the_catalog_folder(clones):
