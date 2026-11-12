@@ -8,6 +8,7 @@
   회사 문서보안(DRM)으로 암호화된 파일(예: 머리가 'SCDSA' — 한글·Word 로 저장하면 자동으로 씌워지는 PC 가 있다)은
   내용을 읽을 수 없으므로 DRM 해제 후 올려 달라고 안내한다.
   .md · .txt : 그대로 (utf-8 → cp949 순서로 시도)
+  .csv · .json · .yaml · .log · .py · .sql · .tf : 글 그대로 (PLAIN_SUFFIXES — 📎 첨부 파일, core/tools/attachments.py)
 
 큰 파일은 MAX_CHARS 까지만, PDF 는 MAX_PAGES 쪽까지만 읽고 그 사실을 notes 에 남긴다.
 """
@@ -22,6 +23,7 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 SUFFIXES = ("docx", "pdf", "hwp", "hwpx", "md", "txt")
+PLAIN_SUFFIXES = ("csv", "json", "yaml", "yml", "log", "py", "sql", "tf")  # 글 그대로 읽는 자료·설정·코드 파일
 MAX_CHARS = 30_000  # 파일 하나에서 읽는 최대 글자 수
 MAX_PAGES = 40  # PDF 최대 쪽 수
 HWP_ADVICE = "한글에서 '다른 이름으로 저장'으로 .hwpx(또는 .docx·.pdf)로 저장해 올려 주세요."
@@ -354,7 +356,7 @@ def read_bytes(name: str, data: bytes) -> DocText:
         text, units = read_hwpx(data)
     elif kind == "hwp":
         text, units = read_hwp(data)
-    elif kind in ("md", "txt"):
+    elif kind in ("md", "txt", *PLAIN_SUFFIXES):
         text = read_plain(data)
         units = f"{text.count(chr(10)) + 1}줄"
         if kind == "md":

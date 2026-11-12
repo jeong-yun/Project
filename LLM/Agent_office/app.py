@@ -38,6 +38,7 @@ from pydantic import ValidationError
 from st_click_detector import click_detector
 
 import ask_first_ui
+import attach_ui
 import board_ui
 import building_ui
 import career_ui
@@ -91,7 +92,8 @@ from core.tasks import TaskInputError, build_request, store_uploads
 from core.exporter import MIME, export_adopted, list_results
 from core.route import CATEGORIES, RouteResult, build_route, map_html
 from core.workflow import (
-    WEB_SEARCH_TOOL, build_office_graph, make_checkpointer, restart_from, resume_step, resume_with_decision, stream_office,
+    WEB_SEARCH_TOOL, build_office_graph, make_checkpointer, restart_from, resume_step, resume_with_decision, saved_evidence,
+    stream_office,
 )
 
 load_env()
@@ -1274,7 +1276,11 @@ def decision_candidates(run: dict) -> list[tuple[str, AgentAnswer]]:
 
 
 def followup_evidence(run: dict) -> str:
-    """후속 대화에 넘길 근거 자료 (데이터 툴 + 웹 검색) — 비평가와 같은 글자 예산."""
+    """후속 대화에 넘길 근거 자료 (데이터 툴 · 📎 첨부 파일 + 웹 검색) — 비평가와 같은 글자 예산."""
+    if run.get("restored") and not run.get("evidence_restored"):
+        # 앱을 다시 켜서 되살린 업무는 근거 자료가 비어 있다 (실행 기록에 저장하지 않음) → 체크포인트에서 한 번 되찾는다
+        run["evidence_restored"] = True
+        run["tools"], run["web"] = saved_evidence(make_graph(), org, run["run_id"])
     parts = [f"## {t.title}\n{t.content}" for t in run.get("tools") or [] if t.content]
     web = run.get("web")
     if web and web.results:
@@ -2004,14 +2010,15 @@ def warn_chosen_off() -> None:
 SCOPE_LOG = DATA_DIR / "scope_log.jsonl"  # 자유 질문 범위 판단 기록 (범위 기준을 다듬을 때 본다)
 
 
-def check_scope(question: str) -> dict:
-    """자유 질문이 이 팀 범위인지 (core/scope.py) — 낱말로 분명하면 바로, 애매하면 🧭 부서장 배정 1회. 판단은 기록한다."""
+def check_scope(question: str, extra: str = "") -> dict:
+    """자유 질문이 이 팀 범위인지 (core/scope.py) — 낱말로 분명하면 바로, 애매하면 🧭 부서장 배정 1회. 판단은 기록한다.
+    extra = 📎 첨부 파일 이름 한 줄 — 애매해서 부서장 배정으로 갈 때만 질문 뒤에 붙는다."""
     last = ""
     if current and current["done"] and current["team_id"] == team_id:
         final = final_answer(current)
         last = current["question"] + "\n" + (final.content if final else "")  # 직전 결과에 대한 짧은 후속 질문은 봐 준다
     with st.spinner("🧭 이 팀이 맡을 질문인지 확인하는 중…"):
-        decision = team_scope.check(question, team, teams, models, last_text=last)
+        decision = team_scope.check(question, team, teams, models, last_text=last, extra=extra)
     team_scope.log_decision(SCOPE_LOG, team, question, decision)
     return decision
 
@@ -2028,6 +2035,7 @@ def cc_scope_check(question: str) -> dict:
 def cc_redirect(other_id: str, question: str, decision: dict) -> None:
     """커맨드 센터에서 '➡️ 맞는 팀에 맡기기' — 그 팀 화면으로 가서 곧바로 시작 (부서장 배정과 같은 길, building_ui)."""
     how = "부장 모델" if decision.get("stage") == "router" else "낱말 확인"
+    attach_ui.clear()  # 터미널 한 줄에는 첨부가 없다 — 창구에 남아 있던 첨부가 따라가지 않게
     building_ui.navigate({"kind": "team", "id": other_id, "question": question, "start": True,
                           "assigned": {"head": "🧭 범위 확인", "reason": decision.get("reason", ""), "how": how,
                                        "model": decision.get("model", ""), "changed": False}})
@@ -2075,6 +2083,19 @@ def task_label(pick: str) -> str:
     return f"{t.name} › " + ("💬 자유 질문" if tk == FREE_FORM else next(x.title for x in t.tasks if x.id == tk))
 
 
+def take_assigned() -> dict:
+    """👔 부서장이 배정하고 '▶ 바로 맡기기'를 누른 요청 (building_ui) — 부서장 창구의 '🔀 단계마다 확인'을 그대로. 없으면 {}."""
+    assigned = building_ui.pop_assigned(team_id, web_available)
+    if assigned:
+        assigned["step_mode"] = bool(st.session_state.get(run_control_ui.step_key(DEPT_STEP)))
+    return assigned
+
+
+def vision_chains() -> list:
+    """📎 첨부 그림을 읽을 모델 후보 — 이번 업무에 참여할 팀원들의 모델 (아래 직급부터)."""
+    return [member_chains[n.id] for n in reversed(list(subtree(org, target).walk()))]
+
+
 def render_task_input() -> dict:
     """업무 입력칸을 그리고, '맡기기'를 누른 경우 워크플로우로 넘길 요청(dict)을 돌려준다 (안 누르면 빈 dict).
 
@@ -2090,8 +2111,9 @@ def render_task_input() -> dict:
     if pick == HEAD_TASK:
         run_control_ui.step_mode_toggle(DEPT_STEP)  # 🔀 단계마다 확인 — 배정된 팀의 업무에 적용
         with st.container(border=True):
-            building_ui.head_desk(dept, teams_by_id, models, dept_store, teams, go_to_dept)
-        return request
+            building_ui.head_desk(dept, teams_by_id, models, dept_store, teams, go_to_dept, DATA_DIR)
+        # 배정된 요청의 📎 첨부에 그림·스캔 PDF 가 있으면 여기서 글자를 확인한 뒤 시작한다 (없으면 그대로 시작)
+        return attach_ui.vision_step(take_assigned(), team_id, "assigned", models, vision_chains())
     mode = pick.split(":", 1)[1]
     st.caption(f"👔 {dept_head.name} → **{team.name}** · 직접 고른 업무 — 부서장 배정 없이 이 팀의 {name_of(target)}에게 바로 맡깁니다")
     warn_chosen_off()
@@ -2175,9 +2197,11 @@ def render_task_input() -> dict:
     - 결과는 그대로 믿지 말고, 최종 결정 전에 검토·비평 기록을 확인하세요.
     """
                 )
+            attach_ui.show_carried(f"attach_drop_{team_id}")  # 📎 창구(접수·부서장)에서 넘어온 첨부
             with st.form("ask_form", clear_on_submit=False):
                 question = st.text_area("질문", placeholder="무엇을 원하는지 한두 문장으로", height=90, key="q_text",
                                         help=f"이 팀이 다루는 질문: {team.scope.summary}" if team.scope else None)
+                files = attach_ui.uploader("q_files")  # 📎 첨부 → 팀의 근거 자료 (core/tools/attachments.py)
                 with st.expander("🎯 원하는 최종 상태 (선택 — 비워 두면 AI 가 질문에서 정리합니다)", expanded=False):
                     goal = st.text_input("최종 목표 — 결과물과 용도", key="b_goal", placeholder="예: 팀 회의에서 공유할 1장짜리 설명 자료")
                     criteria = st.text_area("완료 기준 — 한 줄에 하나", key="b_criteria", height=90,
@@ -2196,9 +2220,11 @@ def render_task_input() -> dict:
             decision = None
             if submitted and not question.strip():
                 st.warning("질문을 입력하세요.")
+            elif submitted and attach_ui.blocked(files):
+                pass  # 읽지 못하는 첨부 — 어느 파일이 왜 안 됐는지 알렸다 (맡기지 않음)
             elif submitted:
                 st.session_state.pop(block_key, None)
-                decision = check_scope(question.strip())
+                decision = check_scope(question.strip(), attach_ui.hint(files))
                 if not decision["in_scope"]:
                     st.session_state[block_key] = {**decision, "question": question.strip()}
             render_scope_block(block_key)
@@ -2210,8 +2236,11 @@ def render_task_input() -> dict:
                 has_brief = not brief_input.is_empty() or brief_input.constraints or brief_input.output_format
                 request = {
                     "question": question.strip(), "brief": brief_input if has_brief else None, "auto_brief": auto_brief,
-                    "use_web": bool(use_web and web_available), "tool_inputs": {}, "extra_validators": [], "harness_options": {},
+                    "use_web": bool(use_web and web_available), "tool_inputs": attach_ui.collect(files, DATA_DIR),
+                    "extra_validators": [], "harness_options": {},
                 }
+            # 📎 첨부에 그림·스캔 PDF 가 있으면 비전 모델로 글자를 옮기고 사람이 확인한 뒤 시작 (커리어부 확인 상자 재사용)
+            request = attach_ui.vision_step(request, team_id, FREE_FORM, models, vision_chains())
     return request
 
 
@@ -2371,10 +2400,8 @@ if not idle:
 # 제출 → 백그라운드 실행 시작 (core/live.py)
 # ════════════════════════════════════════════════════════════════════
 # 👔 부서장이 배정하고 '▶ 바로 맡기기'를 누른 요청 (building_ui) · 🖥️ 커맨드 센터 터미널에서 맡긴 한 줄 (범위 확인을 거침)
-assigned_request = building_ui.pop_assigned(team_id, web_available)
-if assigned_request:  # 부서장 창구의 '🔀 단계마다 확인'을 그대로
-    assigned_request["step_mode"] = bool(st.session_state.get(run_control_ui.step_key(DEPT_STEP)))
-request = request or assigned_request or command_center_ui.pop_request(team_id, web_available)
+# (부서장 배정 요청은 보통 render_task_input 이 먼저 꺼낸다 — 📎 첨부 그림 확인 단계 때문. 여기는 그 화면이 아닐 때의 대비)
+request = request or take_assigned() or command_center_ui.pop_request(team_id, web_available)
 if request:
     if running:
         st.warning("진행 중인 업무가 있습니다. 끝난 뒤에 새 업무를 맡겨 주세요.")
@@ -2392,7 +2419,8 @@ if request:
         design = design_ui.FEATURE in features
         run["post_busy"] = ROUTE_MAP in features or design or (MUSIC_TRACK in features and MUSIC_CFG["auto_generate"])
         run["design_opts"] = design_ui.options_from_inputs(request["tool_inputs"]) if design else None
-        run["career_inputs"] = request["tool_inputs"] if career_ui.FEATURE in features else None  # 받을 형식·업무 종류
+        # 받을 형식·업무 종류 — 업무 양식일 때만 (자유 질문은 첨부만 있어도 예전처럼 '입력 없음'으로 본다)
+        run["career_inputs"] = request["tool_inputs"] if career_ui.FEATURE in features and request["tool_inputs"].get("career_kind") else None
         run["edu_inputs"] = request["tool_inputs"] if education_ui.FEATURE in features else None  # 과목 id·업무 종류
         # 🔀 단계마다 확인 · ⏭ 다른 모델로 고를 때의 규칙(🆓 무료만·팀원 모델)은 맡기는 순간 값으로
         run["step_mode"] = bool(request.get("step_mode", st.session_state.get(run_control_ui.step_key(team_id))))
@@ -2418,4 +2446,6 @@ if request:
             )
 
         launch(run, events)
+        if request["tool_inputs"].get(attach_ui.KEY):
+            attach_ui.clear()  # 넘어온 첨부는 이 업무에 실었다 — 다음 질문에 따라가지 않게
         st.rerun()

@@ -1,6 +1,6 @@
 """🛎 인포메이션 센터 — 1층 로비 접수 창구 (core/reception.py · core/dept_builder.py).
 
-  질문 → 👔 부서장 회의(모델 1회로 모든 부서 판단) → 부서마다 ✅/❌·이유 표
+  질문 (+ 📎 첨부 파일 — attach_ui.py) → 👔 부서장 회의(모델 1회로 모든 부서 판단, 첨부는 파일 이름만 본다) → 부서마다 ✅/❌·이유 표
     맡을 부서가 있으면 → [그 부서장에게 넘기기] → 부서장 창구가 열리고 곧바로 팀 배정 (building_ui 2번 흐름)
     없으면 → "이 일을 할 부서가 없습니다. 새 부서를 만들까요?" + 제안(부서·팀 이름, 하는 일, 팀 구성, 필요한 도구)
       [만들기] → 파일 미리 보기(고칠 수 있음) → [✅ 확인하고 저장] 을 눌러야 저장 → "원래 질문을 새 부서로 넘길까요?"
@@ -13,9 +13,11 @@ from pathlib import Path
 
 import streamlit as st
 
+import attach_ui
 import building_ui
 from core import building, dept_builder, reception
 from core.dept_builder import DeptBuildError
+from core.tools import attachments
 
 TEXT_KEY = "info_text"
 RESULT_KEY = "info_result"  # {question, meeting, proposal?}
@@ -43,6 +45,11 @@ def _taken(ctx: Ctx, depts) -> set[str]:
     return {t.id for t in ctx.teams} | {d.id for d in depts} | {"etc"}
 
 
+def routing_text(question: str, items: list[dict]) -> str:
+    """부서장 회의에 넘길 글 = 질문 + 첨부 파일 이름 한 줄 (파일 내용은 넘기지 않는다 — 내용은 배정된 팀만 읽는다)."""
+    return question + attachments.hint(attach_ui.inputs_of(items))
+
+
 def render(ctx: Ctx, depts: list) -> None:
     flash = st.session_state.pop(FLASH_KEY, None)
     if flash:
@@ -56,10 +63,13 @@ def render(ctx: Ctx, depts: list) -> None:
     st.caption("무엇이든 물어보세요. 👔 부서장들이 '우리 부서 일인지'를 판단해 맡을 부서로 넘기고, 그 부서장이 팀을 배정합니다. "
                "맡을 부서가 없으면 새 부서를 제안합니다.")
     text = st.text_area("🛎 질문", key=TEXT_KEY, height=80, placeholder="예: 다음 달 오사카 3박 4일 / 이 테라폼 코드 보안 점검 / 부가세 신고서 써줘")
-    if st.button("🛎 부서장 회의에 묻기", key="info_go", type="primary", disabled=not text.strip(),
-                 help="보조(부장) 모델 1회로 모든 부서를 한꺼번에 판단합니다 (부서마다 따로 부르지 않음). 모델을 못 쓰면 낱말 비교."):
+    files = attach_ui.uploader("info_files")  # 📎 첨부 — 배정된 팀까지 따라간다 (부서장 회의에는 파일 이름만)
+    asked = st.button("🛎 부서장 회의에 묻기", key="info_go", type="primary", disabled=not text.strip(),
+                      help="보조(부장) 모델 1회로 모든 부서를 한꺼번에 판단합니다 (부서마다 따로 부르지 않음). 모델을 못 쓰면 낱말 비교.")
+    if asked and not attach_ui.blocked(files):
+        items = attach_ui.carry(files, ctx.data_dir, replace=True)
         with st.spinner("👔 부서장 회의 중…"):
-            result = reception.meeting(text.strip(), depts, ctx.teams, ctx.models)
+            result = reception.meeting(routing_text(text.strip(), items), depts, ctx.teams, ctx.models)
         st.session_state[RESULT_KEY] = {"question": text.strip(), "meeting": result}
     res = st.session_state.get(RESULT_KEY)
     if res:

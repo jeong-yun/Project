@@ -51,6 +51,7 @@ from core.schemas import AgentAnswer, CleanupProposal, HumanDecision, Lesson, Mo
 from core.search import WebContext
 from core.storage import Storage
 from core.tools import run_tools
+from core.tools.attachments import KEY as ATTACHMENTS
 
 WEB_SEARCH_TOOL = "web_search"
 DRAFT_TAG = "draft:"  # 초안 스트리밍 토큰에 붙이는 태그 접두어 (뒤에 에이전트 id)
@@ -267,6 +268,7 @@ def build_office_graph(
         root = state["root_id"]
         brief = state["brief"]
         data_tools = [t for t in team.tools if t != WEB_SEARCH_TOOL]
+        has_files = bool((state.get("tool_inputs") or {}).get(ATTACHMENTS))  # 📎 첨부 — 데이터 툴이 없는 팀도 읽는다
 
         def tools_job() -> list[ToolResult]:
             emit({"type": "start", "node": root, "kind": "tools"})
@@ -288,7 +290,7 @@ def build_office_graph(
                 return empty
 
         with ContextThreadPoolExecutor(max_workers=2) as pool:
-            tools_f = pool.submit(tools_job) if data_tools and not call_monitor.stopped() else None
+            tools_f = pool.submit(tools_job) if (data_tools or has_files) and not call_monitor.stopped() else None
             web_f = pool.submit(web_job) if use_web and not call_monitor.stopped() else None
             tool_results = unless_stopped(tools_f, [])
             web = unless_stopped(web_f, None)
@@ -851,6 +853,16 @@ def restart_from(
         as_node = "research"
     new_config = graph.update_state(snap.config, update, as_node=as_node)
     yield from _events(graph, None, {**config, "configurable": new_config["configurable"]})
+
+
+def saved_evidence(graph, org: OrgNode, thread_id: str) -> tuple[list[ToolResult], WebContext | None]:
+    """체크포인트에 남은 근거 자료 (데이터 툴 결과 · 웹 검색) — 앱을 다시 켜서 되살린 업무의 💬 수정 요청·부장 검토가 쓴다.
+    (실행 기록 runs.db 에는 근거 자료를 저장하지 않는다.) 체크포인트가 없으면 ([], None)."""
+    try:
+        values = graph.get_state(_config(org, thread_id)).values
+    except Exception:  # noqa: BLE001 — 체크포인터 없음·읽기 실패: 근거 없이도 수정 요청은 된다
+        return [], None
+    return list(values.get("tool_results") or []), values.get("web")
 
 
 def resume_with_decision(graph, org: OrgNode, decision: HumanDecision, thread_id: str) -> Iterator[tuple[str, object]]:
