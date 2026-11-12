@@ -15,6 +15,12 @@ from langchain_core.runnables import RunnableLambda
 
 from core.schemas import Assignment, CriticResult, Delegation, ReviewResult
 
+# 가짜 모델을 붙잡아 두는 문(threading.Event)의 대기 한도 — `gate.wait(HOLD_SEC)`.
+# 문은 테스트가 열고, 준비 함수(fixture)가 끝날 때도 연다. 이 값은 그조차 못 했을 때 스레드가 영영 남지 않게 하는 안전망일 뿐이다.
+# 전에는 20초였는데, 문을 닫아 둔 사이에 화면을 두세 번 다시 그리는 테스트는 바쁜 PC 에서 그 20초를 넘겨
+# 문이 저절로 열리고, '진행 중' 화면을 확인하기 전에 일이 끝나 버렸다 (2026-11-12 — today_worked.md).
+HOLD_SEC = 600
+
 
 class Script:
     def __init__(self, **outputs: Any):

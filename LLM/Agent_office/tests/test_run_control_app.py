@@ -12,12 +12,12 @@ from streamlit.testing.v1 import AppTest
 
 from core import call_monitor
 from core.step_mode import DirectionOption, DirectionOptions
-from tests.fakes import Script, make_delegation, make_review
+from tests.fakes import HOLD_SEC, Script, make_delegation, make_review
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 
 
-def wait_for(fn, timeout=20.0):
+def wait_for(fn, timeout=60.0):  # 상태가 오면 바로 끝난다 — 한도는 바쁜 PC 에서 화면 한 번 그리는 데 10초쯤 걸려도 되게 (다른 화면 테스트와 같은 60초)
     end = time.time() + timeout
     while time.time() < end:
         value = fn()
@@ -48,7 +48,7 @@ def app(tmp_path, monkeypatch, use_script):
             if hang:
                 first["done"] = True
         if hang:
-            gate.wait(20)  # 이 호출은 응답이 없다 (사람이 다른 모델로 바꿔야 함)
+            gate.wait(HOLD_SEC)  # 이 호출은 응답이 없다 (사람이 다른 모델로 바꿔야 함) — 문은 준비 함수가 끝날 때 연다
         return "초안 [1]"
 
     directions = DirectionOptions(options=[DirectionOption(title="A: 기술 중심", summary="기술"),
