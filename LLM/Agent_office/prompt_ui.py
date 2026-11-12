@@ -394,7 +394,7 @@ def critic_prompt(team: Team, head) -> str:
 def render_dept(dept, head, teams: list[Team], key: str) -> None:
     """부서 화면 '📜 프롬프트·📚 교훈' — 👔 부장의 비평 관점 + 팀마다 팀원 프롬프트·교훈 관리."""
     st.caption("팀원마다 다음 업무에서 실제로 받는 시스템 프롬프트입니다 (실행과 같은 코드로 만듦). "
-               f"교훈은 팀원마다 {_context().budget:,}자 안에서 모두 들어가고, 넘치면 오래된 것부터 빠집니다.")
+               f"교훈은 팀원마다 {_context().budget:,}자 안에서 모두 들어가고, 넘치면 긴 세부 코멘트부터 빠집니다 (규칙 문장은 남습니다).")
     tabs = st.tabs([f"👔 {head.name}", *(f"{t.name}" for t in teams)])
     with tabs[0]:
         st.markdown(f"**비평·팀 배정 관점** — {head.persona}")

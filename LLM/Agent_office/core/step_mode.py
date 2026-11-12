@@ -22,7 +22,7 @@ POINTS = {"brief": "① 브리프·방향", "plan": "② 팀장 업무 분배", 
 
 
 class DirectionOption(BaseModel):
-    title: str = Field(description="방향 이름 (예: 'A: 기술 중심')")
+    title: str = Field(description="방향 이름 (예: 'A: 범위를 넓게')")
     summary: str = Field(description="이 방향으로 하면 결과가 어떻게 달라지는지 1~2문장")
 
 
@@ -36,8 +36,8 @@ def direction_messages(system_prompt: str, brief_text: str) -> list:
     system = "\n".join([
         system_prompt, "",
         "지금은 일을 나누기 전에 사용자에게 진행 방향을 물어보는 단계다.",
-        "- 같은 목표를 이룰 수 있는, 서로 뚜렷이 다른 방향 2~3개를 제안한다 (예: 기술 중심 / 성과 중심 / 리더십 중심).",
-        "- title 은 'A: ○○ 중심'처럼 짧게, summary 는 그 방향을 고르면 결과가 어떻게 달라지는지 1~2문장.",
+        "- 같은 목표를 이룰 수 있는, 서로 뚜렷이 다른 방향 2~3개를 제안한다 (예: 범위를 넓게 / 한 가지를 깊게 / 빠르게 핵심만).",
+        "- title 은 'A: 범위를 넓게'처럼 짧게, summary 는 그 방향을 고르면 결과가 어떻게 달라지는지 1~2문장.",
     ])
     return [SystemMessage(system), HumanMessage(f"[업무 브리프]\n{brief_text}")]
 

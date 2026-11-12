@@ -168,12 +168,14 @@ def revision_messages(head: HeadReview, question: str, before: str, request: str
     system = "\n".join(
         [
             *([head.plan.head.critic_persona()] if head.plan.head else []),
+            verification.head_context(),
             "팀장이 사람의 수정 요청을 받아 결과를 고쳐 썼다. 너는 그 수정본을 사람에게 내기 전에 마지막으로 검토한다.",
             "- [사용자의 수정 요청]이 [수정본]에 빠짐없이, 요청한 뜻대로 반영됐는가? ([수정 전 결과]와 견주어 본다)",
             "- 요청과 무관한 부분을 바꾸거나 [수정 전 결과]의 올바른 내용을 버리지 않았는가? 근거 없이 새 주장을 넣지 않았는가?",
             "- 수정본이 [검토 기준]을 여전히 지키는가?",
             "점수를 매기기 전에 반드시 analysis 에 3문장 이내로 분석을 먼저 쓴다.",
-            "위 세 가지에 어긋나는 것은 rule_violations 에 'A 부분이 B 에 어긋남' 형식으로 구체적으로 쓴다.",
+            "위 세 가지에 어긋나는 것은 rule_violations 에 'A 부분이 B 에 어긋남' 형식으로 구체적으로 쓴다"
+            " (근거 없이 새로 넣은 주장만은 logical_leaps 에 쓰고, rule_violations 에 다시 쓰지 않는다).",
             *(["- [근거 자료]와 대조한다: 수정본의 숫자·사실이 자료와 맞는지, 출처·기준일이 붙었는지 확인한다."] if evidence else []),
             "severity 는 지적 중 가장 심각한 것의 등급이다 (지적이 없으면 none).",
             "- minor : 표현·형식·사소한 누락처럼 요청은 반영됐고 결론도 그대로 유효한 지적",
@@ -181,7 +183,7 @@ def revision_messages(head: HeadReview, question: str, before: str, request: str
             "사소한(minor) 지적만으로 점수를 크게 깎지 않는다.",
             "extra_fixes 에는 사람의 요청과는 별개로, 수정본에서 추가로 고쳐야 할 점을 '어디를 → 어떻게' 한 줄씩 쓴다 (없으면 빈 목록).",
             "- 요청이 반영되지 않은 문제는 extra_fixes 가 아니라 rule_violations 에 쓴다.",
-            "- extra_fixes 는 점수·등급에 넣지 않는다 — 사람에게 묻지 않고 네가 바로 직접 고치게 되니, 취향 차이는 빼고 고쳐야 할 것만 쓴다.",
+            "- extra_fixes 는 점수·등급에 넣지 않는다 — 사람에게 묻지 않고 바로 고쳐질 수 있으니, 취향 차이는 빼고 고쳐야 할 것만 쓴다.",
             verification.TRIM_NOTE,
             *(["[부장이 직접 고친 점]은 앞선 검토에서 네가 짚어 이 수정본에 직접 고쳐 넣은 것이다.",
                "- 그에 따라 바뀐 곳은 '요청과 무관한 변경'으로 보지 않는다. 이미 고쳐진 점은 extra_fixes 에 다시 쓰지 않는다."] if head_fixed else []),
@@ -255,16 +257,23 @@ def _write(agent: OrgAgent, messages: list[BaseMessage], validators: list[str] |
 
 
 def head_fix_messages(head: HeadReview, question: str, request: str, answer: str, extras: list[str],
-                      evidence: str = "") -> list[BaseMessage]:
-    """부장이 자기가 짚은 '추가로 고칠 점'을 직접 고칠 때의 프롬프트. 수정본은 줄이지 않고 전문을 준다 (전문을 다시 써야 하므로)."""
+                      evidence: str = "", skills: str = "") -> list[BaseMessage]:
+    """부장이 자기가 짚은 '추가로 고칠 점'을 직접 고칠 때의 프롬프트. 수정본은 줄이지 않고 전문을 준다 (전문을 다시 써야 하므로).
+
+    skills = 팀장이 받는 팀 업무 지침(agent.skills). 부장은 완성 전문을 다시 쓰는데 "형식·구조는 그대로"만 받으면,
+    형식 검사(하네스)가 없는 팀에서는 그 팀의 형식 규칙이 틀어져도 걸러지지 않는다.
+    """
     system = "\n".join(
         [
             *([head.plan.head.critic_persona()] if head.plan.head else []),
+            verification.head_context(),
             "너는 팀장이 사람의 수정 요청을 받아 쓴 [수정본]을 검토했고, 요청과는 별개로 [추가로 고칠 점]을 짚었다. 이제 그 점들을 네가 직접 고친다.",
             "- [추가로 고칠 점]만 반영한다. 그 밖의 내용과 형식·구조, [사용자의 수정 요청]으로 바뀐 부분은 그대로 둔다.",
             "- revised_answer 에는 고친 **완성 전문**을 처음부터 끝까지 쓴다. 줄이거나 '이하 동일'처럼 생략하지 않는다.",
             "- 무엇을 왜 고쳤는지, 수정 표시는 본문에 넣지 않는다.",
             "- [검토 기준]을 지키고, 근거 없는 숫자·사실을 새로 넣지 않는다" + (" ([근거 자료]와 맞춘다)." if evidence else "."),
+            *(["- [팀 업무 지침(스킬)]은 이 팀 결과물의 형식·표기 규칙이다. 고친 글도 그 형식을 지킨다 "
+               "(거기 적힌 작업 절차를 새로 하지는 않는다)."] if skills else []),
         ]
     )
     human = "\n\n".join(
@@ -274,6 +283,7 @@ def head_fix_messages(head: HeadReview, question: str, request: str, answer: str
             f"[수정본]\n{answer}",
             "[추가로 고칠 점]\n" + "\n".join(f"- {p}" for p in extras),
             "[검토 기준]\n" + ("\n".join(f"- {c}" for c in head.criteria) or "- (없음)"),
+            *([f"[팀 업무 지침(스킬) — 형식·표기 규칙]\n{skills}"] if skills else []),
             *([f"[근거 자료 — 데이터 툴·웹 검색]\n{evidence}"] if evidence else []),
         ]
     )
@@ -291,7 +301,7 @@ def _head_fix(head: HeadReview, agent: OrgAgent, question: str, request: str, dr
     try:
         with call_monitor.purpose("self_correct"):  # ⏱ 호출 모니터·진행 막대의 '🔁 자가 교정', ⛔ 부장 검토 건너뛰기로 함께 끊긴다
             fix = llm_factory.invoke_structured(head.plan.chain, agent.models, HeadFix,
-                                                head_fix_messages(head, question, request, before, extras, evidence),
+                                                head_fix_messages(head, question, request, before, extras, evidence, agent.skills),
                                                 f"{head.plan.who} (직접 수정)").parsed
     except call_monitor.CallCancelled:
         return None, "사용자가 끊음"

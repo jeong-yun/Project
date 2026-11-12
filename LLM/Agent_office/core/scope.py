@@ -75,8 +75,8 @@ def heuristic(question: str, team: Team, teams: list[Team], last_text: str = "")
 # ─── 2) 🧭 부서장 배정 재사용 (보조 모델 1회) ─────────────────────────
 
 
-def _for_router(team: Team) -> Team:
-    """부서장 프롬프트는 팀 소개(description)를 읽는다 → 소개 뒤에 '다루는/다루지 않는 질문'을 붙인 사본을 넘긴다."""
+def with_scope(team: Team) -> Team:
+    """부서장 배정 프롬프트(building.route_messages)는 팀 소개(description)를 읽는다 → 소개 뒤에 '다루는/다루지 않는 질문'을 붙인 사본."""
     if not team.scope:
         return team
     s = team.scope
@@ -89,9 +89,8 @@ def router_check(question: str, team: Team, teams: list[Team], models, route=Non
     from core import building  # 무거운 import 방지
 
     route = route or building.route_request
-    candidates = [_for_router(t) for t in teams]
     dept = building.Department(**ROUTER_DEPT, teams=[t.id for t in teams])
-    pick = route(question, dept, candidates, models)
+    pick = route(question, dept, teams, models)  # 팀 소개에 '다루는/다루지 않는 질문'을 붙이는 일은 route_messages 가 한다 (with_scope)
     picked, how = pick["team_id"], pick.get("how", "")
     if how == "keyword":
         # 보조 모델을 못 씀 → 낱말 비교는 덜 확실하다. 이 팀 낱말은 없고 다른 팀 범위 낱말이 맞을 때만 막는다

@@ -85,10 +85,9 @@ def test_out_of_scope_is_blocked_with_suggested_team(teams):
                  "model": "fake", "note": ""}
     msg = scope.blocked_message(d, stock, teams)
     assert msg == "이 질문은 **주식 팀** 범위가 아닙니다 — **🌏 해외 여행팀**(여행부)이 맞습니다."
-    # 부서장 배정은 모든 팀을 대상으로, 팀 소개에 '다루는 질문'을 붙여서 부른다
+    # 부서장 배정은 모든 팀을 대상으로 부른다 (팀 소개에 '다루는 질문'을 붙이는 일은 building.route_messages 가 한다 — 아래 테스트)
     call = route.calls[0]
     assert {t.id for t in call["candidates"]} == {t.id for t in teams}
-    assert "다루는 질문: 해외 여행" in next(t for t in call["candidates"] if t.id == "travel_abroad").description
     # 부서장이 이 팀을 고르면 통과
     assert scope.check(TRAVEL_Q, stock, teams, None, route=fake_router("stock"))["in_scope"]
 
@@ -99,6 +98,7 @@ def test_real_dept_head_router_is_reused(teams, models, use_script):
     assert not d["in_scope"] and d["team_id"] == "travel_abroad" and d["stage"] == "router"
     prompt = script.prompts("TeamPick")[0]
     assert "부서장 회의" in prompt and "travel_abroad" in prompt and "다루지 않음" in prompt
+    assert prompt.count("다루는 질문: 해외 여행") == 1
 
 
 def test_without_model_blocks_only_on_clear_other_team(teams, models, set_keys):

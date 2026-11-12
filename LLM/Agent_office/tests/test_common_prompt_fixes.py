@@ -1,17 +1,17 @@
-"""공통 조립 프롬프트 고침 (2026-11-10 프롬프트 점검 C3~C10) — 조립된 글에 새 문장이 들어가고 어긋나던 문장이 없어졌는지.
+"""공통 조립 프롬프트 고침 (2026-11-10 프롬프트 점검 C3~C19) — 조립된 글에 새 문장이 들어가고 어긋나던 문장이 없어졌는지.
 
 모델을 부르지 않는다 (실행과 같은 조립 함수만 부른다). 그래서 '결과가 좋아진다'는 여기서 확인하지 못한다.
 """
 
 from core import brief as brief_mod
-from core import feedback, followup, verification
+from core import building, feedback, followup, scope, step_mode, verification
 from core.agent import OrgAgent
 from core.brief import DesiredState
-from core.config import load_verification
-from core.schemas import AgentAnswer, HumanDecision, ModelSpec
+from core.config import date_label, load_verification, today
+from core.schemas import AgentAnswer, HumanDecision, ModelSpec, ReviewEdits, ReviewResult
 from core.search import WEB_BEGIN, WEB_END
 from tests.fakes import Script, make_critic, make_review
-from tests.test_followup import ANSWER, edit, head_review, judge, lead_agent
+from tests.test_followup import ANSWER, edit, fix, head_review, judge, lead_agent
 from tests.test_workflow import full_script, run
 
 SPEC = ModelSpec(provider="openai", model="x")
@@ -36,7 +36,7 @@ def child(node_id: str, content: str = "답") -> AgentAnswer:
 def test_critic_prompt_grades_both_the_review_logic_and_the_answer():
     for system in (critic_system(), critic_system("[1] 자료")):
         assert "논리만" not in system  # 전: "'검토 과정'의 논리만 채점" ↔ "근거 자료와 숫자·사실을 대조"
-        assert "비평가(Critic)" in system and "① 검토자의 '지적 → 수정'" in system
+        assert "마지막으로 확인하는 비평가" in system and "① 검토자의 '지적 → 수정'" in system
         assert "② 수정 답변이 [검토 기준]" in system and "[근거 자료]" in system
 
 
@@ -208,3 +208,112 @@ def test_lesson_prompt_lets_the_model_skip_agents_with_nothing_to_learn():
     system, _ = lesson_prompt("답", "답", edited=False)
     assert "정확히 1개" not in system and "빼도 된다" in system
     # 빠진 에이전트는 전처럼 규칙 기반 교훈으로 채워진다 (tests/test_feedback.py test_generate_lessons_fills_missing_and_keeps_comment)
+
+
+# ─── C11 부장 프롬프트 3종(비평·수정본 검토·직접 수정): 오늘 날짜와 '한국어로 쓴다' ──────
+
+
+def test_head_prompts_carry_today_and_language(org, team, models, monkeypatch):
+    monkeypatch.setenv("AGENT_OFFICE_TODAY", "2026-11-12")
+    head = head_review(org, team, models)
+    for system in (critic_system(),
+                   followup.revision_messages(head, "원 질문", ANSWER, "줄여줘", edit("수정본"))[0].content,
+                   followup.head_fix_messages(head, "원 질문", "줄여줘", "수정본", ["표 제목에 기준일 넣기"])[0].content):
+        assert system.startswith("너는 연구부 부장이다.")  # 부장 관점이 맨 앞인 것은 그대로
+        assert f"오늘 날짜: {date_label(today())}" in system and "2026-11-12" in system and "한국어로 쓴다" in system
+    plain = verification.build_critic_messages("q", "x", make_review(), [])[0].content  # 부장 관점이 없어도 들어간다
+    assert plain.startswith("오늘 날짜: 2026-11-12")
+
+
+# ─── C12 스킬("항상 따른다")과 교훈("반드시 반영")이 어긋나면 어느 쪽이 먼저인지 ────────
+
+
+def test_lessons_say_they_win_over_skills_when_they_disagree(org, ranks, team, models):
+    agent = node_agent(org, ranks, team, models, "am_action", skills="[스킬] 표는 3열로")
+    system = agent.system_prompt(["표는 2열로 줄인다"])
+    head = next(line for line in system.splitlines() if line.startswith("지난 업무에서 받은 피드백"))
+    assert "반드시 반영" in head and "스킬" in head and "어긋나면 이 피드백을 따른다" in head
+    assert system.index("[팀 업무 지침(스킬) — 항상 따른다]") < system.index(head)  # 순서는 그대로 (스킬 → 교훈)
+    bare = node_agent(org, ranks, team, models, "am_action").system_prompt(["표는 2열로 줄인다"])  # 스킬이 없으면 견줄 것도 없다
+    assert "지난 업무에서 받은 피드백 (반드시 반영):" in bare
+    assert "지난 업무에서 받은 피드백" not in agent.system_prompt()
+
+
+# ─── C13 '고칠 곳만 바꾸기'(edit) 검토: 출력 칸 설명이 시스템 지시와 같은 말을 한다 ──────
+
+
+def test_edit_mode_field_description_agrees_with_the_instruction():
+    desc = ReviewEdits.model_json_schema()["properties"]["revised_answer"]["description"]
+    assert "revise 이면 지적을 모두 반영한" not in desc  # 전: 칸 설명은 '완성 답변 전문', 지시는 '전문을 다시 쓰지 말라'
+    assert "빈 문자열" in desc and "edits" in desc and "전면 재작성" in desc
+    # 전문을 쓰는 방식(다른 팀)의 칸 설명은 그대로
+    assert "완성 답변 전문" in ReviewResult.model_json_schema()["properties"]["revised_answer"]["description"]
+
+
+# ─── C14 수정본 검토: '근거 없이 새로 넣은 주장'을 한 칸에만 쓰게 한다 ──────────────────
+
+
+def test_revision_review_puts_unsupported_claims_in_one_field(org, team, models):
+    system = followup.revision_messages(head_review(org, team, models), "원 질문", ANSWER, "줄여줘", edit("수정본"))[0].content
+    line = next(x for x in system.splitlines() if x.startswith("위 세 가지에 어긋나는 것은 rule_violations"))
+    assert "logical_leaps" in line and "다시 쓰지 않는다" in line
+    assert "네가 바로 직접 고치게 되니" not in system  # 상한 0·마지막 회차에는 사실이 아니던 말
+    assert "바로 고쳐질 수 있으니" in system
+
+
+# ─── C15 부장 직접 수정: 팀장이 받는 팀 업무 지침(스킬)을 부장도 받는다 ─────────────────
+
+
+def test_head_fix_gets_the_team_skills_the_lead_gets(org, ranks, team, models, use_script):
+    script = use_script(Script(FollowupResult=edit("수정본 A"), HeadFix=fix("부장이 고친 수정본"),
+                               RevisionCritic=[judge(5, extra=["표 제목에 기준일 넣기"]), judge(5)]))
+    followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "줄여줘", [], head=head_review(org, team, models))
+    lead, head_fix = script.prompts("FollowupResult")[0], script.prompts("HeadFix")[0]
+    assert "[스킬] 형식 유지" in lead and "[스킬] 형식 유지" in head_fix  # 같은 스킬 글
+    assert "[팀 업무 지침(스킬)" in head_fix and "작업 절차" in head_fix  # 형식 규칙으로만 쓰라는 안내
+    assert all("[스킬] 형식 유지" not in p for p in script.prompts("RevisionCritic"))  # 검토 프롬프트는 그대로
+    bare = " ".join(m.content for m in followup.head_fix_messages(head_review(org, team, models), "q", "r", "수정본", ["점"]))
+    assert "스킬" not in bare  # 스킬이 없는 팀은 전과 같은 글
+
+
+# ─── C16 진행 방향 제안: 예시가 한 분야(자소서)에 치우치지 않는다 ──────────────────────
+
+
+def test_direction_examples_are_not_tied_to_one_kind_of_work():
+    system = step_mode.direction_messages("시스템", "브리프")[0].content
+    title = step_mode.DirectionOption.model_json_schema()["properties"]["title"]["description"]
+    for text in (system, title):
+        assert "기술 중심" not in text and "리더십" not in text
+        assert "범위를 넓게" in text
+
+
+# ─── C17 팀 배정: 부서 화면의 🧭 배정에도 '다루는/다루지 않는 질문'이 들어간다 ──────────
+
+
+def test_dept_routing_prompt_shows_team_scope_once():
+    from core.config import list_teams
+
+    teams = list_teams()
+    cands = [t for t in teams if t.id in ("travel_domestic", "travel_abroad")]
+    dept = next(d for d in building.departments([t.id for t in teams], building.load_config()) if "travel_abroad" in d.teams)
+    system = building.route_messages("오사카 3박 4일", dept, cands)[0].content
+    assert "다루는 질문: 해외 여행" in system and "다루지 않음" in system
+    # 범위 확인(scope.router_check)도 같은 소개를 쓴다 — 두 번 붙지 않는다
+    seen = {}
+    scope.router_check("오사카 3박 4일", cands[0], cands, None,
+                       route=lambda q, d, c, m: seen.update(prompt=building.route_messages(q, d, c)[0].content)
+                       or {"team_id": cands[0].id, "how": "llm"})
+    assert seen["prompt"].count("다루는 질문: 해외 여행") == 1
+
+
+# ─── C18 말투·용어: 부장 뒤에 '너는 비평가다'가 또 오지 않고, 영어 덧말이 없다 ──────────
+
+
+def test_role_lines_do_not_repeat_identity_or_carry_english_glosses(org, ranks, team, models):
+    critic = critic_system()
+    assert critic.count("너는 ") == 1 and "(Critic)" not in critic  # '너는 ○○부 부장이다' 한 번뿐
+    agent = node_agent(org, ranks, team, models, "am_action")
+    review = agent.review_messages("브리프", "업무", [child("staff_case")])[0].content
+    assert "적대적 리뷰어" in review and "Adversarial" not in review
+    assert "너는 적대적 리뷰어" not in review  # 페르소나("당신은 …입니다") 뒤에 정체를 한 번 더 말하지 않는다
+    assert "취약점·논리적 오류·근거 없는 주장·[완료 기준] 미충족 항목을 먼저 찾아낸 뒤 판단한다" in review

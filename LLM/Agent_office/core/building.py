@@ -316,9 +316,11 @@ def keyword_pick(text: str, candidates: list[Team]) -> tuple[str, str]:
 def route_messages(text: str, dept: Department, candidates: list[Team]):
     from langchain_core.messages import HumanMessage, SystemMessage  # 무거운 import 는 실제로 부를 때만
 
-    lines = [f"- {t.id}: {t.name} — {t.description} (업무: {', '.join(x.title for x in t.tasks) or '자유 질문'})"
-             for t in candidates]
     from core.dept_heads import head_of
+    from core.scope import with_scope  # 팀 소개 뒤에 '다루는/다루지 않는 질문' — 🧭 부서 화면 배정과 범위 확인이 같은 소개를 쓴다
+
+    lines = [f"- {t.id}: {t.name} — {t.description} (업무: {', '.join(x.title for x in t.tasks) or '자유 질문'})"
+             for t in map(with_scope, candidates)]
 
     head = head_of(dept)  # 부서 부장 — 비평가와 같은 사람 (config/departments.yaml head)
     system = (f"당신은 '{dept.name}' 부서장({head.name})입니다. 관점: {head.persona}\n부서 소개: {dept.description}\n"
