@@ -18,6 +18,7 @@ run(dict) 의 주요 키
   brief / tools / web / notes / error
   checkpoint 🔀 단계마다 확인에서 멈춘 곳 (status=step_check 일 때 — core/step_mode.py 의 payload)
   attempts   ✏️ 고쳐 다시 하기 전의 시도들 [{round, question, brief, steps, ended_at, why}] — 비교용
+  followups  💬 결정 전 수정 대화 [FollowupTurn] — 끝날 때마다 실행 기록에 저장하고(app.py), 다시 켜면 restore_run 이 되살린다
   모델 호출 하나하나의 기록·개입 내역은 core/call_monitor.py (run_id 로 묶음)
 """
 
@@ -81,13 +82,15 @@ def new_run(run_id: str, question: str, root_id: str, team_id: str = "") -> dict
     }
 
 
-def restore_run(row: dict) -> dict:
+def restore_run(row: dict, followups: list | None = None) -> dict:
     """저장소(runs.db)에 남은 '결정 대기' 실행을 화면용 run 으로 되살린다 (서버를 다시 켠 뒤).
 
     LangGraph 체크포인트가 파일(checkpoints.db)에 남아 있으므로 사람 결정으로 이어서 재개할 수 있다.
     브리프·근거 자료는 저장하지 않으므로 비어 있다.
+    followups = 저장해 둔 💬 수정 대화 (수정본은 다시 채택 후보가 된다). 답을 기다리다 꺼졌으면 저장된 것까지만 — 대기 표시는 되살리지 않는다.
     """
     run = new_run(row["id"], row["question"], row["root_id"], row["team_id"])
+    run["followups"] = list(followups or [])
     interrupted = row["status"] == FOLLOWUP_RUNNING  # 💬 추가 질문 중에 서버가 꺼짐 → 결정 대기로 되돌리고 알린다
     if interrupted:
         row = {**row, "status": "awaiting_human"}

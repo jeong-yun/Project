@@ -2,6 +2,7 @@
 
 테이블
   runs    : 질문 1건의 기록 (단계별 결과, 사람의 결정)
+  run_followups : 그 실행의 💬 결정 전 수정 대화 (요청·답·수정본 전문·부장 검토) — 앱을 다시 켠 뒤에도 보이게
   lessons : 사람의 결정에서 만든 에이전트별 교훈 → 다음 실행 때 시스템 프롬프트에 주입
 
 저장 정책 (사람이 피드백을 남긴 것만 보관)
@@ -27,6 +28,11 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS run_monitor (
     run_id      TEXT PRIMARY KEY,           -- ⏱ 호출 모니터 기록 (core/call_monitor.py dump) + 고쳐 다시 전 시도
     data        TEXT NOT NULL               -- JSON {"calls": [...], "interventions": [...], "attempts": [...]}
+);
+
+CREATE TABLE IF NOT EXISTS run_followups (
+    run_id      TEXT PRIMARY KEY,           -- 💬 결정 전 수정 대화 (core/followup.py dump_turns) — 이 PC 에만 둔다 (knowledge/ 로 내보내지 않는다)
+    data        TEXT NOT NULL               -- JSON list[FollowupTurn] (수정본 전문이 들어 있어 runs 와 따로 둔다 — 목록 조회에 딸려 오지 않게)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -232,6 +238,16 @@ class Storage:
         """실행 기록 삭제 (사람 피드백이 없는 불필요한 결과 정리용)."""
         self._execute("DELETE FROM runs WHERE id=?", (run_id,))
         self._execute("DELETE FROM run_monitor WHERE run_id=?", (run_id,))
+        self._execute("DELETE FROM run_followups WHERE run_id=?", (run_id,))
+
+    def save_followups(self, run_id: str, data: str) -> None:
+        """💬 수정 대화 전체(JSON — core/followup.dump_turns)를 실행과 함께 저장한다. 대화가 늘 때마다 통째로 덮어쓴다."""
+        self._execute("INSERT OR REPLACE INTO run_followups (run_id, data) VALUES (?,?)", (run_id, data))
+
+    def get_followups(self, run_id: str) -> str:
+        """저장된 수정 대화 JSON (없으면 '' — 대화가 없던 실행·이 표가 생기기 전의 기록)."""
+        rows = self._execute("SELECT data FROM run_followups WHERE run_id=?", (run_id,))
+        return rows[0]["data"] if rows else ""
 
     def save_monitor(self, run_id: str, data: dict) -> None:
         """⏱ 호출 모니터 기록을 실행과 함께 저장 (🕘 지난 업무에서 다시 본다)."""
