@@ -11,13 +11,14 @@ app.py 는 이 파일의 함수만 부른다 (화면 조각). 기록·끊기 로
   render_history(data, names) : 🕘 지난 업무 창의 ⏱ 호출 기록
 """
 
+import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import streamlit as st
 
-from core import call_monitor, llm_factory, progress, step_mode, switch_rules
+from core import call_monitor, followup, llm_factory, progress, step_mode, switch_rules
 from core.brief import DesiredState, empty_state
 from core.schemas import ModelsConfig, OrgNode, Team
 from core.workflow import RESTART_POINTS
@@ -344,6 +345,9 @@ def render_restart(ctx: Ctx, run: dict) -> dict | None:
     rid = run["run_id"]
     with st.expander("✏️ 질문·브리프 고쳐 다시 (체크포인트에서 다시 시작)"):
         st.caption("지금 시도는 지우지 않고 '🆚 이전 시도'로 남겨 비교할 수 있습니다. 진행 중이면 먼저 멈춘 뒤 다시 시작합니다.")
+        if run.get("followups"):
+            st.caption("💬 지금까지의 수정 대화와 앞선 수정본은 지금 결과를 고친 것이라, 다시 하면 새 결과의 '채택할 안'에서 빠집니다. "
+                       "마지막 수정본은 '🆚 이전 시도'에서 다시 볼 수 있습니다.")
         has_brief = run.get("brief") is not None
         points = ["plan", "brief"] if has_brief else ["brief"]
         with st.form(f"restart_{rid}_{len(run.get('attempts') or [])}"):
@@ -372,10 +376,11 @@ def render_attempts(ctx: Ctx, run: dict, final_text: str | None) -> None:
         idx = st.selectbox("비교할 이전 시도", list(range(len(attempts)))[::-1],
                            format_func=lambda i: f"{attempts[i]['round']}번째 시도 — {attempts[i]['why']}", key=f"att_pick_{run['run_id']}")
         old = attempts[idx]
+        revised = next((t for t in reversed(old.get("followups") or []) if t.revised), None)  # 그 시도에서 받은 마지막 수정본
         left, right = st.columns(2)
         for col, title, q, brief, text in (
-            (left, f"🕘 {old['round']}번째 시도", old["question"], old.get("brief"),
-             old["steps"][-1].content if old["steps"] else "(끝난 단계 없음)"),
+            (left, f"🕘 {old['round']}번째 시도" + (f" · ✏️ 수정본 v{revised.version}" if revised else ""), old["question"],
+             old.get("brief"), revised.content if revised else old["steps"][-1].content if old["steps"] else "(끝난 단계 없음)"),
             (right, f"▶ 지금 ({len(attempts) + 1}번째)", run["question"], run.get("brief"), final_text or "(아직 진행 중)"),
         ):
             with col:
@@ -409,5 +414,7 @@ def serialize_attempts(run: dict) -> list[dict]:
     for a in run.get("attempts") or []:
         brief = a.get("brief")
         out.append({"round": a["round"], "question": a["question"], "why": a["why"], "ended_at": a["ended_at"],
-                    "brief": brief.model_dump() if brief is not None else None, "steps": [s.model_dump() for s in a["steps"]]})
+                    "brief": brief.model_dump() if brief is not None else None, "steps": [s.model_dump() for s in a["steps"]],
+                    # 그 시도의 💬 수정 대화 — 고쳐 다시 하면 run_followups 에서는 비우므로 디스크에는 여기에만 남는다
+                    "followups": json.loads(followup.dump_turns(a.get("followups") or []))})
     return out

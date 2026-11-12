@@ -17,7 +17,7 @@ run(dict) 의 주요 키
   assigned   {관리자 id: [업무를 받은 하위 id]}   — 📊 진행률이 실제로 일을 받은 사람만 세게 (core/progress.py)
   brief / tools / web / notes / error
   checkpoint 🔀 단계마다 확인에서 멈춘 곳 (status=step_check 일 때 — core/step_mode.py 의 payload)
-  attempts   ✏️ 고쳐 다시 하기 전의 시도들 [{round, question, brief, steps, ended_at, why}] — 비교용
+  attempts   ✏️ 고쳐 다시 하기 전의 시도들 [{round, question, brief, steps, followups, ended_at, why}] — 비교용
   followups  💬 결정 전 수정 대화 [FollowupTurn] — 끝날 때마다 실행 기록에 저장하고(app.py), 다시 켜면 restore_run 이 되살린다
   모델 호출 하나하나의 기록·개입 내역은 core/call_monitor.py (run_id 로 묶음)
 """
@@ -188,13 +188,16 @@ def prepare_resume(run: dict, label: str = "▶ 이어서 진행") -> None:
 
 
 def archive_attempt(run: dict, why: str) -> dict:
-    """✏️ 고쳐 다시 — 지금까지의 시도를 run["attempts"] 에 보관하고 화면 상태를 비운다 (비교용으로 남김)."""
+    """✏️ 고쳐 다시 — 지금까지의 시도를 run["attempts"] 에 보관하고 화면 상태를 비운다 (비교용으로 남김).
+
+    💬 수정 대화도 그 시도와 함께 옮긴다 — 수정본은 옛 결과를 고친 글이라, 남겨 두면 새 결과 대신 '지금 결과'·채택 후보가 된다.
+    """
     attempt = {
         "round": len(run["attempts"]) + 1, "question": run["question"], "brief": run.get("brief"),
-        "steps": list(run["steps"]), "ended_at": time.time(), "why": why,
+        "steps": list(run["steps"]), "followups": list(run.get("followups") or []), "ended_at": time.time(), "why": why,
     }
     run["attempts"].append(attempt)
-    run.update(steps=[], drafting={}, decision=None, error=None, checkpoint=None)
+    run.update(steps=[], drafting={}, decision=None, error=None, checkpoint=None, followups=[], followup_error="")
     run["statuses"] = {run["root_id"]: ("working", "✏️ 고쳐 다시")}
     run["activity"] = {run["root_id"]: "✏️ 고쳐 다시"}
     return attempt

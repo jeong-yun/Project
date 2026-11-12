@@ -2327,7 +2327,8 @@ def restart_run(run: dict, req: dict) -> str | None:
     if req["point"] == "plan" and run.get("brief") is not None and req["brief"] != run["brief"]:
         what.append("브리프 고침")
     why = f"{run_control_ui.RESTART_POINTS[req['point']]} · " + (", ".join(what) or "그대로 다시")
-    archive_attempt(run, why)
+    archive_attempt(run, why)  # 💬 수정 대화도 이전 시도로 옮긴다 (옛 결과를 고친 수정본이 새 결과의 채택 후보로 남지 않게)
+    storage.save_followups(rid, "")  # 실행 기록도 같은 상태로 — 다시 하는 도중에 앱을 꺼도 옛 수정본이 되살아나지 않는다
     call_monitor.new_round(rid)
     call_monitor.log(rid, "✏️ 고쳐 다시", why + (" · 🔀 단계마다 확인" if req["step_mode"] else ""))
     # 업무 분배부터면 고친 브리프가 곧 이번 브리프 (요청 정리를 다시 하지 않아 브리프 이벤트가 오지 않는다), 처음부터면 새로 정리될 때까지 비움
@@ -2351,7 +2352,7 @@ if current and (current["done"] or current["status"] == FOLLOWUP_RUNNING):
 
 if (current and not current["error"] and current["status"] not in (*DECIDED, FOLLOWUP_RUNNING)
         and not current.get("restored")):
-    final_now = final_answer(current) if current["done"] and current["status"] == "awaiting_human" else None
+    final_now = current_result(current)[0] if current["done"] and current["status"] == "awaiting_human" else None
     run_control_ui.render_attempts(rc_ctx, current, final_now.content if final_now else None)  # 🆚 이전 시도와 비교
     restart_req = run_control_ui.render_restart(rc_ctx, current)  # ✏️ 질문·브리프 고쳐 다시
     if restart_req:
