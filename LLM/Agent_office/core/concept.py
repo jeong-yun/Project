@@ -667,17 +667,23 @@ def entry_digest(entry: Entry, limit: int = 900) -> str:
 
 def build_concept_request(
     action: str, name: str, draft: str, related: list[Entry], target: Entry | None, d: date | None = None,
-    sub_title: str = "",
+    sub_title: str = "", merge: bool = False,
 ) -> tuple[str, DesiredState]:
     """개념 작성 요청 → (질문, 최종 상태 브리프). 질문 = 프롬프트의 [입력] 절.
 
     action 은 코드가 판정한 것 (catalog.find_existing): 기존에 있으면 update, 없으면 add.
     sub_title 이 있으면 이 개념이 target 항목의 '7. 변형·확장 상세' 소절로 이미 들어 있다는 뜻 → 그 부모 항목을 수정한다.
     수정(update)은 원본 기반 — 대상 항목 전문을 <original> 로 싣고, 팀은 항목을 다시 쓰지 않고 변경 제안 목록(changes)만 낸다.
+    merge: '추가'로 맡겼던 개념을 팀이 target 에 편입(수정)하기로 판정해, 그 항목을 원본 기반 수정으로 다시 맡기는 요청.
     """
     d = d or date.today()
     update = action == "update" and target is not None
-    if update and sub_title:
+    if update and merge:
+        how = (f"수정 (update) — 이 개념은 독립 항목으로 없고, 앞선 검토에서 기존 항목 「{target.name}」 에 편입하기로 판정함 "
+               "→ 부모 항목(원본)은 그대로 두고, 편입에 필요한 곳(7.변형·확장 상세 소절 추가, 6.관계·참고 문헌 보완 등)과 "
+               "근거가 있어 고쳐야 하는 곳만 변경 제안으로 (전체를 다시 쓰지 않는다. 1단계에서 편입이 맞지 않다고 판정하면 "
+               "changes 는 빈 목록으로 두고 <review_log> 에 이유를 쓴다)")
+    elif update and sub_title:
         how = (f"수정 (update) — 이 개념은 「{target.name}」의 7.변형·확장 상세 소절 '{sub_title}' 로 이미 있음 "
                "→ 부모 항목(원본)은 그대로 두고, 그 소절을 중심으로 근거가 있는 곳·형식에 어긋난 곳만 변경 제안으로")
     elif update:
@@ -752,6 +758,16 @@ def build_concept_request(
         assumptions=[],
     )
     return question, brief
+
+
+def request_inputs(question: str) -> tuple[str, str]:
+    """요청 글([입력])에 실린 (개념명, 초안) — 편입 판정 결과를 원본 기반 수정으로 다시 맡길 때 입력칸을 채운다. 없으면 ''.
+
+    초안은 표시선 사이의 글이라 표시선·원본 태그 흉내를 막느라 바꾼 글자(_draft_block)는 바뀐 채로 돌아온다.
+    """
+    name = re.search(r"^- 개념명\(한/영\): (.*)$", question or "", flags=re.MULTILINE)
+    draft = re.search(re.escape(DRAFT_BEGIN) + r"\n(.*?)\n" + re.escape(DRAFT_END), question or "", flags=re.DOTALL)
+    return (name.group(1).strip() if name else ""), (draft.group(1) if draft else "")
 
 
 def _update_brief(name: str, context: str, header: str, no_invention: list[str]) -> DesiredState:

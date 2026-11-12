@@ -225,14 +225,19 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
                          placeholder="예: 그룹 상대적 정책 최적화(Group Relative Policy Optimization, GRPO)")
     draft = st.text_area("초안", height=220, key=f"cw_draft_{team_id}",
                          placeholder="정의·작동 원리·장단점·참고 자료 등 초안을 붙여 넣으세요 (비워도 개념명으로 작성)")
-    target, sub_title, action = None, "", "add"
+    target, sub_title, action, merging = None, "", "add", False
     if name.strip():
         matches = cat.find_existing(ctx.catalog, name)
         ADD = "__add__"
+        # 결과 화면의 '원본 기반으로 다시 받기'(merge_notice)가 남긴 표시 — 팀이 이 개념을 그 기존 항목에 편입하기로 판정했다
+        merge = st.session_state.get(f"cw_merge_{team_id}") or {}
+        into = ctx.catalog.find(merge["target"]) if merge.get("name") == name.strip() and not matches else None
 
         def option_label(n: str) -> str:
             if n == ADD:
                 return "🆕 새 항목으로 추가"
+            if into and n == into.name:
+                return f"✏️ 편입 — {ctx.label(n)} 에 넣기 (원본 기반 수정)"
             m = next(m for m in matches if m.entry.name == n)
             return f"✏️ 수정 — {ctx.label(n)}" + (f" (7.변형 소절 '{m.detail[:40]}')" if m.kind == "하위" else "")
 
@@ -245,11 +250,16 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
             status = concept.app_status(m0.entry) if m0.entry.category == "AI-App" else None
             if status:
                 st.caption(f"🧩 Agent Office 적용 현황: {STATUS_ICON.get(status.get('status'), '❔')} — {status.get('note', '')}")
+        elif into:
+            st.info(f"팀이 기존 항목에 편입하기로 판정한 개념입니다 → 그 항목을 **원본 기반 수정**으로 진행합니다: {ctx.label(into.name)}"
+                    "  \n원본 항목은 그대로 두고, 편입에 필요한 곳만 변경 제안으로 받습니다. 결과 화면에서 변경마다 근거를 읽고 반영할지 고르면 됩니다.")
         else:
             st.success("카탈로그에 없는 개념입니다 → **추가**로 진행합니다. (검토 중 팀이 기존 개념의 하위라고 판단하면 편입으로 바꿉니다)")
-        picked = st.selectbox("판정 (필요하면 바꾸기)", [m.entry.name for m in matches] + [ADD], format_func=option_label,
-                              key=f"cw_pick_{team_id}_{hash(name)}")
-        if picked != ADD:
+        picked = st.selectbox("판정 (필요하면 바꾸기)", [m.entry.name for m in matches] + ([into.name] if into else []) + [ADD],
+                              format_func=option_label, key=f"cw_pick_{team_id}_{hash(name)}")
+        if into and picked == into.name:
+            target, action, merging = into, "update", True
+        elif picked != ADD:
             hit = next(m for m in matches if m.entry.name == picked)
             target, sub_title, action = hit.entry, (hit.detail if hit.kind == "하위" else ""), "update"
     suggested = [e.name for e, _ in cat.find_related(ctx.catalog, name, draft, related_limit) if not target or e.name != target.name]
@@ -258,7 +268,7 @@ def input_form(ctx: CatalogContext, task_id: str, team_id: str, web_available: b
     use_web = st.checkbox("🌐 웹 검색으로 원전 확인", value=web_available, disabled=not web_available, key=f"cw_web_{team_id}")
     related = [e for e in ctx.catalog.entries if e.name in related_names]
     # 요청은 LLM 없이 코드로 만든다 → 맡기기 전에도 보낼 브리프를 그대로 보여 줄 수 있다
-    question, brief = (concept.build_concept_request(action, name.strip(), draft, related, target, sub_title=sub_title)
+    question, brief = (concept.build_concept_request(action, name.strip(), draft, related, target, sub_title=sub_title, merge=merging)
                        if name.strip() else ("", None))
     applied_prompt(question, brief, concept.used_prompt_version(question), key=f"in_{team_id}")
     if not st.button("맡기기", type="primary", disabled=busy or not name.strip(), key=f"cw_go_{team_id}"):
@@ -415,6 +425,36 @@ def change_list(res: concept.ConceptResult, run: dict, content: str, decided: bo
     return picked
 
 
+def merge_notice(run: dict, target_name: str) -> None:
+    """'추가'로 맡겼는데 팀이 기존 항목 편입(수정)으로 판정한 결과 — 그 항목을 원본 기반 수정으로 다시 맡기는 길을 안내한다.
+
+    추가 요청에는 그 항목의 원본 전문이 없어(관련 항목은 발췌만) 팀이 항목 전체를 <final> 에 다시 썼다 → 변경마다 근거를 보고 고를 수 없다.
+    버튼은 위 '✍️ 개념 작성' 입력칸만 채운다 (맡기기는 사람이 누른다 — 팀이 한 번 더 일한다). 대상을 못 찾으면 전처럼 <final> 방식뿐이라고 알린다.
+    """
+    root = st.session_state.get("concept_root") or ""
+    target = load_catalog(Path(root)).find(target_name) if root and target_name and Path(root).is_dir() else None
+    if target is None:
+        st.warning(f"팀이 이 개념을 기존 항목 「{target_name or '이름 없음'}」 에 편입(수정)하기로 판정했지만, 그 항목을 카탈로그에서 찾지 못했습니다. "
+                   "그래서 원본 기반(변경마다 고르기)으로 다시 받을 수 없습니다 — 채택하려면 아래 적용 계획 JSON 의 target 을 실제 항목 이름으로 "
+                   "고쳐야 하고, 채택하면 그 항목 전체가 '📄 최종본' 글로 바뀝니다.")
+        return
+    name, draft = concept.request_inputs(run.get("question", ""))
+    st.info(f"팀이 이 개념을 기존 항목 「{target.name}」 에 편입(수정)하기로 판정했습니다. 지금 '📄 최종본'은 그 항목 전체를 다시 쓴 글이라 "
+            "무엇이 왜 바뀌는지 변경마다 골라 반영할 수 없습니다 (이대로 채택하면 항목 전체가 이 글로 바뀝니다).  \n"
+            "아래 버튼을 누르면 위 '✍️ 개념 작성' 입력칸이 '기존 항목에 편입 — 원본 기반 수정'으로 채워집니다. 거기서 **맡기기**를 누르면 "
+            "원본은 그대로 두고 변경 제안(원문 → 바꿀 글 + 근거)으로 다시 받습니다 (팀이 한 번 더 일합니다).")
+    st.button("✏️ 원본 기반으로 다시 받기 — 입력칸 채우기", key=f"cm_{run.get('run_id', '')}", on_click=_prefill_merge,
+              args=(name or (run.get("concept") or {}).get("title", ""), draft, target.name))
+
+
+def _prefill_merge(name: str, draft: str, target_name: str) -> None:
+    """버튼 콜백 — 화면을 그리기 전에 실행되므로 '✍️ 개념 작성' 입력칸(input_form)의 값을 바꿀 수 있다."""
+    team_id = concept.TEAM_ID
+    st.session_state[f"cw_name_{team_id}"] = name
+    st.session_state[f"cw_draft_{team_id}"] = draft
+    st.session_state[f"cw_merge_{team_id}"] = {"name": name, "target": target_name}  # input_form 이 '편입 — 원본 기반 수정'을 고르게 한다
+
+
 def result_tabs(content: str, run: dict) -> None:
     """최종 결과를 탭으로 — (기존 항목 수정이면 변경 제안 /) 최종본(카탈로그에 들어갈 글) / 검증 로그 / GitHub 요약 / 적용 계획."""
     opts = change_options(run)
@@ -434,6 +474,9 @@ def result_tabs(content: str, run: dict) -> None:
     problems = [] if changing and run.get("status") == "adopted" else concept.check_answer(content, opts)
     if problems:
         st.warning("형식 검사에서 남은 문제 (채택 전 아래에서 직접 고칠 수 있습니다):\n" + "\n".join(f"- {p}" for p in problems))
+    asked_add = info.get("action") == "add" or "- 작업(코드 자동 판정): 추가 (add)" in run.get("question", "")
+    if asked_add and plan.get("action") == "update" and not changing and not decided:
+        merge_notice(run, str(plan.get("target") or ""))
     tabs = st.tabs(([f"✏️ 변경 제안 ({len(res.changes)})"] if changing else []) + ["📄 최종본", "🧠 검증 로그", "🐙 GitHub 요약", "🧾 적용 계획"])
     final_entry = res.final_entry
     if changing:
