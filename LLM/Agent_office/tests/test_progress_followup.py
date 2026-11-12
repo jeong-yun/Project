@@ -12,7 +12,7 @@ import pytest
 from core import call_monitor, dept_heads, live, member_models, model_catalog, progress
 from core.schemas import AgentAnswer, ModelSpec, RankModels
 from core.storage import Storage
-from tests.fakes import Script
+from tests.fakes import HOLD_SEC, Script
 
 LEAD = "claude_cli:claude-opus-5-5"
 
@@ -345,11 +345,11 @@ def app_env(tmp_path, monkeypatch, use_script):
     gate, draft_gate = threading.Event(), threading.Event()
 
     def draft_text(messages):
-        draft_gate.wait(20)  # 초안이 끝나지 않은 동안 진행률을 본다
+        draft_gate.wait(HOLD_SEC)  # 초안이 끝나지 않은 동안 진행률을 본다 (문은 테스트가 연다)
         return "초안 [1]"
 
     def followup_answer(messages):
-        gate.wait(20)
+        gate.wait(HOLD_SEC)
         from core.followup import FollowupResult
 
         return FollowupResult(analysis="질문", revised=False, reply="3번은 [1] 자료가 근거입니다.")
@@ -392,11 +392,18 @@ def test_app_progress_bar_and_background_followup(app_env):
     assert not at.exception, at.exception
     rid = wait_for(lambda: next((r for r in list(call_monitor._calls) if r), None))
     wait_for(lambda: any(c.kind == "draft" for c in call_monitor.in_flight(rid)))
+
+    def held(kind: str) -> bool:
+        """그 종류의 가짜 모델 호출이 아직 문 앞에 서 있는가 — 화면을 그린 뒤에도 참이어야 '진행 중' 화면을 본 것이다."""
+        return any(c.kind == kind for c in call_monitor.in_flight(rid))
+
+    self_opened = "가짜 모델의 문이 저절로 열려 화면을 확인하기 전에 일이 끝났다 — 테스트 준비 문제 (앱 문제 아님)"
     # 진행 중: 위쪽 진행 막대 + 📊 시간표 탭의 진행률·남은 단계
     at = _open()
     at.session_state["mon_open_general"] = True
     at = at.run()
     assert not at.exception, at.exception
+    assert held("draft"), self_opened
     bars = at.get("progress")
     assert bars and all("남은 단계" in b.proto.text and "추정:" in b.proto.text for b in bars)
     assert any("기록 부족" in b.proto.text for b in bars)  # 지난 기록이 없는 새 데이터 폴더 → 기본값이라고 밝힌다
@@ -414,6 +421,7 @@ def test_app_progress_bar_and_background_followup(app_env):
     at.session_state["mon_open_general"] = True
     at = at.run()
     assert not at.exception, at.exception
+    assert held("followup"), self_opened
     assert any("💬 추가 질문 답하는 중" in m.value for m in at.markdown)
     assert any(c.value.startswith("📊 기본 팀 — 💬 추가 질문 ") and "(추정)" in c.value for c in at.caption)
     assert any("추가 질문에 답하는 중입니다" in i.value for i in at.info)  # 결정은 답이 온 뒤에
