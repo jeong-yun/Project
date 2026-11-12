@@ -288,12 +288,15 @@ streamlit run app.py
 브라우저에서 http://localhost:8501 이 열립니다. 포트를 바꾸려면 `streamlit run app.py --server.port 8600`.
 
 **이 폴더(`Agent_office`)에서 켜세요.** Streamlit 은 앱을 켠 폴더의 `.streamlit/config.toml` 만 읽습니다 — 다른 폴더에서
-`streamlit run LLM/Agent_office/app.py` 처럼 켜면 이 설정이 빠집니다. 지금 들어 있는 설정은 둘입니다
+`streamlit run LLM/Agent_office/app.py` 처럼 켜면 이 설정이 빠집니다. 지금 들어 있는 설정은 셋입니다
 (아래 12. 트러블슈팅, `tests/test_config.py` 가 적용 여부를 확인):
 - 큰 화면 조각(1만 바이트 이상)을 '해시만' 보내지 않고 항상 통째로 보내기 (`global.minCachedMessageSize`) —
   브라우저 "Connection error … 404" 창을 막습니다.
 - Streamlit 사용 통계 끄기 (`browser.gatherUsageStats = false`) — 브라우저 "Bad message format — Tried to use SessionInfo
   before it was initialized" 창을 막습니다. 사용 통계도 Streamlit 사로 나가지 않습니다.
+- 코드 파일 감시 끄기 (`server.fileWatcherType = "none"`) — 브라우저를 새로 열거나 새로 고칠 때마다 서버가 몇 초씩 멈추던 것을
+  줄입니다 (이 PC 측정: 2.9초 → 0.5초, 바쁠 때 5.1초 → 1.0초). **코드를 고친 뒤에는 앱을 다시 켜야 반영됩니다.**
+  개발 중에 고친 코드를 바로 보려면 `streamlit run app.py --server.fileWatcherType auto` 로 켜세요.
 
 ## 5. 화면 보는 법
 
