@@ -1,12 +1,30 @@
 import json
 from io import BytesIO
+from pathlib import Path
 
 import pandas as pd
 from docx import Document
 from docx.shared import Pt
 from fpdf import FPDF
 
-KOREAN_FONT_PATH = r"C:\Windows\Fonts\malgun.ttf"
+# PDF 에 쓸 한글 글꼴(.ttf)을 찾아볼 곳 — 앞에서부터 처음 있는 것을 쓴다
+KOREAN_FONT_CANDIDATES = (
+    r"C:\Windows\Fonts\malgun.ttf",  # Windows: 맑은 고딕
+    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",  # macOS
+    "/Library/Fonts/NanumGothic.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",  # Linux (fonts-nanum)
+)
+
+
+class KoreanFontNotFound(RuntimeError):
+    """PDF 에 쓸 한글 글꼴을 찾지 못했다."""
+
+
+def find_korean_font() -> str | None:
+    for path in KOREAN_FONT_CANDIDATES:
+        if Path(path).is_file():
+            return path
+    return None
 
 
 def get_excel_bytes(df: pd.DataFrame):
@@ -153,12 +171,20 @@ def render_entry_to_pdf(pdf: FPDF, entry: dict):
 
 
 def get_pdf_bytes_from_vocab(vocab: dict):
+    font_path = find_korean_font()
+    if font_path is None:
+        raise KoreanFontNotFound(
+            "한글 글꼴을 찾지 못해 PDF 를 만들 수 없습니다. "
+            "나눔고딕 같은 한글 글꼴(.ttf)을 설치한 뒤 다시 열거나, Excel·Word 로 내려받아 주세요. "
+            "찾아본 곳: " + ", ".join(KOREAN_FONT_CANDIDATES)
+        )
+
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
 
-    pdf.add_font("malgun", "", KOREAN_FONT_PATH, uni=True)
-    pdf.set_font("malgun", size=12)
+    pdf.add_font("korean", "", font_path, uni=True)
+    pdf.set_font("korean", size=12)
 
     for _, entry in vocab.items():
         render_entry_to_pdf(pdf, entry)
