@@ -176,6 +176,7 @@ class ConceptResult:
     problems: list[str] = field(default_factory=list)
     change_notes: list[str] = field(default_factory=list)  # 최종본에서 떼어 낸 🔧수정·➕추가 표시와 이유 (화면에만)
     changes: list["Proposal"] | None = None  # 기존 항목 수정의 변경 제안 (None = 추가·예전 방식 결과)
+    outside: str = ""  # 검증 로그 태그 앞·검증 로그와 <final> 사이에 쓴 글 (화면에만 — 예: 수정 요청에 답한 '사용자 지적 판정' 표)
     original: str = ""  # 변경 제안을 적용할 원본 항목 전문
 
 
@@ -206,6 +207,20 @@ def _between(text: str, tag: str) -> str:
     return m.group(1).strip() if m else ""
 
 
+def outside_text(answer: str) -> str:
+    """검증 로그 태그 앞, 그리고 검증 로그와 <final> 사이에 쓴 글 — 결과 탭 어디에도 나오지 않던 글.
+
+    '🧠 검증 로그' 탭에만 보여 준다 (판단용 글 — 최종본·GitHub 요약·적용 계획에는 넣지 않는다). 검증 로그 태그가 없으면 ''.
+    """
+    log = re.search(rf"<({LOG_TAG}|{OLD_LOG_TAG})>.*?</\1>", answer, flags=re.DOTALL | re.IGNORECASE)
+    if not log:
+        return ""
+    before = re.sub(r"<final>.*?</final>", "", answer[:log.start()], flags=re.DOTALL | re.IGNORECASE)  # 순서가 뒤집힌 답변의 최종본은 뺀다
+    final = re.search(r"<final>", answer[log.end():], flags=re.IGNORECASE)
+    between = answer[log.end():log.end() + final.start()] if final else ""
+    return "\n\n".join(p.strip() for p in (before, between) if p.strip())
+
+
 def replace_final(answer: str, new_entry: str) -> str:
     """답변의 <final>…</final> 내용을 (사람이 고친) 최종본으로 바꾼다 — 채택 기록에 실제 반영본이 남도록."""
     pattern = re.compile(r"(<final>).*?(</final>)", flags=re.DOTALL | re.IGNORECASE)
@@ -224,7 +239,7 @@ def parse_result(answer: str, options: dict | None = None, adopted: bool = False
     """
     entry, notes = strip_change_notes(normalize_entry(_between(answer, "final")))
     log = _between(answer, LOG_TAG) or _between(answer, OLD_LOG_TAG)
-    res = ConceptResult(thought=log, final_entry=entry, change_notes=notes)
+    res = ConceptResult(thought=log, final_entry=entry, change_notes=notes, outside=outside_text(answer))
     after = re.split(r"</final>", answer, flags=re.IGNORECASE)[-1] if "</final>" in answer.lower() else answer
     res.summary_md = re.sub(r"```json.*?```", "", after, flags=re.DOTALL).strip()
     for src in extract_code_blocks(answer, "json"):

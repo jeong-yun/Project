@@ -455,6 +455,10 @@ def result_tabs(content: str, run: dict) -> None:
         if res.change_notes:  # 최종본에서 떼어 낸 🔧수정·➕추가 표시와 이유 — 확인용 (카탈로그에는 들어가지 않음)
             notes = "\n".join(f"- {n}" for n in res.change_notes)
             st.markdown(f"**🔧 초안 대비 변경 요약** (최종본에는 넣지 않음)\n{notes}")
+        if res.outside:  # 검증 로그 태그 앞(또는 최종본 앞)에 쓴 글 — 수정 요청에 답한 판정 표 등. 어느 탭에도 안 나오던 글이다
+            st.markdown("**📝 검증 로그 태그 밖에 쓴 글** (팀이 답하며 덧붙인 글 — 이 화면에만 보이고 카탈로그·GitHub 에는 들어가지 않음)")
+            st.markdown(res.outside)
+            st.divider()
         st.markdown(res.thought or "(검증 로그 없음)")
     with tabs[2], st.container(height=420):
         st.markdown(res.summary_md or "(요약 없음)")

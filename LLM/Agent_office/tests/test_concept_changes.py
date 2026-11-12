@@ -387,3 +387,53 @@ def test_app_update_flow_applies_only_picked_changes(app_env, use_script, root):
     assert any(t.value == expected for t in at.text)
     assert not any("형식 검사에서 남은 문제" in w.value for w in at.warning)  # 채택 기록의 <final> 을 형식 오류로 따지지 않는다
     assert any("직접 수정" in s.value for s in at.success)  # 변경을 하나 뺐으므로 '직접 수정'으로 기록된다
+
+
+# ─── 검증 로그 태그 앞에 쓴 글 (예: 수정 요청에 답한 '사용자 지적 판정' 표) — 화면에는 보이고 카탈로그에는 안 들어간다 ──────
+
+
+VERDICT = "## 사용자 지적 판정\n| 지적 | 판정 | 근거 |\n|---|---|---|\n| PPO 대체 서술 | 수용 | 원전 4.1절 |"
+
+
+def test_text_before_the_review_log_is_kept_for_the_screen():
+    res = concept.parse_result(f"{VERDICT}\n\n{answer([FACT])}", OPTIONS)
+    assert res.outside == VERDICT  # 버리지 않는다
+    assert "사용자 지적 판정" not in res.final_entry and "사용자 지적 판정" not in res.summary_md  # 카탈로그 글·GitHub 요약에는 없다
+    assert "사용자 지적 판정" not in res.thought and len(res.changes) == 1
+    assert concept.parse_result(answer([FACT]), OPTIONS).outside == ""  # 앞 글이 없으면 전과 같다
+
+
+def test_text_between_the_review_log_and_final_is_kept_too():
+    from tests.test_concept import GOOD_ENTRY
+    from tests.test_concept import PLAN as ADD_PLAN
+
+    body = (f"{VERDICT}\n<review_log>1단계 표</review_log>\n검토 메모: 6절 한 줄 보완\n<final>\n{GOOD_ENTRY}\n</final>\n## GitHub 요약\n- 요약\n"
+            f"```json\n{json.dumps({'concept_plan': ADD_PLAN}, ensure_ascii=False)}\n```")
+    res = concept.parse_result(body)
+    assert res.outside == f"{VERDICT}\n\n검토 메모: 6절 한 줄 보완"
+    assert "판정" not in res.final_entry and "검토 메모" not in res.summary_md and res.summary_md.startswith("## GitHub 요약")
+
+
+def test_screen_shows_text_written_before_the_review_log():
+    from streamlit.testing.v1 import AppTest
+
+    run = {"run_id": "r1", "question": "", "brief": None, "harness_options": dict(OPTIONS)}
+    at = AppTest.from_function(_page, kwargs={"content": f"{VERDICT}\n\n{answer([FACT])}", "run": run}, default_timeout=30).run()
+    assert not at.exception, at.exception
+    assert any("PPO 대체 서술" in m.value for m in at.markdown)  # '🧠 검증 로그' 탭에서 볼 수 있다
+    assert "사용자 지적 판정" not in at.session_state["out"]["entry"] and "사용자 지적 판정" not in at.session_state["out"]["plan"]
+    plain = AppTest.from_function(_page, kwargs={"content": answer([FACT]), "run": run}, default_timeout=30).run()
+    assert not any("태그 밖" in m.value for m in plain.markdown)  # 앞 글이 없으면 화면은 전과 같다
+
+
+def test_text_before_the_review_log_never_reaches_catalog_or_commit(root):
+    import concept_ui
+
+    ctx = concept_ui.CatalogContext(root, None, "", cat.Catalog.load(root))
+    content = f"{VERDICT}\n\n{answer([FACT])}"
+    run = {"run_id": "r1", "question": "", "harness_options": dict(OPTIONS), "concept": {"title": "GRPO", "target": "GRPO"}}
+    res = concept_ui.read_result(content, run)
+    concept_ui.apply_adopted(ctx, run, res.final_entry, {k: v for k, v in res.plan.items() if k != "changes"})
+    written = "\n".join(p.read_text(encoding="utf-8") for p in root.iterdir() if p.is_file())
+    assert FACT["replace"] in written and "사용자 지적 판정" not in written and "PPO 대체 서술" not in written
+    assert "판정" not in run["concept_commit"]
