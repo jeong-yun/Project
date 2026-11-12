@@ -557,22 +557,31 @@ def git_panel(ctx: CatalogContext, key: str, message: str) -> None:
     diff, pending = git_diff_status(ctx)
     with st.expander("변경 내용 (git diff)"):
         st.code(diff[:30000] or "(차이 없음 — 이미 커밋했거나 새 파일만 있음)", language="diff")
-    msg = st.text_input("커밋 메시지", value=message, key=f"msg_{key}")
+    st.text_input("커밋 메시지", value=message, key=f"msg_{key}")  # 값은 버튼 콜백(_commit_clicked)이 key 로 읽는다
     st.caption("📝 아직 커밋하지 않은 변경이 있습니다 — '🚀 커밋 후 푸시'를 누르면 커밋과 GitHub 업로드를 한 번에 합니다."
                if pending else "커밋하지 않은 변경 없음")
     c1, c2 = st.columns(2)
-    if c1.button("💾 커밋만", use_container_width=True, key=f"commit_{key}", disabled=not pending):
-        ok, log = cat.git_commit(ctx.repo, ctx.subdir, msg)
+    c1.button("💾 커밋만", use_container_width=True, key=f"commit_{key}", disabled=not pending,
+              on_click=_commit_clicked, args=(ctx, key, False))
+    c2.button("🚀 커밋 후 GitHub 에 푸시", type="primary", use_container_width=True, key=f"push_{key}",
+              on_click=_commit_clicked, args=(ctx, key, True))
+
+
+def _commit_clicked(ctx: CatalogContext, key: str, push: bool) -> None:
+    """커밋 버튼 콜백 — 화면을 그리기 전에 실행되므로 사이드바의 '커밋 안 된 변경' 목록과 본문 안내가 커밋 뒤 상태로 그려진다.
+
+    버튼을 그린 뒤에 커밋하면 옛 목록·상자가 화면에 남아 다시 누르게 되고, st.rerun() 으로 새로 그리면 그 아래 본문 입력칸의 선택이 사라진다.
+    결과 글은 SIDEBAR_MSGS 에 넘겨 사이드바 맨 아래에 보여 준다.
+    """
+    msgs: list[tuple[str, str]] = []
+    if cat.git_status(ctx.repo, ctx.subdir):  # 커밋 안 된 변경이 있으면 먼저 커밋 — 커밋 없이 푸시하면 아무것도 올라가지 않는다
+        ok, log = cat.git_commit(ctx.repo, ctx.subdir, st.session_state.get(f"msg_{key}", ""))
         refresh_git()
-        (st.success if ok else st.error)(log[-800:])
-    if c2.button("🚀 커밋 후 GitHub 에 푸시", type="primary", use_container_width=True, key=f"push_{key}"):
-        if pending:  # 커밋 안 된 변경이 있으면 먼저 커밋 — 커밋 없이 푸시하면 아무것도 올라가지 않는다
-            ok, log = cat.git_commit(ctx.repo, ctx.subdir, msg)
-            refresh_git()
-            if not ok:
-                st.error("커밋 실패: " + log[-800:])
-                return
-        show_messages(push_messages(ctx.repo, ctx.subdir, ctx.root))
+        msgs = [("success", log[-800:])] if ok else [("error", "커밋 실패: " + log[-800:])]
+        push = push and ok
+    if push:
+        msgs = push_messages(ctx.repo, ctx.subdir, ctx.root)
+    st.session_state[SIDEBAR_MSGS] = msgs
 
 
 def commit_hint(ctx: CatalogContext) -> None:

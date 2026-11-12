@@ -611,9 +611,10 @@ def test_commit_box_is_only_in_the_sidebar_after_adoption(clones):
     assert any("사이드바" in i.value and "커밋 안 된 변경 올리기" in i.value for i in at.info)  # 본문은 어디서 올리는지만 알려 준다
     at = at.button(key="commit_sidebar").click().run()
     assert not at.exception, at.exception
-    at = at.run()  # 다음 화면: 사이드바 상자는 사라지고 본문 안내도 '커밋 안 된 변경 없음'
+    # 누른 바로 그 화면에서: 사이드바 상자는 사라지고 본문 안내도 '커밋 안 된 변경 없음' (옛 목록이 남아 다시 누르게 하지 않는다)
     assert "commit_sidebar" not in [b.key for b in at.button] and not at.info
     assert any("커밋 안 된 변경 없음" in c.value for c in at.caption)
+    assert any("Term:" in s.value for s in at.success)  # 커밋 결과는 화면을 새로 그린 뒤에도 보인다
     assert len(_log(work)) == 2  # 커밋은 한 번만
 
 
