@@ -342,8 +342,8 @@ class ControlIdsValidator(Validator):
         if result.name_mismatch:
             problems.append("번호와 이름이 맞지 않음: " + " / ".join(result.name_mismatch[:6]))
         if problems:
-            return self.fail(" / ".join(problems) + " — 근거 자료의 '통제 번호 목록'에 있는 번호·이름만 쓰고, 맞는 번호를 모르면 "
-                             "control_id 를 비우고 이름만 써라 (번호를 지어내지 않는다).")
+            return self.fail(" / ".join(problems) + " — 근거 자료에 있는 통제 번호·이름만 쓰고(통제 번호 목록이나 점검 표의 통제 칸), "
+                             "맞는 번호를 모르면 번호를 비우고 이름만 써라 (번호를 지어내지 않는다).")
         return self.ok(f"{result.framework} 통제 번호 {result.checked}개 모두 목록에 있음")
 
 

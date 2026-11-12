@@ -113,8 +113,7 @@ tasks:
       장르: {genre}
       분위기: {mood}
       보컬: {vocal}
-      다듬어서 쓸 가사(사용자 제공):
-      {lyrics}
+      다듬어서 쓸 가사(사용자 제공): {lyrics}
     goal: "Gemini Lyria 로 바로 생성할 수 있는 {length} 길이 {language} 노래의 가사(섹션 태그)와 Lyria 프롬프트"
     success_criteria:
       - "```lyrics 블록에 [Verse]·[Chorus] 등 섹션 태그가 붙은 {language} 가사를 쓴다 (사용자 가사가 있으면 뜻을 살려 다듬는다)"
@@ -141,7 +140,7 @@ tasks:
       [0:10 - 0:40] Verse 1: ...
       ```
       - 가사는 ```lyrics 블록에만 쓰고 ```lyria 블록에는 다시 쓰지 않는다 (생성할 때 코드가 합친다).
-      - 가사 언어는 {language}. Lyria 는 프롬프트 언어를 따라 발음하므로 가사는 그 언어로만 쓴다.
+      - 가사(```lyrics 블록)는 {language} 로만 쓴다. ```lyria 블록은 영어로 쓰되 첫 문장에 가사 언어를 밝힌다 (예: 'A warm Korean city-pop song'). 블록 밖의 콘셉트·제작 메모는 한국어로 쓴다.
     harness_options:
       music_kind: song
       music_length: "{length}"

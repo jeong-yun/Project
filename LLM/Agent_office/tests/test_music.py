@@ -86,7 +86,7 @@ def test_song_task_builds_brief_and_harness_options():
     assert req.harness_options == {"music_kind": "song", "music_length": "2분"}
     assert "분위기" not in req.question  # 빈 입력 줄은 빠진다
     assert "내가 쓴 가사 한 줄\n두 번째 줄" in req.question
-    assert "```lyrics" in req.brief.context and "가사 언어는 한국어" in req.brief.context
+    assert "```lyrics" in req.brief.context and "가사(```lyrics 블록)는 한국어 로만 쓴다" in req.brief.context
     instr = build_request(load_team("music").tasks[1], {"theme": "브이로그", "length": "1분"})
     assert instr.harness_options["music_kind"] == "instrumental"
 

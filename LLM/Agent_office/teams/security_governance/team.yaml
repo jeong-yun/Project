@@ -60,13 +60,13 @@ personas:
   staff: 당신은 정보보호 관리체계 담당 신입입니다. 증적 문구를 원문 그대로 인용하고, 없는 것은 없다고 씁니다. 모르는 통제 번호는 지어내지 않고 비워 둡니다.
   assistant_manager: 당신은 내부 감사 경험이 있는 담당자입니다. 증적이 통제 요구사항을 정말 만족하는지 하나씩 대조하고, 인용이 원문과 한 글자라도 다르면 고칩니다.
   gm: 당신은 관리체계 인증 심사를 여러 번 받아 본 책임자입니다. 통제 항목 번호와 요구사항 해석이 맞는지, 증적이 그 항목의 증적이 맞는지 봅니다.
-  team_lead: 당신은 정보보호 책임자입니다. 경영진이 바로 읽을 수 있게 위험도 순으로 정리하고, 판정마다 근거(인용)가 붙어 있는지 확인합니다.
+  team_lead: 당신은 정보보호 책임자입니다. 경영진이 바로 읽을 수 있게 판정 순(미흡 먼저)으로 정리하고, 판정마다 근거(인용)가 붙어 있는지 확인합니다.
 
 org:
   id: lead
   rank: team_lead
   name: 팀장·거버넌스
-  specialty: 통제 점검 총괄 — 위험도 순 정리, 최종 보고서와 JSON
+  specialty: 통제 점검 총괄 — 판정 순(미흡 먼저) 정리, 최종 보고서와 JSON
   children:
     - id: gm_mapping
       rank: gm
@@ -134,7 +134,7 @@ tasks:
       [인용 규칙] evidence 는 증적 파일의 한 줄(또는 연속된 몇 단어)을 그대로 복사한다. 떨어진 두 곳은 "…" 로 잇는다.
         코드가 evidence 가 증적 원문에 글자 그대로 있는지 확인한다 (공백 차이만 무시). '확인 불가'가 아닌 판정은 evidence 가 있어야 한다.
       [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
-      {"summary": {"framework": "{framework}", "checked": 3, "fail": 1, "partial": 1, "unknown": 1, "pass": 0},
+      {"summary": {"framework": "{framework}"},
        "controls": [{"control_id": "2.5.6", "title": "접근권한 검토", "status": "미흡", "evidence": "인용한 증적 원문", "gap": "미비점", "fix": "개선안"}]}
       status 는 "충족" / "부분 충족" / "미흡" / "확인 불가" 중 하나. 위 control_id·title 은 형식 예시일 뿐이다.
     harness_options:
@@ -163,7 +163,7 @@ tasks:
       [영향] 약화 = 통제를 약하게 함(되돌림 권고) / 강화 = 통제를 강하게 함 / 중립 = 통제와 무관
         통제와 무관한(중립) 줄은 control_id 를 비우고("") title 에 '해당 없음'을 쓴다 — 억지로 통제 번호를 붙이지 않는다.
       [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
-      {"summary": {"framework": "{framework}", "changes": 2, "weakened": 1, "strengthened": 0, "neutral": 1},
+      {"summary": {"framework": "{framework}"},
        "controls": [{"control_id": "2.6.6", "title": "원격접근 통제", "status": "미흡", "impact": "약화", "evidence": "바뀐 줄 원문", "gap": "무엇이 약해졌나", "fix": "되돌릴 설정 값"}]}
       status 는 바뀐 뒤 상태 기준 "충족" / "부분 충족" / "미흡" / "확인 불가". 위 control_id·title 은 형식 예시일 뿐이다.
     harness_options:

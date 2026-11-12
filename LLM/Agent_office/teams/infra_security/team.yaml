@@ -128,7 +128,7 @@ tasks:
     instructions: |
       [순서] 1) 점검 표를 위험도 순으로 읽는다 2) 발견마다 '이 설정이 그대로면 무슨 일이 생기나'를 한두 문장으로 3) 고치는 방향(설정 값 수준)
       [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
-      {"summary": {"framework": "{framework}", "findings": 2, "critical": 0, "high": 1, "medium": 1, "low": 0},
+      {"summary": {"framework": "{framework}"},
        "findings": [{"id": "F01", "rule": "TF_SG_OPEN_ADMIN_PORT", "severity": "HIGH", "risk": "인터넷 어디서나 SSH 무차별 대입 가능", "fix_hint": "cidr_blocks 를 관리망 대역으로"}]}
       위 id·rule 은 형식 예시일 뿐이다. 실제 값은 근거 자료 표에서 복사한다. 코드가 id·rule 이 표와 같은지, 빠진 발견이 없는지 확인한다.
     harness_options:
@@ -165,7 +165,7 @@ tasks:
       [고칠 수 있는 발견이 하나도 없으면] 억지로 diff 를 만들지 않는다. 본문에 '수정 diff 없음 — 서비스 영향 없음'이라고 쓰고, fixes 는 빈 목록 [] 으로,
         모든 발견을 not_attempted 에 이유와 함께 적는다 (이유가 빠진 발견이 있으면 코드 검사에서 불합격). 고치는 법은 근거 자료의 '규칙별 고치는 법'을 따른다.
       [JSON 요약 — 답변 맨 끝에 이 형식의 ```json 블록 1개만]
-      {"summary": {"framework": "{framework}", "findings": 3, "fixed_proposed": 2, "not_attempted": 1},
+      {"summary": {"framework": "{framework}"},
        "fixes": [{"findings": ["F01", "F02"], "file": "terraform/network.tf", "change": "SSH·RDP 를 원본 파일에 있는 사내 대역으로"}],
        "not_attempted": [{"id": "F03", "reason": "필요한 IAM 권한 목록을 운영팀이 정해야 함"}]}
       위 id·파일은 형식 예시일 뿐이다. fixes 에 적은 발견은 코드가 diff 를 적용해 다시 검사한다 — 그대로 남으면 불합격이니, 못 고친 것은 not_attempted 로 옮긴다.

@@ -4,6 +4,7 @@
 코드가 바뀐 항목은 동작을 본다. 실제 모델 결과가 좋아지는지는 여기서 확인하지 못한다.
 """
 
+import json
 from datetime import date
 
 import pytest
@@ -11,6 +12,7 @@ import pytest
 from core import catalog as cat
 from core import concept, harness, route, stock_calc
 from core.config import load_team
+from core.tasks import build_request
 from tests.fakes import Script
 from tests.test_concept import GOOD_ENTRY
 from tests.test_concept_changes import ORIGINAL
@@ -171,3 +173,46 @@ def test_required_terms_do_not_fail_on_spacing_or_decimal():
     assert not passed("보유 기간 · 분할 매수 · 손익비 · 리스크", trade)  # 빠진 항목은 그대로 잡는다
     portfolio = task_of("stock", "portfolio").harness_options["required_terms"]
     assert passed("비중 합계 100.0% · 리밸런싱 분기 1회", portfolio)
+
+
+# ─── S14·S15 보안 두 팀 · 음악 · 설계 ────────────────────────────────────
+
+
+@pytest.mark.parametrize("team_id, task_id", [("security_governance", "control_check"), ("security_governance", "drift_check"),
+                                              ("infra_security", "iac_check"), ("infra_security", "iac_fix")])
+def test_security_json_summary_does_not_ask_the_model_to_count(team_id, task_id):
+    example = next(l for l in task_of(team_id, task_id).instructions.splitlines() if l.strip().startswith('{"summary"'))
+    assert example.strip().startswith('{"summary": {"framework": "{framework}"},')  # 코드는 요약에서 프레임워크 이름만 읽는다
+    for counted in ('"checked"', '"fail"', '"changes"', '"weakened"', '"critical"', '"high"', '"fixed_proposed"'):
+        assert counted not in example, counted  # 아무도 검산하지 않는 개수를 세어 쓰게 하지 않는다
+
+
+def test_music_language_rule_says_which_block_uses_which_language():
+    song = task_of("music", "song")
+    rule = next(l for l in song.instructions.splitlines() if "{language}" in l)
+    assert "```lyrics" in rule and "```lyria 블록은 영어" in rule and "가사 언어를 밝힌다" in rule
+    assert "그 언어로만 쓴다" not in rule  # '그 언어'가 프롬프트 언어인지 가사 언어인지 헷갈리던 문장
+    request = build_request(song, {"theme": "퇴근길 위로", "language": "한국어", "length": "2분"})
+    assert "다듬어서 쓸 가사" not in request.question  # 가사를 안 넣었으면 머리말만 남지 않는다
+    request = build_request(song, {"theme": "퇴근길 위로", "language": "한국어", "length": "2분", "lyrics": "오늘도 수고했어\n집에 가자"})
+    assert "다듬어서 쓸 가사(사용자 제공): 오늘도 수고했어\n집에 가자" in request.question
+
+
+def test_design_json_is_required_from_the_layout_designer_up(ranks, models):
+    team = load_team("design")
+    assert team.harness.also_at == {"json_keys": ["dgm_layout", "gm_review"]}  # 부장이 JSON 을 빠뜨려도 그 단계에서 걸린다
+    role = skill_line(agents_of("design", ranks, models)["dgm_layout"], "- **차장·배치설계**")
+    assert "고칠 것이 없으면 approve" in role and "차장에게는 해당하지 않는다" in role  # 공통 검토 지시와 다른 이유를 밝힌다
+
+
+def test_control_id_failure_message_fits_both_security_teams():
+    answer = "| 통제 | 발견 |\n|---|---|\n| 9.9.9 | F01 |"  # 인프라 보안 팀의 표 — 목록에 없는 번호
+    result = harness.run_validators(["control_ids"], answer, {"control_framework": "ISMS-P"})[0]
+    assert not result.passed
+    assert "control_id" not in result.log and "'통제 번호 목록'" not in result.log  # 인프라 보안 팀 프롬프트에는 없는 이름
+    assert "근거 자료에 있는 통제 번호" in result.log and "번호를 비우고" in result.log
+
+
+def test_governance_lead_sorts_by_verdict_like_the_task(ranks, models):
+    lead = agents_of("security_governance", ranks, models)["lead"].system_prompt()
+    assert "위험도 순" not in lead and "미흡 먼저" in lead  # 완료 기준 '미흡 → 부분 충족 → 확인 불가 → 충족 순'과 같은 말
