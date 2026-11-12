@@ -5,6 +5,7 @@
 가짜 모델·임시 DB 만 쓴다. 화면 준비는 tests/test_progress_followup.py 의 것을 그대로 쓴다.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -193,3 +194,63 @@ def test_app_restores_conversation_after_restart_and_adopts_the_revision(app_env
     assert not any((b.key or "").startswith("send_fixes_") for b in at.button)  # 지난 업무에서는 보기만 한다
     downloads = [d.proto.label for d in at.get("download_button")]
     assert any(label.startswith("⬇ 수정본 v1 받기") for label in downloads)  # 수정본 전문은 내려받아 확인한다
+
+
+# ─── ✏️ 질문·브리프 고쳐 다시 — 앞선 시도의 수정 대화는 새 결과에 붙지 않는다 ─────────────────
+
+
+def test_app_redo_moves_earlier_revision_out_of_the_new_result(app_env, use_script, tmp_path):
+    """수정본 v1 을 받은 뒤 질문을 고쳐 다시 맡기면, v1 은 옛 결과를 고친 글이라 새 결과의 '지금 결과'·'채택할 안'·수정 대화에
+    남으면 안 된다 (남으면 새 결과 대신 옛 수정본이 채택된다). 실행 기록도 비우고, 옛 수정본은 '🆚 이전 시도'에서 본다."""
+    gate, draft_gate = app_env
+    gate.set()
+    draft_gate.set()
+
+    def delegation(messages):
+        text = messages[-1].content
+        return make_delegation("gm_research", "gm_action") if "gm_research" in text else make_delegation("am_fact", "staff_draft")
+
+    def review(messages):  # 고친 질문으로 다시 하면 결과가 달라진다
+        again = any("고친 질문" in str(m.content) for m in messages)
+        return make_review(verdict="approve", score=9, answer="새 결과" if again else "옛 결과")
+
+    use_script(Script(text="초안 [1]", Delegation=delegation, ReviewResult=review, CriticResult=make_critic(5),
+                      FollowupResult=[edit("옛 결과를 고친 수정본")], RevisionCritic=[judge(5)]))
+    at = _open().run()
+    at = at.selectbox(key="dept_task_research").set_value("general:free").run()
+    at.text_area(key="q_text").input("양자컴퓨팅 요약")
+    at = next(b for b in at.button if b.label == "맡기기").click().run()
+    assert not at.exception, at.exception
+    at = wait_for(lambda: (lambda a: a if any("💬 결과에 대해 묻기" in m.value for m in a.markdown) else None)(_open().run()), 60)
+    assert _result_box(at)[1] == "옛 결과"
+    at.text_area(key=next(t.key for t in at.text_area if t.placeholder and "3번 근거" in t.placeholder)).input("정의를 줄여줘")
+    at = next(b for b in at.button if b.label == "💬 보내기").click().run()
+    assert not at.exception, at.exception
+    at = wait_for(lambda: (lambda a: a if any("수정본 v1" in m.value for m in a.markdown) else None)(_open().run()), 60)
+    db = tmp_path / "data" / "runs.db"
+    run_id = wait_for(lambda: next((r["id"] for r in Storage(db).list_runs() if Storage(db).get_followups(r["id"])), None))
+    assert any("앞선 수정본" in c.value for c in at.caption)  # 고쳐 다시 하기 전에 알린다 — 수정본이 채택 후보에서 빠진다
+
+    at.text_area(key=f"rs_q_{run_id}").input("고친 질문")  # ── ✏️ 질문 고쳐 다시 ──
+    at = next(b for b in at.button if b.label == "✏️ 이대로 다시 하기").click().run()
+    assert not at.exception, at.exception
+    assert followup.load_turns(Storage(db).get_followups(run_id)) == []  # 다시 맡긴 순간 실행 기록도 비운다 (도중에 꺼도 옛 수정본이 안 붙게)
+    at = wait_for(lambda: (lambda a: a if any("💬 결과에 대해 묻기" in m.value for m in a.markdown)
+                           and any(e.label.startswith("🆚 이전 시도 1개") for e in a.expander) else None)(_open().run()), 60)
+    assert not at.exception, at.exception
+    title, shown = _result_box(at)
+    assert shown == "새 결과" and "수정본" not in title  # 지금 결과 = 새 결과 (옛 수정본이 아니다)
+    pick = next(r for r in at.radio if r.label == "채택할 안")
+    assert not any("수정본" in o for o in pick.options) and pick.options[0].endswith("(최종)")
+    assert not any("**✏️ 수정본 v1**" in m.value or m.value == "정의를 줄여줘" for m in at.markdown)  # 수정 대화도 새로 시작
+    assert followup.load_turns(Storage(db).get_followups(run_id)) == []
+    # 옛 수정본은 버리지 않는다 — '🆚 이전 시도'의 옛 쪽에 그 시도의 마지막 글(수정본)로 남는다
+    assert any("1번째 시도" in m.value and "수정본 v1" in m.value for m in at.markdown)
+    assert any(m.value == "옛 결과를 고친 수정본" for m in at.markdown)
+    kept = wait_for(lambda: (Storage(db).get_monitor(run_id) or {}).get("attempts"))  # 디스크에는 ⏱ 기록의 이전 시도에 남는다
+    assert [t.content for t in followup.load_turns(json.dumps(kept[0]["followups"]))] == ["옛 결과를 고친 수정본"]
+
+    st_at = next(b for b in at.button if b.label == "✅ 이 안으로 채택").click().run()  # 기본 선택 = 새 결과
+    assert not st_at.exception, st_at.exception
+    decision = Storage(db).get_run(run_id)["decision"]
+    assert decision.final_answer == "새 결과" and "정의를 줄여줘" not in decision.comment  # 옛 대화는 새 결과의 교훈 재료가 아니다
