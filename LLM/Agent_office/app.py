@@ -207,8 +207,20 @@ def shared_runs() -> dict:
             if row["status"] == FOLLOWUP_RUNNING:
                 storage.set_status(row["id"], "awaiting_human")
             row = {**row, "team_id": storage.team_for(row["team_id"], row["question"])}  # 옛 팀 id → 지금 팀
-            runs.setdefault((row["team_id"], row["root_id"]), restore_run(row))
+            if (row["team_id"], row["root_id"]) not in runs:
+                turns, problem = saved_followups(row["id"])  # 💬 수정 대화 — 수정본이 다시 채택 후보가 된다
+                run = runs[(row["team_id"], row["root_id"])] = restore_run(row, turns)
+                if problem:
+                    run["followup_error"] = problem
     return runs
+
+
+def saved_followups(run_id: str) -> tuple[list[followup.FollowupTurn], str]:
+    """실행 기록에 남은 💬 수정 대화. (대화, 읽지 못했으면 화면에 보일 이유) — 읽지 못해도 업무는 열린다."""
+    try:
+        return followup.load_turns(storage.get_followups(run_id)), ""
+    except ValueError:
+        return [], "저장된 수정 대화를 읽지 못했습니다 (앱이 바뀌어 기록 모양이 다릅니다) — 원래 결과는 그대로 채택·반려할 수 있습니다."
 
 
 runs = shared_runs()
@@ -1273,6 +1285,26 @@ def followup_evidence(run: dict) -> str:
     return "\n\n".join(x for x in (original, evidence) if x)
 
 
+def render_turn(t: followup.FollowupTurn, head_name: str, avatar: str | None = None):
+    """수정 대화 한 번 — 요청 · 답 · 수정본 vN · 모델·기록 · 👔 부장 검토. 답 상자를 돌려준다 (버튼을 더 넣을 수 있게).
+    결정 전 화면(render_followup)과 🕘 지난 업무 창이 함께 쓴다."""
+    with st.chat_message("user"):
+        st.markdown(t.request)
+    box = st.chat_message("assistant", avatar=avatar)
+    with box:
+        st.markdown(t.reply or "(답변 없음)")
+        if t.revised:
+            checks = ""
+            if t.harness:
+                checks = " · 🧪 형식 검사 " + ("통과" if all(h.passed for h in t.harness) else "실패 — 채택 전에 확인")
+            st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
+        meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
+        st.caption(meta + "".join(f" · {x}" for x in t.log))
+        if t.critic or t.auto_fixed or t.auto_fixed_earlier:  # 👔 부장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부장이 직접 고친 점, 남은 추가로 고칠 점
+            st.markdown(followup.head_review_markdown(t, critic_badge(t) or head_name))
+    return box
+
+
 def render_followup(run: dict) -> None:
     """💬 결정 전에 결과에 대해 묻거나 고쳐 달라고 한다 — 최종 답변자(supervisor)가 답하거나 수정본을 만든다."""
     root = run["root_id"]
@@ -1286,25 +1318,13 @@ def render_followup(run: dict) -> None:
     newest = next((t for t in reversed(turns) if t.revised), None)  # 지금 결과인 수정본 — 여기에만 '다음 수정 요청' 버튼
     send_fixes = ""
     for t in turns:
-        with st.chat_message("user"):
-            st.markdown(t.request)
-        with st.chat_message("assistant", avatar=avatar_for_chat(root)):
-            st.markdown(t.reply or "(답변 없음)")
-            if t.revised:
-                checks = ""
-                if t.harness:
-                    checks = " · 🧪 형식 검사 " + ("통과" if all(h.passed for h in t.harness) else "실패 — 채택 전에 확인")
-                st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
-            meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
-            st.caption(meta + "".join(f" · {x}" for x in t.log))
-            if t.critic or t.auto_fixed or t.auto_fixed_earlier:  # 👔 부장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부장이 직접 고친 점, 남은 추가로 고칠 점
-                st.markdown(followup.head_review_markdown(t, critic_badge(t) or dept_head.name))
-                fixes = followup.next_request(t) if t is newest and not pending else ""  # 부장이 직접 고친 뒤에도 남은 것만
-                if fixes and st.button(f"🛠 {dept_head.name}이(가) 짚은 점을 고쳐 달라고 요청",
-                                       key=f"send_fixes_{run['run_id']}_{t.version}",
-                                       help=f"{dept_head.name}이(가) 직접 고친 뒤에도 남은 지적과 '추가로 고칠 점'을 그대로 "
-                                            "다음 수정 요청으로 보냅니다. 누르지 않으면 더 고치지 않습니다."):
-                    send_fixes = fixes
+        box = render_turn(t, dept_head.name, avatar_for_chat(root))
+        fixes = followup.next_request(t) if t is newest and not pending else ""  # 부장이 직접 고친 뒤에도 남은 것만 — 최신 수정본에만
+        if fixes and box.button(f"🛠 {dept_head.name}이(가) 짚은 점을 고쳐 달라고 요청",
+                                key=f"send_fixes_{run['run_id']}_{t.version}",
+                                help=f"{dept_head.name}이(가) 직접 고친 뒤에도 남은 지적과 '추가로 고칠 점'을 그대로 "
+                                     "다음 수정 요청으로 보냅니다. 누르지 않으면 더 고치지 않습니다."):
+            send_fixes = fixes
     if send_fixes:
         start_background_followup(run, send_fixes)
         st.rerun()
@@ -1352,6 +1372,8 @@ def start_background_followup(run: dict, request: str) -> None:
                                 validators, options, team.harness.max_retries, head)
 
     def on_finish(r: dict) -> None:
+        # 대화를 실행 기록에 남긴다 — 앱을 다시 켜도 수정본(채택 후보)·부장 검토가 보이고, 채택한 뒤에도 🕘 지난 업무에서 다시 본다
+        storage.save_followups(r["run_id"], followup.dump_turns(r.get("followups") or []))
         storage.set_status(r["run_id"], "awaiting_human")
         save_monitor(r)  # 💬 문의 호출까지 포함한 ⏱ 호출 기록
 
@@ -1640,6 +1662,17 @@ def history_dialog(run_id: str) -> None:
         st.warning(f"❌ 전체 반려 · 만족도 {decision.score}/5")
     if decision and decision.comment:
         st.caption(f"코멘트: {decision.comment}")
+    turns, problem = saved_followups(run_id)  # 💬 결정 전에 주고받은 문의·수정 요청 (보기만)
+    if problem:
+        st.caption(f"💬 {problem}")
+    if turns:
+        with st.expander(f"💬 결정 전 문의·수정 요청 ({len(turns)}번) — 수정본·부장 검토"):
+            for t in turns:
+                box = render_turn(t, "부장")
+                if t.revised:  # 채택하지 않은 수정본도 나중에 확인할 수 있게 (어느 글을 보고 결정했는지)
+                    box.download_button(f"⬇ 수정본 v{t.version} 받기 (.md, {len(t.content):,}자)", data=t.content,
+                                        file_name=f"{tid}_{run_id[:8]}_v{t.version}.md", mime="text/markdown",
+                                        key=f"hist_rev_{run_id}_{t.version}")
     names_here = {nid: dept_infos[tid].name(nid) for nid in dept_infos[tid].nodes} if tid in dept_infos else {}
     run_control_ui.render_history(storage.get_monitor(run_id), names_here)  # ⏱ 호출 기록
     lessons = [l for l in storage.list_lessons(row["team_id"]) if l["run_id"] == run_id]

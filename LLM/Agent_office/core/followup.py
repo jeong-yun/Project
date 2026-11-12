@@ -28,6 +28,7 @@
        나온 회차마다 +2 — 상한 1회(기본)면 최대 +3, 2회면 최대 +5. 팀장이 다시 쓴 글이 하네스에 걸리면 재작성마다 +1 (부장의 직접 수정은 다시 쓰지 않는다).
   수정본은 채택 후보(수정본 v1, v2 …)가 되고, 사람이 그중 하나를 채택하거나 전부 버린다.
   대화 내용은 결정 코멘트에 붙어 에이전트별 교훈(core/feedback.py)에도 반영된다 (부장 검토 의견은 넣지 않는다 — decision_note).
+  대화는 한 번 끝날 때마다 실행 기록(data/runs.db)에 저장되고 앱을 다시 켜면 되살아난다 (dump_turns·load_turns — 이 PC 에만, knowledge/ 로는 나가지 않는다).
 
 추가/수정을 사람이 고르지 않아도 되게 한 것처럼(개념 편집 팀), 질문/수정도 사람이 고르지 않는다.
 """
@@ -36,7 +37,7 @@ from dataclasses import dataclass, field
 from typing import NamedTuple
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter
 
 from core import call_monitor, harness, llm_factory, verification
 from core.agent import OrgAgent, with_feedback
@@ -115,6 +116,20 @@ class FollowupTurn:
     auto_fixed: list[str] = field(default_factory=list)  # 부장이 추가로 짚어 직접 고친 점 (이 수정본에 반영됨 — 사람이 요청하지 않은 변경)
     # 부장이 앞선 수정본에 고쳐 넣었지만 그 뒤 팀장이 글을 다시 쓴 점 (상한 2 이상인 팀에서만 생긴다 — 다시 쓴 글에 남았는지는 모른다)
     auto_fixed_earlier: list[str] = field(default_factory=list)
+
+
+# 실행 기록(runs.db 의 run_followups)에 남기는 모양 — 앱을 다시 켠 뒤에도 대화·수정본·부장 검토가 보이게 (app.py 가 저장·복원)
+_TURNS = TypeAdapter(list[FollowupTurn])
+
+
+def dump_turns(turns: list[FollowupTurn]) -> str:
+    """대화 전체를 JSON 으로 (모든 칸 — 수정본 전문·하네스 결과·부장 검토·직접 고친 점 포함)."""
+    return _TURNS.dump_json(turns).decode("utf-8")
+
+
+def load_turns(data: str) -> list[FollowupTurn]:
+    """dump_turns 의 반대. 빈 글이면 대화 없음. 나중에 칸이 늘어도 옛 기록은 기본값으로 열린다 (모양이 다르면 ValueError)."""
+    return _TURNS.validate_json(data) if data else []
 
 
 def history_text(turns: list[FollowupTurn]) -> str:
