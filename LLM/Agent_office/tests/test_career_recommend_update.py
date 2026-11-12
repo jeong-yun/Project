@@ -249,8 +249,8 @@ def test_tool_update_reads_old_portfolio_latest_docs_and_approved_web(tmp_path):
     inputs = {"career_kind": "portfolio_update", "portfolio": str(old), "portfolio_name": "예전.md", "docs": [str(new)],
               "docs_names": ["최신.md"], "role": "보안 관리자", "web_on": True, "web_approved": True,
               "web_queries": ["보안 관리자 채용 트렌드 2026"], "web_results": [{"title": "트렌드", "url": URL, "snippet": "요약"}],
-              "github_url": "https://github.com/o/r", "github_raw": "https://raw.githubusercontent.com/o/r/HEAD/README.md",
-              "github_text": "# 공개 프로젝트\n- RAG 데모"}
+              "fetched": [{"url": "https://github.com/o/r", "raw": "https://raw.githubusercontent.com/o/r/HEAD/README.md",
+                           "kind": "github", "use": "ref", "text": "# 공개 프로젝트\n- RAG 데모"}]}
     res = career_docs.run("q", inputs, None)
     opts = res.harness_options
     assert "포트폴리오 1개 · 문서 1개 · 외부 자료 1건" in res.title
@@ -328,16 +328,17 @@ def test_search_queries_sends_only_the_given_queries(no_network_search):
 
 
 def test_github_address_rules():
-    raw = career_search.github_raw_url
+    # 주소 규칙 전체는 tests/test_career_web_read.py — 여기는 처음부터 있던 세 모양과 '네트워크에 나가기 전에 막는다'만
+    def raw(url):
+        return career_search.target(url).fetch
+
     assert raw("https://github.com/o/r") == "https://raw.githubusercontent.com/o/r/HEAD/README.md"
     assert raw("https://github.com/o/r/blob/main/docs/PROJECTS.md") == "https://raw.githubusercontent.com/o/r/main/docs/PROJECTS.md"
     assert raw("https://raw.githubusercontent.com/o/r/main/README.md") == "https://raw.githubusercontent.com/o/r/main/README.md"
-    for bad in ("http://github.com/o/r", "https://evil.example/x.md", "https://github.com/o/r/blob/main/app.py",
-                "https://github.com/o", "https://github.com/o/r/blob/main/../x.md", "https://github.com/o/r/blob/main/x.md?a=b",
-                "https://user@github.com/o/r"):
-        assert raw(bad) is None, bad
-    with pytest.raises(ValueError):
-        career_search.fetch_github("https://evil.example/x.md")  # 네트워크에 나가기 전에 막는다
+    for bad in ("http://evil.example/x.md", "https://github.com/o", "https://github.com/o/r/blob/main/../x.md",
+                "https://user@github.com/o/r", "https://github.com/o/r/blob/main/logo.png"):
+        with pytest.raises(ValueError):  # FetchProblem — 네트워크에 나가기 전에 막는다
+            career_search.target(bad)
 
 
 # ─── 팀 설정 · 가짜 모델로 끝까지 ─────────────────────────────────────────────
@@ -469,7 +470,7 @@ def test_career_page_shows_both_new_forms(app):
     assert not at.exception, at.exception
     web = next(c for c in at.checkbox if c.label.startswith("🌐 외부 자료로"))
     assert web.value is False  # 기본 꺼짐
-    assert any(t.label.startswith("GitHub 공개 저장소") for t in at.text_input)
+    assert any(t.label.startswith("참고 주소 — GitHub·웹") for t in at.text_area)
     assert len(at.get("file_uploader")) == 4  # 지금 포트폴리오 + 형식 참고 파일 + 최신 요약 문서 + JD 파일
 
 
@@ -507,7 +508,7 @@ def test_web_box_shows_queries_and_searches_only_after_approval(monkeypatch, mod
                                default_timeout=30).run()
     assert not at.exception, at.exception
     assert no_network_search == [] and "result" not in at.session_state  # 승인 전에는 아무것도 보내지 않는다
-    assert any("승인 버튼을 눌러야만" in c.value for c in at.caption)
+    assert any("검색어는 검색 엔진(DuckDuckGo)으로 나갑니다" in c.value and "승인하세요" in c.value for c in at.caption)
     box = next(t for t in at.text_area if t.label.startswith("보낼 검색어"))
     assert box.value == "보안 관리자 채용 트렌드"  # 개인 정보가 든 모델 검색어는 초안에서 빠진다
     assert any("개인 정보 검사에 걸려" in c.value for c in at.caption)
@@ -543,13 +544,13 @@ def test_web_box_skip_and_off_by_default(models, no_network_search):
     assert inputs["web_approved"] and inputs["web_results"] == [] and no_network_search == []
 
 
-def test_web_box_rejects_non_github_address(models, no_network_search):
+def test_web_box_rejects_address_it_cannot_read(models, no_network_search):
     from streamlit.testing.v1 import AppTest
 
-    at = AppTest.from_function(web_page, kwargs={"root": str(ROOT), "request": update_request(github_url="https://evil.example/x.md"),
+    at = AppTest.from_function(web_page, kwargs={"root": str(ROOT), "request": update_request(ref_urls="http://evil.example/x.md"),
                                                  "models_cfg": models}, default_timeout=30).run()
     assert not at.exception, at.exception
-    assert any("가져올 수 없습니다" in e.value for e in at.error)
+    assert any("⛔ `http://evil.example/x.md`" in m.value and "https 주소만 읽습니다" in m.value for m in at.markdown)
     assert "▶ 진행" in [b.label for b in at.button]
 
 

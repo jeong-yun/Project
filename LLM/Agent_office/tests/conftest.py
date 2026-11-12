@@ -108,6 +108,19 @@ def no_network_feeds(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_network_career(monkeypatch):
+    """👔 커리어 팀의 주소 읽기(GitHub·웹 페이지 — core/career_search.py)가 테스트 중 실제로 나가지 않게 한다 —
+    가져오기(_send)와 사이트 이름 풀기(_resolve) 둘 다. 주소 읽기 테스트는 가짜 _send·_resolve 를 직접 넣는다."""
+    from core import career_search
+
+    def blocked(*args, **kwargs):
+        raise RuntimeError("테스트 중 네트워크 금지")
+
+    monkeypatch.setattr(career_search, "_send", blocked)
+    monkeypatch.setattr(career_search, "_resolve", blocked)
+
+
+@pytest.fixture(autouse=True)
 def no_network_market(monkeypatch):
     """📺 보드·🏠 메인의 지수·환율 띠가 테스트 중 Yahoo 에 묻지 않게 한다 (실패 → 그 칸은 '—').
     시세 테스트는 market.fetch_history 를 가짜 일봉으로 바꿔 쓴다."""
