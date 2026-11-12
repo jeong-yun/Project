@@ -127,10 +127,10 @@ class RequiredTermsValidator(Validator):
     description = "업무 필수 항목(예: 시나리오·손절가·예산)이 답변에 있는지 검사"
 
     def check(self, answer: str, options: dict):
-        # 항목 하나에 "A|B" 처럼 대안을 적으면 그중 하나만 있어도 통과
+        # 항목 하나에 "A|B" 처럼 대안을 적으면 그중 하나만 있어도 통과. 띄어쓰기는 보지 않는다 ('분할 매수' = '분할매수')
         required = options.get("required_terms", [])
-        low = answer.lower()
-        missing = [term for term in required if not any(alt.strip().lower() in low for alt in term.split("|"))]
+        low = re.sub(r"\s+", "", answer.lower())
+        missing = [term for term in required if not any(re.sub(r"\s+", "", alt.lower()) in low for alt in term.split("|"))]
         if missing:
             return self.fail(f"반드시 들어가야 할 항목이 빠졌다: {missing}. 이 항목들을 다루는 내용을 추가하라.")
         return self.ok(f"필수 항목 {len(required)}개 포함" if required else "검사할 필수 항목 없음")

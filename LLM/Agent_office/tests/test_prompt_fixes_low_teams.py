@@ -34,6 +34,18 @@ def grpo_entry(tmp_path, extra: str = "") -> cat.Entry:
     return cat.Catalog.load(folder).find("GRPO")
 
 
+# ─── C19 적대적 리뷰 스킬 (기본·주식·여행) ────────────────────────────────
+
+
+@pytest.mark.parametrize("team_id, worker", [("general", "staff_draft"), ("stock", "am_data"),
+                                             ("travel_domestic", "am_spots"), ("travel_abroad", "am_spots")])
+def test_adversarial_review_skill_says_it_is_for_managers(team_id, worker, ranks, models):
+    prompt = agents_of(team_id, ranks, models)[worker].system_prompt()  # 검토를 하지 않는 실무자도 이 스킬을 받는다
+    line = next(l for l in prompt.splitlines() if "적대적 리뷰어로 행동한다" in l)
+    assert "관리자가 하위 결과를 검토·통합할 때만" in line and "실무자" in line
+    assert "\n검토·통합할 때는 적대적 리뷰어로 행동한다." not in prompt
+
+
 # ─── R10~R14 개념 편집 팀 · 기본 팀 ──────────────────────────────────────
 
 
@@ -99,3 +111,63 @@ def test_small_wording_fixes_in_general_and_concept(ranks, models):
     assert "하네스" not in code and "실행된다" not in code and "문법 오류가 없다" in code  # 검사는 문법만 본다 (실행하지 않음)
     anchor = skill_line(agents_of("concept", ranks, models)["am_fact"], "- 좋음: \"'M-TTC'")
     assert "+5%로 교체" not in anchor and "삭제" in anchor  # 미확인 수치를 다른 수치로 바꿔도 된다고 읽히지 않게
+
+
+# ─── T13·T14 여행 두 팀 ──────────────────────────────────────────────────
+
+
+def test_travel_teams_cover_the_same_basics(ranks, models):
+    abroad, domestic = load_team("travel_abroad"), load_team("travel_domestic")
+    assert any("동행자 조건" in c and "여행 스타일" in c for c in abroad.review_criteria)  # 국내에만 있던 검토 기준
+    compare = next(c for c in task_of("travel_domestic", "plan").success_criteria if "수단별" in c)
+    assert "이동 수단을 정해 준 경우" in compare  # 수단을 정해 줬는데도 모든 수단을 비교하라고 하지 않는다
+    holiday = next(c for c in domestic.review_criteria if "연휴" in c)
+    assert "여행 달력" in holiday and "'확인 필요'" in holiday  # 달력 툴은 공휴일을 표시하지 않는다
+    transport = agents_of("travel_domestic", ranks, models)["am_transport"]
+    assert "정해져 있으면" in skill_line(transport, "- 출발지↔목적지는")
+    assert "'확인 필요'" in skill_line(transport, "- 렌터카·자가용이면")  # '확인한다'에 못 했을 때의 지시
+    prep = agents_of("travel_abroad", ranks, models)["staff_prep"]
+    assert "'확인 필요'" in skill_line(prep, "- 안전:")
+
+
+def test_route_extraction_starts_at_the_itinerary_when_the_plan_is_long(use_script, models):
+    def sent_for(plan: str) -> tuple[str, list[str]]:
+        script = use_script(Script(Itinerary=route.Itinerary(destination="파리", stops=[])))
+        _, notes = route.extract_itinerary(plan, models)
+        return script.calls[-1][1][-1].content, notes
+
+    checklist = "## 출국 준비 체크리스트\n" + "- 여권 유효기간·비자 확인\n" * 900  # 일정 표보다 앞에 오는 긴 글 (약 14,000자)
+    days = "## 일자별 일정\n" + "\n".join(f"| {i}일차 | 장소 {i} |" for i in range(1, 11))
+    assert len(checklist) > route.PLAN_CHARS
+    sent, notes = sent_for(checklist + days)
+    assert sent.startswith("| 1일차") and "| 10일차 |" in sent and notes == []  # 일정이 다 들어갔으면 안내도 없다
+    long_days = "\n".join(f"| {i}일차 | " + "장소 " * 700 + "|" for i in range(1, 11))
+    sent, notes = sent_for(long_days)
+    assert len(sent) == route.PLAN_CHARS and any("12,000자" in n and "빠졌을 수" in n for n in notes)  # 일정이 잘리면 알린다
+    short = "한 줄 요약\n1일차 오사카성"
+    assert sent_for(short) == (short, [])  # 짧은 계획서는 전과 같다
+
+
+# ─── T15 주식 팀 ─────────────────────────────────────────────────────────
+
+
+def test_stock_personas_wording_and_check_message(ranks, models):
+    agents = agents_of("stock", ranks, models)
+    research, risk = agents["gm_research"].system_prompt(), agents["gm_risk"].system_prompt()
+    assert "리스크 관리 책임자" not in research and "리서치" in research.splitlines()[0]  # 부장·리서치는 전문 분야에 맞는 페르소나
+    assert "리스크 관리 책임자" in risk
+    constraints = "\n".join(task_of("stock", "recommend").constraints)
+    assert "데이터 없음" not in constraints and "'확인 불가'" in constraints  # 모를 때 쓰는 말은 '확인 불가' 하나
+    problem = stock_calc.check_recommend("요약 블록이 없는 답변", {}).problems[0]
+    assert "Stage 1" not in problem and "스키마" not in problem and "[JSON 요약" in problem  # 프롬프트에 있는 이름으로 알려 준다
+
+
+def test_required_terms_do_not_fail_on_spacing_or_decimal():
+    def passed(answer: str, terms: list[str]) -> bool:
+        return harness.run_validators(["required_terms"], answer, {"required_terms": terms})[0].passed
+
+    trade = task_of("stock", "trade").harness_options["required_terms"]
+    assert passed("보유기간 중기 · 분할매수 3회 · 손절 · 손익비 2.1 · 리스크", trade)  # 붙여 써도 같은 낱말이다
+    assert not passed("보유 기간 · 분할 매수 · 손익비 · 리스크", trade)  # 빠진 항목은 그대로 잡는다
+    portfolio = task_of("stock", "portfolio").harness_options["required_terms"]
+    assert passed("비중 합계 100.0% · 리밸런싱 분기 1회", portfolio)
