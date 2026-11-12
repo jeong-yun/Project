@@ -123,3 +123,28 @@ def test_home_shows_headline_and_board_link(tmp_path, monkeypatch):
     at.run()
     assert not at.exception
     assert any("오늘의 한 줄" in m.value and "에이전트 관리" in m.value for m in at.markdown)
+
+
+def test_app_draws_html_frames_without_going_away_warning(tmp_path, monkeypatch):
+    """보드·탭 제목 스크립트는 frame_ui.html_frame 으로 그린다 — 새 Streamlit 서버 기록에 '없어질 함수' 경고가 없어야 한다.
+
+    Streamlit 1.66 은 `st.components.v1.html` 을 쓸 때마다 "will be removed after 2026-06-01" 을 남긴다 (1.43 은 경고가 없다).
+    """
+    import logging
+
+    seen: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: seen.append(record.getMessage())
+    logger = logging.getLogger("streamlit.deprecation_util")
+    logger.addHandler(handler)
+    try:
+        board = _app(tmp_path / "board", monkeypatch, board_ui.BOARD_VIEW)
+        board.run()
+        dept = _app(tmp_path / "dept", monkeypatch, "dept")  # 🏢 부서 업무 — 사이드바에 탭 제목 스크립트(높이 0 이던 창)
+        dept.run()
+    finally:
+        logger.removeHandler(handler)
+    assert not board.exception and not dept.exception
+    assert board.get("iframe")[0].proto.srcdoc.startswith("<!doctype html>")
+    assert any("__aoTitle" in f.proto.srcdoc for f in dept.get("iframe"))
+    assert not [m for m in seen if "will be removed" in m]

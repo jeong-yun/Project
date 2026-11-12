@@ -34,7 +34,6 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
-import streamlit.components.v1 as components
 from pydantic import ValidationError
 from st_click_detector import click_detector
 
@@ -47,6 +46,7 @@ import concept_ui
 import design_ui
 import dept_models_ui
 import education_ui
+import frame_ui
 import home_ui
 import models_ui
 import office_ui
@@ -984,7 +984,7 @@ def render_route_tab(run: dict) -> None:
                    horizontal=True, key=f"mapday_{run['run_id']}")
     st.caption("▶ 버튼을 누르면 시간 순서대로 이동 경로가 그려집니다 · 점선은 이동 방향으로 흐릅니다 · "
                "마커 숫자 = 일차-순서 · 마커를 누르면 메모가 보입니다")
-    components.html(map_html(route, day or None, run.get("trip_start")), height=540)
+    frame_ui.html_frame(map_html(route, day or None, run.get("trip_start")), height=540)
     rows = [
         {"일차": s.day, "순서": s.order, "시간": s.time, "종류": f"{CATEGORIES[s.category][0]} {CATEGORIES[s.category][1]}",
          "장소": s.name, "메모": s.note, "위치": "확인됨" if route.verified.get(f"{s.day}-{s.order}") else "추정"}
@@ -1688,7 +1688,7 @@ def set_tab_title() -> None:
     n_waiting = sum(r["done"] and r["status"] == "awaiting_human" for r in runs.values())
     title = ("⏳ 진행 중 · " if n_running else "") + (f"🔔 결정 대기 {n_waiting} · " if n_waiting else "") + "Agent Office"
     # Streamlit 이 다시 그릴 때마다 원래 제목으로 되돌리므로, 부모 창에서 1초마다 맞춰 준다
-    components.html(
+    frame_ui.html_frame(
         "<script>const P = window.parent; P.__aoTitle = " + json.dumps(title) + ";"
         "if (!P.__aoTimer) { P.__aoTimer = new P.Function('if (window.__aoTitle && document.title !== window.__aoTitle)"
         " document.title = window.__aoTitle;'); P.setInterval(P.__aoTimer, 1000); } P.__aoTimer();</script>",

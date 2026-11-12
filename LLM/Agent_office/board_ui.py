@@ -24,8 +24,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import streamlit as st
-import streamlit.components.v1 as components
 
+import frame_ui
 from core import feeds, llm_factory, market
 from core.config import CONFIG_DIR, load_yaml
 
@@ -148,7 +148,7 @@ def render_board_page(models, settings: dict, data_dir: Path) -> None:
     data_dir = Path(data_dir)
     data = board_data(feeds.load_snapshot(data_dir), models, settings, market.quotes(settings, data_dir))
     data["market_pending"] = market.pending(data_dir)  # 첫 시세가 늦으면 1분 뒤 다시 그려 채운다
-    components.html(board_html(data), height=1080, scrolling=False)
+    frame_ui.html_frame(board_html(data), height=1080)  # 안쪽 HTML 이 넘침을 숨긴다 (html,body{overflow:hidden})
 
 
 def market_strip_html(cells: list[dict]) -> str:
