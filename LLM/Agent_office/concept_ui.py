@@ -450,7 +450,7 @@ def result_tabs(content: str, run: dict) -> None:
             if left:  # 원본에 원래 있던 형식 문제 — 하네스가 막지는 않지만 알려 준다
                 st.caption(f"원본에 원래 있던 형식 문제 {len(left)}건이 남아 있습니다 (이번 변경 제안으로는 고쳐지지 않음): "
                            + " / ".join(x[:40] for x in left[:4]) + (" …" if len(left) > 4 else ""))
-        st.text(final_entry or "(최종본 없음 — <final> 블록이 없습니다)")
+        st.text(final_entry or "최종본이 없습니다 — 아래 '채택할 안'에서 편집장·부장의 안을 고르거나, 다시 맡겨 주세요.")
     with tabs[1], st.container(height=420):
         if res.change_notes:  # 최종본에서 떼어 낸 🔧수정·➕추가 표시와 이유 — 확인용 (카탈로그에는 들어가지 않음)
             notes = "\n".join(f"- {n}" for n in res.change_notes)
