@@ -3,8 +3,12 @@
   confirm_step  : 맡기기 전 확인 단계 — JD·요약 문서에 그림(png·jpg·jpeg·webp)·스캔 PDF 가 있으면 비전 모델로 글자를 옮기고,
                   사람이 고친 뒤 '이 내용으로 진행'을 눌러야 업무가 시작된다 (확인한 글 = JD·사실의 출처)
                   🎯 JD 추천은 JD 파일마다 따로 확인한다 (파일 하나 = JD 하나)
-  web_step      : 🔄 포트폴리오 최신화의 외부 자료 승인 — 검색어 초안(직무·일반 기술 용어만)을 보여 주고, 사람이 고치거나 지운 뒤
-                  '승인'을 눌러야 검색·GitHub 글 가져오기를 한다 (기본 꺼짐, core/career_search.py 가 개인 정보가 든 검색어를 막는다)
+  web_step      : 외부 자료 승인 (네 양식 + 💬 자유 질문) — '읽기'와 '보내기'를 나눠 보여 준다.
+                  읽기 = 사람이 넣은 GitHub·웹 주소의 글 (주소만 나간다 — 가져올 주소 목록을 확인하고 승인),
+                  보내기 = 검색어 (기본 꺼짐 — 초안을 고치거나 지운 뒤 승인, core/career_search.py 가 개인 정보가 든 검색어를 막는다).
+                  승인 전에는 아무것도 나가지 않는다. 가져오지 못한 주소는 왜 안 됐고 무엇을 하면 되는지 알린 뒤 진행·취소를 고르게 한다
+  followup_step : 💬 수정 요청·추가 질문 글에 적은 주소 — 같은 확인 상자를 거쳐 가져오고, 그 글을 그 업무의 근거 자료에 더한다
+                  (수정본을 쓰는 팀장 · 부장 검토 · 사실 검사 · 문서 미리보기가 모두 같은 근거를 본다)
   preview       : 최종 결과 아래 '📄 문서' 상자 — 문항별 글자 수(코드 계산) · 사실 검사 요약 · 내려받기(.md · .docx · .hwpx)
   adopted_files : 채택 시 results/career/ 에 함께 저장할 파일 (채택한·고친 내용으로 다시 만든다)
 
@@ -14,13 +18,14 @@
 
 import hashlib
 import re
+from urllib.parse import unquote
 
 import streamlit as st
 
 from core import career, career_search, llm_factory, search, usage, vision
 from core.config import load_settings
 from core.doc_export import to_docx, to_hwpx
-from core.schemas import HumanDecision, ModelsConfig, ModelSpec, RankModels
+from core.schemas import HumanDecision, ModelsConfig, ModelSpec, RankModels, ToolResult
 from core.tools import career_docs
 
 FEATURE = "career_docs"
@@ -115,7 +120,7 @@ def apply_confirmed(request: dict, items: dict[str, list], texts: dict[str, obje
 
 
 def confirm_step(request: dict, team_id: str, task_id: str, models: ModelsConfig, chains: list[RankModels]) -> dict:
-    """맡기기 전 확인 단계 — ① 그림·스캔 PDF 글자 확인 → ② (포트폴리오 최신화) 외부 검색어·GitHub 주소 승인.
+    """맡기기 전 확인 단계 — ① 그림·스캔 PDF 글자 확인 → ② 외부 자료(검색어 · GitHub·웹 주소) 승인.
 
     둘 다 필요 없으면 request 를 그대로 돌려준다. 확인을 기다리는 동안은 빈 dict (업무를 시작하지 않는다).
     """
@@ -244,21 +249,34 @@ def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig,
     return {}
 
 
-# ─── 맡기기 전 외부 자료 승인 (🔄 포트폴리오 최신화) ────────────────────────
+# ─── 맡기기 전 외부 자료 승인 — 읽기(주소의 글) · 보내기(검색어) ─────────────
 
-WEB_NOTICE = ("🔒 이 팀은 평소 웹 검색을 하지 않습니다. 이 단계에서 **승인 버튼을 눌러야만** 아래 검색어를 검색 엔진(DuckDuckGo)으로 "
-              "보냅니다. 검색어에는 직무 이름·일반 기술 용어·연도만 넣습니다 — 이름·회사·프로젝트 이름·숫자·문서 문장이 있으면 "
-              "그 검색어는 보내지 않습니다. 검색 결과는 용어·트렌드에만 쓰고, 내 경력·숫자는 내 문서에서만 씁니다 (출처는 URL 로 표시).")
+READ_NOTICE = ("📥 **읽기** — 주소의 글을 가져올 때는 **그 주소만 나갑니다** — 내 문서 내용은 나가지 않습니다. 그 주소 하나만 읽고 "
+               "링크를 따라가지 않습니다. 가져온 글은 용어·프로젝트 이름을 참고하는 외부 자료이고(출처 URL 표시) 내 경력·숫자의 근거가 "
+               "아닙니다 — '내 저장소'로 표시한 GitHub 글만 사실의 출처가 됩니다. 승인 전에는 아무것도 가져오지 않습니다.")
+SEND_NOTICE = ("🔍 **보내기** — 검색어는 검색 엔진(DuckDuckGo)으로 나갑니다 — 아래에서 확인하고 승인하세요. 검색어에는 직무 이름·"
+               "일반 기술 용어·연도만 넣습니다 — 이름·회사·프로젝트 이름·숫자·문서 문장이 있으면 그 검색어는 보내지 않습니다. "
+               "검색 결과는 용어·트렌드에만 쓰고, 내 경력·숫자는 내 문서에서만 씁니다 (출처는 URL 로 표시).")
+URL_LIMITS = {"ref": career_search.MAX_URLS, "jd": career_docs.MAX_JDS}
+USE_LABEL = {"ref": "참고 주소", "jd": "JD 주소"}
 
 
-def needs_web(inputs: dict) -> bool:
-    """포트폴리오 최신화에서 외부 검색을 켰거나 GitHub 주소를 넣었고, 아직 승인 단계를 거치지 않았는가."""
-    return (inputs.get("career_kind") == "portfolio_update" and not inputs.get("web_approved")
-            and bool(inputs.get("web_on") or str(inputs.get("github_url") or "").strip()))
+def wanted_urls(inputs: dict, question: str = "") -> list[tuple[str, str]]:
+    """가져오려는 주소 [(주소, 쓰임)] — 'jd' = JD 칸에 줄째로 넣은 주소, 'ref' = 참고 주소 칸 (💬 자유 질문은 질문 글 속의 주소)."""
+    refs = career_docs.ref_urls(inputs)
+    if not inputs.get("career_kind"):  # 자유 질문에는 주소 칸이 없다 — 질문에 적은 주소를 가져올지 묻는다
+        refs += [u for u in career_search.find_urls(question) if u not in refs]
+    jds = career_docs.jd_urls(inputs)
+    return [(u, "jd") for u in jds] + [(u, "ref") for u in refs if u not in jds]
+
+
+def needs_web(inputs: dict, question: str = "") -> bool:
+    """외부 검색을 켰거나 가져올 주소가 있고, 아직 승인 단계를 거치지 않았는가 (네 양식 + 💬 자유 질문)."""
+    return not inputs.get("web_approved") and bool(inputs.get("web_on") or wanted_urls(inputs, question))
 
 
 def private_text(inputs: dict) -> str:
-    """검색어 검사에 쓰는 '내 글' — 요약 문서·지금 포트폴리오 원문 + 올린 파일 이름 (이 글의 낱말이 검색어로 나가지 않게)."""
+    """검색어·주소 검사에 쓰는 '내 글' — 요약 문서·지금 포트폴리오 원문 + 올린 파일 이름 (이 글의 낱말이 밖으로 나가지 않게)."""
     docs, _ = career_docs.read_docs(inputs)
     olds, _ = career_docs.read_portfolios(inputs)
     refs, _ = career_docs.read_format_refs(inputs)
@@ -266,41 +284,143 @@ def private_text(inputs: dict) -> str:
     return "\n".join([d.text for d in docs] + [d.text for d in olds] + [d.text for d in refs] + names)
 
 
-def approved_request(request: dict, queries: list[str], results: list[dict], github: tuple[str, str] | None,
-                     notes: list[str]) -> dict:
-    """승인한 검색어·결과·GitHub 글을 업무 입력에 넣는다 → career_docs 툴이 '외부 자료' 절로 보여 준다."""
+def url_plan(inputs: dict, question: str, private: str, role: str) -> list[dict]:
+    """가져올 주소마다 {entered, use, target, problem} — 네트워크 없이 주소 모양만 본다 (승인 전 화면).
+
+    target 이 None 이면 받지 않는 주소이고 problem 에 '이유 — 다음에 할 일'. 참고 주소는 5개, JD 주소는 8개까지.
+    """
+    plan, seen, counts = [], set(), {"ref": 0, "jd": 0}
+    for url, use in wanted_urls(inputs, question):
+        item = {"entered": url, "use": use, "target": None, "problem": ""}
+        try:
+            item["target"] = career_search.target(url, private, role)
+        except career_search.FetchProblem as e:
+            item["problem"] = str(e)
+        if item["target"] and item["target"].fetch in seen:
+            continue  # 같은 글을 가리키는 주소는 한 번만
+        if item["target"] and counts[use] >= URL_LIMITS[use]:
+            item["target"], item["problem"] = None, f"{USE_LABEL[use]}는 {URL_LIMITS[use]}개까지 읽습니다 — 꼭 필요한 주소만 남겨 주세요."
+        if item["target"]:
+            seen.add(item["target"].fetch)
+            counts[use] += 1
+        plan.append(item)
+    return plan
+
+
+def fetch_urls(plan: list[dict]) -> tuple[list[dict], list[str]]:
+    """승인한 주소를 차례로 가져온다 → (가져온 글 [{url, entered, raw, kind, use, text}], 가져오지 못한 주소와 이유).
+
+    하나가 실패해도 나머지는 가져온다.
+    """
+    docs, failed = [], []
+    for item in plan:
+        target = item["target"]
+        if target is None:
+            continue
+        try:
+            docs.append({"url": target.url, "entered": item["entered"], "raw": target.fetch, "kind": target.kind, "use": item["use"],
+                         "folder": target.folder, "text": career_search.fetch(target)})
+        except career_search.FetchProblem as e:
+            failed.append(f"{career_docs.FAILED_URL} {item['entered']}: {e}")
+    return docs, failed
+
+
+def read_line(doc: dict) -> str:
+    """가져온 글 한 줄 안내 — 무엇을 읽었는지 (파일 이름 · 글자 수 · 폴더 주소면 README.md 만 읽었다는 것)."""
+    name = unquote(str(doc["raw"]).rsplit("/", 1)[-1]) if doc.get("kind") == "github" else "웹 페이지"
+    only = " — 폴더 전체가 아니라 그 폴더의 README.md 만 읽었습니다 (다른 파일은 파일 주소로 넣어 주세요)" if doc.get("folder") else ""
+    return f"읽은 글 {doc['url']}: {name} {len(str(doc['text'])):,}자{only}"
+
+
+def approved_request(request: dict, queries: list[str], results: list[dict], docs: list[dict], notes: list[str],
+                     as_source: bool | None = None) -> dict:
+    """승인한 검색어·결과·가져온 글을 업무 입력에 넣는다 → career_docs 툴이 '🌐' 절(외부 자료) · JD · 내 문서로 보여 준다."""
     inputs = dict(request["tool_inputs"])
-    inputs.update(web_approved=True, web_queries=list(queries), web_results=list(results), web_notes=list(notes))
-    if github:
-        inputs["github_text"], inputs["github_raw"] = github
+    inputs.update(web_approved=True, web_queries=list(queries), web_results=list(results), web_notes=list(notes), fetched=list(docs))
+    if as_source is not None:  # 💬 자유 질문 — 승인 상자에서 고른 '내 저장소'
+        inputs["github_as_source"] = bool(as_source)
     return {**request, "tool_inputs": inputs}
 
 
-def web_step(request: dict, team_id: str, task_id: str, models: ModelsConfig) -> dict:
-    """외부 자료 승인 단계 — 검색어 초안을 보여 주고, 사람이 고치거나 지운 뒤 '승인'을 눌러야 검색·GitHub 가져오기를 한다.
+def _plan_line(item: dict, as_source: bool) -> str:
+    target = item["target"]
+    if target is None:
+        return f"- ⛔ `{item['entered']}` — {item['problem']} → **가져오지 않음**"
+    what = ("GitHub" + (" 폴더·저장소 — 폴더 전체가 아니라 README.md 만 읽습니다" if target.folder else " 글")
+            if target.kind == "github" else "웹 페이지")
+    if item["use"] == "jd":
+        use = "JD 로 씁니다"
+    elif target.kind == "github" and as_source:
+        use = "내 문서로 — 사실의 출처"
+    else:
+        use = "외부 자료 — 용어·프로젝트 이름 참고, 출처 URL 표시"
+    return f"- ✅ `{target.fetch}` — {what} · {use}"
 
-    필요 없으면 request 를 그대로 돌려준다. 기다리는 동안은 빈 dict.
+
+def _failed_box(pending: dict, key: str, wkey: str, cancel: str = "✖ 취소 (업무 맡기지 않음)") -> bool:
+    """승인 뒤 — 가져오지 못한 주소가 있다. 어느 주소가 왜 안 됐고 무엇을 하면 되는지 보여 주고, 가져온 글로 진행할지 고르게 한다.
+
+    '▶ 가져온 글로 진행'을 누른 실행에서 True (pending['result'] 를 쓰면 된다). 기다리는 동안은 False.
+    """
+    st.warning("가져오지 못한 주소가 있습니다 — 아래 안내대로 고쳐 다시 보내거나(취소), 가져온 글만으로 진행하세요.\n\n"
+               + "\n".join(f"- ⛔ {line.removeprefix(career_docs.FAILED_URL).strip()}" for line in pending["failed"]))
+    st.caption(pending["summary"])
+    c1, c2 = st.columns(2)
+    go = c1.button("▶ 가져온 글로 진행", type="primary", key=f"{wkey}_use")
+    if c2.button(cancel, key=f"{wkey}_drop"):
+        st.session_state.pop(key, None)
+        st.rerun()
+    if go:
+        st.session_state.pop(key, None)
+    return go
+
+
+def _read_section(plan: list[dict], inputs: dict, wkey: str, ask_source: bool) -> bool | None:
+    """확인 상자의 '읽기' 부분 — 안내 · ('내 저장소' 체크) · 가져올 주소 목록. 체크 칸을 그렸으면 고른 값, 아니면 None."""
+    st.caption(READ_NOTICE)
+    picked = None
+    if ask_source and any(item["target"] and item["target"].kind == "github" for item in plan):
+        picked = st.checkbox("내 저장소입니다 — GitHub 글을 내 문서(사실의 출처)로도 쓰기", key=f"{wkey}_mine",
+                             value=bool(inputs.get("github_as_source")),
+                             help="끄면 용어·프로젝트 이름을 참고하는 외부 자료로만 씁니다 (그 글의 사실·숫자를 내 경력으로 쓰지 못합니다). "
+                                  "프로젝트 내용을 포트폴리오에 넣으려면 켜세요 — 내가 쓴 저장소일 때만.")
+    as_source = bool(inputs.get("github_as_source") if picked is None else picked)
+    st.markdown("**가져올 주소**\n\n" + "\n".join(_plan_line(item, as_source) for item in plan))
+    return picked
+
+
+def web_step(request: dict, team_id: str, task_id: str, models: ModelsConfig) -> dict:
+    """외부 자료 승인 단계 — 가져올 주소(읽기)와 검색어 초안(보내기)을 보여 주고, 사람이 '승인'을 눌러야 가져오고 검색한다.
+
+    필요 없으면(검색 꺼짐 + 주소 없음) request 를 그대로 돌려준다. 기다리는 동안은 빈 dict.
+    주소만 넣고 검색을 켜지 않았으면 검색어 칸 없이 가져올 주소 목록만 확인한다.
     """
     key = f"career_web_{team_id}_{task_id}"
     if request:
-        if not needs_web(request.get("tool_inputs") or {}):
+        if not needs_web(request.get("tool_inputs") or {}, str(request.get("question") or "")):
             st.session_state.pop(key, None)
             return request
         nonce = (st.session_state.get(key) or {}).get("nonce", 0) + 1
-        st.session_state[key] = {"request": request, "notes": None, "nonce": nonce}
+        st.session_state[key] = {"request": request, "notes": None, "nonce": nonce, "result": None, "failed": []}
     pending = st.session_state.get(key)
     if not pending:
         return {}
     inputs, wkey = pending["request"]["tool_inputs"], f"{key}_{pending['nonce']}"
-    role = career_docs.target_role(inputs)
-    private = private_text(inputs)
-    settings = load_settings()
 
     with st.container(border=True):
-        st.markdown("##### 🌐 외부 자료 확인 — 업무 시작 전 (보내기 전에 검색어를 확인하세요)")
-        st.caption(WEB_NOTICE)
+        st.markdown("##### 🌐 외부 자료 확인 — 업무 시작 전")
+        if pending.get("result"):
+            return pending["result"] if _failed_box(pending, key, wkey) else {}
+        role = career_docs.target_role(inputs)
+        private = private_text(inputs)
+        settings = load_settings()
+        plan = url_plan(inputs, str(pending["request"].get("question") or ""), private, role)
+        ready = [item for item in plan if item["target"]]
+        # 💬 자유 질문에는 '내 저장소' 칸이 없다 → 이 상자에서 고른다 (양식은 양식의 체크 칸을 따른다)
+        picked_source = _read_section(plan, inputs, wkey, ask_source=not inputs.get("career_kind")) if plan else None
         checks: list[tuple[str, list[str]]] = []
         if inputs.get("web_on"):
+            st.caption(SEND_NOTICE)
             if pending["notes"] is None:
                 with st.spinner("검색어 초안을 만드는 중… (직무 이름·일반 기술 용어만 씁니다)"):
                     queries, pending["notes"] = career_search.draft_queries(role, private, models, settings)
@@ -314,16 +434,9 @@ def web_step(request: dict, team_id: str, task_id: str, models: ModelsConfig) ->
                 st.markdown("\n".join(f"- ✅ `{q}`" if not p else f"- ⛔ `{q}` — {' / '.join(p)} → **보내지 않음**" for q, p in checks))
             else:
                 st.caption("검색어가 없습니다 — 검색하지 않습니다.")
-        github_url = str(inputs.get("github_url") or "").strip()
-        raw = career_search.github_raw_url(github_url) if github_url else None
-        if github_url and raw:
-            use = "내 문서로 — 사실의 출처" if inputs.get("github_as_source") else "외부 자료 — 용어·프로젝트 이름 참고, 출처 URL 표시"
-            st.markdown(f"📥 가져올 GitHub 글: `{raw}` ({use})")
-        elif github_url:
-            st.error("이 GitHub 주소는 가져올 수 없습니다 — `https://github.com/계정/저장소` 또는 그 안의 .md·.txt 파일 주소만 됩니다. "
-                     "이 주소는 빼고 진행합니다.")
         send = [q for q, p in checks if not p]
-        label = "🔍 승인 — 검색하고 진행" if send else ("📥 승인 — GitHub 글 가져오고 진행" if raw else "▶ 진행")
+        label = ("✅ 승인 — 검색하고 글 가져와 진행" if send and ready else "🔍 승인 — 검색하고 진행" if send
+                 else "📥 승인 — 글 가져오고 진행" if ready else "▶ 진행")
         c1, c2, c3 = st.columns(3)
         go = c1.button(label, type="primary", key=f"{wkey}_go")
         skip = c2.button("🚫 외부 자료 없이 진행", key=f"{wkey}_skip")
@@ -332,23 +445,109 @@ def web_step(request: dict, team_id: str, task_id: str, models: ModelsConfig) ->
             st.rerun()
         if skip:
             st.session_state.pop(key, None)
-            return approved_request(pending["request"], [], [], None, ["외부 자료 없이 진행 (사용자 선택)"])
+            return approved_request(pending["request"], [], [], [], ["외부 자료 없이 진행 (사용자 선택)"])
         if go:
-            notes, results, github = [], [], None
+            notes, results = [], []
             if send:
                 with st.spinner(f"승인한 검색어 {len(send)}개로 검색하는 중…"):
                     context = search.search_queries(send, settings)
                 results, notes = [r.model_dump() for r in context.results], list(context.notes)
             if len(send) < len(checks):
                 notes.append(f"개인 정보 검사에 걸린 검색어 {len(checks) - len(send)}개는 보내지 않았습니다.")
-            if raw:
-                try:
-                    github = career_search.fetch_github(github_url)
-                except Exception as e:  # noqa: BLE001 — 가져오지 못해도 업무는 내 문서로 진행
-                    notes.append(f"GitHub 글을 가져오지 못했습니다: {type(e).__name__}: {str(e)[:150]}")
+            notes += [f"{career_docs.FAILED_URL} {item['entered']}: {item['problem']}" for item in plan if not item["target"]]
+            with st.spinner(f"승인한 주소 {len(ready)}개의 글을 가져오는 중…"):
+                docs, failed = fetch_urls(ready)
+            result = approved_request(pending["request"], send, results, docs, [*notes, *failed, *map(read_line, docs)], picked_source)
+            if failed:  # 왜 안 됐는지 먼저 보여 주고, 가져온 글만으로 진행할지 고르게 한다
+                pending.update(result=result, failed=failed, summary=f"가져온 글 {len(docs)}개 · 검색 결과 {len(results)}건")
+                st.rerun()
             st.session_state.pop(key, None)
-            return approved_request(pending["request"], send, results, github, notes)
+            return result
     return {}
+
+
+# ─── 💬 수정 요청·추가 질문 글에 적은 주소 (결과가 나온 뒤) ───────────────────
+
+
+def add_followup_docs(run: dict, docs: list[dict], as_source: bool, problems: list[str]) -> None:
+    """확인 후 가져온 글을 이 업무의 근거 자료에 더한다 — 수정본을 쓰는 팀장 · 부장 검토 · 사실 검사 · 문서 미리보기가 같은 근거를 본다.
+
+    글은 따로 묶은 툴 결과로 더하고(근거 자료가 길어 줄일 때 짧은 묶음은 통째로 남는다), 검사 값(career_source · career_web_urls)은
+    원래 career_docs 결과에 더한다 (검사 값은 뒤 툴 결과가 앞의 것을 덮어쓰기 때문).
+    서버 메모리에만 있다 — 앱을 다시 켜면 이 글은 근거에서 빠지므로, 그 뒤의 수정 요청에는 주소를 다시 적어야 한다.
+    """
+    text, source, urls = career_docs.followup_addendum(docs, as_source, problems)
+    tools = run["tools"] = run.get("tools") or []
+    main = next((t for t in tools if t.tool == "career_docs"), None)
+    extra = ToolResult(tool="career_docs", title=f"🌐 수정 요청에서 가져온 글 ({len(docs)}개)", content=text)
+    if text:
+        tools.append(extra)
+    options = (main or extra).harness_options
+    if source:
+        options["career_source"] = "\n\n".join(x for x in (str(options.get("career_source") or ""), source) if x)
+    if urls and "career_web_urls" in options:
+        options["career_web_urls"] = [*options["career_web_urls"], *urls]
+    run.pop("career", None)  # 문서 미리보기(사실 검사)를 새 근거로 다시 만든다
+    run.setdefault("followup_fetched", []).extend(read_line(d) + (" · 내 문서로" if as_source and d["kind"] == "github" else " · 참고용 외부 자료")
+                                                  for d in docs)
+
+
+def followup_step(run: dict, request: str, prepare=None) -> str:
+    """💬 수정 요청·추가 질문 글에 적은 GitHub·웹 주소 — 가져올 주소를 보여 주고 확인받은 뒤 가져와, 이 업무의 근거 자료에 더한다.
+
+    돌려주는 값 = 지금 보낼 요청 글 (주소가 없으면 받은 글 그대로 — 네트워크 호출 없음). 확인을 기다리는 동안은 빈 글.
+    바로 가져오지 않고 확인을 거치는 이유: 다른 곳과 같은 원칙(확인 전에는 아무것도 나가지 않는다)이고, 이 상자가 '내 저장소입니다' 체크와
+    실패 안내가 놓일 자리이기 때문이다 — 수정 요청은 보낸 뒤에는 백그라운드로 돌아 중간에 물을 수 없다.
+    prepare: 근거 자료에 더하기 직전에 부르는 함수 (앱을 다시 켜 되살린 업무는 근거 자료를 먼저 되찾아야 한다 — app.py followup_evidence).
+    """
+    key = f"career_followup_web_{run['run_id']}"
+    if request:
+        if not career_search.find_urls(request):
+            st.session_state.pop(key, None)
+            return request
+        nonce = (st.session_state.get(key) or {}).get("nonce", 0) + 1
+        st.session_state[key] = {"request": request, "nonce": nonce, "result": None, "failed": []}
+    if run.get("followup_fetched"):
+        st.caption("📥 수정 요청에서 가져와 근거 자료에 더한 글\n\n" + "\n".join(f"- {line}" for line in run["followup_fetched"]))
+    pending = st.session_state.get(key)
+    if not pending:
+        return ""
+    wkey = f"{key}_{pending['nonce']}"
+    inputs = run.get("career_inputs") or {}
+    private = "\n".join(str(t.harness_options.get("career_source") or "") for t in run.get("tools") or [])
+
+    def done(docs: list[dict], as_source: bool, problems: list[str]) -> str:
+        if prepare:
+            prepare()
+        add_followup_docs(run, docs, as_source, problems)
+        st.session_state.pop(key, None)
+        return pending["request"]
+
+    with st.container(border=True):
+        st.markdown("##### 🌐 수정 요청에 적은 주소 — 보내기 전 확인")
+        if pending.get("result"):
+            return done(*pending["result"]) if _failed_box(pending, key, wkey, "✖ 취소 (보내지 않음)") else ""
+        plan = url_plan({}, pending["request"], private, career_docs.target_role(inputs))
+        ready = [item for item in plan if item["target"]]
+        as_source = bool(_read_section(plan, inputs, wkey, ask_source=True))
+        c1, c2, c3 = st.columns(3)
+        go = c1.button("📥 승인 — 글 가져오고 보내기" if ready else "▶ 그대로 보내기", type="primary", key=f"{wkey}_go")
+        skip = bool(ready) and c2.button("🚫 가져오지 않고 보내기", key=f"{wkey}_skip")
+        if c3.button("✖ 취소 (보내지 않음)", key=f"{wkey}_cancel"):
+            st.session_state.pop(key, None)
+            st.rerun()
+        if skip:
+            st.session_state.pop(key, None)
+            return pending["request"]
+        if go:
+            problems = [f"{career_docs.FAILED_URL} {item['entered']}: {item['problem']}" for item in plan if not item["target"]]
+            with st.spinner(f"주소 {len(ready)}개의 글을 가져오는 중…"):
+                docs, failed = fetch_urls(ready)
+            if failed:  # 팀이 '읽을 수 없습니다'라고만 답하기 전에 — 어느 주소가 왜 안 됐고 무엇을 하면 되는지 먼저 알린다
+                pending.update(result=(docs, as_source, problems + failed), failed=failed, summary=f"가져온 글 {len(docs)}개")
+                st.rerun()
+            return done(docs, as_source, problems)
+    return ""
 
 
 # ─── 결과 문서 ────────────────────────────────────────────────────────

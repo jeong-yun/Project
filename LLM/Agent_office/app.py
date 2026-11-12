@@ -1348,9 +1348,12 @@ def render_followup(run: dict) -> None:
         text = st.text_area("요청", height=80, label_visibility="collapsed",
                             placeholder="예: 3번 근거가 뭐야? / 정의를 두 문장으로 줄여줘 / 비교 표에 항목 하나 추가해줘")
         send = st.form_submit_button("💬 보내기")
-    if not (send and text.strip()):
+    request = text.strip() if send else ""
+    if is_career:  # 글에 적은 GitHub·웹 주소 → 확인 뒤 가져와 이 업무의 근거 자료에 더한다 (career_ui.followup_step)
+        request = career_ui.followup_step(run, request, lambda: followup_evidence(run))
+    if not request:
         return
-    start_background_followup(run, text.strip())
+    start_background_followup(run, request)
     st.rerun()
 
 
@@ -2113,7 +2116,8 @@ def render_task_input() -> dict:
         with st.container(border=True):
             building_ui.head_desk(dept, teams_by_id, models, dept_store, teams, go_to_dept, DATA_DIR)
         # 배정된 요청의 📎 첨부에 그림·스캔 PDF 가 있으면 여기서 글자를 확인한 뒤 시작한다 (없으면 그대로 시작)
-        return attach_ui.vision_step(take_assigned(), team_id, "assigned", models, vision_chains())
+        request = attach_ui.vision_step(take_assigned(), team_id, "assigned", models, vision_chains())
+        return career_ui.web_step(request, team_id, "assigned", models) if is_career else request  # 질문 속 주소 → 승인 후 읽기
     mode = pick.split(":", 1)[1]
     st.caption(f"👔 {dept_head.name} → **{team.name}** · 직접 고른 업무 — 부서장 배정 없이 이 팀의 {name_of(target)}에게 바로 맡깁니다")
     warn_chosen_off()
@@ -2241,6 +2245,8 @@ def render_task_input() -> dict:
                 }
             # 📎 첨부에 그림·스캔 PDF 가 있으면 비전 모델로 글자를 옮기고 사람이 확인한 뒤 시작 (커리어부 확인 상자 재사용)
             request = attach_ui.vision_step(request, team_id, FREE_FORM, models, vision_chains())
+            if is_career:  # 질문에 적은 GitHub·웹 주소 → 가져올 주소를 보여 주고 승인받은 뒤 읽는다 (career_ui.web_step)
+                request = career_ui.web_step(request, team_id, FREE_FORM, models)
     return request
 
 

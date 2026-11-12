@@ -1151,7 +1151,7 @@ def render_document(answer: str, kind: str, questions: list[Question] | None = N
 
     본문(JSON 빼고) + 자소서면 문항마다 코드가 센 글자 수 + 부록(JD 대응표 · 확인 필요 · 근거 인용 — JSON 에서 코드가 만든 표).
     JD 추천(jd_recommend)은 맨 앞에 코드가 계산한 순위·점수·요구사항 대응표 (jds = 툴이 뽑은 JD·요구사항, source = 문서 원문).
-    포트폴리오 최신화(portfolio_update)는 부록에 바뀐 점(이전 → 이후 · 이유 · 출처)과 외부 자료 목록(web).
+    포트폴리오 최신화(portfolio_update)는 부록에 바뀐 점(이전 → 이후 · 이유 · 출처). 승인한 검색 결과(web)가 있으면 어느 업무든 외부 자료 목록.
     target = 내보낼 형식 (md · docx · hwpx) — 답변에 형식 구간(<!-- format:docx --> · <!-- format:md -->)이 있으면 그 구간만.
     """
     body = body_for(answer, target)
@@ -1200,7 +1200,7 @@ def render_document(answer: str, kind: str, questions: list[Question] | None = N
         else:
             appendix.append(f"바뀐 점 없음 — {_cell(data.get('no_changes'))}")
         appendix.append("")
-    if kind == "portfolio_update" and web:
+    if web:  # 승인한 검색 결과 — 어느 업무든 (본문의 [W번호] 가 가리키는 목록)
         appendix += ["## 외부 자료 (용어·트렌드에만 사용 — 내 경력·숫자의 근거 아님)", ""]
         appendix += [f"- [W{i}] {_cell(w.get('title'))} — {w.get('url')}" for i, w in enumerate(web, 1)]
         appendix.append("")
