@@ -530,7 +530,7 @@ def test_fake_model_portfolio(tmp_path, ranks, models, use_script):
                          reviews, ranks, models, use_script)
     steps = [p for k, p in events if k == "step"]
     final = next(s for s in steps if s.node_id == "lead")
-    assert {h.validator for h in final.harness} == {"career_facts", "char_limits", "jd_coverage", "portfolio_format"}
+    assert {h.validator for h in final.harness} == {"career_facts", "char_limits", "jd_coverage", "portfolio_format", "career_style"}
     assert all(h.passed for h in final.harness), [h.log for h in final.harness if not h.passed]
     facts = next(s for s in steps if s.node_id == "staff_facts")
     assert "portfolio_format" not in {h.validator for h in facts.harness}  # 사원은 사실 카드만

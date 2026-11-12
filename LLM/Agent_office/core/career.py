@@ -6,6 +6,7 @@
   extract_requirements / coverage : JD 요구사항(R1…) 뽑기 → 올린 문서에 근거가 있는지 키워드로 1차 판정
   check_facts       : 지어낸 사실 막기 — JSON 인용(quote)이 원문에 글자 그대로 있는지 + 본문 숫자가 원문·JD·문항에 있는지
   check_char_limits / check_coverage_ids / check_portfolio : 하네스 검증기(core/harness/validators.py)가 부른다
+  check_style       : AI 가 쓴 글 티 세기 — 상투 표현 쌓임·되풀이, 자소서 줄글 속 굵은 글씨·긴 줄표 (목록은 스킬 natural_style.md)
   render_document   : 내려받기용 마크다운 (본문 + 코드가 센 글자 수 + JD 대응표 + 확인 필요 + 근거 인용)
 
 최종 답변 끝의 ```json 블록 형식 (팀 업무 지침과 같다)
@@ -18,6 +19,7 @@ import json
 import re
 from dataclasses import dataclass, field
 
+from core.config import TEAMS_DIR
 from core.governance import normalize_text, quote_snippets
 from core.harness.base import extract_code_blocks
 
@@ -1006,6 +1008,137 @@ def check_changes(answer: str, old: str, source: str, urls: list[str], web_count
     if bad:
         problems.append(f"본문의 {', '.join(f'[W{n}]' for n in bad)} 은 외부 자료 목록에 없다 (외부 자료 {web_count}건)")
     return problems
+
+
+# ─── 문체 — AI 가 쓴 글 티 세기 ─────────────────────────────────────────
+# 목표는 '본인이 쓴 글처럼 구체적이고 자연스러운 글'이다 (AI 판별기 통과를 보장하지 않는다). 코드는 셀 수 있는 것만 센다:
+#   ① 상투 표현이 쌓임  ② 같은 표현을 되풀이  ③ 자소서 줄글 속 굵은 글씨·긴 줄표
+# 구체적인 사실이 없는 문단처럼 세기 어려운 것은 부장 비평 규칙(team.yaml)이 본다.
+# 피할 표현 목록은 스킬 파일 한 곳에 있다 — 프롬프트(스킬)와 검사가 같은 목록을 쓴다.
+# 기준 숫자의 근거 (2026-11-12, 직접 지어낸 예시 글 14개로 잼 — today_worked.md 에 표): 상투 표현이 사람 글 0개 · 사람 글에 두 개 섞은
+# 경계 예시 2개(6.0~6.6개/1,000자) · AI 티 글 11~25개(30~49개/1,000자). 기준은 그 사이에서 사람 쪽 가까이 두고, 짧은 글은 개수 하한으로 지킨다.
+# 문장 길이의 고름(변동계수)과 '문단 끝 다짐' 비율도 쟀지만 두 무리가 겹쳐(사람 0.44~0.48 · AI 0.27~0.44) 기준에 넣지 않았다.
+STYLE_SKILL = TEAMS_DIR / "career" / "skills" / "natural_style.md"
+STYLE_LIST_HEAD = "[문체 — 피할 표현"
+STYLE_MIN_HITS = 5  # 상투 표현이 이만큼은 있어야 '쌓였다'고 본다 (짧은 글이 한두 개로 실패하지 않게)
+STYLE_PER_1000 = 8.0  # 1,000자당 상투 표현 수 — 이 이상이면 다시 쓴다
+STYLE_REPEAT = 3  # 같은 표현을 이만큼 되풀이하고
+STYLE_REPEAT_PER_1000 = 2.0  # 그 표현이 1,000자당 이만큼 이상일 때 (긴 포트폴리오에서 3번은 흔하다)
+STYLE_MARKS = 3  # 자소서 줄글 속 굵은 글씨·긴 줄표 수
+STYLE_LINE = re.compile(r"^- ([^:\n]+): (.+?) → (.+)$", re.M)
+STYLE_MARK = re.compile(r"\*\*[^*\n]+\*\*|[—―]|\s–\s")
+LIST_MARK = re.compile(r"^(?:[-•*]|\d{1,2}[.)])\s+")
+CARD_LABEL = re.compile(r"^\*\*[^*\n]{1,15}\*\*\s*[:：]?\s*")  # 포트폴리오 카드의 '**문제**:' — 정해진 형식이지 꾸밈이 아니다
+
+
+@dataclass(frozen=True)
+class AvoidPhrase:
+    text: str  # 목록에 적힌 그대로
+    group: str  # 묶음 이름 (상투적 연결 …)
+    fix: str  # 고치는 법
+    pattern: re.Pattern
+
+
+def avoid_phrases(skill: str | None = None) -> list[AvoidPhrase]:
+    """피할 표현 — 스킬의 '[문체 — 피할 표현' 절에서 읽는다 ('- 묶음: 표현 / 표현 → 고치는 법', '…' 는 같은 문장 안의 사이 글)."""
+    if skill is None:
+        skill = STYLE_SKILL.read_text(encoding="utf-8") if STYLE_SKILL.exists() else ""
+    section = re.split(r"^\[", skill.split(STYLE_LIST_HEAD, 1)[-1], maxsplit=1, flags=re.M)[0] if STYLE_LIST_HEAD in skill else ""
+    out = []
+    for group, items, fix in STYLE_LINE.findall(section):
+        for item in items.split(" / "):
+            parts = [r"\s*".join(map(re.escape, part.split())) for part in item.split("…")]
+            out.append(AvoidPhrase(item.strip(), group.strip(), fix.strip(), re.compile(r"[^.!?\n]{0,40}?".join(parts))))
+    return out
+
+
+def style_text(answer: str, questions: list[int] | None = None) -> str:
+    """문체를 볼 글. 자소서(questions = 문항 번호)는 문항별 답변, 그 밖에는 본문에서 제목·코드 블록(JSON·mermaid)·표 구분선을 뺀 글.
+
+    표 칸과 목록 줄은 한 줄씩 남긴다 (형식 지정 포트폴리오는 본문이 표 안에 있다). 형식 구간(docx·md)이 있으면 한 구간만 본다.
+    """
+    if questions:
+        answers = split_answers(answer)
+        return "\n\n".join(answers[n] for n in questions if answers.get(n))
+    lines = []
+    for line in body_for(CODE_BLOCK.sub("", answer), "docx").splitlines():
+        line = line.strip()
+        if line.startswith(("#", "<!--", "[그림")) or re.fullmatch(r"[|\s:\-]*", line):
+            continue
+        for cell in line.strip("|").split("|") if line.startswith("|") else [line]:
+            lines.append(CARD_LABEL.sub("", LIST_MARK.sub("", cell.strip())).replace("**", ""))
+    return "\n".join(lines)
+
+
+@dataclass
+class StyleCheck:
+    chars: int = 0  # 검사한 글자 수 (내 문서에 그대로 있는 문장 제외)
+    hits: list[tuple[AvoidPhrase, str]] = field(default_factory=list)  # (걸린 표현, 그 문장)
+    marked: list[str] = field(default_factory=list)  # 자소서 줄글 속 굵은 글씨·긴 줄표 — 하나마다 그 문장
+
+    @property
+    def per_1000(self) -> float:
+        return round(len(self.hits) / self.chars * 1000, 1) if self.chars else 0.0
+
+    def counts(self) -> list[tuple[str, int]]:
+        """표현별 횟수 — 많은 순 (같으면 먼저 나온 순)."""
+        seen: dict[str, int] = {}
+        for phrase, _ in self.hits:
+            seen[phrase.text] = seen.get(phrase.text, 0) + 1
+        return sorted(seen.items(), key=lambda kv: -kv[1])
+
+
+def check_style(answer: str, source: str = "", questions: list[int] | None = None) -> StyleCheck:
+    """AI 가 쓴 글 티 세기 — source(내 문서)에 글자 그대로 있는 문장은 내 글이므로 세지 않는다."""
+    phrases, mine, result = avoid_phrases(), _flat(source), StyleCheck()
+    for sent in _sentences(style_text(answer, questions)):
+        sent = sent.strip()
+        if len(_flat(sent)) >= 10 and _flat(sent) in mine:
+            continue
+        result.chars += len(sent)
+        spans = sorted(((m.start(), m.end(), p) for p in phrases for m in p.pattern.finditer(sent)), key=lambda s: s[0] - s[1])
+        kept: list[tuple[int, int, AvoidPhrase]] = []  # 겹치는 표현('이를 통해' ⊂ '통해 … 수 있었습니다')은 긴 것 하나만
+        for start, end, phrase in spans:
+            if all(end <= a or start >= b for a, b, _ in kept):
+                kept.append((start, end, phrase))
+        result.hits += [(phrase, sent) for _, _, phrase in sorted(kept, key=lambda s: s[0])]
+        if questions:
+            result.marked += [sent] * len(STYLE_MARK.findall(sent))
+    return result
+
+
+def style_problems(check: StyleCheck) -> list[str]:
+    """기준을 넘은 것만 (없으면 통과)."""
+    out = []
+    if len(check.hits) >= STYLE_MIN_HITS and check.per_1000 >= STYLE_PER_1000:
+        out.append(f"상투 표현 {len(check.hits)}개 — 1,000자당 {check.per_1000:.1f}개 (기준 {STYLE_PER_1000:g}개)")
+    repeated = [f"'{text}' {n}번" for text, n in check.counts()
+                if n >= STYLE_REPEAT and n / check.chars * 1000 >= STYLE_REPEAT_PER_1000]
+    if repeated:
+        out.append("같은 표현 되풀이: " + ", ".join(repeated[:4]))
+    if len(check.marked) >= STYLE_MARKS:
+        out.append(f"자소서 줄글 속 굵은 글씨(**)·긴 줄표(—) {len(check.marked)}곳")
+    return out
+
+
+def style_feedback(check: StyleCheck, problems: list[str], show: int = 6) -> str:
+    """다시 쓰게 할 때 돌려주는 글 — 어느 문장이 왜 걸렸는지, 어떻게 고치는지."""
+    why: dict[str, list[str]] = {}
+    for phrase, sent in check.hits:
+        why.setdefault(sent, []).append(f"'{phrase.text}'")
+    for sent in check.marked:
+        if "굵은 글씨·긴 줄표" not in why.setdefault(sent, []):
+            why[sent].append("굵은 글씨·긴 줄표")
+    worst = sorted(why.items(), key=lambda kv: -len(kv[1]))
+    lines = [f"\"{sent[:60]}{'…' if len(sent) > 60 else ''}\" ← {', '.join(reasons)}" for sent, reasons in worst[:show]]
+    more = f" (외 {len(worst) - show}문장)" if len(worst) > show else ""
+    fixes = dict.fromkeys(f"{phrase.group} → {phrase.fix}" for phrase, _ in check.hits)
+    top = ", ".join(f"'{text}' {n}번" for text, n in check.counts()[:5] if n > 1)
+    return ("AI 가 쓴 글처럼 읽히는 곳이 있다: " + " · ".join(problems) + ". 걸린 문장: " + " / ".join(lines) + more
+            + (f". 여러 번 나온 표현: {top}" if top else "") + (". 고치는 법 — " + "; ".join(fixes) if fixes else "")
+            + ". 걸린 문장만 고친다 — 그 문장이 말하려던 사실(근거 자료의 내 문서에 있는 것: 무엇을 · 어떻게 · 결과)로 바꿔 쓰거나 지우고, "
+            "다른 상투어로 바꿔 끼우지 않는다. 문서에 없는 경험·숫자·감정을 보태지 않는다. "
+            + ("굵은 글씨(**)와 긴 줄표(—)는 지우고 줄글로 쓴다. " if check.marked else "") + "글자 수 제한과 JSON 은 그대로 지킨다.")
 
 
 # ─── 내려받기용 문서 ────────────────────────────────────────────────────

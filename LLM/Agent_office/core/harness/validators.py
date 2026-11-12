@@ -15,6 +15,7 @@
   iac_fix       : IaC 수정안 diff 를 원본 사본에 적용 → 내장 규칙 재검사로 정말 고쳤는지 (core/iac_patch.py)
   career_facts  : 자소서·포트폴리오의 인용이 올린 문서에 글자 그대로 있는지 + 본문 숫자가 문서·JD·문항에 있는지 (core/career.py)
   char_limits   : 자소서 문항마다 답변이 있고 글자 수 제한(공백 포함/제외)을 지키는지 (코드가 센다)
+  career_style  : 자소서·포트폴리오가 AI 가 쓴 글처럼 읽히는지 — 상투 표현 쌓임·되풀이, 자소서 줄글 속 굵은 글씨·긴 줄표 (코드가 센다)
   jd_coverage   : JD 요구사항(R1…)을 하나도 빼지 않고 근거 있음/부분/공백으로 판정했는지
   portfolio_format: 포트폴리오 절(요약·역량 표·프로젝트)과 프로젝트 카드 다섯 항목 — 형식 지정이 있으면 원본 절 제목·표 머리글,
                   원본 그림이 있으면 [그림 N] 표시
@@ -442,6 +443,26 @@ class CharLimitsValidator(Validator):
         return self.ok("문항별 글자 수 통과: " + ", ".join(
             (f"{r.no}번 {r.counted:,}/{r.limit:,}자" + (" (근거 부족으로 짧음)" if r.counted < r.limit * ratio else ""))
             if r.limit else f"{r.no}번 {r.with_spaces:,}자" for r in rows))
+
+
+@register
+class CareerStyleValidator(Validator):
+    name = "career_style"
+    description = ("문체 — AI 가 쓴 글처럼 읽히는지: 상투 표현이 쌓였는지(5개 이상이면서 1,000자당 8개 이상) · 같은 표현을 3번 이상 되풀이하는지 · "
+                   "자소서 줄글에 굵은 글씨·긴 줄표가 3곳 이상인지 (피할 표현 목록은 팀 스킬 natural_style.md, 내 문서에 그대로 있는 문장은 세지 않음)")
+
+    def check(self, answer: str, options: dict):
+        from core import career
+
+        result = career.check_style(answer, str(options.get("career_source") or ""),
+                                    [q["no"] for q in options.get("career_questions") or []])
+        problems = career.style_problems(result)
+        if problems:
+            return self.fail(career.style_feedback(result, problems))
+        if not result.chars:
+            return self.ok("문체 — 검사할 글 없음")
+        return self.ok(f"문체 통과 — 상투 표현 {len(result.hits)}개 (1,000자당 {result.per_1000:.1f}개, 기준은 "
+                       f"{career.STYLE_MIN_HITS}개 이상이면서 1,000자당 {career.STYLE_PER_1000:g}개)")
 
 
 @register

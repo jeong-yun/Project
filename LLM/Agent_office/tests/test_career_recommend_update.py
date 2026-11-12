@@ -348,7 +348,7 @@ def test_team_yaml_defines_both_tasks_without_web_search_tool():
     assert team.private and "web_search" not in team.tools
     tasks = {t.id: t for t in team.tasks}
     rec, upd = tasks["jd_recommend"], tasks["portfolio_update"]
-    assert rec.validators == ["jd_recommend"] and upd.validators == ["portfolio_format", "portfolio_changes"]
+    assert rec.validators == ["jd_recommend"] and upd.validators == ["portfolio_format", "portfolio_changes", "career_style"]
     assert {"jd_recommend", "portfolio_changes"} <= set(team.harness.final_only)
     assert team.harness.also_at["jd_recommend"] == ["am_writer", "gm_role"]
     web = next(f for f in upd.fields if f.key == "web_on")
