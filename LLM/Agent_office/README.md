@@ -288,9 +288,12 @@ streamlit run app.py
 브라우저에서 http://localhost:8501 이 열립니다. 포트를 바꾸려면 `streamlit run app.py --server.port 8600`.
 
 **이 폴더(`Agent_office`)에서 켜세요.** Streamlit 은 앱을 켠 폴더의 `.streamlit/config.toml` 만 읽습니다 — 다른 폴더에서
-`streamlit run LLM/Agent_office/app.py` 처럼 켜면 이 설정이 빠집니다. 지금 들어 있는 설정은 하나입니다:
-큰 화면 조각(1만 바이트 이상)을 '해시만' 보내지 않고 항상 통째로 보내기 (`global.minCachedMessageSize`) —
-브라우저 "Connection error … 404" 창을 막습니다 (아래 12. 트러블슈팅, `tests/test_config.py` 가 적용 여부를 확인).
+`streamlit run LLM/Agent_office/app.py` 처럼 켜면 이 설정이 빠집니다. 지금 들어 있는 설정은 둘입니다
+(아래 12. 트러블슈팅, `tests/test_config.py` 가 적용 여부를 확인):
+- 큰 화면 조각(1만 바이트 이상)을 '해시만' 보내지 않고 항상 통째로 보내기 (`global.minCachedMessageSize`) —
+  브라우저 "Connection error … 404" 창을 막습니다.
+- Streamlit 사용 통계 끄기 (`browser.gatherUsageStats = false`) — 브라우저 "Bad message format — Tried to use SessionInfo
+  before it was initialized" 창을 막습니다. 사용 통계도 Streamlit 사로 나가지 않습니다.
 
 ## 5. 화면 보는 법
 
@@ -1692,3 +1695,4 @@ git push
 | 웹 검색 자료 0건 | 네트워크 확인. 검색 실패해도 답변은 계속 진행됩니다 (자료 없이) |
 | 업데이트 후 화면에 AttributeError | 코드가 바뀌는 중에 실행한 경우 — 앱을 재시작하세요 |
 | 브라우저에 `Connection error — Failed to process a Websocket message (AxiosError: Request failed with status code 404)` | 브라우저를 새로 고침(F5)하세요 — 서버는 켜져 있고 저장된 내용도 그대로입니다. 다시 안 나게 `.streamlit/config.toml` 에서 '해시만 보내기'를 꺼 두었습니다 — 이 설정은 앱을 `Agent_office` 폴더에서 켜야 읽힙니다. 그래도 또 나오면 앱을 켠 창(터미널)에 `HTTP request for cached message could not be fulfilled` 줄이 있는지 봐 주세요 |
+| 브라우저에 `Bad message format — Tried to use SessionInfo before it was initialized` | 창을 닫거나 브라우저를 새로 고침(F5)하세요 — 서버는 켜져 있고 하던 업무도 계속 돕니다. 화면을 그리는 도중에 서버와의 연결이 잠깐 끊겼다 붙으면 Streamlit 1.43 의 화면 코드가 띄우는 창입니다. 다시 안 나게 `.streamlit/config.toml` 에서 사용 통계를 꺼 두었습니다(끊겨도 창이 안 뜸) — 이 설정은 앱을 `Agent_office` 폴더에서 **다시 켜야** 읽힙니다. PC 가 아주 바쁠 때(테스트를 여러 개 돌릴 때 등) 연결이 더 자주 끊깁니다 |

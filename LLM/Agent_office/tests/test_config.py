@@ -78,14 +78,29 @@ def test_skills_are_loaded_from_team_folder():
     assert load_skills("_template") == ""
 
 
+def _streamlit_reads(expression: str) -> str:
+    """이 폴더(Agent_office)에서 Streamlit 이 실제로 읽은 설정으로 expression 을 계산한 결과 — 새 프로세스로 확인한다.
+
+    파일이 빠지거나, 값이 바뀌거나, 새 Streamlit 에서 옵션이 없어지면 이것을 쓰는 테스트가 실패한다."""
+    done = subprocess.run([sys.executable, "-c", f"from streamlit import config; print({expression})"],
+                          cwd=Path(__file__).resolve().parent.parent, capture_output=True, text=True, timeout=120)
+    return done.stdout.strip() or done.stderr
+
+
 def test_streamlit_config_never_sends_big_screen_parts_as_hash_only():
     """`.streamlit/config.toml` — 큰 화면 조각을 '해시만' 보내는 기능을 끈다 (브라우저 'Connection error … 404' 방지).
 
-    Streamlit 이 이 폴더에서 실제로 읽은 값을 본다 → 파일이 빠지거나, 값이 줄거나, 새 Streamlit 에서 옵션이 없어지면 실패한다.
     웹소켓으로 보낼 수 있는 가장 큰 메시지(server.maxMessageSize, MB)보다 기준이 크면 해시만 보내는 일이 없다.
     """
-    code = ("from streamlit import config; "
-            "print(config.get_option('global.minCachedMessageSize') >= config.get_option('server.maxMessageSize') * 1e6)")
-    done = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parent.parent,
-                          capture_output=True, text=True, timeout=120)
-    assert done.stdout.strip() == "True", done.stdout + done.stderr
+    assert _streamlit_reads("config.get_option('global.minCachedMessageSize') >= "
+                            "config.get_option('server.maxMessageSize') * 1e6") == "True"
+
+
+def test_streamlit_config_sends_no_usage_stats():
+    """`.streamlit/config.toml` — Streamlit 사용 통계를 끈다 (브라우저 'Bad message format — Tried to use SessionInfo
+    before it was initialized' 방지).
+
+    켜져 있으면 서버가 화면 실행이 끝날 때마다 '통계용 메시지'(pageProfile)를 보낸다. Streamlit 1.43 의 화면 코드는
+    연결이 끊겼다 붙은 직후 이 메시지를 받으면 오류 창을 띄운다 (2026-11-12 재현: 켬 9/10 → 끔 0/10).
+    """
+    assert _streamlit_reads("config.get_option('browser.gatherUsageStats')") == "False"
