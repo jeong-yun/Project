@@ -296,6 +296,13 @@ def units_from_drafts(drafts: list, level: str, start_index: int = 1, start_week
     return units
 
 
+def continue_weeks(course: Course, drafts: list[dict]) -> list[dict]:
+    """모델은 주차를 1부터 쓴다 → 끝낸 단원 다음 주차부터 이어지도록 주차를 민다 (주차 사이 간격은 그대로). 교육 두 팀이 함께 쓴다."""
+    start = max((u.week for u in course.curriculum if u.done), default=0) + 1
+    first = min((_int(d.get("week")) for d in drafts), default=1)
+    return [{**d, "week": _int(d.get("week")) - first + start} for d in drafts]
+
+
 def replace_remaining(course: Course, new_units: list, level: str) -> list[str]:
     """끝난 단원은 그대로 두고, 안 끝난 단원을 new_units 로 바꾼다. 바뀐(지워진) 단원 제목을 돌려준다 (이력용)."""
     done = [u for u in course.curriculum if u.done]

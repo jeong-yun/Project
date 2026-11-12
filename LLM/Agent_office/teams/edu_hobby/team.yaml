@@ -15,7 +15,7 @@ name: 🌍 취미·교양 교육팀
 description: 일상·여행·교양을 위해 배우는 학습 — 예 이탈리아어·영어 회화, 유럽 역사, 한국사, 사진. 과목마다 담당 선생님이 수준에 맞춰 커리큘럼·퀴즈·질문 답변을 맡는다.
 
 scope:
-  summary: 취미·교양 학습 — 언어 회화·역사·문화처럼 일상·여행에 쓰려고 배우기 (커리큘럼·수준 퀴즈·질문 답변, 3단계에 단어장·상황별 표현)
+  summary: 취미·교양 학습 — 언어 회화·역사·문화처럼 일상·여행에 쓰려고 배우기 (커리큘럼·수준 퀴즈·질문 답변·단어장·상황별 표현)
   accepts:
     - 여행·일상에 쓸 외국어 회화 배우기 (예 이탈리아어, 영어, 일본어)
     - 역사·문화·예술 같은 교양 배우기 (예 유럽 역사, 한국사)
@@ -95,7 +95,7 @@ verification:
     max_self_corrections: 1
     rules:
       - "학습자 수준이 입문·초급인데 어려운 문법 용어·전문 용어를 풀이 없이 쓰면 '수준 이탈' 위반이다"
-      - "역사·문화 사실(연도·인물·사건)을 근거 없이 단정하거나 틀리게 쓰면 '사실 오류' 위반이다"
+      - "역사·문화의 널리 알려진 흐름은 근거 자료가 없어도 쓸 수 있다. 정확한 연도·수치·인용문을 근거 없이 단정하거나 틀리게 쓰면 '사실 오류' 위반이다"
       - "퀴즈 본문(JSON 블록 밖)에 정답이나 해설을 쓰면 '정답 노출' 위반이다"
 
 tasks:
@@ -124,7 +124,7 @@ tasks:
     success_criteria:
       - "본문에 선생님 소개(이름·경력 설정·가르치는 방식)와 커리큘럼 표(주차 · 단원 · 마치면 할 수 있는 것)를 쓴다"
       - "커리큘럼은 주당 학습 시간에 맞는 분량이고, 첫 단원은 지금 수준과 쓰려는 상황(여행·일상)에 맞는다"
-      - "답변 맨 끝에 지침의 ```json 블록(tutor · curriculum)을 정확히 1개 붙인다 — level_rules 는 수준 id 5개 모두"
+      - "답변 맨 끝에 [업무 수행 지침]의 ```json 블록(tutor · curriculum)을 정확히 1개 붙인다 — level_rules 는 수준 id 5개 모두"
     constraints:
       - "선생님은 가상 인물이다 (실존 인물·회사 이름을 쓰지 않는다)"
     output_format: "## 선생님 소개 → ## 커리큘럼 (표) → ## 첫 주 안내 → ```json 1개"
@@ -150,7 +150,7 @@ tasks:
       - {key: count, label: 문제 수, type: select, options: ["5", "8", "10"]}
     fixed: {edu_kind: hobby, edu_task: quiz}
     question: |
-      과목 {course_id} 학습자에게 {quiz_kind} 를 {count}문제 내줘.
+      이 과목 학습자에게 {quiz_kind} 를 {count}문제 내줘.
     goal: "객관식 {count}문제 — 본문에는 문제와 보기만, 정답·해설은 JSON 에만 (채점은 화면에서 코드가)"
     success_criteria:
       - "문제마다 보기 4개, 정답은 하나 — answer 는 보기 중 하나와 글자 그대로 같다"
@@ -175,7 +175,7 @@ tasks:
       - {key: ask, label: 질문, type: textarea, required: true, placeholder: "예: 이탈리아어로 '계산서 주세요'는 어떻게 말해요?"}
     fixed: {edu_kind: hobby, edu_task: ask}
     question: |
-      과목 {course_id} 학습자의 질문: {ask}
+      이 과목 학습자의 질문: {ask}
     goal: "질문에 대한 지금 수준 눈높이의 답 — 한 문장 답 → 쉬운 설명 → 예시 → 확인 질문 하나"
     success_criteria:
       - "지금 수준의 말투·난이도 규칙을 지킨다"
@@ -196,7 +196,7 @@ tasks:
       - {key: focus, label: 먼저 다루고 싶은 것 (선택), placeholder: "예: 식당·길 묻기 먼저 / 르네상스 위주"}
     fixed: {edu_kind: hobby, edu_task: hobby_curriculum}
     question: |
-      과목 {course_id} 학습자에게 앞으로 {weeks}주 커리큘럼을 짜줘.
+      이 과목 학습자에게 앞으로 {weeks}주 커리큘럼을 짜줘.
       주당 학습 시간: {weekly_hours}시간
       먼저 다루고 싶은 것: {focus}
     goal: "{weeks}주 커리큘럼 — 주차마다 단원(제목·마치면 할 수 있는 것·시간), 주마다 시간 합이 주당 학습 시간 안"
@@ -225,7 +225,7 @@ tasks:
       - {key: theme, label: 주제 (선택), placeholder: "예: 음식·숫자 / 르네상스 인물"}
     fixed: {edu_kind: hobby, edu_task: vocab}
     question: |
-      과목 {course_id} 학습자의 지금 수준에 꼭 알아야 할 단어·용어 {count}개로 단어장을 만들어줘.
+      이 과목 학습자의 지금 수준에 꼭 알아야 할 단어·용어 {count}개로 단어장을 만들어줘.
       주제: {theme}
     goal: "지금 수준에 꼭 필요한 단어·용어 {count}개 — 이미 단어장에 있는 것과 겹치지 않게"
     success_criteria:
@@ -256,7 +256,7 @@ tasks:
       - {key: count, label: 표현 수, type: select, options: ["8", "12", "16"]}
     fixed: {edu_kind: hobby, edu_task: phrases}
     question: |
-      과목 {course_id} 학습자에게 '{situation}' 상황에서 쓸 표현 {count}개를 알려줘.
+      이 과목 학습자에게 '{situation}' 상황에서 쓸 표현 {count}개를 알려줘.
       직접 입력한 상황: {custom}
     goal: "그 상황에서 바로 쓸 표현 {count}개 — 표현·뜻·읽는 법·짧은 대화 예시·문화 팁"
     success_criteria:
@@ -283,7 +283,7 @@ tasks:
       - {key: interest, label: 관심 있는 쪽 (선택), placeholder: "예: 음식 문화, 미술, 근현대사"}
     fixed: {edu_kind: hobby, edu_task: topics}
     question: |
-      과목 {course_id} 학습자가 지금 과목·수준에 이어 볼 추가 지식 주제를 3~5개 제안해줘.
+      이 과목 학습자가 지금 과목·수준에 이어 볼 추가 지식 주제를 3~5개 제안해줘.
       관심 있는 쪽: {interest}
     goal: "이어 볼 주제 3~5개 — 주제마다 왜 지금 과목에 도움이 되는지 + 첫 단원 하나"
     success_criteria:
@@ -308,7 +308,7 @@ tasks:
       - {key: count, label: 문제 수, type: select, options: ["5", "8", "10"]}
     fixed: {edu_kind: hobby, edu_task: review}
     question: |
-      과목 {course_id} 학습자에게 단어·표현 복습 퀴즈를 {count}문제 내줘.
+      이 과목 학습자에게 단어·표현 복습 퀴즈를 {count}문제 내줘.
     goal: "근거 자료 '복습 대상'에서 고른 객관식 {count}문제 — 문제마다 ref, 정답·해설은 JSON 에만"
     success_criteria:
       - "근거 자료의 '🔁 복습 대상' 목록 위쪽(먼저 낼 것)부터 고른다. 뜻 고르기만이 아니라 예문 빈칸·상황에 맞는 표현 고르기를 섞는다"

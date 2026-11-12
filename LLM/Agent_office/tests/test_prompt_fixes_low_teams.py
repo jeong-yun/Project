@@ -216,3 +216,59 @@ def test_control_id_failure_message_fits_both_security_teams():
 def test_governance_lead_sorts_by_verdict_like_the_task(ranks, models):
     lead = agents_of("security_governance", ranks, models)["lead"].system_prompt()
     assert "위험도 순" not in lead and "미흡 먼저" in lead  # 완료 기준 '미흡 → 부분 충족 → 확인 불가 → 충족 순'과 같은 말
+
+
+# ─── E12~E15 포트폴리오·자소서 팀 · 교육 두 팀 ───────────────────────────
+
+
+def test_head_critic_is_not_asked_to_judge_what_it_cannot_check():
+    career = "\n".join(load_team("career").verification["critic"]["rules"])
+    assert "글자 수" in career and "직접 세어" in career and "지적하지 않는다" in career  # 글자 수는 코드가 센다 — 부장 입력에도 없다
+    history = next(r for r in load_team("edu_hobby").verification["critic"]["rules"] if "사실 오류" in r)
+    assert "널리 알려진" in history and "정확한 연도·수치·인용문" in history  # 웹 검색을 꺼도 역사 과목의 모든 문장이 위반이 되지 않게
+
+
+def test_career_roadmap_weeks_start_at_one_and_code_continues_them(ranks, models):
+    from core import learning
+    from core import learning_career as lc
+    from tests.test_edu_career import ROADMAP, make_course
+
+    course = make_course()
+    for unit in ("U1", "U2"):  # 1·2주차 단원을 끝낸 과목
+        learning.mark_unit_done(course, unit, now="2026-11-06T09:00:00")
+    steps = [{**s, "week": s["week"] - 1} for s in ROADMAP["steps"]]  # 모델이 1주차부터 쓴 로드맵 (1·1·2주차)
+    lc.apply_roadmap(course, lc.roadmap_from_answer('```json\n' + json.dumps({"roadmap": {**ROADMAP, "steps": steps}}, ensure_ascii=False) + '\n```'))
+    assert [u.week for u in course.curriculum] == [1, 2, 3, 3, 4]  # 끝낸 단원 다음 주차부터, 같은 주의 단계는 같은 주에
+    assert [s["week"] for s in course.extras["roadmap"]["steps"]] == [3, 3, 4]  # 저장한 로드맵도 같은 주차
+    task = task_of("edu_career", "roadmap")
+    rule = next(c for c in task.constraints if "끝낸 단원" in c)
+    assert "week 는 1부터" in rule and "다음 주차부터 이어서 짠다" not in rule  # 취미·교양 교육팀·JSON 예시("week": 1)와 같은 규칙
+    skill = skill_line(agents_of("edu_career", ranks, models)["lead"], "- week 는 1부터")
+    assert "코드가" in skill
+
+
+def test_teaching_rules_match_the_term_check_and_ask_for_sources(ranks, models):
+    for team_id in ("edu_career", "edu_hobby"):
+        lead = agents_of(team_id, ranks, models)["lead"]
+        terms = skill_line(lead, "- 입문·초급 학습자에게")
+        assert "영어로 된 도구·제품 이름" in terms and "코드가" in terms  # 검사는 4글자 넘는 영문 낱말과 대문자 약어를 모두 센다
+        facts = skill_line(lead, "- 모르는 것·확인 못 한 사실은")
+        assert "출처 [번호]" in facts and "확인한 날짜" in facts
+
+
+def test_small_wording_fixes_in_career_and_education(ranks, models):
+    writer = agents_of("career", ranks, models)["lead"]
+    mermaid = skill_line(writer, "- Word 는 mermaid 를")
+    assert "needs_check 맨 위에" in mermaid and "수정 요청 중이면 reply" in mermaid  # 본 업무 출력에는 reply 칸이 없다
+    hobby = load_team("edu_hobby")
+    assert "3단계" not in hobby.scope.summary and "단어장" in hobby.scope.summary  # 화면 안내에 내부 개발 용어
+    skills = agents_of("edu_hobby", ranks, models)["lead"].skills
+    assert "(3단계" not in skills and skills.count("## 스킬: 취미·교양") == 0  # 스킬 머리말이 두 번 나오지 않는다
+    assert "전체의 30%" in skills and "3할" not in skills
+    for team_id in ("career", "edu_career", "edu_hobby"):
+        team = load_team(team_id)
+        for task in team.tasks:
+            assert "{course_id}" not in task.question, (team_id, task.id)  # 질문은 웹 검색어를 만들 때 쓰인다 — 과목 id 를 넣지 않는다
+            assert not any("지침의 ```json" in c for c in task.success_criteria), (team_id, task.id)  # '[업무 수행 지침]의' — 팀 스킬과 헷갈리지 않게
+            assert "LLM 회사" not in task.description, (team_id, task.id)
+    assert "채용 공고(JD)에 맞춘" in load_team("career").description

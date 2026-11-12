@@ -41,7 +41,7 @@ PICK_KEY = "edu_course_pick"  # 지금 고른 과목 id
 OPEN_KEY = "edu_course_open"  # '📖 자세히'를 펼친 과목 id
 MSG_KEY = "edu_msg"  # 한 번 보일 알림 (수준 변경 등)
 NOTICE = ("🔒 과목 기록(선생님·커리큘럼·퀴즈·질문)은 이 PC 의 `data/learning/` 에만 저장되고 GitHub 에 올라가지 않습니다 "
-          "(교훈 공유에서도 교육부 두 팀은 빠집니다). 다만 업무 내용은 고른 LLM 회사로 전송됩니다.")
+          "(교훈 공유에서도 교육부 두 팀은 빠집니다). 다만 업무 내용은 고른 AI 모델 회사로 전송됩니다.")
 
 
 @dataclass

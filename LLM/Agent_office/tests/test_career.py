@@ -610,7 +610,7 @@ def test_career_team_page_renders_both_forms(app):
     picker = at.selectbox(key="dept_task_career")
     assert [o.split(" › ")[1] for o in picker.options[1:3]] == ["✍️ 자소서 작성", "📁 포트폴리오 작성"]
     assert len(at.get("file_uploader")) == 2  # 요약 문서(여러 개) + JD 파일
-    assert any("LLM 회사로 전송" in c.value for c in at.caption)
+    assert any("AI 모델 회사로 전송" in c.value for c in at.caption)
     assert next(c for c in at.checkbox if c.label == "Word(.docx) 로도 받기").value is True
     at = at.button[[b.label for b in at.button].index("맡기기")].click().run()
     assert any("필수 입력이 비어 있습니다: 자소서 문항" in w.value for w in at.warning)
