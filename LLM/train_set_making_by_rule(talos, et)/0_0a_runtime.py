@@ -135,5 +135,12 @@ def write_status(name, **info):
     path = RUN_DIR / f"{name}.json"
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(path)
+    for k in range(50):     # Windows: UI 등이 그 순간 상태 파일을 읽고 있으면 교체가 막힌다(WinError 5) → 잠깐 뒤 다시 (최대 약 5초)
+        try:
+            tmp.replace(path)
+            break
+        except PermissionError:
+            if k == 49:
+                raise
+            time.sleep(0.1)
     return data

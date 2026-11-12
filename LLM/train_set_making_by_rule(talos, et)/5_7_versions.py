@@ -21,9 +21,23 @@ IPS·WAF 공통 선별 (2026-10-26~): 두 장비에 **같은 신규 샘플**을 
   - '불일치' 중 LLM 재확인 합의가 확인됨인 것은 남기기 (2026-10-29~, 기본 끔): 4. 화면 'LLM 재확인'(3.6) 결과를 5.5 가 비교 표의
     lk 로 남기고(샘플 내용 지문 ck), 이 옵션을 켜면 '불일치' 빼기에서 그 샘플은 빼지 않는다. 담은 뒤 lk 가 바뀌면 확정하지 않음.
     2026-11-02~: lk = '불일치' 합의가 확인됨(두 모델 이상 모두 맞음 또는 화면의 유지 표시·사람 판단) - 한 모델만 맞음이면 남기지 않음.
+  - 피처 충돌 빼기 (2026-11-06~, 기본 켬): 후보의 원본 벡터(SQL 경로) 또는 디코딩 벡터(파이썬 경로, 레시피 1) 중 하나라도
+    기준 데이터의 같은 벡터 다수 label 과 반대이면 뺌 (두 장비 중 하나라도). 판(conflict_ver)의 피처로 5.8 conflicts
+    (화면 '피처 충돌 계산')가 미리 계산해 cache/conflict/ 에 둔다 - 없으면 미리 보기는 빼지 않고 알리며, 담기·확정은 막는다.
+  - 문제 룰 빼기 (2026-11-06~, 기본 켬): 3.6 결과에서 gpt-6.1-sol 이 판정한 '정합 (룰 기준)' 줄이 모두 '학습에 부적합'인 룰의
+    샘플을 뺌 (룰 '넣기'면 안 뺌).
+  - 추가 행끼리 섞인 벡터 빼기 (2026-11-06~, 기본 켬, FEAT4 정의): 기준에 없는 디코딩 벡터(판 conflict_ver)에서 고른 행에 공격·정상이
+    함께 있으면 그 벡터의 고른 행을 모두 뺌 (두 장비 중 하나라도). 고른 행끼리 정해져 상한·목표 합계 뒤 마지막에 뺀다.
+    재료(줄마다 장비별 벡터 묶음 번호)는 피처 충돌 계산이 함께 남긴다.
+  - 세 옵션은 키가 없는 예전 초안·후보·확정에서는 끔 (NEW_OFF - 담은 선별 그대로).
+    담을 때 문제 룰 목록·충돌 표시·섞인 벡터 재료의 지문을 남기고, 그 뒤 바뀌면 확정하지 않음 (다시 담기).
   - 목표 합계 (2026-10-29~, 비우면 안 씀): B 의 패턴당 상한 대신, 다른 선택(A·C·룰 '넣기')을 먼저 넣고 모자란 수를 B 에서
     정확히 채운다. B 패턴당 상한을 1, 2, 3 … 으로 올리며 목표를 넘지 않는 가장 큰 k 까지 넣고, 남은 수는 k+1 번째 샘플을
     패턴을 돌아가며 1개씩 (_fill). C 로는 채우지 않는다.
+  - A 정상 비율 (2026-11-10~, a_ratio, 비우면 안 씀): 고른 A 정상은 그대로 두고 A 공격을 'A 정상 수 × (1-r)/r' 개로 줄인다
+    (0.8 = A 정상 8 : 공격 2, 1 = A 정상만). 줄일 때는 목표 합계와 같은 차례(_fill)로 패턴마다 고르게. 룰 '넣기'한 A 공격은
+    줄이지 않고 먼저 센다. 등급·상한 뒤, 목표 합계·섞인 벡터 빼기 전 (목표 합계를 안 쓰면 11-09 SWEEP2 run_sweep --a-ratio 와
+    같은 선별). A 가 빼기(0)면 안 씀. 키가 없는 예전 초안·후보·확정은 안 씀 (기본값이 '안 씀'이라 NEW_OFF 와 같은 결과).
 버전 (2026-10-30~: 초안 → 1차 확정(후보, rev) → 피처 테스트 → 데이터 추가 → 최종 승인(확정))
   초안   이름, 기준 버전, 조건(날짜·출처), 선별 옵션, 룰·유형 조정 + 저장할 때의 비교 스냅숏(장비별), mode = combined
          (예전 장비별 초안은 '새 방식으로 다시 담기' 를 해야 내보낸다 - 옵션·조정은 그대로)
@@ -56,8 +70,10 @@ import json
 import os
 import re
 import shutil
+import sys
 import threading
 import time
+from array import array
 from collections import Counter
 from itertools import zip_longest
 from pathlib import Path
@@ -73,13 +89,27 @@ def _load(name, file):
 
 
 C = _load("sup_common_v", "5_0a_common.py")
+STD_VER = "std"                                            # 피처 정의 판: 표준모델 피처 파일 그대로 (5.8 의 판과 같은 이름)
 DEFAULT_OPTIONS = {"A": "all", "B": 20, "C": 20,          # "all" = 전부, 0 = 빼기, n = 패턴당 n개까지
+                   "a_ratio": None,                       # A 정상 비율 (None = 안 씀, 0.8 = A 정상 8 : 공격 2 - A 공격을 줄임)
                    "exclude_bad": True, "exclude_rule_based": False, "exclude_python_ua_normal": False,
                    "keep_llm_ok": False,                  # '불일치' 빼기에서 LLM 재확인(4. 화면, 3.6) 합의가 확인됨인 것은 남김
+                   "exclude_conflict": True,              # 피처 충돌(원본·디코딩 벡터가 기준 다수 label 과 반대) 빼기 - 판 conflict_ver
+                   "conflict_ver": STD_VER,
+                   "exclude_bad_rules": True,             # 문제 룰(룰 품질 점검 부적합) 빼기
+                   "exclude_mixed": True,                 # 추가 행끼리 섞인 벡터 빼기 (판 conflict_ver 의 디코딩 벡터, 고른 뒤 마지막에)
                    "target": None}                        # 목표 합계 (None = 안 씀, 있으면 B 는 이 합계까지 채움)
+# 2026-11-06 에 더한 옵션은 키가 없으면 끔 (새 초안의 기본은 켬) → 그 전에 담은 초안·후보·확정은 담은 선별 그대로
+NEW_OFF = {"exclude_conflict": False, "exclude_bad_rules": False, "exclude_mixed": False}
 OPTION_TEXT = {"exclude_bad": "'불일치' 빼기", "exclude_rule_based": "'정합 (룰 기준)' 공격 빼기 (보류)",
                "exclude_python_ua_normal": "python-requests UA 정상 빼기 (보류)",
-               "keep_llm_ok": "'불일치' 중 LLM 재확인 합의가 확인됨인 것은 남기기"}
+               "keep_llm_ok": "'불일치' 중 LLM 재확인 합의가 확인됨인 것은 남기기",
+               "exclude_conflict": "피처 충돌 빼기 (원본·디코딩)", "exclude_bad_rules": "문제 룰 빼기 (룰 품질 점검 부적합)",
+               "exclude_mixed": "추가 행끼리 섞인 벡터 빼기"}
+VER_RE = re.compile(r"^[A-Za-z0-9]+$")
+RECHECK = BASE / "07_llm_output" / "_recheck" / "results.jsonl"   # 3.6 LLM 재확인 결과 (읽기만)
+BAD_RULE_MODEL = "gpt-6.1-sol"                             # 문제 룰을 정한 모델 (룰품질점검 '부적합 = sol 판정 줄')
+CONFLICT_DIR = C.CACHE / "conflict"                        # 피처 충돌 표시 (5.8 conflicts 가 씀)
 HOLD = {"rule": "'정합 (룰 기준)' 공격", "pyua": "python-requests UA 정상"}   # 보류 옵션의 대상 (화면에서 따로 봄)
 PY_UA = 1                                                  # 5.5 FLAG_BITS
 STEPS = ("초안", "1차 확정", "피처 테스트", "데이터 추가", "최종 승인")
@@ -94,7 +124,7 @@ ARCHIVE = BASE / "_보관"                                   # 버린 후보를 
 # ── 선별 ────────────────────────────────────────────────────────────────
 
 def norm_options(o):
-    out = dict(DEFAULT_OPTIONS)
+    out = dict(DEFAULT_OPTIONS, **NEW_OFF)
     for k in ("A", "B", "C"):
         val = (o or {}).get(k, out[k])
         if val != "all":
@@ -103,8 +133,21 @@ def norm_options(o):
             except (TypeError, ValueError):
                 raise ValueError(f"선별 옵션 {k}: 'all' 또는 0 이상의 수")
         out[k] = val
-    for k in ("exclude_bad", "exclude_rule_based", "exclude_python_ua_normal", "keep_llm_ok"):
+    ar = (o or {}).get("a_ratio")
+    if ar not in (None, ""):
+        try:
+            ar = float(ar)
+        except (TypeError, ValueError):
+            ar = -1.0
+        if not 0 < ar <= 1:
+            raise ValueError("선별 옵션 A 정상 비율: 비우거나 0 보다 크고 1 이하인 수 (0.8 = 정상 8 : 공격 2, 1 = A 정상만)")
+        out["a_ratio"] = None if out["A"] == 0 else round(ar, 4)
+    for k in ("exclude_bad", "exclude_rule_based", "exclude_python_ua_normal", "keep_llm_ok", *NEW_OFF):
         out[k] = bool((o or {}).get(k, out[k]))
+    cv = str((o or {}).get("conflict_ver") or STD_VER)
+    if not VER_RE.match(cv):
+        raise ValueError("선별 옵션 피처 충돌 판: 영문·숫자 이름")
+    out["conflict_ver"] = cv
     tg = (o or {}).get("target")
     if tg not in (None, "", 0, "0"):
         try:
@@ -290,12 +333,154 @@ def _fill(t, idx, need, R, L):
     return picked, k, len(more)
 
 
-def select(t, conditions=None, options=None, overrides=None, fill=None):
+# ── 선별 표시: 문제 룰 (3.6 결과) · 피처 충돌 (5.8 conflicts 결과) - 파일이 바뀔 때만 다시 읽음 ─────────
+
+_FLAG_CACHE = {}
+_FLAG_LOCK = threading.Lock()
+
+
+def _cached(name, key, make):
+    with _FLAG_LOCK:
+        hit = _FLAG_CACHE.get(name)
+        if hit is None or hit[0] != key:
+            hit = (key, make())
+            _FLAG_CACHE[name] = hit
+        return hit[1]
+
+
+def bad_rules():
+    """문제 룰 (룰 품질 점검 부적합): 3.6 결과에서 gpt-6.1-sol 이 판정한 '정합 (룰 기준)' 줄(target rule)이 모두 '학습에 부적합'인 룰.
+    룰품질점검 CSV 의 '부적합 = sol 판정 줄'과 같은 정의 - CSV 는 만든 날의 값, 여기는 지금 결과 (그 뒤 3차 투표 줄도 sol 판정 줄로 셈).
+    → {rules: 룰 id 집합, hist: 판정 줄 수별 룰 수, judged: sol 이 판정한 룰 수, lines, sig, at}"""
+    try:
+        st = RECHECK.stat()
+    except OSError:
+        return {"rules": frozenset(), "hist": {}, "judged": 0, "lines": 0, "sig": "", "at": "", "missing": True}
+
+    def make():
+        n, unfit = Counter(), Counter()
+        with open(RECHECK, encoding="utf-8") as f:
+            for line in f:
+                if BAD_RULE_MODEL not in line:
+                    continue
+                d = json.loads(line)
+                if (str(d.get("model") or "").split(":", 1)[-1].split("@", 1)[0] != BAD_RULE_MODEL or d.get("target") != "rule"
+                        or not d.get("rule_id")):
+                    continue
+                n[d["rule_id"]] += 1
+                unfit[d["rule_id"]] += d.get("verdict") == "unfit"
+        rules = frozenset(r for r in n if unfit[r] == n[r])
+        h = Counter(min(n[r], 4) for r in rules)
+        return {"rules": rules, "hist": {"1": h[1], "2": h[2], "3": h[3], "4+": h[4]}, "judged": len(n), "lines": sum(n.values()),
+                "sig": hashlib.sha1("\n".join(sorted(rules)).encode("utf-8")).hexdigest()[:16],
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(st.st_mtime))}
+    return _cached("bad_rules", (st.st_size, st.st_mtime), make)
+
+
+def conflict_path(base_name, ver, snaps):
+    """피처 충돌 표시 파일: 기준 버전 · 판 · 두 장비 비교 스냅숏마다 하나 (다시 비교하면 다시 계산)."""
+    return CONFLICT_DIR / base_name / f"{ver}_{(snaps or {}).get('ips')}_{(snaps or {}).get('waf')}.json"
+
+
+def groups_path(p):
+    """같은 계산의 '섞인 벡터 빼기' 재료: 공통 표 줄마다 장비별 디코딩 벡터 묶음 번호 (int32, -1 = 기준에 있는 벡터·제거 줄)."""
+    return p.with_suffix(".groups")
+
+
+def row_key(t, i):
+    """표시 파일의 샘플 열쇠 = 샘플 지문 sk (없는 예전 줄은 IPS 날짜:줄)."""
+    return t["sk"][i] or f"{t['dates'][t['date'][i]]}:{t['line'][i]}"
+
+
+def conflict_flags(t, ver):
+    """공통 표 t 의 피처 충돌 표시 → {state: ok | missing, keys: 뺄 샘플 열쇠 집합(장비 둘 × 원본·디코딩 중 하나라도), sig, at, dev, ...}."""
+    p = conflict_path(t.get("base") or "", ver, t.get("snapshots"))
+    try:
+        st = p.stat()
+    except OSError:
+        return {"state": "missing", "ver": ver, "file": p.name}
+
+    def make():
+        d = json.loads(p.read_text(encoding="utf-8"))
+        keys = set()
+        for x in (d.get("dev") or {}).values():
+            keys.update(x.get("raw") or [])
+            keys.update(x.get("dec") or [])
+        return {"state": "ok", "ver": ver, "file": p.name, "keys": frozenset(keys), "sig": d.get("sig") or "", "at": d.get("at") or "",
+                "dev": {dev: {k: x.get(k) for k in ("counts", "base_rows", "names")} for dev, x in (d.get("dev") or {}).items()},
+                "rows": d.get("rows"), "seconds": d.get("seconds")}
+    return _cached("conflict", (str(p), st.st_size, st.st_mtime), make)
+
+
+def mixed_groups(t, ver):
+    """'추가 행끼리 섞인 벡터 빼기'의 재료 (5.8 conflicts 가 충돌 표시와 함께 씀) → {state, by_dev: {장비: 줄마다 묶음 번호}, sig, at}."""
+    p = conflict_path(t.get("base") or "", ver, t.get("snapshots"))
+    gp = groups_path(p)
+    try:
+        st, gst = p.stat(), gp.stat()
+    except OSError:
+        return {"state": "missing", "ver": ver, "file": gp.name}
+
+    def make():
+        meta = json.loads(p.read_text(encoding="utf-8"))
+        a = array("i")
+        a.frombytes(gp.read_bytes())
+        if sys.byteorder != "little":
+            a.byteswap()
+        devs, n = meta.get("groups_devices") or [], int(meta.get("n") or 0)
+        if not devs or n != t["n"] or a.itemsize != 4 or len(a) != n * len(devs):
+            return {"state": "missing", "ver": ver, "file": gp.name, "why": "공통 표와 줄 수가 다름"}
+        return {"state": "ok", "ver": ver, "file": gp.name, "by_dev": {d: a[k * n:(k + 1) * n] for k, d in enumerate(devs)},
+                "sig": meta.get("groups_sha") or "", "at": meta.get("at") or ""}
+    return _cached("groups", (str(gp), gst.st_size, gst.st_mtime, st.st_mtime), make)
+
+
+def mixed_rows(rows, Y, by_dev):
+    """고른 행 중 '추가 행끼리 섞인 벡터'의 행 - 피처 세션 enc_recall.mixed_masks 의 '모두 뺌'과 같은 정의: 기준에 없는 디코딩 벡터
+    (묶음 번호 ≥ 0)에서 고른 행에 공격·정상이 함께 있으면 그 벡터의 고른 행 모두. 두 장비 중 하나라도 섞였으면 뺀다 (공통 선별)."""
+    drop = set()
+    for G in by_dev.values():
+        att, cnt = Counter(), Counter()
+        for i in rows:
+            g = G[i]
+            if g >= 0:
+                cnt[g] += 1
+                att[g] += Y[i]
+        mixed = {g for g, c in cnt.items() if 0 < att[g] < c}
+        if mixed:
+            drop.update(i for i in rows if G[i] in mixed)
+    return drop
+
+
+def sel_flags(t, opts):
+    """켠 옵션의 표시 {bad_rules, conflict, mixed} (끈 옵션은 없음). select 가 부르고, 담기·확정은 sig 를 남기고 맞춰 본다."""
+    out = {}
+    if opts["exclude_bad_rules"]:
+        out["bad_rules"] = bad_rules()
+    if opts["exclude_conflict"]:
+        out["conflict"] = conflict_flags(t, opts["conflict_ver"])
+    if opts["exclude_mixed"]:
+        out["mixed"] = mixed_groups(t, opts["conflict_ver"])
+    return out
+
+
+def select(t, conditions=None, options=None, overrides=None, fill=None, flags=None):
     """선별용 표(5.5 <장비>_table.json 또는 combine 한 공통 표) → (고른 줄 번호 목록, 조건 안의 줄 번호 목록, 뺀 이유별 수).
     상한(B·C): 표에 장비별 패턴(pats)이 있으면 장비마다 그 장비 패턴으로 묶어 상한만큼 고른 뒤 합친다.
     목표 합계(options target): B 는 상한 대신 다른 선택을 다 넣은 뒤 모자란 수만큼 채운다 (_fill).
-    fill: dict 를 주면 목표 합계 결과 {target, base(B 없이 고른 수), max(B 전부), added, k, extra, state} 를 적는다."""
+    fill: dict 를 주면 목표 합계 결과 {target, base(B 없이 고른 수), max(B 전부), added, k, extra, state} 를 적는다.
+    flags: dict 를 주면 켠 옵션의 표시(sel_flags)를 적는다 (이미 들어 있으면 그것을 씀).
+    빼는 차례: 제거 → 룰·유형 빼기 → '불일치' → 피처 충돌 → 문제 룰 (룰 '넣기'면 안 뺌) → 보류 옵션 → 등급·상한 → A 정상 비율 →
+    목표 합계 → 추가 행끼리 섞인 벡터 (고른 행끼리 정해져 마지막 - 목표 합계를 켜면 그만큼 모자람). 뺀 이유는 앞에서 빠진 행을 다시
+    세지 않는다."""
     cond, opts, ov = norm_conditions(conditions), norm_options(options), norm_overrides(overrides)
+    if flags is None:
+        flags = {}
+    if not flags:
+        flags.update(sel_flags(t, opts))
+    br, cf = flags.get("bad_rules"), flags.get("conflict")
+    bad_r = [r in br["rules"] for r in t["rules"]] if br else None
+    CK = cf["keys"] if cf and cf.get("state") == "ok" else None
     every = not cond["dates"] and not cond["sources"]
     date_ok = [not cond["dates"] or d in cond["dates"] for d in t["dates"]]
     src_ok = [not cond["sources"] or s in cond["sources"] for s in t["sources"]]
@@ -304,9 +489,10 @@ def select(t, conditions=None, options=None, overrides=None, fill=None):
     caps = [None, opts["A"], "fill" if opts["target"] else opts["B"], opts["C"]]
     ex_bad, ex_rule, ex_py = opts["exclude_bad"], opts["exclude_rule_based"], opts["exclude_python_ua_normal"]
     LK = (t.get("lk") or "") if opts["keep_llm_ok"] else ""      # '불일치' 중 LLM 재확인이 label 맞다고 한 줄은 남김
-    n_dup = n_ex = n_bad = n_rule = n_py = n_grade = 0
+    n_dup = n_ex = n_bad = n_rule = n_py = n_grade = n_conf = n_br = 0
+    f_br = f_cf = f_both = 0                            # 표시가 붙은 후보 행 (뺀 이유와 달리 겹침도 셈 - 화면 요약)
     sel, cand, capped, fillb = [], [], [], []
-    R, L, G, Y = t["rule"], t["llm"], t["g"], t["y"]
+    R, L, G, Y, SK = t["rule"], t["llm"], t["g"], t["y"], t.get("sk")
     # 표의 줄은 날짜·줄 순서 (5.5) → 줄 번호 순서가 곧 날짜·줄 순서
     for i, d, s, g, y, r, ty, k, fl in zip(range(t["n"]), t["date"], t["src"], G, Y, R, t["type"], t["cons"], t["fl"]):
         if not every and not (date_ok[d] and src_ok[s]):
@@ -316,10 +502,20 @@ def select(t, conditions=None, options=None, overrides=None, fill=None):
             n_dup += 1
             continue
         rc = rule_ov[r]
+        hb = bad_r is not None and bad_r[r]
+        hc = CK is not None and (SK[i] or row_key(t, i)) in CK
+        if hb or hc:
+            f_br += hb
+            f_cf += hc
+            f_both += hb and hc
         if rc == 1 or type_ex[ty]:
             n_ex += 1
         elif ex_bad and k == "4" and not (LK and LK[i] == "1"):
             n_bad += 1
+        elif hc:
+            n_conf += 1
+        elif hb and rc != 2:
+            n_br += 1
         elif ex_rule and k == "2" and y:
             n_rule += 1
         elif ex_py and not y and fl & PY_UA:
@@ -347,6 +543,17 @@ def select(t, conditions=None, options=None, overrides=None, fill=None):
             chosen.update(idx if len(idx) <= cap else _round_robin(idx, cap, R, L))
     sel.extend(chosen)
     n_cap = len(capped) - len(chosen)
+    n_ar = 0
+    if opts["a_ratio"]:                                 # A 정상 비율: A 공격을 'A 정상 수 × (1-r)/r' 개로 (목표 합계·섞인 벡터 전)
+        r = opts["a_ratio"]
+        att = sorted(i for i in sel if G[i] == 1 and Y[i] and rule_ov[R[i]] != 2)   # 표 차례 = run_sweep --a-ratio 와 같은 _fill
+        nor = sum(1 for i in sel if G[i] == 1 and not Y[i])
+        need = int(round(nor * (1 - r) / r)) - sum(1 for i in sel if G[i] == 1 and Y[i] and rule_ov[R[i]] == 2)   # 룰 '넣기' 먼저
+        keep = set(att) if need >= len(att) else set(_fill(t, att, need, R, L)[0]) if need > 0 else set()
+        cut = set(att) - keep
+        n_ar = len(cut)
+        if cut:
+            sel = [i for i in sel if i not in cut]
     if opts["target"]:                                  # 목표 합계: 지금까지 고른 것(A·C·룰 '넣기') 다음 B 로 모자란 수만큼
         need, base = opts["target"] - len(sel), len(sel)
         add, k, extra = ([], 0, 0) if need <= 0 else (fillb, None, 0) if need >= len(fillb) else _fill(t, fillb, need, R, L)
@@ -354,11 +561,26 @@ def select(t, conditions=None, options=None, overrides=None, fill=None):
         if fill is not None:
             fill.update(target=opts["target"], base=base, max=base + len(fillb), added=len(add), k=k, extra=extra,
                         state="over" if need < 0 else "under" if need > len(fillb) else "exact")
+    mx = flags.get("mixed")                             # 섞인 벡터는 마지막에: 고른 행(추가 행)끼리 정해지므로 상한·목표 합계로 고른 뒤
+    n_mix = None
+    if mx and mx.get("state") == "ok":
+        drop = mixed_rows(sel, Y, mx["by_dev"])
+        n_mix = len(drop)
+        if drop:
+            sel = [i for i in sel if i not in drop]
+            if fill:
+                fill["after_mixed"] = n_mix
     sel.sort()
-    why = {"제거 (중복)": n_dup, "'불일치'": n_bad, "'정합 (룰 기준)' 공격 (보류)": n_rule,
-           "python-requests UA 정상 (보류)": n_py, "룰·유형 빼기": n_ex, "등급 빼기": n_grade, "패턴당 상한 초과": n_cap}
+    why = {"제거 (중복)": n_dup, "'불일치'": n_bad, "피처 충돌 (원본·디코딩)": n_conf, "문제 룰 (룰 품질 점검 부적합)": n_br,
+           "'정합 (룰 기준)' 공격 (보류)": n_rule, "python-requests UA 정상 (보류)": n_py, "룰·유형 빼기": n_ex, "등급 빼기": n_grade,
+           "패턴당 상한 초과": n_cap}
+    if opts["a_ratio"]:
+        why["A 공격 줄임 (A 정상 비율)"] = n_ar
     if opts["target"]:
         why["목표 합계 밖 (B)"] = len(fillb) - len(add)
+    why["추가 행끼리 섞인 벡터"] = n_mix or 0
+    flags["rows"] = {"bad_rules": f_br if bad_r is not None else None, "conflict": f_cf if CK is not None else None,
+                     "both": f_both if bad_r is not None and CK is not None else None, "mixed": n_mix}   # 끈 옵션은 세지 않음
     return sel, cand, why
 
 
@@ -370,16 +592,38 @@ def hold_rows(t, cand, kind):
     return [i for i in cand if not Y[i] and FL[i] & PY_UA]
 
 
+def flag_view(t, flags):
+    """켠 옵션의 표시 요약 (화면·담기용, 열쇠 목록 없이). 후보(조건 안, 제거 아님) 중 표시가 붙은 행 수는 select 가 센 것
+    (flags['rows'] - 뺀 이유의 수와 달리 겹침도 셈)."""
+    out, br, cf, rows = {}, flags.get("bad_rules"), flags.get("conflict"), flags.get("rows") or {}
+    if br:
+        out["bad_rules"] = {k: br.get(k) for k in ("hist", "judged", "lines", "sig", "at", "missing")}
+        out["bad_rules"].update(n=len(br["rules"]), in_table=sum(r in br["rules"] for r in t["rules"]), rows=rows.get("bad_rules"),
+                                model=BAD_RULE_MODEL)
+    if cf:
+        out["conflict"] = {k: cf.get(k) for k in ("state", "ver", "file", "sig", "at", "dev", "rows", "seconds")}
+        if cf.get("state") == "ok":
+            out["conflict"].update(cand_rows=rows.get("conflict"), both=rows.get("both"))
+    mx = flags.get("mixed")
+    if mx:
+        out["mixed"] = {k: mx.get(k) for k in ("state", "ver", "file", "sig", "at", "why")}
+        out["mixed"]["rows"] = rows.get("mixed")
+    return out
+
+
 def preview(t, conditions=None, options=None, overrides=None, view=""):
-    """화면 미리 보기: 등급·label 별 후보/선택 수, 공격 유형·출처·날짜별, 뺀 이유, 룰별 표, 보류 대상 수.
+    """화면 미리 보기: 등급·label 별 후보/선택 수, 공격 유형·출처·날짜별, 뺀 이유, 룰별 표, 보류 대상 수, 켠 표시 옵션 요약.
     view = rule | pyua 면 표들을 그 보류 대상만으로 센다 (선별 자체는 그대로 - 지금 선별에 몇 개가 들어갔는지 보임)."""
-    fill = {}
-    sel, cand, why = select(t, conditions, options, overrides, fill)
+    fill, flags = {}, {}
+    sel, cand, why = select(t, conditions, options, overrides, fill, flags)
+    o = norm_options(options)                           # 끈 옵션도 요약은 보임 (켜면 무엇을 빼는지 - 후보 행 수는 켰을 때만)
+    fview = flag_view(t, dict(sel_flags(t, dict(o, exclude_bad_rules=True, exclude_conflict=True, exclude_mixed=True)), **flags))
     ov = norm_overrides(overrides)
     on = bytearray(t["n"])
     for i in sel:
         on[i] = 1
     sg = Counter(t["g"][i] for i in sel)                # 등급별 선택 수 (보기와 상관없이 지금 선별 전체)
+    sa = Counter(t["y"][i] for i in sel if t["g"][i] == 1)   # A 의 공격·정상 선택 수 (A 정상 비율 옆에)
     hold, rows_of, G, Y, K = {}, {}, t["g"], t["y"], t["cons"]
     LK = t.get("lk") or ""                              # '불일치' 후보 중 LLM 재확인이 label 맞다고 한 수 (옵션 옆에)
     llm_ok = sum(1 for i in cand if K[i] == "4" and LK[i] == "1") if LK else 0
@@ -439,13 +683,37 @@ def preview(t, conditions=None, options=None, overrides=None, view=""):
             "all_dates": t["dates"], "all_sources": t["sources"], "hold": hold, "unverified_att": unverified,
             "view": view if view in HOLD else "", "combined": bool(t.get("combined")), "overlap": overlap,
             "one_side": t.get("one_side"), "sel_grade": {C.GRADES[g]: sg[g] for g in (1, 2, 3)}, "fill": fill or None,
-            "llm_ok_bad": llm_ok, "has_lk": bool(LK),
+            "sel_a": {"공격": sa[1], "정상": sa[0]},
+            "llm_ok_bad": llm_ok, "has_lk": bool(LK), "flags": fview,
             "options": norm_options(options), "conditions": norm_conditions(conditions), "overrides": ov}
 
 
 def lk_sig(t):
     """비교 표의 LLM 재확인 'label 맞음' 표시 지문 - 'LLM 맞음은 남기기' 초안을 담은 뒤 바뀌었는지 (확정 때 확인)."""
     return hashlib.sha1((t.get("lk") or "").encode()).hexdigest()[:16]
+
+
+def flag_sigs(opts, fview):
+    """켠 표시 옵션의 지문 {badrule_sig, conflict_sig} - 담을 때 남기고 확정 때 맞춰 본다 (lk_sig 와 같음).
+    피처 충돌을 아직 계산하지 않았거나 3.6 결과가 없으면 담지 않는다."""
+    out = {}
+    if opts["exclude_bad_rules"]:
+        br = fview.get("bad_rules") or {}
+        if br.get("missing"):
+            raise ValueError("3.6 LLM 재확인 결과(results.jsonl)가 없어 문제 룰을 알 수 없습니다 - '문제 룰 빼기'를 끄고 담으세요")
+        out["badrule_sig"] = br.get("sig") or ""
+    if opts["exclude_conflict"]:
+        cf = fview.get("conflict") or {}
+        if cf.get("state") != "ok":
+            raise ValueError(f"피처 충돌(판 {opts['conflict_ver']})을 아직 계산하지 않았습니다 - 선별의 '피처 충돌 계산'을 먼저 하세요 "
+                             "(다시 비교한 뒤에도 다시 계산)")
+        out["conflict_sig"] = cf.get("sig") or ""
+    if opts["exclude_mixed"]:
+        mx = fview.get("mixed") or {}
+        if mx.get("state") != "ok":
+            raise ValueError(f"섞인 벡터 재료(판 {opts['conflict_ver']})가 없습니다 - 선별의 '피처 충돌 계산'을 (다시) 하세요")
+        out["mixed_sig"] = mx.get("sig") or ""
+    return out
 
 
 def read_table(base_name, dev):
@@ -481,6 +749,7 @@ def save_draft(name, base_name, conditions, options, overrides, tables):
             raise ValueError("비교 결과의 기준 버전이 다릅니다")
     tc = combine(tables["ips"], tables["waf"])
     pv = preview(tc, conditions, options, overrides)
+    sigs = flag_sigs(pv["options"], pv["flags"])
     snap = {dev: tables[dev]["snapshot"] for dev in C.DEVICES}
     one = {"cand": pv["cand"], "sel": pv["sel"], "sel_label": pv["sel_label"], "by_grade": pv["by_grade"],
            "overlap": pv["overlap"], "one_side": pv["one_side"], "fill": pv["fill"]}
@@ -490,6 +759,7 @@ def save_draft(name, base_name, conditions, options, overrides, tables):
             "draft_counts": counts, "created_at": (cur or {}).get("created_at") or C.now_iso(), "updated_at": C.now_iso()}
     if item["options"]["keep_llm_ok"]:                  # 비교 표의 LLM 재확인 표시가 담은 뒤 바뀌면 확정하지 않는다
         item["lk_sig"] = lk_sig(tc)
+    item.update(sigs)                                   # 문제 룰 목록·피처 충돌 표시도 담은 뒤 바뀌면 확정하지 않는다
     if cur and cur.get("status") == "candidate":        # 후보: 선별만 바꾸고 rev·데이터 추가·목표는 그대로 (다음 내보내기 = rev+1)
         keep = {k: cur[k] for k in ("status", "rev", "revs", "additions", "targets", "counts", "files", "exported_at")
                 if k in cur}
@@ -1104,8 +1374,17 @@ def export(name, ctx):
                 tc = combined_table(base["name"])
                 if (ver.get("options") or {}).get("keep_llm_ok") and ver.get("lk_sig") != lk_sig(tc):
                     raise ValueError("담은 뒤 비교 결과의 LLM 재확인 표시가 바뀌었습니다 - 지금 결과로 확인하고 '버전 후보에 담기'를 다시 하세요")
+                opts = norm_options(ver["options"])
+                flags = sel_flags(tc, opts)
+                now_sigs = flag_sigs(opts, flag_view(tc, flags))
+                for k, what in (("badrule_sig", "문제 룰 목록(3.6 LLM 재확인 결과)이"), ("conflict_sig", "피처 충돌 표시가"),
+                                ("mixed_sig", "섞인 벡터 재료가")):
+                    if k in now_sigs and now_sigs[k] != ver.get(k):
+                        raise ValueError(f"담은 뒤 {what} 바뀌었습니다 - 지금 결과로 확인하고 '버전 후보에 담기'를 다시 하세요")
                 ctx.sub(1, 3, f"공통 선별 ({tc['n']:,}개)")
-                sel, cand, why = select(tc, ver["conditions"], ver["options"], ver["overrides"])
+                sel, cand, why = select(tc, ver["conditions"], ver["options"], ver["overrides"], flags=flags)
+                manifest["flags"] = {k: {x: v for x, v in fv.items() if x in ("n", "hist", "sig", "at", "ver", "file", "dev")}
+                                     for k, fv in flag_view(tc, flags).items()}   # 어떤 문제 룰 목록·충돌 표시로 뺐는지
                 forced, fwhy, fdup = _forced(tc, cand, ver)  # 데이터 추가: 강제로 넣기 (선별에 이미 든 것은 그대로)
                 sset = set(sel)
                 extra = [k for k in forced if k not in sset]

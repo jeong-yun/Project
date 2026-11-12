@@ -17,7 +17,8 @@
                  레시피 내용·서버 데이터셋 이름 규칙은 로컬 전용 5_8a_server_local.py 에만 있다 - 그 파일이 없으면 사본·디코딩 점검·
                  승인 조건은 꺼지고, 올릴 파일·원본 피처 미리 보기·결과 기록만 된다.
   3. 로컬 사전 점검 (check, 화면 job 'server' · 잠금 server_check · 상태 .run/server_check.json)
-       학습 파일 전체(올릴 파일에서 뺀 행은 빼고)의 payload 를 레시피 1 로 디코딩해 고른 판의 피처를 만들고(묶음 프로세스 4개, payload
+       학습 파일 전체(올릴 파일에서 뺀 행은 빼고)의 payload 를 레시피 1 로 디코딩해 (기준 행 = 전처리만 - 기존 데이터에 decoded_payload 가
+       없어 사본 3 이 전처리로 채움, 추가 행 = decoded_payload) 고른 판의 피처를 만들고(묶음 프로세스 4개, payload
        지문 캐시 11_supervised/cache/server_feat/), 서버 Train 처럼 RF 트리 수 100·200·300 × 최대 깊이 6·16·25·35 그리드(그리드 행 표본
        15만의 80/20, 검증 f1 로 고름)에서 고른 조합으로 전체를 학습한다 (--no-grid = RF 100 트리·깊이 제한 없음).
        95% 미리 보기  학습 데이터 자체를 예측한 4지표 (전체 · 기준 · 추가) + 참고 f1 만 95% (지난번 통과 방식). 참고로 그리드 검증분.
@@ -25,14 +26,22 @@
                       일치하지 않는 추가 샘플의 원인(피처·인코딩·룰·유형)과 목록 CSV.
        ① 구현 일치    같은 원본에서 파이썬 vs SQL 의 줄바꿈 처리 차이(SQL 만 공백으로 바꾸는 글자)가 든 행과 예측 차이 (Java 정규식 차이는
                       피처 세션의 검사).
-  4. 서버 결과   장비별 TP·FP·TN·FN → 4지표·95% 판정, ② 예측 일치 % → 98% 판정, ① 다른 칸 수 (기록·표시만). 서버의 틀린 행·예측 다른 행
+       (2026-11-06~) 학습 입력: 디코딩(기본) 또는 원본(서버가 원본 payload 로 학습할 때 - 사본 3r 의 표). 장비별 판정 기준값
+                      (공격 확률 ≥ 기준값, 비우면 0.50 - 서버에서 IPS·WAF 따로 정함)으로 4지표·②·① 을 내고, 0.25~0.50 훑기 표.
+  4. 서버 결과   장비별 TP·FP·TN·FN → 4지표·95% 판정, ② 예측 일치 % → 98% 판정, ① 다른 칸 수, 서버 Train 기준값 (기록·표시만). 서버의 틀린 행·예측 다른 행
                  CSV 를 올리면 우리 추가 샘플과 payload 로 짝지어 룰·유형별로 보인다.
   5. 체크리스트  서버 단계마다 완료·시각·메모.
   6. 넘겨줄 묶음 사본·올릴 파일·피처 사전·SQL·점검 결과·서버 기록을 설명(README_설명.md)과 함께 zip 하나로 (bundle).
   최종 승인(5_7 approve)은 5_8a 가 있으면 장비마다 서버 4지표 95% + ② 예측 일치 98% 를 보고, 못 넘거나 결과가 없으면 사유를 받는다 (gate).
+  + 선별의 '피처 충돌 빼기' 표시 (conflicts, 화면 job 'selconf' · 잠금 sel_conflict, 2026-11-06~): 비교 결과의 후보마다 판의 원본·디코딩
+    벡터가 기준 데이터의 같은 벡터 다수 label 과 반대인지 (사전 점검과 같은 디코딩·피처 캐시) → 5_7 select 가 읽는다.
+    '추가 행끼리 섞인 벡터 빼기'의 재료(후보마다 기준에 없는 디코딩 벡터 묶음 번호, 장비별)도 함께 남긴다 - 섞였는지는 5_7 이 고른 행끼리.
+    판의 피처가 표준보다 많아도 된다 (표준 34 를 모두 가진 보강판, 예: enc1n5 = 39).
 
     python 5_8_server.py prepare --version "26 하반기" [--tag 261104] [--nul drop|block|pct] [--labels keep|attack_only] [--ver std]
     python 5_8_server.py check --version "26 하반기" --dev ips waf [--ver std] [--grid-rows 150000 | --no-grid] [--workers 4]
+                               [--threshold ips=0.30 --threshold waf=0.30] [--train-input decoded|raw]
+    python 5_8_server.py conflicts --base "26 상반기" --ver enc1n5 [--workers 4]
     python 5_8_server.py bundle --version "26 하반기"
     python 5_8_server.py state --version "26 하반기"
 """
@@ -78,6 +87,9 @@ CACHE_VER = 1
 # RF 트리 수 × 최대 깊이 그리드에서 가장 좋은 값. 로컬도 같은 그리드를 f1 로 고른다 (그리드는 표본 행의 80/20 나누기, 고른 조합으로 전체 다시 학습).
 GRID_TREES, GRID_DEPTH, GRID_METRIC, GRID_ROWS = (100, 200, 300), (6, 16, 25, 35), "f1", 150000
 IMPL_REF = 0.998                                     # ① 참고 기준 (실제 시스템 입력은 다른 업무자가 99.8% 이상 같은지 확인 뒤 적용)
+# 판정 기준값 (2026-11-06 사용자: 서버 Train 에서 IPS·WAF 따로 정할 수 있음): 공격 확률 ≥ 기준값이면 공격. 비우면 0.50.
+THRESHOLD, SCAN_T = 0.5, (0.25, 0.30, 0.35, 0.40, 0.45, 0.50)
+TRAIN_INPUTS = {"decoded": "디코딩 입력 (기본 - 사본 3 의 표로 학습)", "raw": "원본 입력 (서버가 원본 payload 로 학습할 때 - 사본 3r 의 표)"}
 PREV_FILE = BASE / "12_server" / "server_results.json"   # 로컬 전용: 지난 버전의 서버 결과 (예: 26 상반기 - 사용자가 알려 준 값)
 GENERIC_STEPS = [("upload", "올리기", ""), ("r1", "1 decode", ""), ("r2", "2 결합", ""), ("r3", "3 py 피처 (디코딩, 학습용)", ""),
                  ("r3r", "3r py 피처 (원본, ① 확인용)", ""), ("r4", "4 sql 피처 (원본)", ""), ("train", "Train", ""),
@@ -456,7 +468,7 @@ def _int(b, k, need=True):
 
 def record(name, dev, kind, b):
     """서버 결과 기록. kind = metrics (tp·fp·tn·fn) | agree (② value % 또는 0~1) | impl (① diff_cells[, diff_rows, total_rows])
-    | wrong_csv·diff_csv (data = base64 CSV) | clear (what)."""
+    | threshold (서버 Train 에 쓴 판정 기준값 value) | wrong_csv·diff_csv (data = base64 CSV) | clear (what)."""
     rev = _dev_rec(name, dev, b.get("rev"))
     memo = str(b.get("memo") or "")[:500]
     now = C.now_iso()
@@ -485,6 +497,11 @@ def record(name, dev, kind, b):
                 "at": now, "memo": memo, "source": "입력"}
         if item["diff_rows"] is not None and item["total_rows"]:
             item["rate"] = round(1 - item["diff_rows"] / item["total_rows"], 6)
+    elif kind == "threshold":                           # 체크리스트: 서버 Train 기준값 (장비별)
+        t = norm_threshold(b.get("value"))
+        if t is None:
+            raise ValueError("서버 Train 기준값 (0.01~0.99)")
+        item = {"value": t, "at": now, "memo": memo, "source": "입력"}
     elif kind in ("wrong_csv", "diff_csv"):
         import base64
         data = base64.b64decode(b.get("data") or "")
@@ -494,7 +511,7 @@ def record(name, dev, kind, b):
                     filename=str(b.get("filename") or "")[:200])
     elif kind == "clear":
         what = b.get("what")
-        if what not in ("metrics", "agree", "impl", "wrong_csv", "diff_csv"):
+        if what not in ("metrics", "agree", "impl", "threshold", "wrong_csv", "diff_csv"):
             raise ValueError("what")
         with _wlock:
             rec = load_rec(name)
@@ -591,12 +608,18 @@ def state(name):
     btag = base_tag(v, ver)
     tag = r.get("tag") or time.strftime("%y%m%d")
     stale = {d: bool(r.get("added_sha256")) and (r.get("added_sha256") or {}).get(d) != _added_sha(man, d) for d in C.DEVICES}
+    vs = versions_of(L)
+    so = ver.get("options") or {}                       # 선별의 '피처 충돌 빼기' 판 = 서버 반영 판의 기본 (만든 뒤에는 만든 판)
+    sel_ver = so.get("conflict_ver") or STD if so.get("exclude_conflict") else None
+    sel_ok = sel_ver is not None and all(any(x["ver"] == sel_ver for x in vs[d]) for d in C.DEVICES)
     out = {"name": name, "rev": rev, "status": ver.get("status"), "tag": tag, "base_tag": btag, "prepared": bool(r.get("prepared_at")),
            "prepared_at": r.get("prepared_at"), "nul": r.get("nul") or "drop", "nul_modes": NUL_MODES,
-           "labels": r.get("labels") or "keep", "label_modes": LABEL_MODES, "ver": r.get("ver") or STD, "versions": versions_of(L),
+           "labels": r.get("labels") or "keep", "label_modes": LABEL_MODES, "ver": r.get("ver") or (sel_ver if sel_ok else STD),
+           "sel_ver": sel_ver, "versions": vs,
            "stale": stale, "targets": {"metric": TARGET_METRIC, "agree": TARGET_AGREE, "impl_ref": IMPL_REF}, "local": avail,
            "local_file": LOCAL_FILE, "prev_server": prev_server(v, ver),
            "grid": {"trees": list(GRID_TREES), "depth": list(GRID_DEPTH), "metric": GRID_METRIC, "rows": GRID_ROWS},
+           "threshold": THRESHOLD, "train_inputs": TRAIN_INPUTS,
            "dev": {}, "older_revs": sorted((int(k) for k in (rec.get("revs") or {}) if k != str(rev)), reverse=True)}
     for dev in C.DEVICES:
         d = (r.get("dev") or {}).get(dev) or {}
@@ -651,6 +674,7 @@ def _check_md(dev, chk):
     ins, ho, ag, im = chk.get("insample") or {}, chk.get("holdout"), chk.get("agree"), chk.get("impl")
     lines = [f"## {dev.upper()} 로컬 사전 점검 ({chk.get('at', '')}, {chk.get('seconds')}초)", "",
              f"- 피처 정의 판 {chk.get('feature_ver')} · 학습 피처 {('디코딩 입력' if chk.get('basis') == 'decoded' else '원본 입력')} · "
+             f"판정 기준값 {chk.get('threshold', THRESHOLD):.2f} · "
              f"{chk.get('rows_used', chk.get('rows'))}행 (기준 {chk.get('base_rows')} + 추가 {chk.get('added_used', chk.get('added_rows'))}, "
              f"올릴 파일에서 뺀 행 {chk.get('excluded', 0)}) · {chk.get('model')}",
              f"- 95% 미리 보기 (학습분 안, 전체): {m4(ins.get('all'))} → 4지표 {'넘음' if not ins.get('fails') else '미달: ' + ', '.join(ins['fails'])}"
@@ -671,6 +695,10 @@ def _check_md(dev, chk):
     if im:
         lines.append(f"- ① 구현 일치 (같은 원본, 파이썬 vs SQL 줄바꿈 처리 {', '.join(im.get('chars') or []) or '차이 없음'}): "
                      f"그 글자가 든 행 {im.get('rows')} · 피처 다른 행 {im.get('feat_diff_rows')} · 예측 다른 행 {im.get('pred_diff_rows')}")
+    if chk.get("scan"):
+        lines.append("- 기준값 훑기 (같은 모델, 전체): " + " / ".join(
+            f"{r['t']:.2f}: F1 {_pct(r.get('f1'))}{'✓' if r.get('f1_ok') else ''} · ② {_pct(r.get('agree'))}{'✓' if r.get('a98') else ''}"
+            for r in chk["scan"]) + " (✓ = f1 ≥95% · ② ≥98%)")
     return "\n".join(lines) + "\n"
 
 
@@ -774,21 +802,19 @@ def bundle(name):
 # ── 3. 로컬 사전 점검 ────────────────────────────────────────────────────
 
 class _Prog:
-    """진행률: 장비마다 같은 몫, 장비 안에서는 단계 몫 (읽기·원본 피처·디코딩 피처·그리드·학습·학습분 안·일치·구현·저장)."""
+    """진행률: 장비마다 같은 몫, 장비 안에서는 단계 몫 w (점검: 읽기·원본 피처·디코딩 피처·그리드·학습·학습분 안·일치·구현·저장)."""
 
-    def __init__(self, devs, grid, dec, raw_calc):
-        w = {"read": 3, "raw": 12 if raw_calc else 0, "dec": 25 if dec else 0, "grid": 32 if grid else 0, "fit": 14, "insample": 3,
-             "agree": 5 if dec else 0, "impl": 2 if dec else 0, "save": 1}
+    def __init__(self, devs, w, lock=LOCK):
         tot = sum(w.values())
         self.start, acc = {}, 0.0
         for k, x in w.items():
             self.start[k] = acc / tot
             acc += x
         self.w = {k: x / tot for k, x in w.items()}
-        self.devs, self.t0, self.last = devs, time.time(), 0.0
+        self.devs, self.lock, self.t0, self.last = devs, lock, time.time(), 0.0
 
     def set(self, i, phase, frac, text, force=False):
-        if RT.stop_requested(LOCK):
+        if RT.stop_requested(self.lock):
             raise Stopped()
         now = time.time()
         if not force and now - self.last < 1.0:
@@ -796,7 +822,7 @@ class _Prog:
         self.last = now
         pct = 100 * (i + self.start[phase] + self.w[phase] * min(1.0, max(0.0, frac))) / len(self.devs)
         el = now - self.t0
-        RT.write_status(LOCK, dev=self.devs[i], step=phase, step_text=text, pct=round(pct, 1),
+        RT.write_status(self.lock, dev=self.devs[i], step=phase, step_text=text, pct=round(pct, 1),
                         eta_s=round(el / pct * (100 - pct)) if pct >= 3 else None, elapsed_s=round(el))
 
 
@@ -804,13 +830,13 @@ _W = {}
 
 
 def _w_init(code_path, defs_json, decode):
-    """계산 프로세스 하나 준비: 판의 피처 정의 + (디코딩이면) 레시피 1 함수."""
+    """계산 프로세스 하나 준비: 판의 피처 정의 + (decode = 'decoded' | 'pre' 면) 레시피 1 함수."""
     F = _features()
     ns = F.load_legacy(code_path)
     if defs_json:
         d = json.loads(defs_json)
         ns = dict(ns, regex_dict_comb=d["comb"], regex_dict_count=d["count"], regex_dict_ratio=d["ratio"])
-    _W.update(F=F, ns=ns, names=F.legacy_names(ns), dec=local().decoder() if decode else None)
+    _W.update(F=F, ns=ns, names=F.legacy_names(ns), dec=local().decoder(decode) if decode else None)
 
 
 def _w_run(payloads):
@@ -825,38 +851,46 @@ def _w_run(payloads):
 
 
 def _cache_key(code, ns, decode):
-    """피처 캐시 열쇠 = 판 정규식(장비 접두사 빼고) + 한글 비율 함수 + 디코딩 함수 + 5.0b 계산 판.
-    IPS·WAF 의 정규식이 접두사 말고 같으면 열쇠가 같아, 두 장비에 같은 payload(정상 행 등)는 한 번만 계산한다."""
+    """피처 캐시 열쇠 = 판 정규식(장비 접두사 빼고) + 한글 비율 함수 + 디코딩 함수·종류(decoded | pre) + 5.0b 계산 판.
+    IPS·WAF 의 정규식이 접두사 말고 같으면 열쇠가 같아, 두 장비에 같은 payload(같은 샘플·정상 행 등)는 한 번만 계산한다."""
     F = _features()
     rx = {k: {n.split("_", 1)[1]: list(x) for n, x in ns[f"regex_dict_{k}"].items()} for k in ("comb", "count", "ratio")}
     ko = ns["ko_ratio"].__code__
     key = {"v": CACHE_VER, "rx": rx, "ko": hashlib.sha1(ko.co_code + repr(ko.co_consts).encode("utf-8")).hexdigest(),
-           "dec": local().decoder_key() if decode else "", "gf": hashlib.sha1(F.generate_fast.__code__.co_code).hexdigest()}
+           "dec": f"{local().decoder_key()}:{decode}" if decode else "", "gf": hashlib.sha1(F.generate_fast.__code__.co_code).hexdigest()}
     return hashlib.sha1(json.dumps(key, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:16]
 
 
-def _feature_matrix(P, ns, names, defs, code, decode, prog, i, phase, workers):
-    """payload 배열 → 피처 행렬 (decode=True 면 레시피 1 디코딩 뒤). payload 지문 캐시(11_supervised/cache/server_feat/<열쇠>/)에서 없는 것만
-    프로세스 여러 개로 계산해 묶음마다 저장 (멈춰도 계산한 것은 남음). → (행렬, 디코딩 오류 수, 새로 계산한 수)"""
+DEC_TEXT = {"decoded": "디코딩한 payload (익명화 + 전처리)", "pre": "전처리한 payload", None: "원본 payload", False: "원본 payload"}
+
+
+def _feature_matrix(P, ns, names, defs, code, decode, prog, i, phase, workers, span=(0.0, 1.0)):
+    """payload 배열 → 피처 행렬. decode = None(원본) | 'decoded'(레시피 1 decoded_payload = 익명화 + 전처리) | 'pre'(전처리만).
+    payload 지문 캐시(11_supervised/cache/server_feat/<열쇠>/)에서 없는 것만 프로세스 여러 개로 계산해 묶음마다 저장 (멈춰도 계산한 것은
+    남음). 캐시는 이 payload 들의 줄만 읽는다 (메모리). span = 이 계산이 차지하는 단계 안의 몫. → (행렬, 디코딩 오류 수, 새로 계산한 수)"""
     import numpy as np
     import pandas as pd
     F = _features()
     U = prog.devs[i].upper()
-    what = "디코딩한 payload" if decode else "원본 payload"
+    what = DEC_TEXT[decode]
+    a, b = span
     d = C.CACHE / "server_feat" / _cache_key(code, ns, decode)
     d.mkdir(parents=True, exist_ok=True)
     fcols = [f"f{j:02d}" for j in range(len(names))]
     if not (d / "info.json").exists():
-        C.write_json(d / "info.json", {"decode": decode, "names_without_prefix": [n.split("_", 1)[1] for n in names], "at": C.now_iso()})
+        C.write_json(d / "info.json", {"decode": decode or "", "names_without_prefix": [n.split("_", 1)[1] for n in names], "at": C.now_iso()})
     pk = F.hash_series(pd.Series(P, dtype=object))
+    want = pd.Index(pd.unique(pk))
 
     def have():
-        parts = sorted(d.glob("part-*.parquet"))
-        if not parts:
+        hs = []
+        for p in sorted(d.glob("part-*.parquet")):
+            h = pd.read_parquet(p)
+            hs.append(h[h["pk"].isin(want)])
+        if not hs:
             return pd.DataFrame(columns=fcols, index=pd.Index([], dtype="uint64", name="pk"))
-        h = pd.concat([pd.read_parquet(p) for p in parts], ignore_index=True)
-        return h.drop_duplicates("pk", keep="last").set_index("pk")
-    prog.set(i, phase, 0, f"{U} {what} 피처 캐시 읽기", True)
+        return pd.concat(hs, ignore_index=True).drop_duplicates("pk", keep="last").set_index("pk")
+    prog.set(i, phase, a, f"{U} {what} 피처 캐시 읽기 ({len(P):,}행)", True)
     H = have()
     miss = ~pd.Index(pk).isin(H.index)
     first = pd.Series(np.arange(len(pk)))[miss].groupby(pk[miss]).first().to_numpy() if miss.any() else np.zeros(0, int)
@@ -874,7 +908,8 @@ def _feature_matrix(P, ns, names, defs, code, decode, prog, i, phase, workers):
             df.to_parquet(d / f"part-{stamp}-{no:05d}.parquet", index=False)
             done[0] += len(ix)
             rate = done[0] / max(1e-6, time.time() - t0)
-            prog.set(i, phase, done[0] / len(todo), f"{U} {what} 피처 {done[0]:,}/{len(todo):,} (캐시에 없던 것, {rate:.0f}개/초)")
+            prog.set(i, phase, a + (b - a) * done[0] / len(todo),
+                     f"{U} {what} 피처 {done[0]:,}/{len(todo):,} (캐시에 없던 것, {rate:.0f}개/초)")
         left = list(range(len(chunks)))
         if workers > 1 and len(chunks) > 1:
             from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -908,14 +943,31 @@ def _feature_matrix(P, ns, names, defs, code, decode, prog, i, phase, workers):
     return X, errs, len(todo)
 
 
-def check(name, devs, grid=True, ver=None, workers=WORKERS, grid_rows=GRID_ROWS):
+def norm_threshold(x):
+    """기준값 칸: 비우면 None (= 0.50), 아니면 0.01~0.99."""
+    if x in (None, ""):
+        return None
+    try:
+        t = round(float(str(x).strip()), 4)
+    except ValueError:
+        raise ValueError("기준값은 0.01~0.99 의 수 (비우면 0.50)")
+    if not 0.01 <= t <= 0.99:
+        raise ValueError("기준값은 0.01~0.99 의 수 (비우면 0.50)")
+    return t
+
+
+def check(name, devs, grid=True, ver=None, workers=WORKERS, grid_rows=GRID_ROWS, thresholds=None, train_input="decoded"):
+    """thresholds = {장비: 기준값} (없는 장비는 0.50), train_input = decoded | raw."""
+    thresholds = {d: norm_threshold(x) for d, x in (thresholds or {}).items()}
+    if train_input not in TRAIN_INPUTS:
+        raise ValueError("학습 입력은 decoded 또는 raw")
     held = RT.acquire_lock(LOCK, version=name, devs=list(devs))
     if held:
         raise SystemExit(f"서버 사전 점검이 이미 도는 중입니다 (pid {held.get('pid')})")
     RT.clear_stop(LOCK)
     RT.write_status(LOCK, version=name, rev=None, devs=list(devs), status="running", started_at=C.now_iso(), finished_at=None,
                     error=None, results={}, pct=0, eta_s=None, elapsed_s=0, dev=devs[0] if devs else "", step="",
-                    step_text="시작", grid=grid, grid_rows=grid_rows, ver=ver)
+                    step_text="시작", grid=grid, grid_rows=grid_rows, ver=ver, thresholds=thresholds, train_input=train_input)
     try:
         v, vv, rev, man = _ver(name)
         L = local()
@@ -923,10 +975,12 @@ def check(name, devs, grid=True, ver=None, workers=WORKERS, grid_rows=GRID_ROWS)
             ver = ((load_rec(name).get("revs") or {}).get(str(rev)) or {}).get("ver") or STD
         ver = _check_ver(L, ver)
         RT.write_status(LOCK, rev=rev, ver=ver)
-        prog = _Prog(list(devs), grid, L is not None, ver != STD)
+        dec = L is not None
+        prog = _Prog(list(devs), {"read": 3, "raw": 12 if ver != STD else 0, "dec": 25 if dec else 0, "grid": 32 if grid else 0,
+                                  "fit": 14, "insample": 3, "agree": 5 if dec else 0, "impl": 2 if dec else 0, "save": 1})
         res = {}
         for i, dev in enumerate(devs):
-            res[dev] = _check_dev(name, v, rev, man, dev, grid, prog, i, ver, workers, grid_rows)
+            res[dev] = _check_dev(name, v, rev, man, dev, grid, prog, i, ver, workers, grid_rows, thresholds.get(dev), train_input)
             RT.write_status(LOCK, results=res)
         RT.write_status(LOCK, status="done", pct=100, eta_s=0, finished_at=C.now_iso(), step_text="끝남")
         return res
@@ -992,7 +1046,43 @@ def _grid(X, y, part, rows_cap, prog, i, U):
     return best, table, info
 
 
-def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=GRID_ROWS):
+def _ver_ns(L, v, dev, fver):
+    """판의 피처 정의 → (표준 피처 파일, ns, 판 피처 이름, 판 정규식 사전(std 는 None), 표준 피처 이름).
+    판은 표준 34 피처를 모두 가져야 한다 (보강판 = 같은 이름의 정규식 고침 + 새 피처 더하기, 예: enc1n5 = 39)."""
+    F = _features()
+    code = C.feature_code(v, dev)
+    ns = F.load_legacy(code)
+    std_names = F.legacy_names(ns)
+    defs = L.version_defs(dev, fver) if L and fver != STD else None
+    if defs:
+        ns = dict(ns, regex_dict_comb=defs["comb"], regex_dict_count=defs["count"], regex_dict_ratio=defs["ratio"])
+        vn = F.legacy_names(ns)
+        miss = sorted(set(std_names) - set(vn))
+        if miss:
+            raise ValueError(f"{dev.upper()} 피처 정의 판 '{fver}' 에 표준 피처 {len(miss)}개가 없습니다 (예: {miss[0]})")
+        odd = [x for x in vn if x not in std_names and not re.fullmatch(rf"{dev}_payload_[a-z0-9]+_\d+_comb", x)]
+        if odd:                                         # 늘어난 피처는 <장비>_payload_<공격>_<번호>_comb 꼴만 (FEAT4 2절)
+            raise ValueError(f"{dev.upper()} 피처 정의 판 '{fver}' 의 새 피처 이름이 '{dev}_payload_<공격>_<번호>_comb' 꼴이 아닙니다: {odd[:3]}")
+    return code, ns, F.legacy_names(ns), defs, std_names
+
+
+def _dec_features(P, part, ns, names, defs, code, prog, i, workers, phase="dec"):
+    """디코딩 입력 피처 (파이썬 경로): 기준 행(part False) = 레시피 1 전처리만 (기존 데이터에는 decoded_payload 가 없어 사본 3 이
+    전처리로 채움 - 메인 지시·FEAT3 와 같음), 추가 행(part True) = decoded_payload (익명화 + 전처리). → (행렬, 디코딩 오류 수, 새로 계산한 수)"""
+    import numpy as np
+    X = np.zeros((len(P), len(names)))
+    errs = new = 0
+    sides = [(~part, "pre", (0.0, 0.5)), (part, "decoded", (0.5, 1.0))]
+    for mask, kind, span in sides:
+        if mask.any():
+            Xk, e, n = _feature_matrix(P[mask], ns, names, defs, code, kind, prog, i, phase, workers, span)
+            X[mask] = Xk
+            errs += e
+            new += n
+    return X, errs, new
+
+
+def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=GRID_ROWS, threshold=None, train_input="decoded"):
     import numpy as np
     import pandas as pd
     t0 = time.time()
@@ -1002,16 +1092,9 @@ def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=G
     md = (man.get("dev") or {}).get(dev) or {}
     base_rows, added_rows = int(md.get("base_rows") or 0), int(md.get("added_rows") or 0)
     vdir = C.VERDIR / name
-    code = C.feature_code(v, dev)
-    ns = F.load_legacy(code)
-    names = F.legacy_names(ns)
-    defs = L.version_defs(dev, fver) if L and fver != STD else None
-    if defs:
-        ns = dict(ns, regex_dict_comb=defs["comb"], regex_dict_count=defs["count"], regex_dict_ratio=defs["ratio"])
-        if F.legacy_names(ns) != names:
-            raise ValueError(f"{U} 피처 정의 판 '{fver}' 의 피처 이름이 표준모델 피처 파일과 다릅니다")
+    code, ns, names, defs, std_names = _ver_ns(L, v, dev, fver)
     prog.set(i, "read", 0, f"{U} 학습 파일 읽기 ({base_rows + added_rows:,}행)", True)
-    df = pd.read_csv(vdir / f"{dev}_train.csv", usecols=["method", "payload", "label"] + names,
+    df = pd.read_csv(vdir / f"{dev}_train.csv", usecols=["method", "payload", "label"] + std_names,
                      dtype={"method": str, "payload": str, "label": str}, keep_default_na=False, low_memory=False)
     n = len(df)
     if n != base_rows + added_rows:
@@ -1043,18 +1126,24 @@ def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=G
         Xr = df[names].to_numpy(dtype=float)[idx]
         res["raw_source"] = "학습 파일 피처 (표준판, 서버 py·sql 피처와 같은 값)"
     else:
-        Xr, _, nr = _feature_matrix(P, ns, names, defs, code, False, prog, i, "raw", workers)
+        Xr, _, nr = _feature_matrix(P, ns, names, defs, code, None, prog, i, "raw", workers)
         res["raw_source"] = f"판 '{fver}' 으로 계산 (새로 {nr:,})"
     del df
-    if L:                                               # 학습 피처 = 디코딩 입력 (사용자 답 4)
-        Xd, derr, nd = _feature_matrix(P, ns, names, defs, code, True, prog, i, "dec", workers)
-        res.update(basis="decoded", decoder_errors=int(derr), dec_new=int(nd))
+    if L:                                               # 디코딩 입력: 기준 행 = 전처리만, 추가 행 = decoded_payload
+        Xd, derr, nd = _dec_features(P, part, ns, names, defs, code, prog, i, workers)
+        res.update(decoder_errors=int(derr), dec_new=int(nd),
+                   dec_note="기준 행 = 레시피 1 전처리만 (기존 데이터에 decoded_payload 가 없음 - 사본 3 의 채움과 같음), 추가 행 = decoded_payload")
     else:
         Xd = Xr
-        res.update(basis="raw", note=f"{LOCAL_FILE} 가 없어 디코딩하지 못해 원본 입력 피처로 학습했습니다 (② 입력 일치·① 구현 일치 없음)")
+        res["note"] = f"{LOCAL_FILE} 가 없어 디코딩하지 못해 원본 입력 피처로 학습했습니다 (② 입력 일치·① 구현 일치 없음)"
+    # 학습 입력: 디코딩 (사용자 답 4, 기본) 또는 원본 (서버가 원본 payload 로 학습할 수도 있음 - 11-06 덧붙임, 사본 3r 의 표)
+    basis = "decoded" if L and train_input != "raw" else "raw"
+    Xtr, Xot = (Xd, Xr) if basis == "decoded" else (Xr, Xd)
+    t = THRESHOLD if threshold is None else float(threshold)
+    res.update(basis=basis, threshold=t)
     trees, depth = 100, None                            # 그리드 없이: 표준모델 재현 설정 (5_0a make_model('rf'))
     if grid:
-        best, table, gi = _grid(Xd, y, part, grid_rows, prog, i, U)
+        best, table, gi = _grid(Xtr, y, part, grid_rows, prog, i, U)
         trees, depth = best["trees"], best["depth"]
         res["grid"] = dict(gi, best={"trees": trees, "depth": depth},
                            table=[{"trees": r["trees"], "depth": r["depth"], **{k: r["all"][k] for k in METRICS4},
@@ -1067,25 +1156,29 @@ def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=G
                     + (f"그리드 {len(GRID_TREES)}×{len(GRID_DEPTH)} 에서 검증 {GRID_METRIC} 로 고름" if grid else "그리드 없이 표준모델 재현 설정")
                     + ", 학습 열 = 피처만 - 서버는 피처 + payload, method 안 씀)")
     prog.set(i, "fit", 0, f"{U} RF 학습 - 트리 {trees} · 깊이 {depth or '제한 없음'} · "
-                          f"{'디코딩' if res['basis'] == 'decoded' else '원본'} 피처 전체 {len(idx):,}행 (서버 Train 처럼)", True)
+                          f"{'디코딩' if basis == 'decoded' else '원본'} 피처 전체 {len(idx):,}행 (서버 Train 처럼)", True)
     m = RandomForestClassifier(n_estimators=trees, max_depth=depth, random_state=C.SEED, n_jobs=-1)
-    m.fit(Xd, y)
-    prog.set(i, "insample", 0, f"{U} 학습 데이터 자체 예측 (서버 레시피 6 방식)", True)
-    p_in = m.predict(Xd).astype(bool)
+    m.fit(Xtr, y)
+    prog.set(i, "insample", 0, f"{U} 학습 데이터 자체 예측 (서버 레시피 6 방식, 기준값 {t:.2f})", True)
+    q_in = m.predict_proba(Xtr)[:, 1]                   # 판정 = 공격 확률 ≥ 기준값 (서버·FEAT4 와 같음)
+    p_in = q_in >= t
     res["insample"] = {"all": _metrics(y, p_in), "base": _metrics(y[~part], p_in[~part]), "added": _metrics(y[part], p_in[part])}
     res["insample"]["fails"] = m95_fails(res["insample"]["all"])
     res["insample"]["f1_ok"] = f1_ok(res["insample"]["all"])
     diff_rows = []
+    q_ot = None
     if L:
-        prog.set(i, "agree", 0, f"{U} ② 같은 모델로 원본 입력 예측 (전체 {len(idx):,}행)", True)
-        pr = m.predict(Xr).astype(bool)                 # 원본 입력 (SQL 쪽)
-        ag = pr == p_in                                 # p_in = 디코딩 입력 (파이썬 쪽, 학습 피처)
+        prog.set(i, "agree", 0, f"{U} ② 같은 모델로 {'원본' if basis == 'decoded' else '디코딩'} 입력 예측 (전체 {len(idx):,}행)", True)
+        q_ot = m.predict_proba(Xot)[:, 1]
+        p_ot = q_ot >= t
+        p_dec, pr = (p_in, p_ot) if basis == "decoded" else (p_ot, p_in)   # pr = 원본 입력 (SQL 쪽), p_dec = 디코딩 입력 (파이썬 쪽)
+        ag = pr == p_dec
 
         def part_sum(mask):
             k = int(mask.sum())
             a = int((ag & mask).sum())
             return {"rows": k, "agree": a, "rate": round(a / k, 6) if k else None, "disagree": k - a,
-                    "raw_attack_dec_normal": int((mask & pr & ~p_in).sum()), "raw_normal_dec_attack": int((mask & ~pr & p_in).sum())}
+                    "raw_attack_dec_normal": int((mask & pr & ~p_dec).sum()), "raw_normal_dec_attack": int((mask & ~pr & p_dec).sum())}
         alls, bs, ads = part_sum(np.ones(len(idx), bool)), part_sum(~part), part_sum(part)
         meta = {}
         for pos in np.where(part)[0]:
@@ -1103,7 +1196,7 @@ def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=G
             low = str(P[k]).lower()
             diff_rows.append({"sk": u.get("sk", ""), "rule_id": u.get("rule_id", ""), "attack_type": u.get("attack_type", ""),
                               "origin": u.get("origin", ""), "label": u.get("label", ""),
-                              "원본_입력_예측": "anomalies" if pr[k] else "normal", "디코딩_입력_예측": "anomalies" if p_in[k] else "normal",
+                              "원본_입력_예측": "anomalies" if pr[k] else "normal", "디코딩_입력_예측": "anomalies" if p_dec[k] else "normal",
                               "바뀐_피처(원본→디코딩)": " ".join(f"{names[j]}:{Xr[k, j]:g}→{Xd[k, j]:g}" for j in top),
                               "인코딩": " ".join(e for e, rx in _ENC_RX.items() if rx.search(low)),
                               "payload_앞부분": str(P[k])[:300]})
@@ -1115,7 +1208,7 @@ def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=G
                 tr_ = str.maketrans({ch: " " for ch in brk})
                 Xs = F.generate_fast(pd.Series([P[k].translate(tr_) for k in ir], dtype=object), ns)[names].to_numpy(dtype=float)
                 fdi = (np.abs(Xr[ir] - Xs) > 1e-9).any(axis=1)
-                pdi = m.predict(Xr[ir]).astype(bool) != m.predict(Xs).astype(bool)
+                pdi = (m.predict_proba(Xr[ir])[:, 1] >= t) != (m.predict_proba(Xs)[:, 1] >= t)
             else:
                 fdi = pdi = np.zeros(0, bool)
             res["impl"] = {"chars": [f"U+{ord(ch):04X}" for ch in brk], "rows": int(len(ir)), "added_rows": int(part[ir].sum()) if len(ir) else 0,
@@ -1126,6 +1219,15 @@ def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=G
     else:
         res["agree"] = None
         res["impl"] = None
+    scan = []                                           # 기준값 훑기: 같은 모델로 기준값만 바꿔 4지표·② (f1 ≥95 · ② ≥98 표시)
+    for tt in sorted(set(SCAN_T) | {round(t, 2)}):
+        pi = q_in >= tt
+        r = {"t": tt, **{k: _metrics(y, pi)[k] for k in METRICS4}}
+        r["agree"] = round(float((pi == (q_ot >= tt)).mean()), 6) if q_ot is not None else None
+        r["f1_ok"] = (r["f1"] or 0) >= TARGET_METRIC
+        r["a98"] = None if r["agree"] is None else r["agree"] >= TARGET_AGREE
+        scan.append(r)
+    res["scan"] = scan
     prog.set(i, "save", 0, f"{U} 결과 저장", True)
     out = rev_dir(name, rev)
     out.mkdir(parents=True, exist_ok=True)
@@ -1150,6 +1252,143 @@ def _check_dev(name, v, rev, man, dev, grid, prog, i, fver, workers, grid_rows=G
     return str(out / f"check_{dev}.json")
 
 
+# ── 화면 6 선별의 '피처 충돌 빼기' 표시 (job 'selconf') ─────────────────────────────────
+
+CONFLICT_LOCK = "sel_conflict"
+
+
+def _log_payloads(dev, want):
+    """학습 로그(08)의 줄 → payload (want = {날짜: 줄 번호 집합}, 줄 번호는 4. 화면·비교 표와 같이 빈 줄 빼고 0부터)."""
+    out = {}
+    for date, lines in want.items():
+        with open(C.log_path(date, dev), "rb") as f:
+            for k, line in enumerate(x for x in f if x.strip()):
+                if k in lines:
+                    out[(date, k)] = C.split_log_line(line.rstrip(b"\r\n").decode("utf-8", errors="replace"))[6]
+    return out
+
+
+def conflicts(base_name, ver=STD, workers=WORKERS):
+    """선별 후보(IPS·WAF 공통 표의 제거 아닌 줄)의 피처 충돌 표시 → 11_supervised/cache/conflict/ (5_7 conflict_path, 화면 '피처 충돌 계산').
+    장비마다 기준 학습 파일 행과 후보 행을 같은 판으로
+      원본 벡터 = 학습 파일 payload 그대로 (SQL 경로) · 디코딩 벡터 = 레시피 1 (기준 행 전처리만, 후보 decoded_payload - 파이썬 경로)
+    로 만들고, 후보 중 벡터가 같은 기준 행들의 다수 label 과 반대인 샘플을 원본·디코딩 따로 남긴다 (피처 세션 enc_whole._conflict_of 를
+    그대로 부름 - FEAT3 와 같은 정의). 피처는 기준 행도 같은 함수로 계산한다 (학습 파일의 비율 피처 값은 다시 계산한 값과 1e-16 쯤 달라
+    같은 벡터를 못 맞춤). 피처는 사전 점검(check)과 같은 payload 지문 캐시를 쓴다 → 다시 비교한 뒤에는 새 payload 만 계산."""
+    import numpy as np
+    import pandas as pd
+    held = RT.acquire_lock(CONFLICT_LOCK, base=base_name, ver=ver)
+    if held:
+        raise SystemExit(f"피처 충돌 계산이 이미 도는 중입니다 (pid {held.get('pid')})")
+    RT.clear_stop(CONFLICT_LOCK)
+    try:
+        (RT.RUN_DIR / f"{CONFLICT_LOCK}.json").unlink()   # 지난 실행의 상태(수·파일)는 지우고 새로
+    except OSError:
+        pass
+    RT.write_status(CONFLICT_LOCK, base=base_name, ver=ver, status="running", started_at=C.now_iso(), finished_at=None, error=None,
+                    pct=0, eta_s=None, elapsed_s=0, dev="", step="", step_text="시작")
+    t0 = time.time()
+    try:
+        L = local()
+        if not L:
+            raise ValueError(f"{LOCAL_FILE} 가 없어 디코딩 벡터를 만들 수 없습니다")
+        ver = _check_ver(L, ver)
+        V = _load("sup_versions_srv", "5_7_versions.py")
+        F = _features()
+        v = C.load_versions()
+        base = C.get_version(v, base_name)
+        tc = V.combined_table(base_name)
+        if tc is None:
+            raise ValueError("IPS·WAF 비교 결과가 둘 다 있어야 합니다")
+
+        def same_logs(dev):                             # 비교 표의 줄 번호가 지금 로그와 맞는지 (확정 전 확인과 같음, 읽기 앞뒤로도)
+            summ = C.read_json(C.compared_files(base_name, dev)["summary"], {}) or {}
+            if summ.get("snapshot") != tc["snapshots"].get(dev):
+                raise ValueError(f"{dev.upper()} 비교 결과 파일이 서로 맞지 않습니다 - 다시 비교하세요")
+            for date, st in (summ.get("log_stats") or {}).items():
+                if C.log_stat(date, dev) != st:
+                    raise ValueError(f"{dev.upper()} {date} 학습데이터가 비교한 뒤 바뀌었습니다 - 다시 비교한 뒤 계산하세요 "
+                                     "(계산한 피처는 캐시에 남아 다음에는 새 payload 만)")
+        for dev in C.DEVICES:
+            same_logs(dev)
+        rows = [k for k in range(tc["n"]) if tc["g"][k]]
+        keys = [V.row_key(tc, k) for k in rows]
+        yc = np.array([bool(tc["y"][k]) for k in rows])
+        prog = _Prog(list(C.DEVICES), {"read": 6, "raw": 40, "dec": 50, "conf": 4}, CONFLICT_LOCK)
+        groups = np.full(len(C.DEVICES) * tc["n"], -1, np.int32)
+        cand_p = {}
+        for j, dev in enumerate(C.DEVICES):             # 두 장비 후보의 로그 줄을 먼저 다 읽는다 (계산하는 동안 수집이 08 을 바꿔도 비교 때의 줄)
+            line = tc["line"] if dev == "ips" else tc["wline"]
+            want = {}
+            for k in rows:
+                want.setdefault(tc["dates"][tc["date"][k]], set()).add(line[k])
+            prog.set(0, "read", 0.4 * j, f"{dev.upper()} 후보 {len(rows):,}행의 로그 줄 읽기 ({len(want)}일)", True)
+            same_logs(dev)
+            got = _log_payloads(dev, want)
+            same_logs(dev)
+            cand_p[dev] = [F.raw_to_payload(got[(tc["dates"][tc["date"][k]], line[k])]) for k in rows]
+            del got
+        res = {}
+        for i, dev in enumerate(C.DEVICES):
+            U = dev.upper()
+            code, ns, names, defs, _ = _ver_ns(L, v, dev, ver)
+            csv_p, _ = C.version_files(v, base, dev)
+            prog.set(i, "read", 0.8 if i == 0 else 0, f"{U} 기준 학습 파일 읽기 ({csv_p.name})", True)
+            B = pd.read_csv(csv_p, usecols=["payload", "label"], dtype=str, keep_default_na=False)
+            yb = B["label"].str.strip().str.lower().ne("normal").to_numpy()
+            P = np.array(B["payload"].tolist() + cand_p.pop(dev), dtype=object)
+            y = np.concatenate([yb, yc])
+            part = np.zeros(len(P), bool)
+            part[len(B):] = True
+            nb = len(B)
+            del B
+            Xr, _, nr = _feature_matrix(P, ns, names, defs, code, None, prog, i, "raw", workers)
+            prog.set(i, "conf", 0, f"{U} 원본 벡터 충돌", True)
+            c_raw = L.conflict_of(Xr, y, part)[nb:]
+            del Xr
+            Xd, derr, nd = _dec_features(P, part, ns, names, defs, code, prog, i, workers)
+            prog.set(i, "conf", 0.5, f"{U} 디코딩 벡터 충돌", True)
+            c_dec = L.conflict_of(Xd, y, part)[nb:]
+            gid = L.dec_groups(Xd, part)                # 섞인 벡터 빼기의 재료: 후보마다 기준에 없는 디코딩 벡터 묶음 번호 (-1 = 기준에 있음)
+            groups[i * tc["n"] + np.array(rows)] = gid
+            del Xd, P
+            res[dev] = {"raw": sorted({keys[j] for j in np.flatnonzero(c_raw)}), "dec": sorted({keys[j] for j in np.flatnonzero(c_dec)}),
+                        "base_rows": int(nb), "names": len(names), "new_raw": int(nr), "new_dec": int(nd), "decoder_errors": int(derr),
+                        "counts": {"raw": int(c_raw.sum()), "dec": int(c_dec.sum()), "both": int((c_raw & c_dec).sum()),
+                                   "either": int((c_raw | c_dec).sum()),
+                                   "either_attack": int(((c_raw | c_dec) & yc).sum()), "either_normal": int(((c_raw | c_dec) & ~yc).sum()),
+                                   "not_in_base": int((gid >= 0).sum()), "groups": int(gid.max() + 1) if len(gid) else 0}}
+            print(f"{U}: 후보 {len(rows):,} 중 원본 충돌 {res[dev]['counts']['raw']:,} · 디코딩 충돌 {res[dev]['counts']['dec']:,} · "
+                  f"둘 중 하나 {res[dev]['counts']['either']:,} · 기준에 없는 디코딩 벡터 {res[dev]['counts']['not_in_base']:,}행 "
+                  f"(묶음 {res[dev]['counts']['groups']:,}) (새로 계산 원본 {nr:,} · 디코딩 {nd:,})", flush=True)
+        allk = sorted(set().union(*(set(x["raw"]) | set(x["dec"]) for x in res.values())))
+        p = V.conflict_path(base_name, ver, tc["snapshots"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        gp = V.groups_path(p)                           # 공통 표 줄 순서 그대로 장비별 int32 (IPS n개 + WAF n개)
+        tmp = gp.with_name(gp.name + ".tmp")
+        tmp.write_bytes(groups.astype("<i4").tobytes())
+        tmp.replace(gp)
+        out = {"base": base_name, "ver": ver, "snapshots": tc["snapshots"], "rows": len(rows), "n": tc["n"], "decoder_key": L.decoder_key(),
+               "defs_sha": {dev: hashlib.sha1(json.dumps(L.version_defs(dev, ver), sort_keys=True).encode("utf-8")).hexdigest()[:12]
+                            if ver != STD else "" for dev in C.DEVICES},
+               "either_any_dev": len(allk), "at": C.now_iso(), "seconds": round(time.time() - t0, 1), "dev": res,
+               "groups_file": gp.name, "groups_devices": list(C.DEVICES), "groups_sha": _sha256(gp)[:16],
+               "sig": hashlib.sha1((ver + "\n" + "\n".join(allk)).encode("utf-8")).hexdigest()[:16]}
+        C.write_json(p, out)
+        RT.write_status(CONFLICT_LOCK, status="done", pct=100, eta_s=0, finished_at=C.now_iso(), step_text="끝남", file=p.name,
+                        counts={d: x["counts"] for d, x in res.items()}, either_any_dev=len(allk), rows=len(rows))
+        return str(p)
+    except Stopped:
+        RT.write_status(CONFLICT_LOCK, status="stopped", finished_at=C.now_iso(), step_text="중지됨 (계산한 피처는 캐시에 남음)")
+        print("중지됨")
+    except BaseException as e:
+        RT.write_status(CONFLICT_LOCK, status="error", error=f"{type(e).__name__}: {e}"[:600], finished_at=C.now_iso())
+        raise
+    finally:
+        RT.release_lock(CONFLICT_LOCK)
+        RT.clear_stop(CONFLICT_LOCK)
+
+
 def main():
     ap = argparse.ArgumentParser(description="서버 반영 지원 (화면 6 후보 rev)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1161,6 +1400,8 @@ def main():
     a.add_argument("--no-grid", action="store_true", help="그리드 없이 RF 100 트리·깊이 제한 없음 (빠른 확인)")
     a.add_argument("--grid-rows", type=int, default=GRID_ROWS, help=f"그리드에 쓸 행 (층화 표본, 0 = 전체, 기본 {GRID_ROWS:,})")
     a.add_argument("--workers", type=int, default=WORKERS)
+    a.add_argument("--threshold", action="append", default=[], metavar="장비=값", help="장비별 판정 기준값 (예: ips=0.30, 없으면 0.50)")
+    a.add_argument("--train-input", choices=list(TRAIN_INPUTS), default="decoded", help="학습 입력 (기본 decoded, raw = 원본 payload 피처로 학습)")
     b = sub.add_parser("prepare", help="올릴 파일·레시피 사본 만들기")
     b.add_argument("--version", required=True)
     b.add_argument("--tag", default="")
@@ -1173,13 +1414,27 @@ def main():
     s.add_argument("--version", required=True)
     g = sub.add_parser("gate", help="승인 조건")
     g.add_argument("--version", required=True)
+    k = sub.add_parser("conflicts", help="화면 6 선별의 '피처 충돌 빼기' 표시 계산 (기준 버전·판, 두 장비)")
+    k.add_argument("--base", required=True)
+    k.add_argument("--ver", default=STD)
+    k.add_argument("--workers", type=int, default=WORKERS)
     args = ap.parse_args()
+    if args.cmd == "conflicts":
+        print(conflicts(args.base, args.ver, max(1, args.workers)))
+        return
     if args.cmd == "check":
         if args.rev:
             cur = int(C.get_version(C.load_versions(), args.version).get("rev") or 0)
             if cur != args.rev:
                 raise SystemExit(f"최신 rev 는 {cur} 입니다 (요청 rev {args.rev})")
-        check(args.version, list(dict.fromkeys(args.dev)), not args.no_grid, args.ver, max(1, args.workers), max(0, args.grid_rows))
+        th = {}
+        for x in args.threshold:
+            d, _, val = x.partition("=")
+            if d not in C.DEVICES or not val:
+                raise SystemExit("--threshold 은 ips=0.30 꼴")
+            th[d] = val
+        check(args.version, list(dict.fromkeys(args.dev)), not args.no_grid, args.ver, max(1, args.workers), max(0, args.grid_rows),
+              th, args.train_input)
     elif args.cmd == "prepare":
         print(json.dumps(prepare(args.version, args.tag, args.nul, args.labels, args.ver), ensure_ascii=False, indent=1))
     elif args.cmd == "bundle":

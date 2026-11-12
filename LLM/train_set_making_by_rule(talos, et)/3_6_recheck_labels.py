@@ -91,6 +91,8 @@ STATES = {"keep": "확인됨 (유지)", "delete": "삭제", "flip": "label 반�
 VOTE_DELETE = ("unfit",)        # 어느 모델이든 이 판정이 하나라도 있으면 삭제
 VOTE_DECISIVE = ("ok", "flip")  # 다수결에 세는 판정 (판단 불가는 뺌) - ok 다수 → 확인됨, flip 다수 → label 반대
 VOTE_MIN = 2                    # 다수결에 필요한 확정 판정 수 (이보다 적으면 2번째 모델 대기)
+VOTE_FLIP_DELETE = True         # 2026-11-05~ (사용자): 반대 다수도 label 을 바꾸지 않고 삭제 (까닭 flip). False = label 반대 (11-04 규칙)
+                                # 룰 기준 label 원칙에서 '룰에 걸리는데 정상' 은 같은 룰의 공격과 모순이라, 애매하면 뺀다
 CROSS_ASK = ("ok", "unknown", "flip")   # 교차 확인이 묻는 1번째 판정 (부적합은 이미 삭제라 묻지 않음)
 CROSS_DEFAULT = "claude_cli:claude-opus-5-5"     # 화면 4 교차 확인의 2번째 모델 기본 제안
 CLI_WORKERS = 4                                  # claude_cli(구독 사용량) 동시 요청 수 상한 (LLM_설정.md 2026-10-26 메모)
@@ -501,7 +503,8 @@ def consensus_state(votes, decision=None):
     사람 판단·유지 표시(decision)가 있으면 그것 (decided) / 어느 모델이든 부적합 → delete (unfit) /
     확정 판정(맞음·반대)이 VOTE_MIN 개 이상이고 한쪽이 많으면 → 맞음 keep · 반대 flip (vote) /
     그 밖 → review: 판정한 모델이 하나뿐 = pending (2번째 모델 대기 → 교차 확인), 두 모델 이상인데 다수 없음 = split
-    (투표 갈림 → 3차 투표, 그래도 없으면 사람). 예전(11-02~11-04)에는 반대도 삭제, 판단 불가가 섞이면 mixed."""
+    (투표 갈림 → 3차 투표, 그래도 없으면 사람). 예전(11-02~11-04)에는 반대도 삭제, 판단 불가가 섞이면 mixed.
+    2026-11-05~ VOTE_FLIP_DELETE: 반대 다수 → delete (까닭 flip). 사람 판단의 label 반대(decided)는 그대로."""
     if decision:
         return decision["decision"], "decided"
     vs = [r.get("verdict") for r in (votes or {}).values()]
@@ -509,7 +512,9 @@ def consensus_state(votes, decision=None):
         return "delete", "unfit"
     ok, flip = vs.count(VOTE_DECISIVE[0]), vs.count(VOTE_DECISIVE[1])
     if ok + flip >= VOTE_MIN and ok != flip:
-        return ("keep" if ok > flip else "flip"), "vote"
+        if ok > flip:
+            return "keep", "vote"
+        return ("delete", "flip") if VOTE_FLIP_DELETE else ("flip", "vote")
     return "review", "pending" if len(vs) < 2 else "split"
 
 
