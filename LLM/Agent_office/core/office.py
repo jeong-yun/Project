@@ -336,6 +336,7 @@ class TeamView:
     run: dict | None = None
     active_ids: set[str] | None = None
     blocked: dict[str, str] = field(default_factory=dict)
+    faces: dict[str, str] = field(default_factory=dict)  # {에이전트 id: 얼굴 그림 data URL} — 전용 이미지를 올린 사람만
 
 
 def head_state(views: list[TeamView]) -> dict:
@@ -380,14 +381,17 @@ def dept_events(views: list[TeamView], limit: int = 24) -> list[dict]:
 
 
 def dept_snapshot(layout: dict, views: list[TeamView], *, head_name: str, head_about: str, focus: str | None,
-                  active_team: str = "") -> dict:
-    """부서 사무실 화면 상태 — 부서장 + 모든 팀의 팀원 (일하는 팀은 회의실·자료실로 움직이고, 쉬는 팀은 자리에)."""
+                  active_team: str = "", head_face: str = "") -> dict:
+    """부서 사무실 화면 상태 — 부서장 + 모든 팀의 팀원 (일하는 팀은 회의실·자료실로 움직이고, 쉬는 팀은 자리에).
+
+    올린 얼굴 그림(head_face · TeamView.faces)이 있는 사람만 "photo" 가 붙는다 — 화면은 머리 자리에 그 그림을 그린다."""
     seats, spots = layout["seats"], layout["spots"]
     hs = head_state(views)
     agents = [{
         "id": HEAD, "name": head_name, "rank": "부서장", "lead": False, "head": True, "team": "",
         "color": "#4B3B8F", "desk": seats[HEAD], "target": list(seats[HEAD]), "face": "down", "place": "desk",
         "tone": hs["tone"], "bubble": hs["bubble"], "about": head_about, "dim": False, "note": "",
+        **({"photo": head_face} if head_face else {}),
     }]
     k = 0  # 회의실·자료실 자리를 부서 전체에서 차례로 나눠 겹치지 않게
     for v in views:
@@ -409,6 +413,8 @@ def dept_snapshot(layout: dict, views: list[TeamView], *, head_name: str, head_a
                 "about": v.specialties.get(node.id, ""),
                 "dim": v.active_ids is not None and node.id not in v.active_ids, "note": v.blocked.get(node.id, ""),
             })
+            if node.id in v.faces:  # 올린 그림이 있으면 머리 자리에 그 그림 (없으면 도트 머리 — 항목을 넣지 않는다)
+                agents[-1]["photo"] = v.faces[node.id]
     stages = [f"{v.team_name} {STAGES[min(stage_of(v.run), len(STAGES) - 1)]}" for v in views
               if v.run and v.run["status"] not in ("adopted", "rejected")]
     return {

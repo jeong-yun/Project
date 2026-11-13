@@ -11,7 +11,7 @@ import json
 import pytest
 from streamlit.testing.v1 import AppTest
 
-from core import building, live, office
+from core import avatars, building, live, office
 from core.config import BASE_DIR, list_teams, load_ranks, team_org
 from core.schemas import Assignment, Delegation
 from tests.fakes import Script
@@ -97,6 +97,22 @@ def test_snapshot_moves_working_team_and_relays_mail_through_head(world):
     run["steps"].append(live_step(dom.id, Delegation(analysis="분석", assignments=[Assignment(child_id=dom.children[0].id, subtask="일정")])))
     snap = office.dept_snapshot(layout, [view("travel_domestic", dom, run)], head_name="부장", head_about="", focus="")
     assert (f"travel_domestic/{dom.id}", f"travel_domestic/{dom.children[0].id}") in [(e["from"], e["to"]) for e in snap["events"]]
+
+
+def test_snapshot_carries_face_only_for_members_with_own_image(world):
+    teams, ranks, depts = world
+    layout, orgs = layout_of(world, "travel")
+    dom = orgs["travel_domestic"]
+    face = "data:image/png;base64,AAAA"
+    view = office.TeamView(team_id="travel_domestic", team_name="국내", org=dom, names={n.id: n.id for n in dom.walk()},
+                           ranks={n.id: (n.rank, n.rank) for n in dom.walk()}, specialties={}, parents={},
+                           faces={dom.id: face})
+    snap = office.dept_snapshot(layout, [view], head_name="부장", head_about="", focus="")
+    by_id = {a["id"]: a for a in snap["agents"]}
+    assert by_id[f"travel_domestic/{dom.id}"]["photo"] == face
+    assert [k for k, a in by_id.items() if "photo" in a] == [f"travel_domestic/{dom.id}"]  # 나머지는 도트 머리 (자리 차지 없음)
+    snap = office.dept_snapshot(layout, [view], head_name="부장", head_about="", focus="", head_face=face + "B")
+    assert snap["agents"][0]["id"] == office.HEAD and snap["agents"][0]["photo"] == face + "B"  # 👔 부서장도 같은 방식
 
 
 def live_step(node_id, delegation):
@@ -231,3 +247,36 @@ def test_department_records_gather_all_teams(app_env):
     at = at.sidebar.selectbox(key="hist_team_travel").set_value("travel_abroad").run()  # 팀 필터 (선택)
     history = next(e for e in at.sidebar.expander if e.label.startswith("🕘 지난 업무"))
     assert history.label == "🕘 지난 업무 (1)"
+
+
+def test_uploaded_agent_image_becomes_office_face(app_env, tmp_path, monkeypatch):
+    import io
+
+    from PIL import Image
+
+    monkeypatch.setattr(avatars, "TEAMS_DIR", tmp_path / "teams")  # 실제 teams/ 폴더에 그림을 쓰지 않는다
+    buf = io.BytesIO()
+    Image.new("RGB", (120, 160), "teal").save(buf, format="PNG")
+    avatars.save_avatar("career", "lead", buf.getvalue())
+    members = [a["id"] for a in office_snapshot(open_app(view="dept", dept="career"))["agents"]]
+    other = next(k for k in members if k.startswith("career/") and k != "career/lead")
+    (tmp_path / "teams" / "career" / "avatars" / f"{other.split('/')[1]}.png").write_bytes(b"broken")  # 깨진 파일이 있어도
+
+    at = open_app(view="dept", dept="career")  # 사무실은 그려진다
+    photos = {a["id"]: a.get("photo", "") for a in office_snapshot(at)["agents"]}
+    assert photos["career/lead"].startswith("data:image/png;base64,")
+    assert [k for k, v in photos.items() if v] == ["career/lead"]  # 올린 사람만 얼굴, 부서장·나머지는 도트 머리
+
+    # 👔 부서장 얼굴 — 부서장을 누르면 나오는 패널에서 올린다 (teams/_dept_heads/avatars/<부서 id>.png)
+    avatars.save_avatar(avatars.HEAD_FOLDER, "career", buf.getvalue())
+    at.session_state["head_panel_career"] = True
+    at.run()
+    assert not at.exception, at.exception
+    assert office_snapshot(at)["agents"][0].get("photo", "").startswith("data:image/png;base64,")
+    assert any(e.label.startswith("🖼 부서장 얼굴") for e in at.expander)
+    # 에이전트 패널의 안내 — 사무실 얼굴로 쓰인다는 것 · 이 PC 에만 저장된다는 것
+    at.session_state["head_panel_career"] = False
+    at.session_state["focus_career"] = "lead"
+    at.run()
+    assert not at.exception, at.exception
+    assert any("부서 사무실 캐릭터의 얼굴" in c.value and "GitHub" in c.value for c in at.caption)

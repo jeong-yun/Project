@@ -59,7 +59,7 @@ from core import (
 )
 from core.agent import OrgAgent
 from core.feedback import lesson_budget, team_lessons
-from core.avatars import AvatarError, has_custom_avatar, reset_avatar, save_avatar
+from core.avatars import HEAD_FOLDER, AvatarError, has_custom_avatar, office_faces, reset_avatar, save_avatar
 from core import scope as team_scope
 from core.brief import DesiredState
 from core.config import (
@@ -543,6 +543,7 @@ class TeamInfo:
             ranks={nid: (n.rank, ranks_by_id[n.rank].name) for nid, n in self.nodes.items()},
             specialties={nid: n.specialty for nid, n in self.nodes.items()}, parents=self.parents, run=run, active_ids=active,
             blocked={nid: f"{o[0]} — {o[1]}" for nid in self.nodes if (o := self.off(nid))},
+            faces=office_faces(self.id, self.nodes),
         )
 
 
@@ -932,6 +933,28 @@ def assigned_task(run: dict, node_id: str) -> str | None:
 # ════════════════════════════════════════════════════════════════════
 # 에이전트 패널 — 조직도에서 고른 에이전트가 한 일 + 이미지 바꾸기
 # ════════════════════════════════════════════════════════════════════
+FACE_NOTE = (
+    "올린 그림은 🏢 부서 사무실 캐릭터의 얼굴로도 쓰입니다 (증명사진·캐릭터 그림 모두 됩니다). 얼굴을 자동으로 찾아 주지는 않으니, "
+    "얼굴이 그림 한가운데에 크게 오도록 잘라서 올려 주세요. 그림은 이 PC 에만 저장되고 GitHub 에는 올라가지 않습니다."
+)
+
+
+def avatar_buttons(folder: str, stem: str, normal, working=None, reset_label: str = "↩ 기본 이미지로") -> None:
+    """💾 저장 · ↩ 되돌리기 — 에이전트 이미지와 부서장 얼굴이 같이 쓴다 (folder = 팀 id 또는 HEAD_FOLDER)."""
+    b1, b2 = st.columns(2)
+    if b1.button("💾 저장", key=f"save_av_{folder}_{stem}", disabled=normal is None, use_container_width=True):
+        try:
+            save_avatar(folder, stem, normal.getvalue(), working.getvalue() if working else None)
+        except AvatarError as e:
+            st.warning(str(e))
+        else:
+            st.rerun()
+    if b2.button(reset_label, key=f"reset_av_{folder}_{stem}", disabled=not has_custom_avatar(folder, stem),
+                 use_container_width=True):
+        reset_avatar(folder, stem)
+        st.rerun()
+
+
 def render_avatar_editor(node_id: str) -> None:
     with st.expander("🖼 이 에이전트 이미지 바꾸기"):
         st.caption(
@@ -939,6 +962,7 @@ def render_avatar_editor(node_id: str) -> None:
             "말풍선(…)을 붙여 자동으로 만듭니다. 저장 위치: "
             f"`teams/{team_id}/avatars/{node_id}.png`"
         )
+        st.caption(FACE_NOTE)
         c1, c2 = st.columns(2)
         normal_now, working_now = avatar_path(node_id), avatar_path(node_id, working=True)
         if normal_now:
@@ -948,18 +972,7 @@ def render_avatar_editor(node_id: str) -> None:
         exts = settings.get("avatar", {}).get("allowed_ext", ["png", "jpg", "jpeg", "webp"])
         normal = st.file_uploader("평소 이미지", type=exts, key=f"up_{team_id}_{node_id}")
         working = st.file_uploader("작업 중 이미지 (선택)", type=exts, key=f"upw_{team_id}_{node_id}")
-        b1, b2 = st.columns(2)
-        if b1.button("💾 저장", key=f"save_av_{team_id}_{node_id}", disabled=normal is None, use_container_width=True):
-            try:
-                save_avatar(team_id, node_id, normal.getvalue(), working.getvalue() if working else None)
-            except AvatarError as e:
-                st.warning(str(e))
-            else:
-                st.rerun()
-        if b2.button("↩ 기본 이미지로", key=f"reset_av_{team_id}_{node_id}",
-                     disabled=not has_custom_avatar(team_id, node_id), use_container_width=True):
-            reset_avatar(team_id, node_id)
-            st.rerun()
+        avatar_buttons(team_id, node_id, normal, working)
 
 
 def render_route_tab(run: dict) -> None:
@@ -1810,6 +1823,11 @@ def render_head_panel() -> None:
             r = open_run_of(tid)
             st.markdown(f"- **{team_names[tid]}** — " + (short(run_title(r), 50) + (" · ⏳ 진행 중" if not r["done"] else " · 끝남")
                                                          if r else "쉬는 중"))
+        with st.expander("🖼 부서장 얼굴 그림 바꾸기"):
+            st.caption("png·jpg·webp, 5MB 이하. 가운데를 정사각형으로 잘라 저장합니다. " + FACE_NOTE)
+            face = st.file_uploader("얼굴 그림", type=settings.get("avatar", {}).get("allowed_ext", ["png", "jpg", "jpeg", "webp"]),
+                                    key=f"up_head_{dept.id}")
+            avatar_buttons(HEAD_FOLDER, dept.id, face, reset_label="↩ 도트 머리로")
 
 
 def render_live() -> None:
@@ -1830,7 +1848,8 @@ def render_live() -> None:
             picked = office_ui.render_dept_office(
                 dept, views, head_name=dept_head.name, head_about=f"부서장 — 🧭 팀 배정 · ⚖️ 비평. {dept_head.persona}",
                 focus=office.HEAD if st.session_state.get(HEAD_PANEL_KEY) else
-                office.agent_key(team_id, focus_now) if focus_now != NO_FOCUS else "", active_team=team_id)
+                office.agent_key(team_id, focus_now) if focus_now != NO_FOCUS else "", active_team=team_id,
+                head_face=office_faces(HEAD_FOLDER, [dept.id]).get(dept.id, ""))
         with c_cc:
             st.caption(f"🖥️ 커맨드 센터 — 지금 보는 팀: **{team.name}**")
             command_center_ui.render(office_ctx, run, target, active_ids)

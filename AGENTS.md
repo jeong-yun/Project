@@ -34,7 +34,7 @@
 
 ## 3. 꼭 지킬 것
 
-- **공개 저장소다.** 비밀 값·회사 자료·개인 문서·`.env`·`env.zip`·`data/`·`results/`·`LLM/Agent_office/teams/stock/avatars/` 를 커밋하지 않는다. 올리기 전 검사 안내는 [SECURITY.md](SECURITY.md).
+- **공개 저장소다.** 비밀 값·회사 자료·개인 문서·`.env`·`env.zip`·`data/`·`results/`·`LLM/Agent_office/teams/*/avatars/`(화면에서 올린 에이전트 그림·사진) 를 커밋하지 않는다. 올리기 전 검사 안내는 [SECURITY.md](SECURITY.md).
 - **테스트는 가짜 모델만 쓴다.** `.env` 의 실제 키로 진짜 모델을 부르지 않는다. 실측이 꼭 필요하면 사용자에게 먼저 묻는다.
 - 작업은 따로 만든 브랜치(또는 worktree)에서 한다. commit·push 는 사용자가 요청할 때만 한다.
 - 답변·보고는 쉬운 한국어로 하고, 확인한 것과 확인하지 못한 것을 나눠 적는다.

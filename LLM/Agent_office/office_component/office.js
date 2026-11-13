@@ -135,9 +135,13 @@ function onSnapshot(s) {
     let a = agents[d.id];
     if (!a) {
       const [x, y] = feet(...d.target);
-      a = agents[d.id] = { x, y, path: [], dir: d.face, d, step: 0, goal: d.target.join(",") };
+      a = agents[d.id] = { x, y, path: [], dir: d.face, d, step: 0, goal: d.target.join(","), photo: "", face: null };
     }
     a.d = d;
+    if ((d.photo || "") !== a.photo) {     // 올린 얼굴 그림이 생김·바뀜·사라짐 (없으면 도트 머리)
+      a.photo = d.photo || ""; a.face = null;
+      if (a.photo) { a.face = new Image(); a.face.src = a.photo; }
+    }
     if (a.goal !== d.target.join(",")) {   // 갈 곳이 바뀜 → 걷기 시작
       a.goal = d.target.join(",");
       a.path = findPath(Math.floor(a.x / T), Math.floor(a.y / T), d.target[0], d.target[1]);
@@ -252,13 +256,17 @@ function drawChar(a, now) {
   const frame = moving ? 1 + (Math.floor(now / 160) % 2) : 0;
   const bob = moving ? (frame === 1 ? -1 : 0) : working ? (Math.floor(now / 300) % 2 ? -1 : 0) : 0;
   const dir = moving ? a.dir : d.face;
+  const photo = dir !== "up" && a.face && a.face.complete && a.face.naturalWidth > 0;   // 올린 그림 얼굴 (뒷모습은 뒷머리 그대로)
   const head = dir === "up" ? BACK_HEAD : FRONT_HEAD[h % 3];
   const seated = !moving && d.place === "desk";
   const rows = seated ? [...head, ...BODY] : [...head, ...BODY, ...LEGS[frame]];   // 앉으면 다리는 책상 뒤
   const left = Math.round(a.x) - 5 * P, top = Math.round(a.y) - 17 * P + bob + (seated ? 6 : 0);
+  a.faceAt = photo ? [Math.round(a.x), top] : null;   // 얼굴 그림은 글자 층에서 선명하게 그린다 (drawFaces) — 여기서는 머리 줄을 비운다
+  a.lift = photo && !seated ? FACE_UP : 0;            // 서 있으면 얼굴 그림이 머리 위로 더 올라온다 — 말풍선도 그만큼 위로
   if (d.dim) w.globalAlpha = 0.38;
   if (!seated) { w.fillStyle = "rgba(0,0,0,.25)"; w.fillRect(left + 2, Math.round(a.y) - 2, 16, 3); }
   rows.forEach((row, r) => {
+    if (photo && r < head.length) return;
     for (let i = 0; i < 10; i++) {
       let ch = row[i];
       if (ch === ".") continue;
@@ -275,9 +283,25 @@ function drawChar(a, now) {
     }
     else if (d.lead) { w.fillStyle = "#f5c518"; w.fillRect(left + 4 * P, top + 8 * P, 2 * P, 4 * P); }     // 팀장: 금색 넥타이
     else if (/부장/.test(d.rank)) { w.fillStyle = pal.t; w.fillRect(left + 4 * P, top + 8 * P, 2 * P, 4 * P); }
-    else if (/차장/.test(d.rank)) { w.fillStyle = pal.g; w.fillRect(left + 2 * P, top + 4 * P, 3 * P, P); w.fillRect(left + 5 * P, top + 4 * P, 3 * P, P); }  // 안경
+    else if (!photo && /차장/.test(d.rank)) { w.fillStyle = pal.g; w.fillRect(left + 2 * P, top + 4 * P, 3 * P, P); w.fillRect(left + 5 * P, top + 4 * P, 3 * P, P); }  // 안경
   }
   w.globalAlpha = 1;
+}
+
+// 올린 그림 얼굴 — 도트 층(세계 해상도)에 그리면 20px 로 뭉개져 알아볼 수 없어, 화면 해상도인 글자 층에 그린다.
+// 머리 자리에 둥근 네모로: 너비는 몸통과 같고(20), 도트 머리(14)보다 위로 6 더 크다. 앉음·흔들림은 drawChar 가 정한 자리(faceAt)를 따른다
+const FACE = 20, FACE_UP = 6;
+function drawFaces(S) {
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
+  for (const a of Object.values(agents).sort((p, q) => p.y - q.y)) {   // 위(뒤)쪽 사람부터 — 앞사람 얼굴이 위에 오게
+    if (!a.faceAt) continue;
+    const x = (a.faceAt[0] - FACE / 2) * S, y = (a.faceAt[1] - FACE_UP) * S, s = FACE * S;
+    g.globalAlpha = a.d.dim ? 0.38 : 1;
+    roundRect(x, y, s, s, s * 0.28);
+    g.save(); g.clip(); g.fillStyle = "#eef1f5"; g.fillRect(x, y, s, s); g.drawImage(a.face, x, y, s, s); g.restore();
+    g.strokeStyle = "#2b2b35"; g.lineWidth = Math.max(1, S); g.stroke();
+  }
+  g.globalAlpha = 1;
 }
 
 // ── 쪽지 ─────────────────────────────────────────────────────────
@@ -386,6 +410,7 @@ function drawOverlay(now) {
     g.fillStyle = snap.running ? "rgba(200,40,40,.9)" : "rgba(20,18,28,.7)"; roundRect(x - tw - 10, 6, tw + 14, fs * 1.6, 5); g.fill();
     g.fillStyle = "#fff"; g.fillText(text, x - 3, 6 + fs * 0.8);
   }
+  drawFaces(S);
   // 이름표 + 말풍선 (겹치면 위로 비켜 쌓는다)
   const placed = [];
   const list = Object.values(agents).sort((a, b) => b.y - a.y);
@@ -408,7 +433,8 @@ function drawOverlay(now) {
     const [bgc, bd, fg] = BUBBLE[d.tone] || BUBBLE.idle;
     g.font = `${d.tone === "working" ? "bold " : ""}${fs - 1}px "Malgun Gothic", sans-serif`;
     const tw = g.measureText(text + (d.tone === "working" ? ".." : "")).width, bw = tw + 12, bh = fs * 1.45;
-    let bx = a.x * S - bw / 2, by = (a.y - 36) * S - bh;
+    const lift = a.lift || 0;
+    let bx = a.x * S - bw / 2, by = (a.y - 36 - lift) * S - bh;
     for (let k = 0; k < 6; k++) {
       const hit = placed.find((p) => bx < p[0] + p[2] && bx + bw > p[0] && by < p[1] + p[3] && by + bh > p[1]);
       if (!hit) break;
@@ -418,7 +444,7 @@ function drawOverlay(now) {
     g.globalAlpha = d.dim ? 0.5 : 1;
     g.fillStyle = bgc; g.strokeStyle = bd; g.lineWidth = d.tone === "working" || d.tone === "blocked" ? 2 : 1;
     roundRect(bx, by, bw, bh, 5); g.fill(); g.stroke();
-    g.beginPath(); g.moveTo(a.x * S - 4, by + bh); g.lineTo(a.x * S, Math.min(by + bh + 5, (a.y - 33) * S)); g.lineTo(a.x * S + 4, by + bh); g.closePath();
+    g.beginPath(); g.moveTo(a.x * S - 4, by + bh); g.lineTo(a.x * S, Math.min(by + bh + 5, (a.y - 33 - lift) * S)); g.lineTo(a.x * S + 4, by + bh); g.closePath();
     g.fill(); g.stroke(); g.fillStyle = bgc; g.fillRect(a.x * S - 3, by + bh - 1.5, 6, 2);
     g.fillStyle = fg; g.textAlign = "left"; g.fillText(text, bx + 6, by + bh / 2 + 0.5); g.textAlign = "center";
     g.globalAlpha = 1;
