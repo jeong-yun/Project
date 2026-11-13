@@ -221,7 +221,7 @@ def test_trim_middle_keeps_head_and_tail():
 # ─── Gemini 시간 제한 ─────────────────────────────────────────────────
 
 
-def test_google_model_gets_request_timeout_from_settings(set_keys, models, monkeypatch):
+def test_google_model_gets_request_timeout_from_settings(set_keys, models, monkeypatch, allow_model_objects):
     import core.config
 
     set_keys("google")

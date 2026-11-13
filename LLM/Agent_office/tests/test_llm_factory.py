@@ -39,7 +39,7 @@ def test_disabled_provider_is_skipped_even_with_key(models, set_keys):
     assert llm_factory.provider_status(models)["openai"] == "ok"
 
 
-def test_create_chat_model_per_provider(models, set_keys):
+def test_create_chat_model_per_provider(models, set_keys, allow_model_objects):
     set_keys("openai", "anthropic", "google", "upstage")
 
     upstage = llm_factory.create_chat_model(ModelSpec(provider="upstage", model="solar-mini"), models)
@@ -57,7 +57,7 @@ def test_create_chat_model_per_provider(models, set_keys):
     assert gemini.max_output_tokens == 100
 
 
-def test_temperature_omitted_when_not_set(models, set_keys):
+def test_temperature_omitted_when_not_set(models, set_keys, allow_model_objects):
     set_keys("openai")
     gpt = llm_factory.create_chat_model(ModelSpec(provider="openai", model="gpt-5"), models)
     assert gpt.temperature is None
@@ -66,7 +66,7 @@ def test_temperature_omitted_when_not_set(models, set_keys):
 # ─── 무료 모델 (FreeLLMAPI) ───────────────────────────────────────────
 
 
-def test_freellm_model_uses_proxy_and_json_schema(models, set_keys, monkeypatch):
+def test_freellm_model_uses_proxy_and_json_schema(models, set_keys, monkeypatch, allow_model_objects):
     set_keys("freellm")
     monkeypatch.setenv("FREELLMAPI_BASE_URL", "http://127.0.0.1:3999/v1")
     spec = ModelSpec(provider="freellm", model="gpt-oss-20b")

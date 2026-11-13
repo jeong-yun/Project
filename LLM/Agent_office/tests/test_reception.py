@@ -346,6 +346,8 @@ def test_command_center_line_goes_through_scope_check(app_env):
     assert app_env["started"] == []  # 범위 밖 → 맡기지 않았다
     text = "\n".join(m.value for m in at.markdown)
     assert "범위가 아닙니다" in text and "해외 여행팀" in text
+    log = json.loads((app_env["data"] / "scope_log.jsonl").read_text(encoding="utf-8").splitlines()[-1])
+    assert (log["stage"], log["model"]) == ("router_keyword", "")  # 키 없음(app_env) → 모델 없이 낱말 비교
     at = at.button(key="cc_redirect_go_stock").click().run()  # ➡️ 맞는 팀에 맡기기
     assert not at.exception, at.exception
     assert at.session_state["team_pick"] == "travel_abroad" and app_env["started"] == [("travel_abroad", ABR_Q)]

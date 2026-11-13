@@ -110,7 +110,7 @@ def test_callback_records_tokens_from_chat_model(store, monkeypatch):
     assert row["cost_usd"] == pytest.approx((600 * 2.5 + 400 * 0.25 + 200 * 15) / 1e6)
 
 
-def test_create_chat_model_attaches_usage_callback(monkeypatch):
+def test_create_chat_model_attaches_usage_callback(monkeypatch, allow_model_objects):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-0000000000001234")
     from core.config import load_models
 

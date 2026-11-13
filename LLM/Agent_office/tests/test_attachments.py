@@ -341,6 +341,7 @@ def test_reception_and_head_desk_have_file_boxes_and_attachments_follow_to_the_t
     at.text_area(key="dept_head_text").input("다음 달 KTX 타고 강릉 1박 2일 국내 여행").run()
     at = at.button(key="dept_head_go").click().run()
     assert not at.exception and "🚄 국내 여행팀" in at.success[0].value
+    assert any(c.value.startswith("판단: 낱말 비교 (모델 없이)") for c in at.caption)  # 키 없음(app_env) → 부장 모델 없이 낱말 비교
     at = at.button(key="dept_head_start").click().run()  # ▶ 바로 맡기기 → 팀장이 첨부와 함께 시작
     assert not at.exception, at.exception
     assert [s["tool_inputs"]["attachments_names"] for s in app_env["started"]] == [["일정표.md"]]

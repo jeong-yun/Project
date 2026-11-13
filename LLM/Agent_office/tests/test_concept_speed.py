@@ -82,6 +82,8 @@ def test_failure_reasons_are_plain_words():
 def test_claude_cli_usage_recorded_with_team_and_agent_and_failures_skipped(models, set_keys, fake_cli, cli_logged_in,
                                                                            monkeypatch):
     set_keys("openai")
+    # 대안 모델(openai)은 처음부터 가짜 — 가짜 claude 가 실패해도 진짜 openai 로 넘어가지 않게 (가짜 모델은 기록 콜백이 없음)
+    _fallback_to_fake(monkeypatch, Script(Plan=Plan(analysis="대안", picks=[])))
     events = []
     usage.set_sink(events.append)
     fake_cli([result_event("", structured_output={"analysis": "a", "picks": []})])
@@ -91,13 +93,12 @@ def test_claude_cli_usage_recorded_with_team_and_agent_and_failures_skipped(mode
     (e,) = events
     assert (e.provider, e.team_id, e.run_id, e.agent_id, e.cost_usd) == ("claude_cli", "concept", "r1", "gm_editor", 0.0)
 
-    # 거부된 호출은 답이 없으므로 기록하지 않는다 (대안 모델 호출만 남는다 — 가짜 모델은 기록 콜백이 없음)
+    # 거부된 호출은 답이 없으므로 기록하지 않는다 (가짜 대안 모델이 답한다)
     events.clear()
-    _fallback_to_fake(monkeypatch, Script(Plan=Plan(analysis="대안", picks=[])))
     fake_cli(refused(), code=1)
     with usage.scope(team_id="concept"):
-        llm_factory.invoke_structured(CHAIN, models, Plan, [HumanMessage("q")], "부장")
-    assert events == []
+        call = llm_factory.invoke_structured(CHAIN, models, Plan, [HumanMessage("q")], "부장")
+    assert call.spec.provider == "openai" and events == []
 
 
 # ─── 실무자: 스킬 일부 · 산출물 범위 ─────────────────────────────────
