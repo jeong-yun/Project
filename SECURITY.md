@@ -25,7 +25,7 @@
 - 루트 `.gitignore` 가 어디에 있든 막는 것:
   - 비밀 설정: `.env`, `.env.*` (`.env.example` 만 예외), `env.zip`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa*`, `id_ed25519*`, `credentials*.json`, `service-account*.json`
   - 데이터·실행 결과: 모든 `data/`, `results/` 폴더 (Kaggle 공개 예제인 `Titanic/data/` 만 예외)
-  - 개인 이미지: `LLM/Agent_office/teams/stock/avatars/`
+  - 개인 이미지: `LLM/Agent_office/teams/*/avatars/` (화면에서 올린 에이전트 그림·증명사진 — 어느 팀이든)
   - 부산물: `__pycache__/`, `.venv/`, `.pytest_cache/`, `.ipynb_checkpoints/`
 - 폴더별 `.gitignore`(Agent Office, 학습 데이터 파이프라인)는 그 폴더의 원본·중간 데이터와 로그를 추가로 막습니다.
 

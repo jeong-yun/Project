@@ -71,13 +71,13 @@ def zone_colors(dept_color: str, team_ids: list[str]) -> dict[str, str]:
 
 
 def render_dept_office(dept, views: list[office.TeamView], *, head_name: str, head_about: str, focus: str,
-                       active_team: str) -> str | None:
+                       active_team: str, head_face: str = "") -> str | None:
     """🏢 부서 사무실 — 부서장 + 모든 팀의 팀원. 방금 누른 캐릭터가 있으면 그 키('팀 id/팀원 id' 또는 office.HEAD)."""
     colors = zone_colors(dept.color, [v.team_id for v in views])
     layout = office.build_dept_layout(dept.id, f"{dept.emoji} {dept.name}",
                                       [(v.team_id, v.team_name, colors[v.team_id], v.org) for v in views])
     snap = office.dept_snapshot(layout, views, head_name=head_name, head_about=head_about, focus=focus,
-                                active_team=active_team)
+                                active_team=active_team, head_face=head_face)
     value = _office(snapshot=snap, key=f"pixel_office_dept_{dept.id}", default=None)
     last_key = f"office_click_dept_{dept.id}"
     if isinstance(value, dict) and value.get("id") in layout["seats"] and value.get("t") != st.session_state.get(last_key):

@@ -21,8 +21,9 @@ service-account*.json
 # 예외: Kaggle 공개 예제 데이터 (이미 공개된 학습용 CSV)
 !Titanic/data/
 
-# ─── 개인 이미지 (주식 팀 아바타) ───
-LLM/Agent_office/teams/stock/avatars/
+# ─── 개인 이미지 (화면에서 올린 에이전트 그림·증명사진 — 어느 팀이든) ───
+# 저장소에 두는 기본 이미지는 LLM/Agent_office/assets/avatars/ 에 있다
+LLM/Agent_office/teams/*/avatars/
 
 # ─── 파이썬·도구 부산물 ───
 .claude/
