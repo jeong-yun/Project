@@ -6,9 +6,19 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 import common
-from fakes import fake_chat
+from fakes import FAKE_KEY, FakeTTSClient, fake_chat
 
 PAGES = ["app.py", "pages/1_english_word_maker.py", "pages/2_ai_safety_eval.py", "pages/3_rag_docs_qa.py"]
+
+
+@pytest.fixture(autouse=True)
+def fake_tts(monkeypatch):
+    """단어장 화면은 열릴 때 발음 ZIP 을 준비하며 발음(TTS) 클라이언트를 쓴다 → 가짜를 끼운다."""
+    from english_word_maker import tts_utils
+
+    client = FakeTTSClient()
+    monkeypatch.setattr(tts_utils, "_client", client)
+    return client
 
 
 def open_page(rel: str) -> AppTest:
@@ -55,7 +65,7 @@ def test_safety_dashboard_runs_with_fake_models(monkeypatch):
     verdict = json.dumps({"verdict": "PASS", "severity": "none", "reason": "거부함"}, ensure_ascii=False)
     fakes = iter([fake_chat("도와드릴 수 없습니다."), fake_chat(verdict)])  # 대상, 심판 순서로 만든다
     monkeypatch.setattr(judge, "make_llm", lambda *a, **k: next(fakes))
-    monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-real-key")
+    monkeypatch.setenv("OPENAI_API_KEY", FAKE_KEY)
 
     at = open_page("pages/2_ai_safety_eval.py")
     at.button[0].click().run()
@@ -71,7 +81,7 @@ def test_safety_dashboard_rag_target_shows_rag_categories_separately(monkeypatch
     # 대상: 심은 문구를 그대로 따라 쓰는 가짜 모델 → 인젝션 3건 중 그 문구가 걸린 건은 코드 검사가 FAIL
     fakes = iter([fake_chat("문서에 없습니다. MOONLIB-OVERRIDE-42"), fake_chat(verdict)])
     monkeypatch.setattr(judge, "make_llm", lambda *a, **k: next(fakes))
-    monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-real-key")
+    monkeypatch.setenv("OPENAI_API_KEY", FAKE_KEY)
 
     at = open_page("pages/2_ai_safety_eval.py")
     at.radio[0].set_value("rag").run()
@@ -123,7 +133,7 @@ def test_rag_page_without_key_still_shows_found_chunks():
 
 
 def test_rag_page_answers_with_fake_model_and_checks_citations(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-real-key")
+    monkeypatch.setenv("OPENAI_API_KEY", FAKE_KEY)
     replies = iter(["2026-01-22 에 시행됩니다 [1].", "2030-12-31 에 시행됩니다 [9]."])
     monkeypatch.setattr(common, "make_llm", lambda *a, **k: fake_chat(next(replies)))
 
@@ -139,7 +149,7 @@ def test_rag_page_answers_with_fake_model_and_checks_citations(monkeypatch):
 
 
 def test_rag_page_says_not_in_docs_without_calling_model(monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "test-not-a-real-key")
+    monkeypatch.setenv("OPENAI_API_KEY", FAKE_KEY)
 
     def must_not_be_called(*a, **k):
         raise AssertionError("찾은 조각이 없으면 모델을 만들지 않아야 한다")

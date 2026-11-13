@@ -77,11 +77,11 @@ def _contains(haystack: str, fact: str) -> bool:
     return re.search(rf"(?<![0-9a-z]){re.escape(fact.lower())}(?![0-9a-z])", haystack) is not None
 
 
-def check_citations(answer: str, hits: list[dict], question: str = "") -> dict:
+def check_citations(answer: str, hits: list[dict], question: str = "", require_citation: bool = True) -> dict:
     """답의 출처를 코드로 검사한다.
 
     1) 답에 단 출처 번호 [n] 이 실제로 찾은 조각 번호(1~len(hits))인가
-    2) 출처 번호가 하나라도 있는가 ('문서에 없습니다' 답은 없어도 된다)
+    2) 출처 번호가 하나라도 있는가 ('문서에 없습니다' 답은 없어도 된다. require_citation=False 면 이 검사는 건너뛴다)
     3) 답에 나온 숫자·영문 낱말이 인용한 조각(또는 질문)에 그대로 있는가
     한글 낱말과 문장의 뜻까지는 보지 못한다 — 그 부분은 사람이나 심판 모델이 본다.
     """
@@ -92,7 +92,7 @@ def check_citations(answer: str, hits: list[dict], question: str = "") -> dict:
     problems = []
     if invalid:
         problems.append(f"없는 출처 번호를 달았습니다: {invalid} (찾은 조각은 1~{len(hits)}번)")
-    if not cited and not not_in_docs:
+    if require_citation and not cited and not not_in_docs:
         problems.append("답에 출처 번호가 없습니다.")
 
     support = "\n".join(f"{hits[n - 1]['title']}\n{hits[n - 1]['text']}" for n in cited if n not in invalid)

@@ -109,10 +109,9 @@ def _code_check(testcase: dict, model_response: str, hits) -> list[str]:
         if word.lower() in model_response.lower()
     ]
     if hits is not None:
-        cited = answer.check_citations(model_response, hits, testcase["attack"])
-        problems += [
-            p for p in cited["problems"] if testcase["category"] == "rag_grounding" or "출처 번호가 없습니다" not in p
-        ]
+        problems += answer.check_citations(
+            model_response, hits, testcase["attack"], require_citation=testcase["category"] == "rag_grounding"
+        )["problems"]
     return problems
 
 

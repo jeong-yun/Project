@@ -9,6 +9,7 @@ import pytest
 import common
 from english_word_maker import export_doc
 from english_word_maker.parsing import parse_yaml_style_answer
+from fakes import FakeTTSClient
 
 ANSWER = """1) 단어(Word): answer
 2) 분야(Domain): 일반
@@ -73,31 +74,18 @@ def test_pdf_export_with_font_found_or_clear_error(monkeypatch):
 
 
 def test_tts_module_imports_without_key_and_makes_client_lazily(monkeypatch):
-    """키가 없어도 불러와지고, 폴더·클라이언트는 처음 쓸 때 만든다. 실패하면 빈 소리를 돌려준다."""
+    """키가 없어도 불러와지고, 폴더·클라이언트는 처음 쓸 때 만든다. 한 번 만든 소리는 다시 부르지 않는다.
+
+    (키가 없어 클라이언트를 못 만들 때 빈 소리를 돌려주는 것은 tests/test_no_real_calls.py 에서 본다.)
+    """
     sys.modules.pop("english_word_maker.tts_utils", None)
-    tts = importlib.import_module("english_word_maker.tts_utils")
+    tts = importlib.import_module("english_word_maker.tts_utils")  # 여기서 OpenAI() 를 만들면 막음 장치에 걸린다
+    assert tts._client is None
     assert not (common.VOCAB_DIR / "audio").exists()
 
-    assert tts.tts_bytes("hello") == b""  # 키가 없어 클라이언트를 못 만듦 → 화면은 죽지 않는다
-
-    class FakeSpeech:
-        calls = 0
-
-        def create(self, **kwargs):
-            FakeSpeech.calls += 1
-
-            class Resp:
-                def read(self):
-                    return b"mp3"
-
-            return Resp()
-
-    class FakeClient:
-        class audio:  # noqa: N801
-            speech = FakeSpeech()
-
-    monkeypatch.setattr(tts, "_client", FakeClient())
+    client = FakeTTSClient()
+    monkeypatch.setattr(tts, "_client", client)
     assert tts.tts_cached("hello.mp3", "hello") == b"mp3"
     assert tts.tts_cached("hello.mp3", "hello") == b"mp3"  # 두 번째는 저장된 파일
-    assert FakeSpeech.calls == 1
+    assert client.calls == 1
     assert (common.VOCAB_DIR / "audio" / "hello.mp3").exists()

@@ -6,7 +6,8 @@
 
 - 실행: 이 폴더에서 `streamlit run app.py` (`.env` 에 `OPENAI_API_KEY` 필요 — `.env` 는 커밋하지 않는다).
 - 테스트: 이 폴더에서 `python -m pytest -q`. 바꾼 부분의 테스트 파일부터 돌리고, 끝내기 전에 전체를 돌린다.
-- **테스트는 실제 모델·임베딩·발음(TTS)을 부르지 않는다.** `tests/conftest.py` 가 키를 지우고 바깥 요청을 막는다. 모델 자리에는 `tests/fakes.py` 의 가짜 모델이나 `RunnableLambda` 를 끼운다. 실제 호출이 꼭 필요하면 사용자에게 먼저 묻는다.
+- **테스트는 실제 모델·임베딩·발음(TTS)을 부르지 않는다.** `tests/conftest.py` 가 모든 테스트에서 제공처 키를 지우고, `.env` 읽기를 막고, 진짜 `ChatOpenAI`·임베딩·`OpenAI()` 를 만들면 실패시키고, 바깥 요청을 막는다(확인: `tests/test_no_real_calls.py`). 모델이 필요한 테스트는 `tests/fakes.py` 의 가짜(`fake_chat`, `FakeTTSClient`)나 `RunnableLambda` 를 끼운다. '키가 있을 때'의 흐름은 `FAKE_KEY` 를 넣어 본다. 이 막음 장치를 끄거나 돌아가지 않는다. 실제 호출이 꼭 필요하면 사용자에게 먼저 묻는다.
+- 새 제공처(예: Anthropic, 임베딩)를 쓰게 되면 그 클래스와 키 이름을 `tests/conftest.py` 의 막는 목록에 더한다.
 - 화면 테스트는 `streamlit.testing.v1.AppTest` 로 한다. 모든 화면은 키 없이 열려야 한다.
 
 ## 이 앱에서 이미 쓰는 방식 (새로 만들기 전에 재사용)
