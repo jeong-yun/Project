@@ -288,7 +288,8 @@ def test_list_view_and_dept_head_fill_question(seeded):
     assert at.session_state["view"] == "dept" and at.session_state["dept_pick"] == "travel"
     at.text_area(key="dept_head_text").input("비자랑 환전 필요한 오사카 해외 여행").run()
     at.button(key="dept_head_go").click().run()
-    assert not at.exception and "🌏 해외 여행팀" in at.success[0].value  # 키 없음 → 낱말 비교
+    assert not at.exception and "🌏 해외 여행팀" in at.success[0].value
+    assert any(c.value.startswith("판단: 낱말 비교 (모델 없이)") for c in at.caption)  # 키 없음(seeded) → 부장 모델 없이 낱말 비교
     at.button(key="dept_head_open").click().run()
     assert not at.exception and at.session_state["view"] == "dept" and at.session_state["team_pick"] == "travel_abroad"
     assert at.text_area(key="q_text").value == "비자랑 환전 필요한 오사카 해외 여행"

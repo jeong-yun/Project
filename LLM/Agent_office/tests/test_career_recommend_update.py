@@ -529,11 +529,12 @@ def test_web_box_shows_queries_and_searches_only_after_approval(monkeypatch, mod
     assert "[W1]" in res.content and res.harness_options["career_web_count"] == len(inputs["web_results"]) > 0
 
 
-def test_web_box_skip_and_off_by_default(models, no_network_search):
+def test_web_box_skip_and_off_by_default(models, no_network_search, set_keys):
     from streamlit.testing.v1 import AppTest
 
     import career_ui
 
+    set_keys()  # 키 없음 → 검색어 초안은 보조 모델 없이 코드가 만든다 (이 테스트는 '외부 자료 없이 진행'만 본다)
     plain = update_request()
     assert career_ui.confirm_step(plain, "career", "portfolio_update", models, []) is plain  # 끄면 상자 없이 바로 시작
     at = AppTest.from_function(web_page, kwargs={"root": str(ROOT), "request": update_request(web_on=True), "models_cfg": models},

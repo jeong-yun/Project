@@ -205,7 +205,8 @@ def test_off_topic_question_is_blocked_and_button_goes_to_right_team(app_env):
     assert not at.exception, at.exception
     assert app_env["started"] == []  # 실행하지 않았다
     assert "주식 팀** 범위가 아닙니다 — **🌏 해외 여행팀**(여행부)이 맞습니다" in at.error[0].value
-    assert scope.read_log(app_env["data"] / "scope_log.jsonl")[-1]["team_id"] == "travel_abroad"
+    row = scope.read_log(app_env["data"] / "scope_log.jsonl")[-1]
+    assert (row["team_id"], row["stage"], row["model"]) == ("travel_abroad", "router_keyword", "")  # 키 없음 → 모델 없이 낱말 비교
     assert not any(b.label.startswith("그래도") for b in at.button)  # '그래도 실행'은 없다
     at = at.button(key="scope_go_stock").click().run()
     assert not at.exception, at.exception
@@ -215,7 +216,8 @@ def test_off_topic_question_is_blocked_and_button_goes_to_right_team(app_env):
 
 
 def test_edit_button_clears_block_and_keeps_question(app_env):
-    at = submit(open_team("stock"), TRAVEL_Q)
+    at = submit(open_team("stock"), TRAVEL_Q)  # 키 없음 → 낱말 비교로 막힌다
+    assert scope.read_log(app_env["data"] / "scope_log.jsonl")[-1]["stage"] == "router_keyword"
     at = at.button(key="scope_edit_stock").click().run()
     assert not at.exception and not at.error
     assert at.text_area(key="q_text").value == TRAVEL_Q

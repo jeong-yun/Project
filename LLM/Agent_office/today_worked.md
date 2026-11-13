@@ -2080,6 +2080,61 @@
   - 자소서·JD 추천 양식에는 목표 직무 칸이 없어 검색어 초안이 'IT 직무 …'로 시작한다 — 화면에서 고쳐 쓴다.
 - 다음 할 일: main 에 합친 뒤 실제 앱에서 참고 주소 한 번 써 보기. 웹 JD 의 본문만 고르는 것(메뉴·바닥글 빼기)은 실제 공고 몇 개를 본 뒤 정한다.
 
+**테스트가 `.env` 의 실제 키·진짜 모델을 쓰지 못하게 막기**
+- 배경: 주 작업 폴더(`.env` 에 실제 키가 있음)에서 전체 테스트를 돌리면 `test_web_box_skip_and_off_by_default` 가 가끔 "AppTest script run timed out after 30(s)" 로 실패했다 (하루 2번).
+  원인은 테스트가 진짜 모델을 부르고 있었던 것. 앱 화면 테스트(AppTest 로 `app.py` 실행)가 돌면 `app.py` 의 `load_env()` 가 `.env` 를 읽는다 →
+  테스트가 `set_keys()` 로 지운 키까지 되살아나고, 그 테스트가 끝나도 환경에 남는다. 웹 검색·뉴스·주소 읽기는 모든 테스트에서 막혀 있었지만 **모델 생성은 막혀 있지 않았다.**
+  GitHub 검사와 worktree 에는 `.env` 가 없어 드러나지 않았다. 올리기 전 검사(`tools/prepush/`)는 키 환경변수를 빈 값으로 두지만, 테스트가 그 값을 지운 뒤 앱이 `.env` 를 다시 읽으면 같은 일이 생긴다.
+- 재현 (실제 키 없이): worktree 에 누가 봐도 가짜인 값 4개로 `.env` 를 만들고(커밋 안 됨 — 끝나고 지움) 전체 1,259건을 측정용 플러그인과 함께 돌렸다.
+  플러그인은 테스트마다 ① 시작할 때 환경에 남은 키 ② 진짜 `create_chat_model` 에 닿았는지 ③ 내 PC 밖으로 나가는 연결 시도를 적고, 생성 단계에서 막아 가짜 키로도 밖에 나가지 않게 했다.
+- 작업 (실패하는 테스트 5건을 먼저 쓰고 고침 — `tests/test_conftest_guards.py`):
+  - **`.env` 를 읽지 않는다** (`tests/conftest.py` `no_real_keys`, 모든 테스트): `core.config` 안의 `load_dotenv` 를 아무것도 하지 않게 바꾸고, 테스트 시작 때 제공처 키 6개를 지운다.
+    `load_env` 가 아니라 그 안의 `load_dotenv` 를 바꾼 이유 — `scripts/run_autonomous.py` 처럼 `from core.config import load_env` 로 미리 가져간 곳도 이 한 곳을 지나기 때문.
+    `app.py` 가 실제로 이 자리를 지나는지는 테스트가 확인한다 (`.env` 가 없는 GitHub 에서도 빈말이 되지 않게, 읽으려던 경로를 기록해서 본다).
+  - **가짜를 끼우지 않으면 모델 생성이 실패한다** (`no_real_models`, 모든 테스트): `llm_factory.create_chat_model` 이 기본으로 "테스트 중 실제 모델 금지" 오류를 낸다.
+    앱 코드는 모델 오류를 삼키고 다음 후보·낱말 비교로 넘어가므로 오류만으로는 테스트가 통과해 버린다 → 닿은 모델을 적어 두고 **테스트가 끝날 때 실패**시킨다.
+    `use_script` 등 가짜는 그 위에 덮어쓴다. 모델 객체를 만들어 설정만 보는 테스트는 `allow_model_objects` 를 받는다 (7개 — 하나씩 읽어 `.invoke()` 가 없음을 확인).
+  - **문제 테스트 8개**: 7개는 준비 함수가 이미 '키 없음 → 낱말 비교'를 의도하고 있었는데 앱이 `.env` 를 다시 읽어 키가 살아났던 것 → 위 차단으로 의도대로 돌고,
+    어느 경로를 보는지 단언으로 고정했다 (범위 기록의 `stage == "router_keyword"`, 화면의 "판단: 낱말 비교 (모델 없이)"). `test_web_box_skip_and_off_by_default` 는 `set_keys()` 를 명시.
+    `test_claude_cli_usage_recorded_…` 는 가짜 claude 가 답하므로 평소에는 openai 로 넘어가지 않았다 (측정 때 넘어간 것은 측정용 차단이 claude 생성까지 막아서) — 그래도 대안 모델을 처음부터 가짜로 끼웠다.
+    `tests/test_dept_office.py` 는 다른 작업과 겹칠 수 있어 고치지 않았다 (주석이 이미 '키 없음 → 낱말 비교', 차단만으로 통과).
+- 기술: 모든 테스트에 걸리는 pytest 준비 함수(autouse fixture), 삼켜지는 오류를 teardown 에서 실패로 바꾸기, 새 pytest 프로세스로 안전장치 자체를 테스트, 측정용 플러그인(모델 생성·소켓 기록).
+- 성과 (같은 PC, 가짜 `.env`, 다른 하단 작업이 함께 돌아 CPU 90%대 — 시간은 평소 11~16분과 비교할 수 없음):
+
+  | 가짜 `.env` 를 둔 전체 테스트 | 고치기 전 | 고친 뒤 |
+  |---|---|---|
+  | 시작할 때 `.env` 에서 온 키가 환경에 남은 테스트 | 1,232개 | 0개 |
+  | 진짜 모델 생성에 닿은 테스트 | 18개 (의도하지 않은 것 8개) | 11개 (모두 허용한 것 — 설정 확인 7개 + 가짜 claude 실행 파일 4개) |
+  | 밖으로 나가는 연결 시도 | 0개 (플러그인이 생성 단계에서 막음) | 0개 |
+  | 결과 | 1,246 통과 · 13 실패 (11 = 플러그인 차단, 2 = 부하 민감 `test_concurrency`) · 53분 55초 | 1,266 통과 · 0 실패 · 53분 28초 |
+
+  `.env` 없는 상태(worktree 기본) 전체: **1,266 통과**, 29분 42초. `test_web_box_skip_and_off_by_default` 를 앱 화면 테스트 뒤에 5번: 5번 통과, 본문 시간 중앙값 0.43초 (0.27~0.98초).
+- 아직:
+  - **주 작업 폴더의 실제 `.env` 로는 돌려 보지 않았다** (실제 키를 읽지 않기로 함) — 가짜 값으로 같은 조건을 만들어 확인했다.
+  - `create_chat_model` 을 거치지 않는 길: 음악(Lyria·채점, `core/music.py` `_genai_client`)은 키가 없으면 오류로 끝나고 테스트는 가짜로 바꿔 쓴다 — 키를 지우는 것으로 막히지만 전용 차단은 없다.
+    좌표 확인(`core/route.py`)·주가(`yfinance`)도 테스트가 가짜로 바꿔 쓴다. 측정에서 밖으로 나간 연결은 0건이었다.
+  - 다른 테스트가 남긴 백그라운드 스레드가 다음 테스트 도중 모델을 만들면 그 다음 테스트가 실패로 잡힌다 — 고친 뒤 전체 실행 2번에서는 없었다.
+- 다음 할 일: main 에 합친 뒤 주 작업 폴더에서 전체 테스트를 돌려 시간 초과가 사라졌는지 본다.
+
+**GitHub 검사가 실패하면 실패한 테스트 이름이 로그인 없이 보이게**
+- 배경: 2026-11-12 `5a55279` 의 check/main 검사에서 `agent-office-tests / pytest` 가 실패했는데(exit code 1), 실행 기록은 GitHub 로그인이 있어야 보이고
+  공개 API 의 주석에는 "Process completed with exit code 1" 뿐이라 **어떤 테스트가 실패했는지 알 수 없었다.** 같은 코드를 다시 올리니 통과했고 이 PC 에서는 재현하지 못했다.
+- 작업 (실패하는 테스트 2건을 먼저 쓰고 고침): `tests/conftest.py` 의 `pytest_terminal_summary` — 환경변수 `GITHUB_ACTIONS` 가 있을 때만,
+  실패·오류 난 테스트마다 맨 끝 요약에 `::error title=pytest 실패::<테스트 id> — <오류 첫 줄>` 한 줄을 찍는다. GitHub 이 이 줄을 주석으로 바꿔
+  실행 요약 화면과 공개 API(`/repos/<소유자>/<저장소>/check-runs/<작업 id>/annotations`)에 보여 준다. 워크플로 파일은 고치지 않았다.
+  - 공개되는 글이라 테스트 id 와 오류 첫 줄(예외 종류 + 200자)만 쓰고, 24자 넘는 영숫자 덩어리(키일 수 있는 값)는 `***` 로 가린다. `%`·줄바꿈은 GitHub 규칙대로 바꾼다.
+  - GitHub 은 한 단계에서 오류 주석을 10개까지만 보여 준다 → 10개를 넘으면 앞 9개 + "외 N개".
+- 기술: pytest 훅(`pytest_terminal_summary`), GitHub Actions 워크플로 명령(`::error`), 새 pytest 프로세스로 출력 확인.
+- 성과: 새 테스트 2건 — 일부러 실패하는 임시 테스트를 `GITHUB_ACTIONS=true` 로 새 pytest 프로세스에서 돌리면 주석 줄 2개(실패 1 · 준비 함수 오류 1)가 나오고, 환경변수가 없으면 0개.
+  GitHub 과 같은 명령(`python -m pytest -q -p no:cacheprovider -rfE`, 경로 인자 없음)으로도 직접 1번 확인 — 주석 줄이 'short test summary' 바로 위에 찍힌다 (`-q`·출력 가로채기와 무관).
+  전체 `python -m pytest -q` **1,266 통과** (`.env` 없음 29분 42초 · 가짜 `.env` 53분 28초 — 다른 하단 작업이 함께 도는 중).
+- 아직:
+  - **실제 GitHub 실행에서는 확인하지 못했다** (push 하지 않음) — 주석이 화면·공개 API 에 뜨는지는 다음에 실제로 실패할 때 알 수 있다.
+  - **`5a55279` 가 왜 실패했는지는 여전히 모른다.** 이 변경은 지난 실패를 설명하지 못하고, 다음에 실패하면 이름이 남게 할 뿐이다.
+  - 부하 민감 테스트 단계(하나씩 최대 3번)에서는 1번째에 실패하고 2번째에 통과해도 실패한 시도의 주석이 남는다 (단계는 통과).
+- 다음 할 일 (제안 — 워크플로 변경은 따로 올려야 해서 하지 않음): 실패했을 때 `--junitxml` 결과를 artifact 로 올리기, 실패 목록을 `$GITHUB_STEP_SUMMARY` 에 적기,
+  부하 민감 단계는 마지막 시도에서만 오류 주석이 남게 하기.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

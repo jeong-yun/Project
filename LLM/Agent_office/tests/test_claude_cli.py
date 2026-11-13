@@ -15,6 +15,7 @@ from core import claude_cli, llm_factory, usage
 from core.agent import AnswerStream
 from core.claude_cli import ClaudeCLIChatModel, ClaudeCLITimeout, ClaudeCLIUnavailable, ClaudeCLIUsageLimit
 from core.schemas import ModelSpec, RankModels
+from tests.conftest import REAL_CREATE_CHAT_MODEL
 from tests.fakes import FakeOfficeModel, Script
 
 USAGE = {"input_tokens": 10, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 1000, "output_tokens": 20}
@@ -328,7 +329,7 @@ def test_team_lead_prefers_subscription_then_existing_chain(models, set_keys, mo
     assert llm_factory.concurrency_limit("claude_cli") == 1
 
 
-def test_create_chat_model_reads_settings(models):
+def test_create_chat_model_reads_settings(models, allow_model_objects):
     llm = llm_factory.create_chat_model(ModelSpec(provider="claude_cli", model="claude-opus-5-5"), models)
     assert isinstance(llm, ClaudeCLIChatModel)
     assert llm.model == "claude-opus-5-5" and llm.timeout == 600 and llm.effort is None
@@ -340,10 +341,10 @@ CHAIN = RankModels(primary=ModelSpec(provider="claude_cli", model="claude-opus-5
 
 
 def _fallback_to_fake(monkeypatch, script):
-    real = llm_factory.create_chat_model
+    """claude_cli 는 원래대로 만들고(가짜 실행 파일 fake_cli 로 돈다), 그 밖의 제공처는 Script 대로 답하는 가짜 모델로."""
 
     def create(spec, models):
-        return real(spec, models) if spec.provider == "claude_cli" else FakeOfficeModel(script=script)
+        return REAL_CREATE_CHAT_MODEL(spec, models) if spec.provider == "claude_cli" else FakeOfficeModel(script=script)
 
     monkeypatch.setattr(llm_factory, "create_chat_model", create)
 
@@ -384,7 +385,7 @@ def test_unavailable_cli_falls_back_in_draft_stream(models, set_keys, fake_cli, 
     assert stream.result.model.provider == "openai" and "ClaudeCLIUnavailable" in stream.result.errors[0]
 
 
-def test_usage_is_recorded_as_subscription(models, fake_cli):
+def test_usage_is_recorded_as_subscription(models, fake_cli, allow_model_objects):
     events = []
     usage.set_sink(events.append)
     llm = llm_factory.create_chat_model(ModelSpec(provider="claude_cli", model="claude-opus-5-5"), models)
