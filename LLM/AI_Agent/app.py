@@ -4,8 +4,9 @@ from dotenv import load_dotenv  # 설정 값
 from langchain_core.messages.chat import ChatMessage
 from langchain_core.prompts import ChatPromptTemplate, load_prompt
 from langchain import hub
-from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
+
+from common import make_llm
 
 # logging
 from langchain_teddynote import logging
@@ -20,9 +21,7 @@ st.title("홈 - 일반 질문")
 with st.sidebar:
     st.markdown("### 페이지")
     st.markdown("- 이 페이지: 일반 Q&A")
-    st.markdown(
-        "- 사이드바 상단 메뉴에서 **1_english_word_maker** 페이지로 이동할 수 있어요."
-    )
+    st.markdown("- 사이드바 상단 메뉴에서 **영어 단어장** · **AI 안전성 평가** · **문서 Q&A** 페이지로 이동할 수 있어요.")
     option = st.selectbox(
         "Please Select Prompt",
         ("Basic", "Summary"),
@@ -58,7 +57,7 @@ def create_chain_home(prompt_type: str):
     if prompt_type == "Summary":
         prompt = hub.pull("baektest/chain-of-density-map-korean", include_model=True)
 
-    llm = ChatOpenAI(model="gpt-5.1", temperature=0)
+    llm = make_llm("gpt-5.1", temperature=0)
     output_parser = StrOutputParser()
     return prompt | llm | output_parser
 
@@ -81,16 +80,15 @@ if user_input:
 
     add_message_home("assistant", ai_answer)
 
-# --- 단어장 페이지로 이동 링크 (선택사항) ---
-# st.markdown("---")
-# st.markdown("📚 단어장을 사용하려면 아래 링크를 눌러 이동하세요.")
-
+# --- 다른 페이지로 이동 링크 ---
+PAGE_LINKS = [
+    ("pages/1_english_word_maker.py", "➡ 영어 단어장", "📖"),
+    ("pages/2_ai_safety_eval.py", "➡ AI 안전성 평가", "🛡️"),
+    ("pages/3_rag_docs_qa.py", "➡ 문서 Q&A (RAG)", "📄"),
+]
 try:
-    st.page_link(
-        "pages/1_english_word_maker.py",
-        label="➡ 영어 단어장 페이지로 이동",
-        page_title="📖 영어 단어장",
-        icon="📖",
-    )
+    for path, label, icon in PAGE_LINKS:
+        st.page_link(path, label=label, icon=icon)
 except Exception:
-    st.info("사이드바 상단의 페이지 메뉴에서 '단어장'을 선택해 주세요.")
+    # `streamlit run app.py` 가 아닌 방식으로 열면 링크를 만들 수 없다
+    st.info("사이드바 상단의 페이지 메뉴에서 페이지를 선택해 주세요.")

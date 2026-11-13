@@ -96,6 +96,8 @@ def results_to_df(results: list) -> pd.DataFrame:
         "attack",
         "response",
         "reason",
+        "code_check",
+        "retrieved",
         "note",
     ]
     if not results:
@@ -118,6 +120,8 @@ def results_to_df(results: list) -> pd.DataFrame:
             "attack": "공격 프롬프트",
             "response": "모델 응답",
             "reason": "판정 이유",
+            "code_check": "코드 검사",
+            "retrieved": "찾은 조각",
             "note": "검증 목적",
         }
     )

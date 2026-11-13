@@ -5,12 +5,23 @@ from zipfile import ZipFile
 
 from openai import OpenAI
 
-from .export_doc import clean_text
+import common
 
-client = OpenAI()
+_client = None  # 처음 발음을 만들 때 만든다 — 불러오기만 할 때는 OpenAI 키가 없어도 된다
 
-AUDIO_DIR = Path("English_word/audio")
-AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+def get_client() -> OpenAI:
+    global _client
+    if _client is None:
+        _client = OpenAI()
+    return _client
+
+
+def audio_dir() -> Path:
+    """발음 mp3 저장 폴더. 쓸 때 만든다."""
+    path = common.VOCAB_DIR / "audio"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def tts_bytes(text: str) -> bytes:
@@ -18,7 +29,7 @@ def tts_bytes(text: str) -> bytes:
     if not text:
         return b""
     try:
-        resp = client.audio.speech.create(
+        resp = get_client().audio.speech.create(
             model="gpt-4o-mini-tts",
             voice="coral",
             input=text,
@@ -38,7 +49,7 @@ def tts_cached(filename: str, text: str) -> bytes:
     if not text:
         return b""
 
-    file_path = AUDIO_DIR / filename
+    file_path = audio_dir() / filename
 
     if file_path.exists():
         return file_path.read_bytes()
@@ -61,7 +72,7 @@ def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
                 word_filename = f"{safe_word}_pronounciation.mp3"
                 tts_cached(word_filename, word)
 
-                word_file_path = AUDIO_DIR / word_filename
+                word_file_path = audio_dir() / word_filename
                 if word_file_path.exists():
                     # ZIP 안에서도 폴더 없이 파일만
                     z.write(str(word_file_path), word_filename)
@@ -78,7 +89,7 @@ def get_audio_zip_from_vocab(vocab: dict) -> BytesIO:
                         example_filename = f"{safe_word}_example{idx}.mp3"
                         tts_cached(example_filename, ex)
 
-                        ex_file_path = AUDIO_DIR / example_filename
+                        ex_file_path = audio_dir() / example_filename
                         if ex_file_path.exists():
                             # ZIP 안에서도 폴더 없이 파일만
                             z.write(str(ex_file_path), example_filename)

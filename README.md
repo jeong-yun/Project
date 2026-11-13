@@ -5,7 +5,7 @@
 ## LLM
 - [Agent_office](LLM/Agent_office/README.md) — 직급형 멀티 에이전트 협업 앱 (LangGraph · Streamlit). 부서 7개 · 팀 12개, 보안 거버넌스 · 인프라 보안 · 자율 실행 · 교육
 - [train_set_making_by_rule(talos, et)](<LLM/train_set_making_by_rule(talos, et)/README.md>) — Snort 룰 기반 IPS/WAF 학습데이터 생성 파이프라인 (공개본, 코드만) + AI 거버넌스 문서
-- AI_Agent — LLM 과 프롬프트로 영어 단어장 생성
+- [AI_Agent](LLM/AI_Agent/README.md) — LangChain · Streamlit 작은 LLM 앱: 채팅 · 영어 단어장 · AI 안전성 평가 · 문서 Q&A(RAG)
 - LLM 에이전트 기반 게임 IP 리뷰 감성 분석 파이프라인
 
 ## 그 밖

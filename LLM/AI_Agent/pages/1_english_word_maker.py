@@ -8,14 +8,17 @@ from dotenv import load_dotenv
 from langchain_core.messages.chat import ChatMessage
 from langchain_core.prompts import ChatPromptTemplate, load_prompt
 from langchain import hub
-from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import StrOutputParser
 
 from langchain_teddynote import logging
 
+import common
+from common import make_llm
+
 # --- 단어장 기능 모듈 ---
 from english_word_maker.parsing import parse_yaml_style_answer
 from english_word_maker.export_doc import (
+    KoreanFontNotFound,
     get_excel_bytes,
     get_word_bytes_from_vocab,
     get_pdf_bytes_from_vocab,
@@ -33,7 +36,7 @@ st.title("영어 단어장 생성 & 발음 앱")
 
 # ---------------- 기본 설정 ----------------
 
-SAVE_DIR = Path("English_word")
+SAVE_DIR = common.VOCAB_DIR  # 실행 위치와 상관없이 이 앱 폴더의 English_word/
 SAVE_PATH = SAVE_DIR / "vocab.json"
 
 if "messages_vocab" not in st.session_state:
@@ -166,9 +169,9 @@ def update_vocab_from_answer(vocab: dict, answer_text: str):
 
 def create_chain():
     # 항상 English.yaml 프롬프트 로드
-    prompt = load_prompt("prompts/English.yaml", encoding="utf-8")  # 수정
+    prompt = load_prompt(str(common.PROMPTS_DIR / "English.yaml"), encoding="utf-8")
 
-    llm = ChatOpenAI(model="gpt-5.1", temperature=0)
+    llm = make_llm("gpt-5.1", temperature=0)
     output_parser = StrOutputParser()
     return prompt | llm | output_parser
 
@@ -261,13 +264,17 @@ if not df.empty:
         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
 
-    pdf_bytes = get_pdf_bytes_from_vocab(vocab)
-    st.download_button(
-        label="📥 단어장 다운로드 (PDF)",
-        data=pdf_bytes,
-        file_name="vocab.pdf",
-        mime="application/pdf",
-    )
+    try:
+        pdf_bytes = get_pdf_bytes_from_vocab(vocab)
+    except KoreanFontNotFound as e:
+        st.warning(str(e))
+    else:
+        st.download_button(
+            label="📥 단어장 다운로드 (PDF)",
+            data=pdf_bytes,
+            file_name="vocab.pdf",
+            mime="application/pdf",
+        )
 
     audio_zip = get_audio_zip_from_vocab(vocab)
     st.download_button(
