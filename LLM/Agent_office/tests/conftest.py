@@ -3,9 +3,12 @@
 - 실제 웹 검색·LLM 호출을 모두 막고 가짜로 바꾼다 → API 키·비용·네트워크 없이 테스트
 - 모든 테스트에서 `.env` 를 읽지 않고 제공처 키를 지운다. 가짜 모델을 끼우지 않고 모델을 만들면 그 테스트는 실패한다
   (no_real_keys · no_real_models — 확인: tests/test_conftest_guards.py)
+- GitHub 검사에서 실패하면 실패한 테스트 이름을 주석(::error)으로 찍는다 → 로그인 없이 보인다 (맨 아래 pytest_terminal_summary)
 - 설정은 실제 config/, teams/ 파일을 읽는다 → 설정 파일이 깨지면 테스트도 실패한다
 """
 
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -244,3 +247,37 @@ def use_script(set_keys, monkeypatch):
         return script
 
     return _install
+
+
+# ─── GitHub 검사에서 실패한 테스트 이름 보이기 ───────────────────────
+# 실행 기록(로그)은 GitHub 로그인이 있어야 보이지만, 주석(annotation)은 실행 요약 화면과 공개 API
+# (/repos/<소유자>/<저장소>/check-runs/<작업 id>/annotations)에서 로그인 없이 보인다.
+GITHUB_ERROR_LIMIT = 10  # GitHub 은 한 단계에서 오류 주석을 10개까지만 보여 준다
+LONG_TOKEN = re.compile(r"[A-Za-z0-9_\-]{24,}")  # 키일 수 있는 긴 영숫자 덩어리 — 공개되는 글이라 가린다
+
+
+def _github_data(text: str) -> str:
+    return text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def github_error_lines(reports, limit: int = GITHUB_ERROR_LIMIT) -> list[str]:
+    """실패·오류 난 테스트 → GitHub 주석 줄. 테스트 id 와 오류 첫 줄(예외 종류 + 200자)만 쓴다. 한도를 넘으면 앞 몇 개 + '외 N개'."""
+    lines = []
+    for report in reports:
+        crash = getattr(getattr(report, "longrepr", None), "reprcrash", None)
+        message = (crash.message if crash else str(getattr(report, "longrepr", "") or "")).strip()
+        first = LONG_TOKEN.sub("***", message.splitlines()[0])[:200] if message else ""
+        lines.append(f"::error title=pytest 실패::{_github_data(report.nodeid)} — {_github_data(first)}")
+    if len(lines) > limit:
+        rest = len(lines) - (limit - 1)
+        lines = lines[: limit - 1] + [f"::error title=pytest 실패::외 {rest}개 — 전체 목록은 실행 기록의 short test summary 에 있습니다"]
+    return lines
+
+
+def pytest_terminal_summary(terminalreporter):
+    """GitHub Actions 에서만(GITHUB_ACTIONS): 실패·오류 난 테스트마다 주석 한 줄을 맨 끝 요약에 찍는다."""
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return
+    reports = [r for kind in ("failed", "error") for r in terminalreporter.stats.get(kind, [])]
+    for line in github_error_lines(reports):
+        terminalreporter.write_line(line)

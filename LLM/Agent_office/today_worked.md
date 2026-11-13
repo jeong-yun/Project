@@ -2116,6 +2116,25 @@
   - 다른 테스트가 남긴 백그라운드 스레드가 다음 테스트 도중 모델을 만들면 그 다음 테스트가 실패로 잡힌다 — 고친 뒤 전체 실행 2번에서는 없었다.
 - 다음 할 일: main 에 합친 뒤 주 작업 폴더에서 전체 테스트를 돌려 시간 초과가 사라졌는지 본다.
 
+**GitHub 검사가 실패하면 실패한 테스트 이름이 로그인 없이 보이게**
+- 배경: 2026-11-12 `5a55279` 의 check/main 검사에서 `agent-office-tests / pytest` 가 실패했는데(exit code 1), 실행 기록은 GitHub 로그인이 있어야 보이고
+  공개 API 의 주석에는 "Process completed with exit code 1" 뿐이라 **어떤 테스트가 실패했는지 알 수 없었다.** 같은 코드를 다시 올리니 통과했고 이 PC 에서는 재현하지 못했다.
+- 작업 (실패하는 테스트 2건을 먼저 쓰고 고침): `tests/conftest.py` 의 `pytest_terminal_summary` — 환경변수 `GITHUB_ACTIONS` 가 있을 때만,
+  실패·오류 난 테스트마다 맨 끝 요약에 `::error title=pytest 실패::<테스트 id> — <오류 첫 줄>` 한 줄을 찍는다. GitHub 이 이 줄을 주석으로 바꿔
+  실행 요약 화면과 공개 API(`/repos/<소유자>/<저장소>/check-runs/<작업 id>/annotations`)에 보여 준다. 워크플로 파일은 고치지 않았다.
+  - 공개되는 글이라 테스트 id 와 오류 첫 줄(예외 종류 + 200자)만 쓰고, 24자 넘는 영숫자 덩어리(키일 수 있는 값)는 `***` 로 가린다. `%`·줄바꿈은 GitHub 규칙대로 바꾼다.
+  - GitHub 은 한 단계에서 오류 주석을 10개까지만 보여 준다 → 10개를 넘으면 앞 9개 + "외 N개".
+- 기술: pytest 훅(`pytest_terminal_summary`), GitHub Actions 워크플로 명령(`::error`), 새 pytest 프로세스로 출력 확인.
+- 성과: 새 테스트 2건 — 일부러 실패하는 임시 테스트를 `GITHUB_ACTIONS=true` 로 새 pytest 프로세스에서 돌리면 주석 줄 2개(실패 1 · 준비 함수 오류 1)가 나오고, 환경변수가 없으면 0개.
+  GitHub 과 같은 명령(`python -m pytest -q -p no:cacheprovider -rfE`, 경로 인자 없음)으로도 직접 1번 확인 — 주석 줄이 'short test summary' 바로 위에 찍힌다 (`-q`·출력 가로채기와 무관).
+  전체 `python -m pytest -q` **1,266 통과** (`.env` 없음 29분 42초 · 가짜 `.env` 53분 28초 — 다른 하단 작업이 함께 도는 중).
+- 아직:
+  - **실제 GitHub 실행에서는 확인하지 못했다** (push 하지 않음) — 주석이 화면·공개 API 에 뜨는지는 다음에 실제로 실패할 때 알 수 있다.
+  - **`5a55279` 가 왜 실패했는지는 여전히 모른다.** 이 변경은 지난 실패를 설명하지 못하고, 다음에 실패하면 이름이 남게 할 뿐이다.
+  - 부하 민감 테스트 단계(하나씩 최대 3번)에서는 1번째에 실패하고 2번째에 통과해도 실패한 시도의 주석이 남는다 (단계는 통과).
+- 다음 할 일 (제안 — 워크플로 변경은 따로 올려야 해서 하지 않음): 실패했을 때 `--junitxml` 결과를 artifact 로 올리기, 실패 목록을 `$GITHUB_STEP_SUMMARY` 에 적기,
+  부하 민감 단계는 마지막 시도에서만 오류 주석이 남게 하기.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

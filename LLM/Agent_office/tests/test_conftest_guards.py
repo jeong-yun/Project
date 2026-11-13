@@ -2,6 +2,8 @@
 
 배경(2026-11-13): 앱 화면 테스트(AppTest 로 app.py 실행)가 돌면 app.py 의 load_env() 가 `.env` 를 읽어
 `set_keys()` 로 지운 키까지 되살렸고, 그 키가 다음 테스트로 넘어가 가짜 모델을 끼우지 않은 테스트가 진짜 모델을 불렀다.
+
+맨 아래: GitHub 검사(GITHUB_ACTIONS)에서 실패한 테스트 이름을 주석(::error)으로 찍는 것 — 로그인 없이 실패 원인을 알 수 있게.
 """
 
 import os
@@ -106,3 +108,56 @@ def test_swallowed_block_still_fails_the_test(tmp_path):
         """)
     assert re.search(r"3 passed.* 1 error", out), out  # 본문은 셋 다 통과, 삼킨 테스트는 끝날 때(teardown) 오류
     assert "ERROR at teardown of test_swallows" in out and BLOCKED_MODEL in out and "openai · gpt-5.4-mini" in out
+    assert "::error" not in out  # GitHub 검사가 아니면(GITHUB_ACTIONS 없음) 주석 줄을 찍지 않는다
+
+
+# ─── GitHub 검사 실패 때 테스트 이름이 주석으로 보인다 ───────────────
+
+
+def test_github_run_prints_failed_test_names_as_annotations(tmp_path):
+    out = run_inner(tmp_path, """
+        import pytest
+
+
+        def test_ok():
+            pass
+
+
+        def test_wrong_number():
+            print("captured output must not hide the annotation")
+            assert 1 + 1 == 3, "sum is wrong\\nsecond line stays out"
+
+
+        @pytest.fixture
+        def broken():
+            raise ValueError("setup broke with key " + "x9" * 20)
+
+
+        def test_setup_error(broken):
+            pass
+        """, GITHUB_ACTIONS="true")
+    lines = [line for line in out.splitlines() if line.startswith("::error ")]
+    assert len(lines) == 2, out
+    assert lines[0].startswith("::error title=pytest 실패::") and "test_inner.py::test_wrong_number — AssertionError: sum is wrong" in lines[0]
+    assert "second line" not in lines[0]
+    assert "test_inner.py::test_setup_error — ValueError: setup broke with key ***" in lines[1]  # 긴 영숫자 덩어리(키일 수 있는 값)는 가린다
+    assert "test_ok" not in "".join(lines)
+
+
+def test_github_annotations_are_capped_and_escaped():
+    from types import SimpleNamespace
+
+    from tests.conftest import GITHUB_ERROR_LIMIT, github_error_lines
+
+    def report(i: int, message: str = "AssertionError: x"):
+        return SimpleNamespace(nodeid=f"tests/test_a.py::test_{i}", longrepr=SimpleNamespace(reprcrash=SimpleNamespace(message=message)))
+
+    lines = github_error_lines([report(i) for i in range(25)])
+    assert len(lines) == GITHUB_ERROR_LIMIT == 10  # 한 단계에 보이는 오류 주석 한도
+    assert lines[8].endswith("tests/test_a.py::test_8 — AssertionError: x") and lines[9].startswith("::error title=pytest 실패::외 16개")
+    (line,) = github_error_lines([report(0, "ValueError: 50% done\nnext line " + "y" * 300)])
+    assert line == "::error title=pytest 실패::tests/test_a.py::test_0 — ValueError: 50%25 done"  # 첫 줄만, % 는 GitHub 규칙대로
+    (line,) = github_error_lines([SimpleNamespace(nodeid="tests/test_b.py", longrepr="ImportError: no module\nmore")])  # 모으기 오류
+    assert line.endswith("tests/test_b.py — ImportError: no module")
+    (line,) = github_error_lines([report(1, "RuntimeError: " + "가" * 500)])
+    assert len(line.split(" — ", 1)[1]) == 200  # 오류 첫 줄은 200자까지
