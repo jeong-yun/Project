@@ -10,6 +10,7 @@
   iac_scan        : Terraform·쿠버네티스·Dockerfile 내장 규칙 점검 + 원본·diff 규칙 (인프라 보안 팀, 외부 스캐너는 설치돼 있으면)
   career_docs     : 올린 요약 문서(docx·pdf·hwp·hwpx·md·txt)·JD·자소서 문항 읽기 + JD 요구사항 1차 대응 (포트폴리오·자소서 팀, 외부 호출 없음)
   learning_course : 과목(course_id) → 선생님 프로필·수준 규칙·커리큘럼·진도·최근 기록 (교육부 두 팀 공용, core/learning.py)
+  voice_svc       : 노래 음색 변환 — 학습 설정표(코드 규칙)·올린 dataset_raw.zip 숫자 점검·범위 밖 요청 표시 (음성 합성 팀, core/voice.py)
   attachments     : 📎 자유 질문·접수 창구·부서장 창구의 첨부 파일 → 근거 자료 (모든 팀 공통 — team.yaml 에 적지 않아도
                     툴 입력에 첨부가 있으면 run_tools 가 팀 툴 뒤에 돌린다)
 
@@ -22,7 +23,8 @@
 from collections.abc import Callable
 
 from core.schemas import ModelsConfig, ToolResult
-from core.tools import attachments, career_docs, floorplan_input, governance_evidence, iac_scan, learning_course, stock_data, travel_calendar
+from core.tools import (attachments, career_docs, floorplan_input, governance_evidence, iac_scan, learning_course, stock_data,
+                        travel_calendar, voice_svc)
 
 ToolFn = Callable[[str, dict, ModelsConfig], ToolResult | None]
 
@@ -34,6 +36,7 @@ TOOLS: dict[str, ToolFn] = {
     "iac_scan": iac_scan.run,
     "career_docs": career_docs.run,
     "learning_course": learning_course.run,
+    "voice_svc": voice_svc.run,
     "attachments": attachments.run,
 }
 READS_ATTACHMENTS = {"career_docs"}  # 첨부를 스스로 읽는 툴 (첨부 = 요약 문서) — 공통 첨부 묶음을 또 넣지 않는다

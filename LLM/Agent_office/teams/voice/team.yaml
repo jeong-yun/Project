@@ -1,0 +1,177 @@
+# 🎙 음성 합성 팀 — 노래 음색 변환(SVC, so-vits-svc-fork) 준비를 돕는다. 말하는 목소리 합성(TTS)·실시간 변환은 다루지 않는다
+#
+# 이 앱이 하는 일 : 실행 계획 + 맞춤 파일(Colab 노트북·전처리 스크립트·안내) 만들기, 올린 dataset_raw.zip 을 코드로 점검·해석
+# 앱 밖에서 도는 일: 보컬 분리·자르기(사용자 PC 의 preprocess.py 또는 Colab B안) · 학습 · 변환(Colab T4 GPU)
+#   → 이 PC 에는 GPU·audio-separator·so-vits-svc-fork 가 없고, 앱은 패키지를 설치하지 않는다
+# 원본 파일: teams/voice/assets/ (사용자가 만든 스크립트·노트북 그대로) — 맞춤 파일은 core/voice.py 가 여기서 만든다
+# 책임 있는 사용: 목소리 출처·확인 체크(양식 필수 + voice_ui 가 맡기기 전에 확인) → 확인이 없으면 계획·노트북을 만들지 않는다.
+#   사칭·무단 복제 요청은 툴이 표시하고(voice_svc) 검증기 voice_guard 가 실행 방법이 새지 않았는지 본다.
+#   결과물에는 'AI 로 합성한 음성' 표시 안내 (voice_plan 이 검사, 맞춤 노트북·안내 글에도 넣음)
+
+id: voice
+name: 🎙 음성 합성 팀
+description: 내 목소리(또는 본인 동의를 받은 목소리)로 노래 음색 변환 모델(SVC)을 학습해 커버 보컬을 바꾸는 일을 준비한다 — 실행 계획과 맞춤 Colab 노트북을 만들고, 학습 데이터를 코드로 점검한다. 말하는 목소리 합성(TTS)은 다루지 않는다.
+
+scope:
+  summary: 노래 음색 변환(SVC) — 학습 데이터 준비(보컬 분리·자르기), Colab 학습·이어 학습, 변환 옵션, 흔한 문제 해결
+  accepts:
+    - 내 목소리·본인 동의를 받은 목소리로 노래 음색 변환 모델 학습 준비
+    - 보컬 분리·자르기·학습 데이터 분량, Colab 학습 설정과 로그 해석
+    - 변환 옵션(키 조절)과 반주 합치기, 쇳소리·끊김 같은 문제 해결
+  rejects:
+    - 동의 확인이 없는 다른 사람·실존 가수·유명인의 목소리 복제
+    - 남을 속이는 용도 (전화·음성 메시지로 다른 사람인 척하기, 본인 인증 통과·우회)
+    - 말하는 목소리 합성(TTS)·실시간 목소리 변환 (이 팀은 노래 음색 변환만 다룬다)
+    - 새 노래·가사·반주 만들기 (→ 🎵 음악 팀)
+  keywords: [음색, 음색 변환, 목소리 모델, 내 목소리, SVC, so-vits, so-vits-svc, 보컬 분리, audio-separator, dataset_raw, preprocess,
+             Colab, 체크포인트, 이어 학습, 쇳소리, 키 조절, 커버 보컬, 화자, crepe, HuBERT, 목소리 학습, 학습 데이터]
+free_examples:
+  - title: 데이터 — 얼마나 필요한가
+    question: 내 목소리 모델을 학습하려면 학습 데이터는 몇 분이나 있어야 해?
+    goal: 지금 가진 음원으로 시작해도 되는지 판단할 기준
+    success_criteria:
+      - 권장 분량과 부족한 분량의 기준을 근거(스킬 글)와 함께 쓴다
+      - 클립 길이(5~15초)와 보컬만 남기는 이유를 쓴다
+    constraints: [근거 없는 숫자는 '재 보지 않음'으로]
+    output_format: 결론 → 기준 표 → 다음에 할 일
+  - title: 학습 — Colab 세션이 끊겼을 때
+    question: Colab 에서 SVC 학습하다가 세션이 끊겼어. 처음부터 다시 해야 해?
+    goal: 끊긴 지점부터 이어서 학습하는 순서
+    success_criteria:
+      - 다시 실행할 셀 순서를 쓴다
+      - 체크포인트가 Drive 에 남는 이유를 쓴다
+    constraints: []
+    output_format: 결론 → 셀 순서 → 주의할 점
+  - title: 변환 — 쇳소리가 날 때
+    question: 변환한 목소리가 쇳소리가 나고 군데군데 끊겨. 어떻게 고쳐?
+    goal: 원인 후보와 하나씩 해 볼 조치
+    success_criteria:
+      - 원인 후보를 데이터·학습·변환 옵션으로 나눠 쓴다
+      - 해 볼 순서를 쓴다
+    constraints: []
+    output_format: 원인 후보 표 → 해 볼 순서
+  - title: 변환 — 남녀 키 차이
+    question: 여자 가수 노래를 내 목소리 모델로 바꾸면 키 조절은 얼마나 해야 해?
+    goal: 변환할 때 쓸 키 조절 값
+    success_criteria:
+      - 키 조절 옵션(-t)과 반음 단위를 쓴다
+      - 먼저 해 볼 값과 들어 보고 고치는 법을 쓴다
+    constraints: []
+    output_format: 결론 → 명령 예시 → 들어 보고 고치는 법
+
+personas:
+  team_lead: >-
+    당신은 보이스 PD 입니다. 목표·목소리 출처·가진 음원·작업 환경(GPU 유무)을 정리해 실행 계획을 확정하고 최종 답을 씁니다.
+    코드가 근거 자료로 준 값(화자 이름·epochs·batch_size·점검 숫자)을 바꾸지 않고, 목소리 출처와 사용 확인, 'AI 로 합성한 음성' 표시 안내를 꼭 넣습니다.
+    다른 사람인 척 속이기·동의 없는 목소리 복제·실존 가수 목소리 복제는 돕지 않고, 이유와 다음에 할 일만 쉬운 말로 알립니다.
+  gm: >-
+    당신은 권리·품질 검수 부장입니다. 목소리 출처와 동의가 분명한지, 결과물에 'AI 로 합성한 음성' 표시 안내가 있는지,
+    학습 데이터 분량·클립 길이가 기준에 맞는지 검수합니다. 실존 가수·유명인 목소리를 대상으로 삼은 답, 남을 속이는 데 쓸 수 있는 안내를 가장 무겁게 지적합니다.
+  deputy_gm: >-
+    당신은 오디오 데이터 엔지니어입니다. 음원 준비 → 보컬 분리(BS-RoFormer / 빠른 MDX-Net) → 무음 기준 자르기를
+    내 PC(A안)·Colab(B안) 중 알맞은 쪽으로 설계하고, 코드가 계산한 데이터 점검 표를 해석해 다음 조치를 씁니다. 표의 숫자는 그대로 씁니다.
+  assistant_manager: >-
+    당신은 학습·변환 엔지니어입니다. so-vits-svc-fork 의 Colab 학습 설정(epochs·batch_size·f0 방식 crepe·이어 학습)과
+    학습 로그 해석, 변환 옵션(키 조절 -t, f0 방식)과 반주 합치기를 팀 스킬 글에 적힌 명령 그대로 안내합니다.
+
+org:
+  id: lead
+  rank: team_lead
+  name: 팀장·보이스PD
+  specialty: 목표·목소리 출처·보유 음원·환경(GPU 유무) 정리, 실행 계획 확정·최종 정리
+  children:
+    - id: gm_rights
+      rank: gm
+      name: 부장·권리품질검수
+      specialty: 목소리 사용 동의·권리 확인, 'AI 합성 음성' 표시, 데이터 분량·클립 길이 기준 검수
+      children:
+        - id: data_eng
+          rank: deputy_gm
+          name: 차장·데이터엔지니어
+          specialty: 음원 준비 → 보컬 분리 → 자르기 설계(A안 내 PC / B안 Colab, 빠른 모델 여부), 데이터 점검 표 해석
+        - id: train_eng
+          rank: assistant_manager
+          name: 대리·학습변환엔지니어
+          specialty: Colab 학습 설정(epochs·batch·f0·이어 학습), 로그 진단, 변환 옵션(키 -t·f0)과 반주 합치기
+
+review_criteria:
+  - 목소리 출처(내 목소리 / 본인 동의 / 사용이 허락된 공개 데이터셋)와 사용 확인을 밝혔는가
+  - 결과물을 남에게 보이거나 올릴 때 'AI 로 합성한 음성'이라고 표시하라는 안내가 있는가
+  - 실존 가수·유명인 목소리를 대상으로 삼거나, 남을 속이는 데 쓸 수 있는 안내가 없는가
+  - 명령·셀 번호·기본값이 팀 스킬 글(원본 파일)과 같은가 — 지어낸 옵션·숫자가 없는가
+  - 근거 자료의 코드 값(화자 이름·epochs·batch_size·점검 숫자)을 바꿔 쓰지 않았는가
+  - 걸리는 시간 같은 숫자는 원본 파일에 적힌 어림값만 쓰고, 없는 것은 '재 보지 않음'으로 썼는가
+
+output_format: markdown
+
+tools: [voice_svc]
+
+# voice_kit — 최종 결과 아래 '🎁 맞춤 실행 파일'(zip) 내려받기 · 데이터 점검 표 (voice_ui.py)
+features: [voice_kit]
+
+harness:
+  validators: [voice_guard]
+  final_only: [voice_plan, voice_data]   # 실무자는 계획·해석의 일부만 쓰므로 전체 형식은 최종 답변에서만 검사
+  max_retries: 2
+
+tasks:
+  - id: plan
+    title: 📋 학습 계획 만들기
+    description: 목소리 출처·가진 음원·작업 환경을 넣으면 단계별 실행 계획을 쓰고, 값을 넣은 Colab 노트북·전처리 스크립트·안내를 묶어 드립니다. 보컬 분리·학습·변환은 내 PC 와 Colab 에서 직접 돌립니다.
+    fixed: {voice_task: plan}
+    fields:
+      - {key: source, label: 목소리 출처, type: select, required: true, options: [내 목소리, 본인 동의를 받은 사람의 목소리, 사용이 허락된 공개 데이터셋]}
+      - {key: consent, label: "이 목소리를 학습·변환에 써도 된다는 것을 확인했습니다", type: checkbox, required: true,
+         help: "다른 사람의 목소리라면 먼저 그 사람에게 학습·변환에 써도 된다는 동의를 받으세요. 확인이 없으면 계획과 노트북을 만들지 않습니다."}
+      - {key: singer, label: 화자 이름 (영문·숫자·-_), required: true, placeholder: "예: myvoice", help: "dataset_raw/<화자 이름>/ 폴더 이름이 됩니다."}
+      - {key: songs, label: 가진 음원 수 (곡), type: number}
+      - {key: minutes, label: 대략의 노래 길이 합 (분), type: number, help: "보컬만 남기면 줄어듭니다. 30분~1시간 이상을 권합니다."}
+      - {key: gpu, label: 이 PC 의 GPU, type: select, options: [없음, 있음 (NVIDIA)], default: 없음}
+      - {key: where, label: 보컬 분리·자르기를 할 곳, type: select, options: [내 PC (A안), Colab (B안)], default: 내 PC (A안),
+         help: "A안: 내 PC 에서 preprocess.py 로 만든 dataset_raw.zip 을 올림 · B안: 원본 곡 songs.zip 만 올리고 Colab GPU 로 처리"}
+      - {key: oom, label: 학습 중 메모리 부족(OOM) 오류를 겪었습니다, type: checkbox}
+      - {key: goal, label: 무엇을 변환하고 싶나요, type: textarea, placeholder: "예: 내 목소리로 좋아하는 발라드 커버 보컬 만들기"}
+    question: |
+      노래 음색 변환(SVC) 학습 계획을 세워줘.
+      목소리 출처: {source} (사용해도 된다고 확인함: {consent})
+      화자 이름: {singer}
+      가진 음원: {songs}곡
+      노래 길이 합: 약 {minutes}분
+      이 PC 의 GPU: {gpu}
+      보컬 분리·자르기: {where}
+      학습 중 메모리 부족을 겪음: {oom}
+      목표: {goal}
+    goal: "화자 {singer} 의 노래 음색 변환 모델을 학습해 변환까지 따라 할 수 있는 단계별 실행 계획"
+    success_criteria:
+      - "첫 줄 근처에 목소리 출처({source})와 학습·변환에 써도 된다는 확인을 한 줄로 밝힌다"
+      - "내 PC 에서 할 일 → Drive 에 올릴 것 → Colab 셀 순서 → 변환 → 반주 합치기를 번호 목록으로 쓴다"
+      - "화자 이름 {singer}, epochs·batch_size 는 근거 자료의 '코드가 정한 학습 설정' 값을 그대로 쓴다"
+      - "걸리는 시간은 근거 자료에 적힌 어림값만 출처와 함께 쓰고, 없는 숫자는 '재 보지 않음'으로 쓴다"
+      - "결과물을 남에게 보이거나 올릴 때 'AI 로 합성한 음성'이라고 표시하라는 안내와 권리 체크리스트를 넣는다"
+    output_format: "목소리 출처·확인 한 줄 → ## 실행 순서 (번호 목록) → ## 예상 소요 → ## 권리·표시 체크리스트 → 받은 파일 안내"
+    instructions: |
+      - 보컬 분리·학습·변환은 이 앱이 아니라 사용자의 PC 와 Colab 에서 돈다. 앱이 만든 맞춤 파일(zip)은 최종 결과 아래에서 내려받는다고 안내한다.
+      - 근거 자료의 표(화자 이름·epochs·batch_size)는 코드가 정한 값이다. 바꾸거나 다른 값을 권하지 않는다 (자동 검증이 대조한다).
+      - 명령·셀 번호·기본값은 팀 스킬 글에 적힌 것만 쓴다.
+    validators: [voice_plan]
+
+  - id: check
+    title: 🔍 데이터 점검
+    description: preprocess.py 로 만든 dataset_raw.zip 을 올리면 화자 폴더별 클립 수·총 길이·클립 길이·무음·클리핑을 코드로 세고, 팀이 해석과 다음 조치를 씁니다. 음원 내용은 모델로 보내지 않고 숫자 요약만 근거 자료가 됩니다.
+    fixed: {voice_task: check}
+    fields:
+      - {key: dataset, label: "dataset_raw.zip (200MB 까지)", type: file, required: true, options: [zip],
+         help: "dataset_raw 폴더를 통째로 zip 으로 묶어 올리세요. 파일은 이 PC 의 data/uploads/ 에만 저장되고, 모델에는 숫자 요약만 보냅니다."}
+      - {key: goal, label: 궁금한 점 (선택), type: textarea, placeholder: "예: 이 정도면 학습을 시작해도 될까요?"}
+    question: |
+      올린 학습 데이터({dataset_name})를 점검하고 해석해줘.
+      궁금한 점: {goal}
+    goal: "코드가 계산한 점검 표를 바탕으로 학습을 시작해도 되는지와 다음 조치"
+    success_criteria:
+      - "점검 표의 숫자(전체 클립 수·총 길이)와 분량 판정을 바꾸지 않고 그대로 인용한다"
+      - "2초 미만·15초 초과·거의 무음·클리핑 의심 클립과 폴더 구조 문제에 각각 조치를 쓴다"
+      - "분량이 부족하면 얼마나 더 모으면 되는지 기준(10분 미만 부족 · 30분~1시간 이상 권장)으로 쓴다"
+    output_format: "결론 한 줄 → 점검 표 요약 (숫자 그대로) → 문제와 조치 → 다음 단계"
+    validators: [voice_data]
+
+disclaimer: "본인 또는 동의를 받은 목소리만 학습·변환하세요. 결과물을 남에게 보이거나 올릴 때는 'AI 로 합성한 음성'이라고 표시하고, 다른 사람인 척 속이는 데 쓰지 마세요. 실존 가수의 목소리를 동의 없이 학습·공개하면 퍼블리시티권 등 권리 침해가 될 수 있습니다."

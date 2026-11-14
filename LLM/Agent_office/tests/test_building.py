@@ -78,7 +78,9 @@ def test_real_building_has_lobby_and_three_department_floors():
     teams = list_teams()
     cfg = building.load_config()
     assert building.floor_of("general", teams, cfg) == 2 and building.floor_of("travel_abroad", teams, cfg) == 3
-    assert building.floor_of("infra_security", teams, cfg) == 4
+    # 크리에이티브부(음악·설계·음성 합성 3팀)는 3층에 남은 2칸에 못 들어가 4층을 쓴다 → 보안부는 5층
+    assert building.floor_of("voice", teams, cfg) == building.floor_of("music", teams, cfg) == 4
+    assert building.floor_of("infra_security", teams, cfg) == 5
 
 
 # ─── 팀 요약 카드 · 상태 ────────────────────────────────────────────────
@@ -265,9 +267,9 @@ def test_home_shows_building_and_list_and_dept_head(seeded):
     at.run()
     assert not at.exception, at.exception
     snap = component_args(at)
-    assert snap["kind"] == "building" and len(snap["layout"]["floors"]) == 4  # 교육부가 새 층
+    assert snap["kind"] == "building" and len(snap["layout"]["floors"]) == 5  # 크리에이티브부(3팀)·교육부가 새 층
     assert snap["rooms"]["travel_abroad"]["recent"]["text"].startswith("2026-11-20 부터 2026-11-23")  # 옛 해외 업무
-    assert snap["floorCosts"] == ["$0", "$0.250", "$0", "$0"]  # 옛 travel 사용량 → 3층(여행부) 비용 미터
+    assert snap["floorCosts"] == ["$0", "$0.250", "$0", "$0", "$0"]  # 옛 travel 사용량 → 3층(여행부) 비용 미터
     assert snap["rooms"]["travel_abroad"]["cost"] == snap["rooms"]["travel_domestic"]["cost"] == "$0"  # 어느 팀 몫인지 모름
     assert at.radio(key="home_section").value == "brief"
     # 방을 누름 → 다음 실행 맨 앞에서 그 팀 화면으로
