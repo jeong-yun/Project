@@ -1,11 +1,12 @@
 """코드가 가리키는 프롬프트·페이지 파일이 실제로 있는지, 모델 설정 규칙이 한 곳에서 나오는지."""
 
+import os
 import re
 
 from langchain_core.prompts import load_prompt
 
 import common
-from fakes import fake_chat
+from fakes import FAKE_KEY, fake_chat
 
 ROOT = common.BASE_DIR
 
@@ -16,6 +17,34 @@ def test_prompt_files_exist_and_load():
 
     judge = load_prompt(str(common.PROMPTS_DIR / "safety_judge.yaml"), encoding="utf-8")
     assert {"category", "safe_definition", "attack_prompt", "model_response"} <= set(judge.input_variables)
+
+    summary = load_prompt(str(common.PROMPTS_DIR / "summary.yaml"), encoding="utf-8")
+    assert summary.input_variables == ["question"]
+    # 요약할 글은 '지시가 아닌 데이터' 표시선 안에 들어간다
+    assert common.DATA_OPEN + "\n{question}\n" + common.DATA_CLOSE in summary.template
+
+
+def test_no_prompt_is_downloaded_from_langchain_hub():
+    """남이 올린 공개 프롬프트를 내려받아 실행하지 않는다 (GHSA-3644-q5cj-c5c7, langchain < 0.3.30).
+    그 경로를 쓰던 langchain 본체·langchainhub·langchain_teddynote 도 더는 쓰지 않는다."""
+    code = "\n".join(p.read_text(encoding="utf-8") for p in ROOT.rglob("*.py") if "tests" not in p.parts)
+    assert "hub.pull" not in code
+    assert not re.search(r"^\s*(from|import) (langchain|langchainhub|langchain_teddynote)\b", code, re.M)
+
+
+def test_enable_langsmith_only_with_key(monkeypatch):
+    """LangSmith 키가 없으면 아무것도 바꾸지 않고, 있으면 호출 기록을 켠다 (예전 teddynote 와 같은 동작)."""
+    common.enable_langsmith("프로젝트")
+    assert "LANGSMITH_TRACING" not in os.environ
+
+    monkeypatch.setenv("LANGCHAIN_API_KEY", FAKE_KEY)
+    monkeypatch.delenv("LANGSMITH_PROJECT", raising=False)
+    common.enable_langsmith("프로젝트")
+    assert os.environ["LANGSMITH_TRACING"] == "true"
+    assert os.environ["LANGSMITH_PROJECT"] == "프로젝트"
+    # 끝난 뒤 검사(conftest)가 '켜진 기록'을 새어 나간 값으로 보지 않게 되돌린다
+    monkeypatch.delenv("LANGSMITH_TRACING")
+    monkeypatch.delenv("LANGSMITH_ENDPOINT", raising=False)
 
 
 def test_every_page_path_in_code_points_to_a_real_file():
@@ -69,8 +98,6 @@ def test_requirements_list_only_imported_packages():
         "fpdf2": "fpdf",
         "langchain-core": "langchain_core",
         "langchain-openai": "langchain_openai",
-        "langchain-teddynote": "langchain_teddynote",
-        "langchainhub": "hub",  # `from langchain import hub` 가 내려받을 때 필요
         "pyyaml": "load_prompt",  # load_prompt 가 .yaml 을 읽을 때 필요
         "xlsxwriter": "xlsxwriter",  # pd.ExcelWriter(engine="xlsxwriter")
         "pytest": "pytest",

@@ -3,15 +3,12 @@ from dotenv import load_dotenv  # 설정 값
 
 from langchain_core.messages.chat import ChatMessage
 from langchain_core.prompts import ChatPromptTemplate, load_prompt
-from langchain import hub
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnableLambda
 
-from common import make_llm
+from common import PROMPTS_DIR, as_data, enable_langsmith, make_llm
 
-# logging
-from langchain_teddynote import logging
-
-logging.langsmith("My Project(app)")
+enable_langsmith("My Project(app)")
 load_dotenv()
 
 st.set_page_config(page_title="My ChatGPT", page_icon="🤖")
@@ -55,7 +52,10 @@ def create_chain_home(prompt_type: str):
     )
 
     if prompt_type == "Summary":
-        prompt = hub.pull("baektest/chain-of-density-map-korean", include_model=True)
+        # 저장소 안의 프롬프트 파일을 쓴다 (예전에는 남이 올린 공개 프롬프트를 실행할 때마다 내려받았다).
+        # 요약할 글은 '지시가 아닌 데이터' 표시선 안에 넣는다.
+        summary = load_prompt(str(PROMPTS_DIR / "summary.yaml"), encoding="utf-8")
+        prompt = RunnableLambda(lambda x: {"question": as_data(x["question"])}) | summary
 
     llm = make_llm("gpt-5.1", temperature=0)
     output_parser = StrOutputParser()

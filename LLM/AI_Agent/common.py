@@ -3,6 +3,7 @@
 경로는 이 파일 위치를 기준으로 잡는다 — 어느 폴더에서 실행해도 같은 파일을 읽는다.
 """
 
+import os
 from pathlib import Path
 
 from langchain_openai import ChatOpenAI
@@ -24,6 +25,19 @@ def make_llm(model: str, temperature: float = 0.0) -> ChatOpenAI:
     if model.startswith("gpt-5"):
         return ChatOpenAI(model=model)
     return ChatOpenAI(model=model, temperature=temperature)
+
+
+def enable_langsmith(project_name: str) -> None:
+    """LangSmith 키(LANGSMITH_API_KEY 또는 LANGCHAIN_API_KEY)가 있으면 호출 기록을 켠다. 키가 없으면 아무것도 안 한다.
+
+    예전에 쓰던 langchain_teddynote.logging.langsmith 와 같은 일을 한다. 그 패키지는 langchain 본체·langgraph·
+    pinecone 등을 함께 설치해, 이 몇 줄 때문에 보안 권고가 걸린 langchain 본체가 따라 들어왔다.
+    """
+    if not (os.environ.get("LANGSMITH_API_KEY", "").strip() or os.environ.get("LANGCHAIN_API_KEY", "").strip()):
+        return
+    os.environ.setdefault("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+    os.environ["LANGSMITH_TRACING"] = "true"
+    os.environ["LANGSMITH_PROJECT"] = project_name
 
 
 # --- '지시가 아닌 데이터' 표시선 -------------------------------------------------

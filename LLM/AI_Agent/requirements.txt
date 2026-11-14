@@ -1,22 +1,21 @@
-# 이 폴더의 코드가 실제로 불러 쓰는 패키지만 적는다. (버전은 이 앱을 만들 때 쓰던 값)
-streamlit==1.43.2
-python-dotenv
-langchain==0.3.21
-langchain-core==0.3.46
-langchain-openai==0.3.9
-langchain-teddynote==0.3.44
-langchainhub==0.1.21
-openai==1.67.0
+# 이 폴더의 코드가 실제로 불러 쓰는 패키지만 적는다.
+# 범위(최소 <= 버전 < 상한)는 Agent Office(../Agent_office/requirements.txt)와 같은 방식이다 — 같은 Python 에 둘 다 설치해도 맞도록.
+# 최소 버전 = 알려진 보안 권고가 고쳐진 버전 (2026-11-13 OSV 조회). langchain 은 0.3 계열로 고정 (1.x 는 별도 검증 후).
+streamlit>=1.54,<1.67          # 1.54 미만: Windows 에서 NTLM 자격 증명이 새는 SSRF (GHSA-7p48-42j8-8846)
+python-dotenv>=1.2.2           # 1.2.2 미만: GHSA-mf9w-mj56-hr94
+langchain-core>=0.3.85,<1.0    # 0.3.85 미만: 비밀 값 유출 (Critical, GHSA-c67j-w6g6-q2cm) · 역직렬화 (GHSA-pjwx-r37v-7724) 등
+langchain-openai>=0.3.9,<1.0
+openai>=1.67,<2                # 발음(TTS) — langchain-openai 0.3 이 openai 1.x 를 쓴다
 pandas
 pyyaml
 
 # 단어장·평가 결과 내려받기
-xlsxwriter==3.2.9
-python-docx==1.2.0
-fpdf2==2.8.7
+xlsxwriter>=3.2.9
+python-docx>=1.2,<2
+fpdf2>=2.8.8,<3                # 2.8.8 미만: 그림 경로로 바깥 주소를 몰래 읽음 (GHSA-rw7v-4hrq-x6r9) · SVG 폭주 (GHSA-wqw6-wpr3-45rh)
 
 # 문서 Q&A 에서 PDF 를 올릴 때만 필요 (없어도 .md·.txt 는 된다)
 # pypdf
 
 # 테스트
-pytest
+pytest>=9.0.3                  # 9.0.3 미만: GHSA-6w46-j5rx-g56g

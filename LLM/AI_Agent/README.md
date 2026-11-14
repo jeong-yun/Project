@@ -32,6 +32,7 @@ AI_Agent/
 │   └─ 3_rag_docs_qa.py        # 문서 Q&A (RAG) 화면
 ├─ prompts/
 │   ├─ English.yaml            # 단어장 프롬프트
+│   ├─ summary.yaml            # 홈 채팅 'Summary' 요약 프롬프트
 │   └─ safety_judge.yaml       # 심판(채점) 프롬프트
 ├─ english_word_maker/         # 단어장 기능: parsing.py · export_doc.py · tts_utils.py
 ├─ ai_safety/                  # 안전성 평가 기능: testcases.py · judge.py · metrics.py · report.py
@@ -47,9 +48,10 @@ AI_Agent/
 ### 1. 일반 질문 채팅 — `app.py`
 
 - 채팅 입력 → `프롬프트 | ChatOpenAI | 문자열 파서` 체인 → 글자가 나오는 대로 화면에 표시(스트리밍).
-- 사이드바에서 프롬프트 종류를 고른다: `Basic`(기본 답변) / `Summary`(LangChain Hub 의 요약 프롬프트를 내려받아 사용).
+- 사이드바에서 프롬프트 종류를 고른다: `Basic`(기본 답변) / `Summary`(밀도 높은 한국어 요약 — [prompts/summary.yaml](prompts/summary.yaml)). 요약할 글은 '지시가 아닌 데이터' 표시선 안에 넣는다.
+  - 예전에는 남이 올린 공개 프롬프트를 LangChain Hub 에서 실행할 때마다 내려받았다(`hub.pull`). 그 경로가 보안 권고(GHSA-3644-q5cj-c5c7)의 대상이어서 2026-11-13 저장소 안의 파일로 바꿨다.
 - 대화 기록은 브라우저 세션에만 남는다(앱을 새로 열면 사라짐).
-- LangSmith 로 호출 기록을 남기도록 되어 있다(`langchain_teddynote.logging`).
+- `.env` 에 LangSmith 키(`LANGSMITH_API_KEY` 또는 `LANGCHAIN_API_KEY`)가 있으면 호출 기록을 남긴다(`common.enable_langsmith`). 키가 없으면 아무것도 하지 않는다.
 
 ### 2. 영어 단어장 — `pages/1_english_word_maker.py` + `english_word_maker/`
 
@@ -137,6 +139,8 @@ RAG 는 '찾아서(Retrieval) 덧붙여(Augmented) 답하기(Generation)'다. �
 ## 실행하려면
 
 1. 패키지 설치: `pip install -r requirements.txt`
+   - 버전은 범위(최소 ~ 상한)로 적었다. 최소 버전은 알려진 보안 권고가 고쳐진 버전이고(2026-11-13 확인), langchain 은 0.3 계열로 묶었다. Agent Office 와 같은 Python 에 설치해도 서로 맞는 범위다.
+   - `langchain`(본체)·`langchainhub`·`langchain-teddynote` 는 더 이상 쓰지 않는다.
 2. 이 폴더에 `.env` 를 만들고 OpenAI 키(`OPENAI_API_KEY`)를 넣는다. LangSmith 기록을 쓰려면 그 키도 넣는다. **`.env` 는 커밋하지 않는다.**
 3. 이 폴더에서 `streamlit run app.py`. 사이드바에서 페이지를 고른다.
 4. 테스트: 이 폴더에서 `python -m pytest -q` (키 없이 돈다. 실제 모델을 부르지 않는다).
@@ -214,3 +218,4 @@ python -c "from dotenv import load_dotenv; load_dotenv(); from ai_safety import 
 | 2026-11-13 | 찾은 문제 수정: 프롬프트·페이지 경로 맞춤, 심판 프롬프트·평가 대시보드 추가, 모델 설정 한 곳으로, 발음·PDF 모듈 보완, `requirements.txt`·테스트 추가, `Info.md` 는 이 문서로 합침 |
 | 2026-11-13 | 문서 Q&A (RAG) 추가: `rag/` 패키지, 화면, 검색 품질 측정 |
 | 2026-11-13 | RAG 안전성 평가 추가: RAG 범주 3개 · 7건, 심은 문서, 코드 검사(심은 문구 · 출처), 대시보드에서 대상 고르기 |
+| 2026-11-13 | 의존성 보안 권고 대응: langchain-core 0.3.85 이상 등 최소 버전 올림, `hub.pull` 을 저장소 프롬프트(`summary.yaml`)로 바꾸고 `langchain`·`langchainhub`·`langchain-teddynote` 빼기 |
