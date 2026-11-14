@@ -7,10 +7,7 @@ from dotenv import load_dotenv
 
 from langchain_core.messages.chat import ChatMessage
 from langchain_core.prompts import ChatPromptTemplate, load_prompt
-from langchain import hub
 from langchain_core.output_parsers import StrOutputParser
-
-from langchain_teddynote import logging
 
 import common
 from common import make_llm
@@ -29,7 +26,7 @@ from english_word_maker.tts_utils import (
 )
 
 load_dotenv()
-logging.langsmith("English_word_maker_project")
+common.enable_langsmith("English_word_maker_project")
 
 st.set_page_config(page_title="영어 단어장", page_icon="📚")
 st.title("영어 단어장 생성 & 발음 앱")
