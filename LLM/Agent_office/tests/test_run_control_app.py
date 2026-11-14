@@ -143,6 +143,63 @@ def test_stop_then_restart_with_edited_question(app):
     assert any(e["what"] == "✏️ 고쳐 다시" for e in call_monitor.interventions(rid))
 
 
+def test_first_click_right_after_finish_is_not_swallowed(app, monkeypatch):
+    """업무가 '진행 영역을 그린 뒤 ~ 최종 결과를 그리기 전' 사이에 끝나도, 그 화면에서 누른 첫 버튼이 그대로 동작한다.
+
+    2026-11-13 GitHub 검사에서 가끔 실패하던 틈을 문(Event)으로 순서를 고정해 매번 만든다 (시간에 기대지 않는다):
+    화면이 '아직 진행 중'으로 보고 지나감 → 실행이 끝남 → 같은 화면 아래쪽에 최종 결과가 뜸 → ✏️ 다시 하기 클릭.
+    고치기 전에는 다음 번 그리기에서 watch_run_state 가 '상태가 바뀌었다'며 st.rerun() 해서 그 클릭이 사라졌다.
+    """
+    import dept_models_ui
+    from core import live
+
+    at, gate = app
+    passed, finished = threading.Event(), threading.Event()  # 화면이 진행 영역을 지나감 / 실행 스레드가 끝남(done=True)
+    armed = {"on": False}
+    real_release, real_consume, real_render = call_monitor.release, live.consume, dept_models_ui.render_dept
+
+    def release(run_id):  # consume 이 done=True 로 바꾸기 바로 전에 부른다 → 화면이 지나갈 때까지 붙잡는다
+        real_release(run_id)
+        passed.wait(60)
+
+    def consume(*args, **kwargs):
+        try:
+            real_consume(*args, **kwargs)
+        finally:
+            finished.set()
+
+    def render_dept(*args, **kwargs):  # 진행 영역(watch_run_state) 바로 다음, 최종 결과보다 먼저 그려진다
+        if armed["on"] and not passed.is_set():
+            passed.set()
+            assert finished.wait(60)
+        return real_render(*args, **kwargs)
+
+    monkeypatch.setattr(call_monitor, "release", release)
+    monkeypatch.setattr(live, "consume", consume)
+    monkeypatch.setattr(dept_models_ui, "render_dept", render_dept)
+    try:
+        at = submit(at)
+        rid = current_run_id()
+        wait_for(lambda: next((c for c in call_monitor.in_flight(rid) if c.agent_id == "staff_case"), None))
+        at.toggle(key="mon_open_general").set_value(True)
+        at = at.run()
+        at = at.button(key=f"stop_{rid}").click().run()  # 실행 스레드는 끝나기 직전(release)에서 기다린다
+        assert not at.exception, at.exception
+        assert not finished.is_set() and not any("최종 결과" in m.value for m in at.markdown)
+        armed["on"] = True
+        at = at.run()  # 이번 그리기 도중에 실행이 끝난다
+        assert not at.exception, at.exception
+        assert passed.is_set() and finished.is_set()
+        assert any("최종 결과" in m.value for m in at.markdown)  # 같은 화면 아래쪽에는 결과가 떴다
+        at.text_area(key=f"rs_q_{rid}").input("고친 질문")
+        at = next(b for b in at.button if b.label == "✏️ 이대로 다시 하기").click().run()
+        assert not at.exception, at.exception
+        assert any(e["what"] == "✏️ 고쳐 다시" for e in call_monitor.interventions(rid))  # 클릭이 사라지지 않았다
+        wait_for(lambda: any(c.round == 2 for c in call_monitor.calls(rid)))
+    finally:
+        passed.set()  # 실패해도 붙잡아 둔 스레드를 놓아준다
+
+
 def test_step_mode_pauses_and_direction_choice_continues(app):
     at, gate = app
     gate.set()  # 멈춘 호출 없이
