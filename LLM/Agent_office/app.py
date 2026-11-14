@@ -235,6 +235,16 @@ def is_running(run: dict | None) -> bool:
     return bool(run and (not run["done"] or run.get("post_busy")))  # 지도 만드는 중에도 자동 갱신
 
 
+def run_state(run: dict) -> tuple[bool, bool]:
+    return run["done"], run.get("post_busy", False)
+
+
+# 이번에 화면 전체를 그리기 시작할 때의 업무 상태 — watch_run_state 가 쓴다.
+# 1초 자동 갱신은 진행 영역(fragment)만 다시 실행하므로 이 줄을 지나지 않는다 → 그때는 표시가 꺼져 있다
+drawn_states = {_r["run_id"]: run_state(_r) for _r in runs.values()}
+st.session_state["ao_full_pass"] = True
+
+
 def discard_run(run: dict) -> None:
     """피드백 없이 버리는 실행 — 저장소와 체크포인트에서 삭제."""
     storage.delete_run(run["run_id"])
@@ -1940,20 +1950,28 @@ def render_live() -> None:
 NOTICE_KEY = "ao_notices"
 
 
-def watch_run_state() -> None:
-    """어느 팀이든 업무가 끝나거나(→ '최종 결정' 표시·알림) 지도 만들기가 끝나면(→ 자동 갱신 멈춤) 화면 전체를 다시 그린다."""
+def watch_run_state(full_pass: bool) -> None:
+    """어느 팀이든 업무가 끝나거나(→ '최종 결정' 표시·알림) 지도 만들기가 끝나면(→ 자동 갱신 멈춤) 화면 전체를 다시 그린다.
+
+    다시 그리는 것은 1초 자동 갱신(진행 영역만 다시 실행)이 변화를 알아챘을 때만이다. 화면 전체를 그리는 번에는 st.rerun() 하지 않는다 —
+    그 번은 버튼을 누른 번일 수 있고, st.rerun() 은 방금 누른 버튼을 지워 버려서 업무가 끝난 직후의 첫 클릭
+    (✏️ 다시 하기·채택·💬 보내기 등)이 아무 일도 하지 않게 됐다 (2026-11-13, GitHub 검사에서 가끔 실패하던 원인).
+    화면 전체를 그리는 도중에 상태가 바뀌었으면(그리기 시작할 때와 다름) 기록하지 않고 두어, 다음 1초 갱신이 알아채 다시 그리게 한다.
+    """
     changed = False
     for run in list(runs.values()):
         state_key = f"live_state_{run['run_id']}"
-        state_now = (run["done"], run.get("post_busy", False))
+        state_now = run_state(run)
         previous_state = st.session_state.get(state_key)
         if previous_state != state_now:
+            if full_pass and drawn_states.get(run["run_id"]) != state_now:
+                continue  # 이번 그리기 도중에 바뀜 — 위쪽은 옛 상태로 그려졌다. 자동 갱신은 그리기 시작할 때의 상태로 켜져 있다
             st.session_state[state_key] = state_now
             if previous_state is not None:
                 changed = True
                 if state_now[0] and not previous_state[0]:
                     st.session_state.setdefault(NOTICE_KEY, []).append(run["run_id"])
-    if changed:
+    if changed and not full_pass:
         st.rerun()
 
 
@@ -1963,8 +1981,9 @@ any_running = any(is_running(r) for r in runs.values())  # 다른 팀 업무가 
 
 
 def live_area() -> None:
+    full_pass = st.session_state.pop("ao_full_pass", False)  # 진행 영역이 오류로 멈춰도 다음 1초 갱신이 '전체 그리기'로 착각하지 않게 먼저 꺼낸다
     render_live()
-    watch_run_state()  # 전체 진행을 접어 둔 상태(render_live 가 일찍 끝남)에서도 완료를 감지해야 한다
+    watch_run_state(full_pass)  # 전체 진행을 접어 둔 상태(render_live 가 일찍 끝남)에서도 완료를 감지해야 한다
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -2272,7 +2291,19 @@ def render_task_input() -> dict:
 with st.sidebar:
     set_tab_title()
 
-# 끝난 업무 알림 (watch_run_state 가 모아 둔 것)
+if st.session_state.get(HISTORY_KEY):
+    history_dialog(st.session_state.pop(HISTORY_KEY))
+# 👔 부서장 → 팀 — 부서장이 배정한 이유·모델 (없으면 지금 업무가 어느 팀 일인지 한 줄)
+if not building_ui.assignment_banner(team_id, team.name, current) and current is not None:
+    st.caption(f"👔 {dept_head.name} → **{team.name}** · {name_of(current['root_id'])}이(가) 맡은 업무")
+
+# 일이 없을 때는 업무 입력칸을 맨 위에 — 질문하려고 조직도 아래까지 내려가지 않아도 된다
+idle = current is None
+if idle:
+    request = render_task_input()
+
+st.fragment(run_every=REFRESH_SEC if any_running else None)(live_area)()
+# 끝난 업무 알림 (바로 위 watch_run_state 가 모아 둔 것 — 화면을 다시 그리지 않은 번에도 바로 뜨게 그 뒤에 둔다)
 for done_id in st.session_state.pop(NOTICE_KEY, []):
     done_run = next((r for r in runs.values() if r["run_id"] == done_id), None)
     if done_run:
@@ -2287,18 +2318,6 @@ for done_id in st.session_state.pop(NOTICE_KEY, []):
                      f"{short(run_title(done_run), 24)}", icon="🔀")
         else:
             st.toast(f"🔔 {where} 업무가 끝났습니다 — 결과를 확인하고 결정해 주세요: {short(run_title(done_run), 24)}", icon="🔔")
-if st.session_state.get(HISTORY_KEY):
-    history_dialog(st.session_state.pop(HISTORY_KEY))
-# 👔 부서장 → 팀 — 부서장이 배정한 이유·모델 (없으면 지금 업무가 어느 팀 일인지 한 줄)
-if not building_ui.assignment_banner(team_id, team.name, current) and current is not None:
-    st.caption(f"👔 {dept_head.name} → **{team.name}** · {name_of(current['root_id'])}이(가) 맡은 업무")
-
-# 일이 없을 때는 업무 입력칸을 맨 위에 — 질문하려고 조직도 아래까지 내려가지 않아도 된다
-idle = current is None
-if idle:
-    request = render_task_input()
-
-st.fragment(run_every=REFRESH_SEC if any_running else None)(live_area)()
 render_member_models()
 # 📜 팀원마다 실제로 받는 시스템 프롬프트 · 📚 교훈 관리 (prompt_ui.py) — 켰을 때만 그린다 (다시 그릴 때 드는 시간 없음)
 if st.toggle(f"📜 {dept.name} 프롬프트·📚 교훈 보기", key=f"prompts_{dept_id}",
