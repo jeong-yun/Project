@@ -2189,6 +2189,44 @@
   - 필요하면 다음 단계로 제안만: ① 올릴 때 자를 영역을 고르는 화면(확대·이동) ② 얼굴 자동 찾기(패키지 추가 필요) ③ 도트 그림체로 바꿔 그리기(이미지 생성 모델 필요, 비용·외부 전송 동의 필요).
   - 🗂 부서 조직도의 부서장 칸에는 올린 얼굴이 아직 나오지 않는다(사무실에만).
 
+### 의존성 보안 권고 대응 (GitHub Dependabot 경보 13건 — langchain-core Critical 등)
+
+- 작업: GitHub 가 `LLM/AI_Agent/requirements.txt` 의 고정 버전에서 경보 13건(langchain-core 6 · langchain 2 · langchain-openai 1 · streamlit 2 · fpdf2 2)을 알렸다.
+  같은 문제가 범위로 적힌 이 폴더 `requirements.txt` 의 최소 버전에도 있어(경보는 정확한 버전만 보므로 안 떴다) 함께 올렸다.
+  - 조사: 세 requirements 파일의 모든 패키지를 OSV(`api.osv.dev`) 공개 권고로 조회했다 — 적힌 최소 버전, 이 PC 에 설치된 버전, 고친 뒤 새로 설치한 버전 각각.
+    | 무엇 | 걸린 권고 (GHSA 기준) |
+    |---|---|
+    | AI_Agent 예전 고정 버전 | 13건 (Critical 1 · High 4) — GitHub 경보 13건과 같은 목록 |
+    | 이 폴더 예전 최소 버전 | 77건 (pillow 54 · langchain-core 6 · langgraph-checkpoint-sqlite 3 · langsmith 3 · requests 3 · streamlit 2 · 그 밖 6) |
+    | 이 PC 에 설치된 것 (두 앱이 쓰는 패키지와 langchain 계열만) | 96건 (pillow 11.3.0 60 · langchain-core 6 · setuptools 5 · langgraph 계열 9 · langsmith 3 · 그 밖) |
+    | 고친 뒤 새로 설치한 것 (두 앱 함께) | 19건 — 아래 '남은 것' |
+  - 이 폴더: `langchain-core>=0.3.85`, `langsmith>=0.8.18`, `streamlit>=1.54`(Windows 에서 NTLM 자격 증명이 새는 SSRF), `pillow>=13.0`, `requests>=2.33`, `python-dotenv>=1.2.2`,
+    `requirements-dev.txt` 의 `pytest>=9.0.3`. 상한(`<1.0`, `<0.6`, `<1.67` 등)은 그대로. 이 앱은 `langchain` 본체를 쓰지 않는다(`import` 없음).
+  - AI_Agent: 정확한 고정(`==`)을 이 폴더와 같은 범위 + 상한으로 바꿨다(같은 Python 에 둘 다 설치하므로). 홈 채팅 'Summary' 가 남이 올린 공개 프롬프트를
+    `hub.pull` 로 실행할 때마다 내려받던 것(권고 GHSA-3644-q5cj-c5c7 의 경로)을 저장소 안의 새 프롬프트 `prompts/summary.yaml` 로 바꿨다(밀도 높은 한국어 요약, 새로 씀, 글은 '데이터' 표시선 안).
+    그러자 `langchain` 본체·`langchainhub` 를 쓰는 곳이 없어졌고, LangSmith 기록용 `langchain_teddynote` (10줄짜리 환경 변수 설정 — 그런데 langchain 본체·langgraph·pinecone 등을 끌고 들어옴)도
+    `common.enable_langsmith` 로 바꿔 셋 다 requirements 에서 뺐다. 새로 설치한 환경에는 `langchain` 본체가 아예 없다.
+- 남은 것 (19건 — 모두 0.3 계열 · langgraph 0.5 안에서는 고친 버전이 없다):
+  - langchain-core `load_prompt` 경로 탐색(High, 1.2.22) — AI_Agent 는 저장소 안의 고정 경로만 읽는다(사용자 입력이 경로가 되지 않음). ChatOpenAI 그림 토큰 세기 SSRF(Low, core 1.2.11 · openai 1.1.14) — 두 앱 모두 `get_num_tokens` 를 부르지 않는다.
+  - langgraph 0.5.4 · langgraph-checkpoint 2.1.2 · langgraph-checkpoint-sqlite 2.0.11 · langgraph-sdk 0.1.74 (8건) — langgraph 0.5 가 checkpoint `<3`, sdk `<0.2` 로 묶는다(0.6 은 '고쳐 다시'가 깨져 못 올림).
+    체크포인트 역직렬화 2건은 이 PC 의 `data/` SQLite 파일을 남이 고쳐 쓸 수 있을 때만 해당, metadata 필터·namespace 저장소·SDK 는 이 앱이 쓰지 않는다(`grep`).
+  - langchain-anthropic 파일 검색 미들웨어(Moderate) — 쓰지 않음. pyarrow 19.0.1(High) — Arrow IPC 파일을 '미리 읽기'로 열 때만 해당, 19.x 고정은 25.0 강제 종료 때문에 유지.
+  - setuptools 65.5.0(5건) — 가상환경을 만들 때 Python 에 딸려 오는 설치 도구라 requirements 와 무관. 사용자 PC 에서 `pip install -U setuptools` 로 따로 올릴 수 있다.
+  - 1.x 로 올리면 대부분 사라진다 → 다음 할 일.
+- 기술: OSV `querybatch`·`vulns` API(공개 정보 읽기), pip 의존성 해석, worktree 안 git 무시 폴더(`results/venv_deps`)의 임시 가상환경(끝나고 지움), Streamlit AppTest + `RunnableLambda` 가짜 모델
+- 성과:
+  - 새 버전(임시 가상환경 — langchain-core 0.3.86 · langchain-openai 0.3.35 · langsmith 0.14.17 · streamlit 1.66.1 · pillow 13.0.0 · langgraph 0.5.4 · fpdf2 2.9.0 · openai 1.109.1, `pip check` 이상 없음):
+    AI_Agent **61 통과**(1분 17초), 이 폴더 전체 **1,272 통과**(31분 17초)
+  - 지금 이 PC 버전(설치 안 바꿈 — langchain-core 0.3.46 · streamlit 1.43.2): AI_Agent **61 통과**(50초), 이 폴더 전체 1,271 통과 · 1 실패(57분 37초, 다른 하단 작업의 테스트가 같이 돌던 때).
+    실패한 `test_building.py::test_home_shows_building_and_list_and_dept_head`(최근 업무 글 순서)는 혼자 다시 돌리니 통과(13초) — 이번 변경은 이 폴더 코드를 건드리지 않았다.
+  - AI_Agent 새 테스트 3건 + 기존 프롬프트 테스트에 확인 1개: Summary 가 저장소 프롬프트로 가짜 모델에 보내지고 사용자 글이 표시선을 일찍 닫지 못함(AppTest) · 프롬프트 파일 · `hub.pull`/`langchain` 본체 import 없음 · LangSmith 키 있을 때만 켜짐.
+- 확인 못 한 것: 실제 모델로 새 Summary 프롬프트의 요약 품질은 돌려 보지 않았다(가짜 모델만). Dependabot 경보가 닫히는지는 main 에 올린 뒤 GitHub 에서 봐야 한다.
+  `GAME/Soccer/requirements.txt`(`pygame>=2.6`)는 고치지 않고 조회만 했다 — 2.6.0 · 2.6.1 모두 알려진 권고 0건.
+- 다음 할 일:
+  - 사용자 PC 패키지 올리기(앱을 끄고 → 설치 → 다시 켜기). 명령은 이 작업 보고에. 같은 PC 의 다른 폴더가 쓰는 `langchain` 0.3.21 · `langchain-community` 0.3.20 ·
+    `langchain-text-splitters` 0.3.7 에도 권고가 있다 — `langchain>=0.3.30`·`langchain-community>=0.3.27`·`langchain-text-splitters>=0.3.9` 가 위 범위와 함께 풀리는 것을 임시 환경의 설치 시험(`--dry-run`)으로만 확인.
+  - langchain 1.x · langgraph 1.x 로 올리기 검토 — 남은 권고 대부분이 사라진다. 갈래 만들기(`restart_from`) 회귀 테스트부터.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
