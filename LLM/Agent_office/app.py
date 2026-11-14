@@ -53,6 +53,7 @@ import models_ui
 import office_ui
 import prompt_ui
 import run_control_ui
+import voice_ui
 from core import (
     audio_edit, building, call_monitor, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_caps,
     model_catalog, model_recs, music, office, progress, stock_calc, usage, verification,
@@ -407,6 +408,7 @@ with st.sidebar:
     is_design = design_ui.FEATURE in team.features  # 설계 팀: 최종 JSON → 도면(+3D) (design_ui.py)
     is_career = career_ui.FEATURE in team.features  # 포트폴리오·자소서 팀: 최종 답변 → .md · .docx · .hwpx (career_ui.py)
     is_edu = education_ui.FEATURE in team.features  # 교육부: 📚 내 과목 · 퀴즈 채점 · 과목 저장 (education_ui.py)
+    is_voice = voice_ui.FEATURE in team.features  # 음성 합성 팀: 맡기기 전 목소리 사용 확인 · 점검 표 · 맞춤 실행 파일 (voice_ui.py)
     edu_ctx = education_ui.Ctx(DATA_DIR, models, teams_by_id, TASK_KEY, TEAM_KEY)
 
     # 결과 기록은 부서 단위로 모아 본다 — 팀 필터는 선택 (팀이 둘 이상인 부서만)
@@ -1515,6 +1517,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
             career_ui.preview(run, final.content)  # 📄 문항별 글자 수·사실 검사·.md/.docx/.hwpx 내려받기
         if is_edu:
             education_ui.preview(edu_ctx, run, final.content)  # 🎓 선생님 미리 보기 / 📝 퀴즈 풀기·채점·레벨업
+        if is_voice:
+            voice_ui.preview(run)  # 🔍 데이터 점검 표 · 🎁 맞춤 실행 파일(zip)
         if team.disclaimer:
             st.caption(f"ℹ️ {team.disclaimer}")
 
@@ -2169,6 +2173,8 @@ def render_task_input() -> dict:
             if submitted:
                 try:
                     values = store_uploads(values, DATA_DIR / "uploads")  # 첨부 파일 → 저장 경로 (+ {key}_name)
+                    if is_voice:
+                        voice_ui.check_form(task.id, values, extra)
                     built = build_request(task, values, extra)
                 except TaskInputError as e:
                     st.warning(str(e))

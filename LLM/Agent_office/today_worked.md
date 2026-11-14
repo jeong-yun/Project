@@ -2189,6 +2189,33 @@
   - 필요하면 다음 단계로 제안만: ① 올릴 때 자를 영역을 고르는 화면(확대·이동) ② 얼굴 자동 찾기(패키지 추가 필요) ③ 도트 그림체로 바꿔 그리기(이미지 생성 모델 필요, 비용·외부 전송 동의 필요).
   - 🗂 부서 조직도의 부서장 칸에는 올린 얼굴이 아직 나오지 않는다(사무실에만).
 
+## 2026-11-14
+
+**🎙 음성 합성 팀 — 크리에이티브부 세 번째 팀 (노래 음색 변환 SVC 준비, 실행은 앱 밖)**
+- 배경: 사용자가 가진 노래 음색 변환 파이프라인 4개 파일(`preprocess.py` · `run.bat` · `svc_colab_training.ipynb` · `README.md`, so-vits-svc-fork)을
+  Agent Office 에 넣어 달라는 요청. 부서부터 정했다 → **크리에이티브부** (음악 팀이 만든 곡·내가 부른 커버의 '보컬 음색'을 다루는 일이라 음악 팀 옆).
+- 작업:
+  - 팀 `teams/voice/team.yaml` — 팀장·보이스PD / 부장·권리품질검수 / 차장·데이터엔지니어 / 대리·학습변환엔지니어, 범위(받는 것·거절하는 것·낱말), 자유 질문 예시 4개,
+    업무 양식 2개(📋 학습 계획 만들기 · 🔍 데이터 점검). 원본 4개 파일은 `teams/voice/assets/` 에 그대로(PC 경로·개인 정보 없음 확인), 지식은 스킬 글 `skills/svc_pipeline.md` 로.
+  - `core/voice.py` — ① 목소리 사용 확인·범위 밖 낱말(사칭·속이기·인증 우회·동의 없는 복제, 실존 가수 '목소리' — 이름 목록은 음악 팀 것 재사용)
+    ② epochs·batch_size 를 **코드 규칙**으로(기본 400·16, OOM 이면 8 — 원본 노트북 근거, 근거 없는 구간은 기본값) ③ 원본 노트북을 JSON 으로 읽어 화자·epochs·batch 줄만 바꾼 맞춤 노트북 +
+    안내 + 원본 스크립트 zip ④ `dataset_raw.zip` 을 풀지 않고 메모리에서 wav 만 읽어 숫자 점검(자르는 기준은 원본 `slice_wav` 기본값을 AST 로 읽음 — 한 곳에만 둠) ⑤ 검증기 검사 함수.
+  - 툴 `core/tools/voice_svc.py`(근거 자료 = 코드 값만, 음원 내용은 모델로 안 보냄), 검증기 `voice_guard` · `voice_plan` · `voice_data`, 화면 `voice_ui.py`(맡기기 전 확인 · 점검 표 · 🎁 zip 내려받기),
+    `app.py` 6줄, 부서 설명·부장 persona(세 팀 배정 기준 + 동의 없는 목소리 복제를 가장 무겁게).
+- 기술: JSON 노트북 셀 편집(셀 수·순서 유지), zip 안전 읽기(경로 속임·크기·개수 상한, 적힌 크기와 실제 읽은 양 모두 확인), 표준 라이브러리 `wave` + numpy 로 PCM 읽기(새 의존성 없음),
+  ast 로 원본 함수 기본값 읽기, 하네스 숫자 대조.
+- 성과:
+  - 새 테스트 `tests/test_voice.py` 23건 (가짜 모델 · numpy 로 만든 사인파·무음·꽉 찬 사각파만 — 사람 목소리 없음): 팀이 크리에이티브부 세 번째 방, 확인 체크 없으면 시작 안 함,
+    맞춤 노트북 JSON·셀 그대로·바뀐 줄 2개, zip 내용, 점검 숫자(클립 6개·0.7분·1.0/4.5/20.0초·짧음/김/무음/클리핑 각 1), 경로 속임 4가지·크기 초과·깨진 zip 거부,
+    검증기 통과·실패, 음악/음성 범위 갈림, 부장 배정(키 없음 낱말 비교·가짜 모델)으로 세 팀 갈림, 가짜 모델로 틀린 epochs → 하네스 피드백 → 다시 써서 통과, 화면(AppTest) 두 양식·확인 경고·내려받기 버튼.
+  - 기존 테스트 2건 수정(`tests/test_building.py`): 크리에이티브부가 3팀이 되어 3층 남은 2칸에 못 들어가 **4층**으로 옮기고 보안부·커리어부 5층, 교육부 6층 — 부서 층이 4개 → 5개 (기존 배치 규칙 그대로).
+  - 전체 `python -m pytest -q` **1,297 통과**, 55분 28초 (이 PC, Streamlit 1.43.2, main `c6662f1` 기준. 다른 하단 작업 여럿이 함께 돌아 평소 11~16분보다 크게 느림 — 문서 수정 전, 코드는 같음).
+  - 확인 못 한 것: 실제 모델로 답 받아 보기 · 실제 브라우저 화면 · 실제 Colab 학습·변환(맞춤 노트북을 Colab 에서 돌려 보지 않음) · 실제 사람 음원 점검 속도(재 보지 않음).
+- 다음 할 일:
+  - 사용자가 앱을 갱신한 뒤 실제 `dataset_raw.zip` 으로 점검해 보고, 맞춤 노트북을 Colab 에서 한 번 끝까지 돌려 보기.
+  - 제안만: ① 📈 학습 로그 진단 양식(로그 붙여넣기 → 손실 값 추이를 코드로 뽑아 해석) ② 앱 안에서 '자르기만' 하기(보컬이 이미 분리된 wav — numpy 로 충분, 보컬 분리는 여전히 앱 밖)
+    ③ 채택할 때 맞춤 zip 도 `results/voice/` 에 저장(지금은 결과 화면에서만 내려받음, 앱을 다시 켜면 버튼이 안 보임).
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

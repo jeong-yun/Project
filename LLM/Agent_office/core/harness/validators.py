@@ -20,6 +20,7 @@
   portfolio_format: 포트폴리오 절(요약·역량 표·프로젝트)과 프로젝트 카드 다섯 항목 — 형식 지정이 있으면 원본 절 제목·표 머리글,
                   원본 그림이 있으면 [그림 N] 표시
   jd_recommend  : JD 추천 — 모든 JD·요구사항 판정 + 순위·추천이 코드가 계산한 점수 순서와 같은지 (점수는 코드가 셈)
+  voice_guard · voice_plan · voice_data: 음성 합성 팀 — 목소리 사용 범위 · 학습 계획 값 대조 · 데이터 점검 숫자 대조 (core/voice.py)
   portfolio_changes: 포트폴리오 최신화 변경 목록 — 이전 글 그대로 · 문서 인용 그대로 · 외부 출처는 승인한 URL · 외부 숫자 금지
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
@@ -559,3 +560,54 @@ class PortfolioChangesValidator(Validator):
         changes = career._items(career.answer_json(answer), "changes")
         outside = sum(str(c.get("kind")).strip() == "외부" for c in changes)
         return self.ok(f"변경 목록 통과 — {len(changes)}건 (문서 {len(changes) - outside} · 외부 {outside})")
+
+
+class _VoiceValidator(Validator):
+    """음성 합성 팀 검증기 공통 — core/voice.py 의 검사 함수 하나를 부른다."""
+
+    label = ""
+
+    def problems(self, answer: str, options: dict) -> list[str]:
+        raise NotImplementedError
+
+    def check(self, answer: str, options: dict):
+        problems = self.problems(answer, options)
+        if problems:
+            return self.fail(f"{self.label} 오류: " + " / ".join(problems) + " — 이 부분을 고쳐 다시 작성하라.")
+        return self.ok(f"{self.label} 통과")
+
+
+@register
+class VoiceGuardValidator(_VoiceValidator):
+    name = "voice_guard"
+    label = "목소리 사용 범위"
+    description = "음성 합성 팀 — 실존 가수·유명인 목소리를 대상으로 적지 않았는지, 범위 밖 요청에 실행 방법을 주지 않았는지 (core/voice.py)"
+
+    def problems(self, answer, options):
+        from core import voice
+
+        return voice.check_guard(answer, options)
+
+
+@register
+class VoicePlanValidator(_VoiceValidator):
+    name = "voice_plan"
+    label = "학습 계획"
+    description = "음성 합성 팀 학습 계획 — 출처·동의 문장, 'AI 합성 음성' 표시, 네 단계, 화자·epochs·batch_size 가 코드가 만든 노트북과 같은지"
+
+    def problems(self, answer, options):
+        from core import voice
+
+        return voice.check_plan(answer, options)
+
+
+@register
+class VoiceDataValidator(_VoiceValidator):
+    name = "voice_data"
+    label = "데이터 점검"
+    description = "음성 합성 팀 데이터 점검 — 답의 클립 수·길이·분량 판정이 코드가 계산한 점검 표와 같은지"
+
+    def problems(self, answer, options):
+        from core import voice
+
+        return voice.check_data(answer, options)
