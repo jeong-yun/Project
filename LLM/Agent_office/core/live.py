@@ -29,6 +29,7 @@ from collections.abc import Callable, Iterator
 from datetime import datetime
 
 from core import call_monitor, step_mode, usage
+from core.config import subtree
 from core.llm_factory import NoAvailableModelError
 from core.schemas import AgentAnswer
 
@@ -64,6 +65,29 @@ def stage_of(run: dict) -> int:
     for label in run["activity"].values():
         reached = max(reached, _LABEL_STAGE.get(label, 0))
     return reached
+
+
+# ⚡ 빠른 답 — 팀장 혼자라 업무 분배·검토·통합 단계는 건너뛴다 (화면 진행 단계 줄에 '건너뜀')
+QUICK_SKIPPED = ("📋 업무 분배", "🔍 검토·통합")
+QUICK_HINT_CHARS = 80  # 이보다 짧고 3줄 이하인 자유 질문이면 화면이 ⚡ 빠른 답을 권한다 (모델로 판정하지 않음)
+
+
+def skipped_stages(run: dict | None) -> set[int]:
+    """이번 업무가 지나가지 않는 진행 단계 (STAGES 위치)."""
+    return {STAGES.index(s) for s in QUICK_SKIPPED} if run and run.get("quick") else set()
+
+
+def run_members(org, root_id: str, run: dict | None) -> set[str]:
+    """이번 업무에 참여하는 에이전트 — ⚡ 빠른 답이면 문의 대상 한 명, 아니면 그 아래 조직 전체 (조직도·픽셀 사무실)."""
+    if run and run.get("quick"):
+        return {root_id}
+    return {n.id for n in subtree(org, root_id).walk()}
+
+
+def quick_hint(question: str) -> bool:
+    """짧은 자유 질문인가 — 맞으면 화면이 '⚡ 빠른 답을 권합니다'라고만 알린다 (자동으로 켜지 않음)."""
+    text = question.strip()
+    return bool(text) and len(text) <= QUICK_HINT_CHARS and text.count("\n") < 3
 
 
 def new_run(run_id: str, question: str, root_id: str, team_id: str = "") -> dict:

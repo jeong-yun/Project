@@ -26,6 +26,12 @@
 검증 (core/verification.py, core/harness)
   초안 → 하네스(결정론적 검증) 실패 시 에러 로그를 돌려주고 재작성 (Backtracking)
   검토·통합 → 비평가(Critic) 채점 → 불합격이면 자가 교정 → 하네스 검증
+
+⚡ 빠른 답 (state["quick"], 기본 꺼짐 — 2026-11-16 '간단한 문의도 모델을 너무 많이 써서 오래 걸린다')
+  팀장(문의 대상) 혼자 근거 자료(데이터 툴·첨부·웹)를 받아 한 번 답한다 → 하네스(final_only 포함)는 그대로, 실패하면 다시 쓰기.
+  모델을 부르지 않는 것: 요청 정리(사용자가 채운 브리프만), 웹 검색어(질문을 그대로 검색), 분배·초안·검토, 부서장 비평, 🔀 단계 확인.
+  결정 뒤 교훈: 고친 곳·코멘트가 없으면 규칙 교훈 + 문장 비교로 겹친 교훈 합치기 (모델 0번), 있으면 지금처럼 모델.
+  '👥 팀 전체로 다시' = restart_from(point="brief", quick=False) — 같은 질문·입력으로 요청 정리부터 지금 방식.
 """
 
 import operator
@@ -33,6 +39,7 @@ from collections.abc import Iterator
 from concurrent.futures import FIRST_COMPLETED, Future, wait
 from typing import Annotated, TypedDict
 
+from langchain_core.messages import HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import ContextThreadPoolExecutor
 from langgraph.config import get_stream_writer
@@ -45,7 +52,9 @@ from core.llm_factory import NoAvailableModelError
 from core.brief import DesiredState, draft_brief, empty_state
 from core.config import load_skills, parent_map, subtree
 from core.dept_heads import DeptHead
-from core.feedback import absorb_duplicates, active_lessons, generate_lessons, lesson_budget, propose_cleanup, team_lessons
+from core.feedback import (
+    absorb_duplicates, active_lessons, generate_lessons, lesson_budget, propose_cleanup, rule_based_lessons, team_lessons,
+)
 from core.member_models import team_rank_models
 from core.schemas import AgentAnswer, CleanupProposal, HumanDecision, Lesson, ModelsConfig, OrgNode, Rank, Team, ToolResult
 from core.search import WebContext
@@ -55,6 +64,10 @@ from core.tools.attachments import KEY as ATTACHMENTS
 
 WEB_SEARCH_TOOL = "web_search"
 DRAFT_TAG = "draft:"  # 초안 스트리밍 토큰에 붙이는 태그 접두어 (뒤에 에이전트 id)
+QUICK_QUERY_CHARS = 120  # ⚡ 빠른 답의 웹 검색어 = 질문 앞부분 (검색어를 모델로 만들지 않는다)
+QUICK_NOTE = ("[⚡ 빠른 답 — 혼자 최종 답변]\n팀원에게 나누지 않고 내가 바로 최종 답변을 쓴다. "
+              "업무 브리프의 [최종 목표]·[완료 기준]·[결과 형식]을 모두 내가 맞춘다.")
+QUICK_LOG = "⚡ 빠른 답 — 팀원 분배·검토 없이 팀장이 혼자 답함 (부서장 검토 없이 팀장이 바로 답했습니다)"
 
 
 class OfficeState(TypedDict, total=False):
@@ -84,6 +97,7 @@ class OfficeState(TypedDict, total=False):
     step_mode: bool
     directions: list  # 팀장이 내놓은 진행 방향 (DirectionOption)
     root_plan: dict | None  # 팀장의 업무 분배 {"chosen": [(하위 id, 업무)…]} — 사람이 확인·수정한 것
+    quick: bool  # ⚡ 빠른 답 — 팀장 혼자 한 번 (맨 위 설명)
 
 
 def make_checkpointer(db_path):
@@ -251,7 +265,7 @@ def build_office_graph(
         partial = state.get("brief_input") or empty_state()
         if partial.goal.strip() and partial.success_criteria:
             return {"brief": partial, "notes": []}
-        if not state.get("auto_brief", True):
+        if not state.get("auto_brief", True) or state.get("quick"):  # ⚡ 빠른 답은 요청 정리 모델을 부르지 않는다
             return {"brief": partial.model_copy(update={"goal": partial.goal or state["question"]}), "notes": []}
         emit({"type": "start", "node": state["root_id"], "kind": "brief"})
         try:
@@ -276,10 +290,11 @@ def build_office_graph(
 
         def web_job() -> WebContext:
             emit({"type": "start", "node": root, "kind": "research"})
+            web_settings = {**settings, "web_search": {**settings.get("web_search", {}), **team.search}}
+            if state.get("quick"):  # ⚡ 빠른 답 — 검색어를 모델로 만들지 않고 질문을 그대로 검색한다
+                return search.search_queries([" ".join(state["question"].split())[:QUICK_QUERY_CHARS]], web_settings)
             # 검색어는 원 질문 + 목표로 만든다 (브리프 전체는 검색어 생성에 너무 길다). 팀별 검색 설정을 덮어쓴다
-            return search.research(
-                f"{state['question']}\n(목표: {brief.goal})", models, {**settings, "web_search": {**settings.get("web_search", {}), **team.search}}
-            )
+            return search.research(f"{state['question']}\n(목표: {brief.goal})", models, web_settings)
 
         use_web = bool(state.get("use_web") and WEB_SEARCH_TOOL in team.tools)
 
@@ -322,13 +337,15 @@ def build_office_graph(
             chosen = [(c.id, task) for c in node.children]
         return chosen, plan
 
-    def draft(state: OfficeState, node_id: str, task: str, lessons) -> AgentAnswer:
-        """맨 아래: 실무자 초안 (+ 하네스)."""
+    def draft(state: OfficeState, node_id: str, task: str, lessons, quick: bool = False) -> AgentAnswer:
+        """맨 아래: 실무자 초안 (+ 하네스). quick = ⚡ 빠른 답 — 팀장이 혼자 최종 답변을 쓴다 (task 는 비움)."""
         agent = agents[node_id]
         emit({"type": "start", "node": node_id, "kind": "draft"})
         # 맡은 업무가 최종 답변자의 업무(= 최종 목표)와 다르면 상사가 나눠 준 것 — '[완료 기준]은 팀 전체 기준'이라고 알린다
-        split = task != state["tasks"].get(state["root_id"])
+        split = not quick and task != state["tasks"].get(state["root_id"])
         messages = agent.draft_messages(state["brief"].as_prompt(state["question"]), task, web_text(state), lessons, split)
+        if quick:
+            messages = [*messages[:-1], HumanMessage(f"{messages[-1].content}\n\n{QUICK_NOTE}")]
         tag = DRAFT_TAG + node_id
 
         def restart() -> None:
@@ -343,6 +360,8 @@ def build_office_graph(
 
             return run_harness(answer, redo_draft, state)
         except NoAvailableModelError as e:
+            if quick:
+                raise  # 팀장 혼자 답하는데 모델이 모두 실패 — 다른 결과로 보완할 수 없으므로 오류로 멈춘다
             # 실무자 한 명의 모든 모델이 실패해도 팀 전체를 멈추지 않는다 → 실패 표시를 남기고 관리자가 나머지로 진행
             lines = str(e).splitlines()
             # 호출 전에 막힌 경우(무료 서버 꺼짐·키 없음)는 그 이유 한 줄뿐 → 본문에도 이유를 쓴다
@@ -559,7 +578,27 @@ def build_office_graph(
         steps = [s for s in in_order(root) if id(s) in fresh]
         return {"tasks": tasks, "assigned": assigned, "results": results, "steps": steps}
 
+    def quick_work(state: OfficeState) -> dict:
+        """⚡ 빠른 답 — 팀장(문의 대상) 혼자 한 번 쓰고 하네스만. 분배·검토·비평 없음."""
+        root = state["root_id"]
+        answer = None
+        if not call_monitor.stopped():
+            try:
+                with usage.scope(agent_id=root):
+                    answer = draft(state, root, "", lessons_for(root, state["question"]), quick=True)
+            except call_monitor.CallCancelled:
+                if not call_monitor.stopped():
+                    raise
+        if answer is None:  # ⏹ 중단
+            answer = partial_answer(root, {}, {})
+        else:
+            answer.verification_log = [*answer.verification_log, QUICK_LOG]
+        emit({"type": "step", "step": answer})
+        return {"assigned": {}, "results": {root: answer}, "steps": [answer]}
+
     def work_node(state: OfficeState) -> dict:
+        if state.get("quick"):
+            return quick_work(state)
         return run_work(state, "all")
 
     # ── 🔀 단계마다 확인 (state["step_mode"] 일 때만 지나가는 노드) ──────────
@@ -645,22 +684,27 @@ def build_office_graph(
         return {"decision": HumanDecision.model_validate(value)}
 
     def feedback_node(state: OfficeState, config: RunnableConfig) -> dict:
-        lessons, notes = generate_lessons(
-            state["question"], state["steps"], state["decision"], names, parents, team, models
-        )
+        decision: HumanDecision = state["decision"]
+        # ⚡ 빠른 답을 고친 곳·코멘트 없이 결정했으면 교훈 모델이 더할 정보가 없다 (참여자 = 팀장 1명, 사람 지적 없음)
+        #   → 규칙 교훈('채택됨 — 유지' / '반려됨 — 의도 확인')과 문장 비교만으로 겹친 교훈 합치기. 모델 0번
+        plain = bool(state.get("quick")) and not decision.edited and not decision.comment.strip()
+        if plain:
+            lessons, notes = rule_based_lessons(state["steps"], decision, names, parents), []
+        else:
+            lessons, notes = generate_lessons(state["question"], state["steps"], decision, names, parents, team, models)
         merged, cleanup = [], []
         if storage:
             run_id = config.get("configurable", {}).get("thread_id")
             new_ids = dict(zip((l.agent_id for l in lessons), storage.add_lessons(team.id, run_id, lessons)))
             # 새 교훈과 겹치거나 충돌하는 옛 교훈을 찾는다 — 겹치면 바로 합쳐 '피드백 N회 반복'으로 강조(원래 교훈은 끔),
             # 충돌은 어느 쪽이 맞는지 사람만 알므로 바꾸지 않고 화면에서 고르게 한다
-            proposals, more = propose_cleanup(team, active_lessons(storage, team.id), names, models, new_ids)
+            proposals, more = propose_cleanup(team, active_lessons(storage, team.id), names, models, new_ids, use_model=not plain)
             merged, cleanup = absorb_duplicates(storage, proposals)
             notes = [*notes, *more]
         return {"lessons": lessons, "merged": merged, "cleanup": cleanup, "notes": notes}
 
     def stepwise(state: OfficeState) -> bool:
-        return bool(with_human and state.get("step_mode"))
+        return bool(with_human and state.get("step_mode") and not state.get("quick"))  # ⚡ 빠른 답은 멈출 단계가 없다
 
     after_work = "human_decision" if with_human else END
     graph = StateGraph(OfficeState)
@@ -767,6 +811,7 @@ def stream_office(
     extra_validators: list[str] | None = None,
     harness_options: dict | None = None,
     step_mode: bool = False,
+    quick: bool = False,
 ) -> Iterator[tuple[str, object]]:
     """질문 → 브리프 → (데이터 툴·웹 검색) → 분배·초안·검토·통합 진행 이벤트.
 
@@ -777,6 +822,7 @@ def stream_office(
         extra_validators: 업무 양식이 추가로 요구하는 하네스 검증기
         harness_options:  하네스 옵션 (예: required_terms)
         step_mode:        🔀 단계마다 확인 — 브리프 뒤·팀장 분배 뒤·초안 뒤에 멈춘다 (체크포인터 필요, 기본 꺼짐)
+        quick:            ⚡ 빠른 답 — root 혼자 한 번 답하고 하네스만 (분배·검토·비평 없음, 켜면 step_mode 는 무시)
 
     Yields:
         ("start",   {"node", "kind"})  — 어떤 에이전트가 어떤 일을 시작함 (brief/tools/research/plan/draft/review/integrate/critic)
@@ -804,6 +850,7 @@ def stream_office(
         "steps": [],
         "step_mode": step_mode,
         "root_plan": None,
+        "quick": quick,
     }
     yield from _events(graph, inputs, _config(org, thread_id))
 
@@ -819,13 +866,14 @@ RESTART_POINTS = {"brief": "처음부터 (요청 정리 다시)", "plan": "업�
 
 def restart_from(
     graph, org: OrgNode, thread_id: str, point: str, question: str | None = None,
-    brief: DesiredState | None = None, step_mode: bool | None = None,
+    brief: DesiredState | None = None, step_mode: bool | None = None, quick: bool | None = None,
 ) -> Iterator[tuple[str, object]]:
     """✏️ 질문·브리프를 고쳐 체크포인트에서 다시 — 같은 thread 안에서 갈래(fork)를 만든다.
 
     point="brief": 처음 입력 체크포인트에 새 질문(·브리프 입력)을 넣고 요청 정리부터 다시
     point="plan" : 자료 조사가 끝난 체크포인트에 새 브리프(·질문)를 넣고 업무 분배부터 다시 (웹·데이터 조사 결과 재사용)
     예전 갈래의 체크포인트는 그대로 남는다 (LangGraph 기록). 화면은 예전 시도의 단계를 따로 보관해 비교한다.
+    quick: ⚡ 빠른 답 켜기·끄기 (None = 그대로). '👥 팀 전체로 다시' = point="brief", quick=False
     """
     config = _config(org, thread_id)
     history = list(graph.get_state_history(config))  # 최신 → 오래된 순
@@ -839,6 +887,8 @@ def restart_from(
         update["question"] = question
     if step_mode is not None:
         update["step_mode"] = step_mode
+    if quick is not None:
+        update["quick"] = quick
     if point == "brief":
         if brief is not None:
             update["brief_input"] = brief

@@ -461,18 +461,22 @@ def _proposals(team_id: str, groups: list[LessonGroup], targets: dict[str, list[
 
 
 def propose_cleanup(
-    team: Team, lessons: dict[str, list[dict]], names: dict[str, str], models: ModelsConfig, new_ids: dict[str, int] | None = None
+    team: Team, lessons: dict[str, list[dict]], names: dict[str, str], models: ModelsConfig, new_ids: dict[str, int] | None = None,
+    use_model: bool = True,
 ) -> tuple[list[CleanupProposal], list[str]]:
     """교훈 정리 제안 — 저장소는 바꾸지 않는다.
 
     lessons: {에이전트 id: 켜 둔 교훈 (최신 먼저)} (active_lessons)
     new_ids: {에이전트 id: 이번 결정에서 생긴 교훈 번호} — 주면 그 교훈과 겹치거나 충돌하는 옛 교훈만 찾는다.
     교훈이 2개 이상인 에이전트만 보조 모델에 한 번에 묻는다. 모델을 못 부르면 문장이 거의 같은 것만 코드로 찾는다.
+    use_model=False: 모델 없이 문장 비교만 (⚡ 빠른 답의 코멘트 없는 결정 — 새 교훈이 규칙 문장이라 비교로 충분하다).
     """
     new_ids = new_ids or {}
     targets = {a: rows for a, rows in lessons.items() if len(rows) >= 2 and (not new_ids or a in new_ids)}
     if not targets:
         return [], []
+    if not use_model:
+        return _proposals(team.id, similar_groups(targets, new_ids), targets, new_ids, "code"), []
     notes: list[str] = []
     try:
         call = llm_factory.invoke_structured(

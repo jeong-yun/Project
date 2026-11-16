@@ -11,6 +11,7 @@
     불합격으로 🔁 자가 교정이 시작되면 그때마다 (교정 1 + 다시 비평 1) 을 더한다 → 남은 단계가 늘어난다
   🧪 하네스 재작성이 실제로 일어나면 그만큼 더한다
   '최대' = 비평이 매번 불합격하고 하네스가 매번 실패할 때 (max_self_corrections · max_retries 끝까지)
+  ⚡ 빠른 답(quick)이면 문의 대상 한 명의 ✍️ 답 1 + 하네스 재작성만 (분배·검토·비평 없음 — 요청 정리·검색어도 모델 안 씀)
   💬 추가 질문(결정 전 문의·수정) 중에는 그 한 번만 센다 (답 1 + 하네스 실패 시 다시 고침 + 수정본이면 부서장 검토,
     불합격이면 팀장이 다시 고침 · 추가로 고칠 점이 있으면 부서장이 직접 고침 → 다시 검토 — followup_units)
 
@@ -66,6 +67,7 @@ class Plan:
     brief: bool = True  # 요청 정리를 AI 가 하는가
     web: bool = False
     step_mode: bool = False
+    quick: bool = False  # ⚡ 빠른 답 — 문의 대상 혼자 한 번 (core/workflow.py)
     concurrency: dict = field(default_factory=dict)  # settings llm_concurrency
 
 
@@ -268,7 +270,7 @@ def build_units(plan: Plan, run: dict, records, now: float | None = None) -> tup
         nonlocal extra_worst
         model = plan.node_models.get(node.id, "")
         kinds = step_kinds.get(node.id, set())
-        if not node.children:
+        if not node.children or (plan.quick and node.id == plan.root_id):
             finished = "draft" in kinds
             add("draft", node.id, model, finished)
             harness_units(node.id, finished)
@@ -362,7 +364,7 @@ def critical_path(plan: Plan, units: list[Unit], run: dict) -> float:
         return sum(u.left_sec for u in by_node.get(node_id, []) if u.kind in kinds)
 
     def t(node: OrgNode) -> float:
-        if not node.children:
+        if not node.children or (plan.quick and node.id == plan.root_id):
             return own(node.id, ("draft", "harness"))
         kids = assigned.get(node.id)
         chosen = [c for c in node.children if kids is None or c.id in kids]
