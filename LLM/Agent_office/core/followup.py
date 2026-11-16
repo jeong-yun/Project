@@ -39,8 +39,15 @@
   · ❓ 질문만 / ✏️ 고쳐 줘: 사람이 고를 수 있다 (MODES). 질문만이면 수정본·하네스·부서장 검토를 부르지 않는다 (모델 1번)
   · 🔁 같은 지적: 다시 검토에서 앞 검토와 같은 지적(same_point)이 또 나오면 남은 상한을 쓰지 않고 멈추고 FollowupTurn.repeated 에 남긴다.
     사람이 '이 지적은 괜찮음'으로 넘기면(waive) 그 수정본에만 적용되고 log 에 남는다 (채택하면 검증 기록으로)
+  · ✂️ 고칠 곳만: 고칠 글이 PATCH_MIN_CHARS 이상이면 팀장(다시 고치기·하네스 재시도 포함)과 부서장 직접 수정이 전문 대신
+    '찾을 원문 → 바꿀 글'(edits)만 쓰고, 코드가 글에 적용해 수정본 전문을 만든다 (본 업무 검토의 review_mode: edit 와 같은
+    core/agent.apply_text_edits·EDIT_RETRY_NOTE). 고칠 곳 밖은 글자 그대로 남는다. 원문을 못 찾은 고칠 곳은 건너뛰고 log 에 이유를,
+    하나도 적용하지 못하면 전문으로 한 번 더 받는다. 요청이 전체 구조를 바꾸는 것이면 모델이 전문을 써도 받는다.
+  · 🔍 바뀐 곳: 수정본마다 앞 버전(원래 결과 또는 직전 수정본)과 줄 단위로 비교한 바뀐 곳(FollowupTurn.diff)을 코드가 계산해 둔다.
+    요청·바뀐 점 설명에 그곳을 가리키는 말이 없으면 '요청하지 않은 곳일 수 있음'으로 표시한다 (낱말 대조 — 추정)
 """
 
+import difflib
 import re
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -49,13 +56,15 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field, TypeAdapter
 
 from core import call_monitor, harness, llm_factory, verification
-from core.agent import OrgAgent, with_feedback
+from core.agent import EDIT_RETRY_NOTE, OrgAgent, apply_text_edits, with_feedback
 from core.dept_heads import CriticPlan
 from core.llm_factory import NoAvailableModelError
-from core.schemas import CriticResult, HarnessResult, ModelSpec
+from core.schemas import CriticResult, HarnessResult, ModelSpec, TextEdit
 
 QUESTION_CHARS = 4000  # 원 질문(개념 편집 팀은 초안·관련 항목까지 들어 있어 길다)
 HISTORY_TURNS = 6  # 프롬프트에 넣을 최근 대화 수
+# 고칠 글이 이 글자 수 이상이면 전문 대신 고칠 곳(edits)만 받는다. 짧은 글은 전문이 더 간단하고 출력도 작다 (추정값 — 실제 모델로 재지 않음)
+PATCH_MIN_CHARS = 3000
 
 # 💬 입력 아래 보내기 버튼 셋 (app.py) — auto(그냥 보내기)는 지금처럼 팀장 모델이 판단한다
 MODES = {"auto": "💬 보내기", "question": "❓ 질문만", "revise": "✏️ 고쳐 줘"}
@@ -133,7 +142,10 @@ class FollowupResult(BaseModel):
     revised: bool = Field(description="결과를 고쳐 썼으면 true (질문에 답만 했으면 false)")
     reply: str = Field(description="사람에게 하는 답변. 질문이면 근거와 함께 답하고, 수정이면 무엇을 왜 고쳤는지 한두 문장")
     changes: list[str] = Field(default_factory=list, description="수정했을 때 바뀐 점 (짧게, 항목마다 한 줄)")
-    revised_answer: str = Field(default="", description="수정했을 때 요청을 반영한 완성 답변 전문. 질문이면 빈 문자열")
+    revised_answer: str = Field(default="", description="수정했을 때 요청을 반영한 완성 답변 전문. 질문이면 빈 문자열. "
+                                                        "지시가 고칠 곳만 edits 에 쓰라고 했으면 빈 문자열 (전체 구조를 바꿀 때만 전문)")
+    edits: list[TextEdit] = Field(default_factory=list, description="고칠 곳만 바꿀 때: 고칠 곳마다 찾을 원문(글자 그대로) → 바꿀 글. "
+                                                                    "코드가 원래 글에 적용한다. 전문을 썼거나 질문이면 빈 목록")
 
 
 class RevisionCritic(CriticResult):
@@ -155,7 +167,10 @@ class RevisionCritic(CriticResult):
 class HeadFix(BaseModel):
     """👔 부서장이 자기가 짚은 '추가로 고칠 점'을 직접 고친 결과."""
 
-    revised_answer: str = Field(description="[추가로 고칠 점]만 반영한 완성 답변 전문 (처음부터 끝까지, 생략 없이)")
+    revised_answer: str = Field(default="", description="[추가로 고칠 점]만 반영한 완성 답변 전문 (처음부터 끝까지, 생략 없이). "
+                                                        "지시가 고칠 곳만 edits 에 쓰라고 했으면 빈 문자열")
+    edits: list[TextEdit] = Field(default_factory=list,
+                                  description="고칠 곳만 바꿀 때: 고칠 곳마다 [수정본]에서 찾을 원문(글자 그대로) → 바꿀 글")
 
 
 # 부서장이 고친 글이 고치기 전 길이의 이 비율보다 짧으면 잘린 것으로 보고 버린다 (추정값 — 실제 모델로 재지 않음)
@@ -169,6 +184,15 @@ class HeadReview:
     plan: CriticPlan  # 누가(부서장)·어느 모델로 (core/dept_heads.critic_plan)
     cfg: dict  # 팀의 비평 설정 (verification.critic_settings) — enabled 가 꺼져 있으면 검토하지 않는다
     criteria: list[str] = field(default_factory=list)  # 팀 검토 기준 + 브리프의 완료 기준
+
+
+class DiffBlock(BaseModel):
+    """앞 버전과 견준 바뀐 곳 하나 — 코드가 줄 단위로 계산한다 (모델이 쓴 '바뀐 점'과 따로)."""
+
+    before: str = ""  # 앞 버전의 줄들 (새로 넣은 곳이면 빈 글)
+    after: str = ""  # 수정본의 줄들 (지운 곳이면 빈 글)
+    where: str = ""  # 바로 앞 제목 줄 (예: '## 3. 프로젝트') — 어디인지
+    unrequested: bool = False  # 요청·바뀐 점 설명에 이곳을 가리키는 말이 없음 (낱말 대조 — 추정)
 
 
 @dataclass
@@ -196,6 +220,9 @@ class FollowupTurn:
     # 🔁 다시 검토에서도 같은 지적이 나와 더 고치지 않고 멈춘 지적 (critic 의 지적 글 그대로) · 사람이 '이 지적은 괜찮음'으로 넘긴 지적
     repeated: list[str] = field(default_factory=list)
     waived: list[str] = field(default_factory=list)
+    # 🔍 코드가 계산한 바뀐 곳 — 앞 버전(diff_from: 0 = 원래 결과, n = 수정본 vn) 대비. 이 칸이 없던 옛 기록은 빈 목록
+    diff: list[DiffBlock] = field(default_factory=list)
+    diff_from: int = 0
 
 
 # 실행 기록(runs.db 의 run_followups)에 남기는 모양 — 앱을 다시 켠 뒤에도 대화·수정본·부서장 검토가 보이게 (app.py 가 저장·복원)
@@ -220,6 +247,13 @@ def history_text(turns: list[FollowupTurn]) -> str:
     return "\n".join(lines)
 
 
+def _edit_how(source: str) -> list[str]:
+    """팀장·부서장 프롬프트가 함께 쓰는 '고칠 곳(edits)' 쓰는 법. source = 원문을 찾을 글의 이름."""
+    return [f"  · find 는 {source}에 있는 글자 그대로 (공백·기호·마크다운까지), 그 글 안에서 한 번만 나오도록 앞뒤를 조금 포함한다. "
+            "replace 는 그 부분을 바꿀 글 (지우려면 빈 문자열).",
+            "  · 새 내용을 넣을 때는 넣을 자리 바로 앞 문장을 find 로 잡고, replace 에 그 문장과 새 내용을 함께 쓴다."]
+
+
 def build_messages(agent: OrgAgent, question: str, current: str, request: str, turns: list[FollowupTurn],
                    evidence: str = "", lessons: list[str] | None = None, criteria: list[str] | None = None,
                    mode: str = "auto") -> list[BaseMessage]:
@@ -234,6 +268,19 @@ def build_messages(agent: OrgAgent, question: str, current: str, request: str, t
                      "  (고쳐야 할 점이 보이면 reply 끝에 한 줄로 알리고, 원하면 '고쳐 줘'로 다시 보내 달라고 한다)"],
         "revise": ["- 사람이 '고쳐 줘'를 골랐다 — 수정 요청이다. revised=true 로 수정본을 쓴다 (묻는 말이 섞여 있으면 reply 에 함께 답한다)."],
     }[mode]
+    revise = [
+        "- 수정 요청이면 revised=true, revised_answer 에 요청을 반영한 **완성 답변 전문**을 쓴다.",
+        "  · [현재 결과]의 형식·구조·팀 업무 지침(스킬)을 그대로 지킨다. 요청과 무관한 부분은 바꾸지 않는다.",
+        "  · 무엇을 왜 고쳤는지는 changes·reply 에만 쓰고 revised_answer 본문에는 넣지 않는다 (수정 표시·이유 금지).",
+    ] if len(current) < PATCH_MIN_CHARS else [  # 긴 결과 — 고칠 곳만 받는다
+        "- 수정 요청이면 revised=true. [현재 결과]가 길어 전문을 다시 쓰지 않고 **고칠 곳만** edits 에 쓴다 "
+        "(코드가 [현재 결과]에 적용해 수정본 전문을 만든다 — 고칠 곳 밖은 글자 그대로 남는다).",
+        *_edit_how("[현재 결과]"),
+        "  · 이때 revised_answer 는 빈 문자열로 둔다. 요청이 글 전체의 구조·순서·문체를 바꾸는 것일 때만 edits 대신 "
+        "revised_answer 에 완성 전문을 쓴다.",
+        "  · [현재 결과]의 형식·팀 업무 지침(스킬)을 지킨다. 요청과 무관한 곳은 고칠 곳에 넣지 않는다.",
+        "  · 무엇을 왜 고쳤는지는 changes·reply 에만 쓰고 replace 에는 넣지 않는다 (수정 표시·이유 금지).",
+    ]
     system = "\n".join(
         [
             agent.system_prompt(lessons),
@@ -242,9 +289,7 @@ def build_messages(agent: OrgAgent, question: str, current: str, request: str, t
             *how,
             "- 질문이면 revised=false, reply 에 [현재 결과]와 [근거 자료]를 바탕으로 답한다. 근거가 없으면 모른다고 밝힌다.",
             *([] if mode == "question" else [
-                "- 수정 요청이면 revised=true, revised_answer 에 요청을 반영한 **완성 답변 전문**을 쓴다.",
-                "  · [현재 결과]의 형식·구조·팀 업무 지침(스킬)을 그대로 지킨다. 요청과 무관한 부분은 바꾸지 않는다.",
-                "  · 무엇을 왜 고쳤는지는 changes·reply 에만 쓰고 revised_answer 본문에는 넣지 않는다 (수정 표시·이유 금지).",
+                *revise,
                 "- 요청이 [근거 자료]나 사실과 어긋나면 그대로 따르지 말고 reply 에서 이유를 설명한다.",
                 "  (그래도 사람이 원하는 방향이면 반영하되, 근거가 없다는 점을 reply 에 남긴다)",
             ]),
@@ -323,16 +368,43 @@ def revision_messages(head: HeadReview, question: str, before: str, request: str
     return [SystemMessage(system), HumanMessage(human)]
 
 
-def refix_message(critic: CriticResult) -> str:
+def refix_message(critic: CriticResult, patch: bool = False) -> str:
     """부서장 불합격 뒤 팀장에게 돌려주는 글. 본 업무의 자가 교정 글(verification.correction_message)은 검토 출력용이라
-    '점수는 마지막에'·'analysis 맨 앞에 교정 사유'를 말하는데, 팀장의 출력(FollowupResult)에는 점수 칸이 없고 analysis 는 다른 뜻이다."""
+    '점수는 마지막에'·'analysis 맨 앞에 교정 사유'를 말하는데, 팀장의 출력(FollowupResult)에는 점수 칸이 없고 analysis 는 다른 뜻이다.
+    patch = 수정본이 길어 고칠 곳(edits)만 받는다 — 앞서 낸 edits 는 이미 반영됐다고 알린다 (본 업무 검토와 같은 EDIT_RETRY_NOTE)."""
+    how = (" 고칠 곳만 edits 에 쓴다 (find 는 방금 네 출력의 revised_answer — 지금 수정본 — 에 있는 글자 그대로). " + EDIT_RETRY_NOTE
+           if patch else " revised_answer 에는 고친 완성 전문만 쓴다.")
     return (
         "부서장 검토에서 네 수정본의 다음 부분이 지적됐다.\n"
         f"{verification.critic_problems(critic)}\n"
         "지적을 반영해 수정본을 다시 쓴다. 지적마다 어떻게 고쳤는지는 changes 에 한 줄씩 쓰고"
-        " (고칠 필요가 없다고 판단한 지적은 '수정 없음: 이유'), revised_answer 에는 고친 완성 전문만 쓴다."
-        " 사람의 수정 요청은 그대로 지킨다."
+        " (고칠 필요가 없다고 판단한 지적은 '수정 없음: 이유')." + how + " 사람의 수정 요청은 그대로 지킨다."
     )
+
+
+def full_text_message(missed: list[str]) -> str:
+    """고칠 곳을 하나도 적용하지 못했을 때 — 전문으로 한 번 더 받는다 (팀장·부서장 공통)."""
+    return ("고칠 곳(edits)의 찾을 원문(find)을 고칠 글에서 하나도 찾지 못해 적용하지 못했다:\n"
+            + "\n".join(f"- {m}" for m in missed)
+            + "\n이번에는 edits 를 빈 목록으로 두고 revised_answer 에 완성 전문을 처음부터 끝까지 쓴다 (줄이거나 생략하지 않는다).")
+
+
+def _patched(full: str, edits: list[TextEdit], base: str, log: list[str]) -> tuple[str, list[str]]:
+    """모델 출력으로 수정본 전문을 만든다 → (전문, 하나도 적용하지 못했을 때 그 이유들).
+
+    전문(full)을 썼으면 그것을 쓴다. 없으면 고칠 곳(edits)을 base 에 적용한다 — 원문이 글에 정확히 한 번 있을 때만
+    (core/agent.apply_text_edits). 적용하지 못한 고칠 곳은 log 에 이유를 남긴다. 둘 다 없으면 ('', [])."""
+    if full.strip():
+        if len(base) >= PATCH_MIN_CHARS:
+            log.append("고칠 곳 대신 전문을 다시 씀")
+        return full, []
+    if not edits:
+        return "", []
+    text, skipped = apply_text_edits(base, edits)
+    applied = len(edits) - len(skipped)
+    log.append(f"고칠 곳 {applied}/{len(edits)}개 적용 (전문을 다시 쓰지 않음)")
+    log += [f"적용 못 함 — {s}" for s in skipped]
+    return (text, []) if applied else ("", skipped)
 
 
 def review_note(name: str, cfg: dict, waiting: bool = False) -> str:
@@ -373,13 +445,31 @@ class Reviewed(NamedTuple):
     earlier: list[str]  # 부서장이 고쳐 넣었지만 그 뒤 팀장이 글을 다시 쓴 점
 
 
+def _lead_call(agent: OrgAgent, messages: list[BaseMessage], base: str | None,
+               log: list[str]) -> tuple[llm_factory.StructuredCall, FollowupResult]:
+    """팀장 호출 한 번. 고칠 곳(edits)으로 답했으면 base 에 적용해 revised_answer 를 전문으로 채운다 (base=None 이면 적용하지 않음 — 질문만).
+    고칠 곳을 하나도 적용하지 못하면 전문으로 한 번 더 받는다."""
+    call = llm_factory.invoke_structured(agent.rank_models, agent.models, FollowupResult, messages, agent.name)
+    out: FollowupResult = call.parsed
+    if not out.revised or base is None:
+        return call, out
+    text, missed = _patched(out.revised_answer, out.edits, base, log)
+    if missed:
+        log.append("고칠 곳을 하나도 적용하지 못해 전문으로 다시 받음")
+        call = llm_factory.invoke_structured(agent.rank_models, agent.models, FollowupResult,
+                                             with_feedback(messages, out.model_dump_json(), full_text_message(missed)), agent.name)
+        out = call.parsed
+        text = _patched(out.revised_answer, out.edits, base, log)[0] if out.revised else ""
+    return call, out.model_copy(update={"revised_answer": text})
+
+
 def _write(agent: OrgAgent, messages: list[BaseMessage], validators: list[str] | None, options: dict | None,
-           max_retries: int, log: list[str]) -> Draft:
-    """팀장이 한 번 답한다. 수정했으면 하네스로 검사하고, 실패하면 오류를 돌려줘 다시 고치게 한다."""
+           max_retries: int, log: list[str], base: str | None = None) -> Draft:
+    """팀장이 한 번 답한다. 수정했으면 하네스로 검사하고, 실패하면 오류를 돌려줘 다시 고치게 한다.
+    base = 고칠 곳(edits)을 적용할 글 — 처음은 [현재 결과], 하네스 재시도는 직전 시도의 수정본 (모델이 마지막으로 본 글)."""
     results: list[HarnessResult] = []
     for attempt in range(max_retries + 1):
-        call = llm_factory.invoke_structured(agent.rank_models, agent.models, FollowupResult, messages, agent.name)
-        out: FollowupResult = call.parsed
+        call, out = _lead_call(agent, messages, base, log)
         if not _is_revision(out) or not validators:
             break
         results = harness.run_validators(validators, out.revised_answer, options or {})
@@ -388,24 +478,33 @@ def _write(agent: OrgAgent, messages: list[BaseMessage], validators: list[str] |
                 log.append("하네스 검사 실패 상태로 수정본을 냄 — 채택 전에 확인하세요")
             break
         log.append("하네스 실패 → 다시 고침: " + " / ".join(r.log for r in results if not r.passed))
-        messages = with_feedback(messages, out.model_dump_json(), harness.harness_feedback(results))
+        feedback = harness.harness_feedback(results)
+        if out.edits or len(out.revised_answer) >= PATCH_MIN_CHARS:  # 앞서 낸 edits 는 이미 반영됐다 — 지금 글 기준으로 새로 고칠 곳만
+            feedback = f"{feedback}\n{EDIT_RETRY_NOTE}"
+        messages = with_feedback(messages, out.model_dump_json(), feedback)
+        base = out.revised_answer
     return Draft(out, call, results)
 
 
 def head_fix_messages(head: HeadReview, question: str, request: str, answer: str, extras: list[str],
                       evidence: str = "", skills: str = "") -> list[BaseMessage]:
-    """부서장이 자기가 짚은 '추가로 고칠 점'을 직접 고칠 때의 프롬프트. 수정본은 줄이지 않고 전문을 준다 (전문을 다시 써야 하므로).
+    """부서장이 자기가 짚은 '추가로 고칠 점'을 직접 고칠 때의 프롬프트. 수정본은 줄이지 않고 전문을 준다 (전문을 다시 쓰거나 원문을 복사해야 하므로).
+    수정본이 PATCH_MIN_CHARS 이상이면 전문 대신 고칠 곳(edits)만 쓰게 한다 (코드가 수정본에 적용).
 
     skills = 팀장이 받는 팀 업무 지침(agent.skills). 부서장은 완성 전문을 다시 쓰는데 "형식·구조는 그대로"만 받으면,
     형식 검사(하네스)가 없는 팀에서는 그 팀의 형식 규칙이 틀어져도 걸러지지 않는다.
     """
+    how = (["- revised_answer 에는 고친 **완성 전문**을 처음부터 끝까지 쓴다. 줄이거나 '이하 동일'처럼 생략하지 않는다."]
+           if len(answer) < PATCH_MIN_CHARS else
+           ["- [수정본]이 길어 전문을 다시 쓰지 않고 **고칠 곳만** edits 에 쓴다 (코드가 [수정본]에 적용한다). revised_answer 는 빈 문자열로 둔다.",
+            *_edit_how("[수정본]")])
     system = "\n".join(
         [
             *([head.plan.head.critic_persona()] if head.plan.head else []),
             verification.head_context(),
             "너는 팀장이 사람의 수정 요청을 받아 쓴 [수정본]을 검토했고, 요청과는 별개로 [추가로 고칠 점]을 짚었다. 이제 그 점들을 네가 직접 고친다.",
             "- [추가로 고칠 점]만 반영한다. 그 밖의 내용과 형식·구조, [사용자의 수정 요청]으로 바뀐 부분은 그대로 둔다.",
-            "- revised_answer 에는 고친 **완성 전문**을 처음부터 끝까지 쓴다. 줄이거나 '이하 동일'처럼 생략하지 않는다.",
+            *how,
             "- 무엇을 왜 고쳤는지, 수정 표시는 본문에 넣지 않는다.",
             "- [검토 기준]을 지키고, 근거 없는 숫자·사실을 새로 넣지 않는다" + (" ([근거 자료]와 맞춘다)." if evidence else "."),
             *_human_note(evidence),
@@ -428,22 +527,30 @@ def head_fix_messages(head: HeadReview, question: str, request: str, answer: str
 
 
 def _head_fix(head: HeadReview, agent: OrgAgent, question: str, request: str, draft: Draft, extras: list[str],
-              evidence: str, validators: list[str] | None, options: dict | None) -> tuple[Draft | None, str]:
-    """부서장이 '추가로 고칠 점'만 반영한 완성 전문을 직접 쓴다 — 모델 1번, 하네스는 검사만 한다 (실패해도 다시 쓰게 하지 않는다).
+              evidence: str, validators: list[str] | None, options: dict | None,
+              log: list[str]) -> tuple[Draft | None, str]:
+    """부서장이 '추가로 고칠 점'만 반영한 완성 전문(긴 글은 고칠 곳)을 직접 쓴다 — 모델 1번, 하네스는 검사만 한다 (실패해도 다시 쓰게 하지 않는다).
+    고칠 곳을 하나도 적용하지 못하면 전문으로 한 번 더 받는다.
 
     (새 수정본, "") 을 돌려준다. 고치지 못했으면 (None, 이유) — 부르는 쪽이 직전 수정본을 그대로 낸다.
     """
     before = draft.out.revised_answer.strip()
+    messages = head_fix_messages(head, question, request, before, extras, evidence, agent.skills)
+    who = f"{head.plan.who} (직접 수정)"
     try:
         with call_monitor.purpose("self_correct"):  # ⏱ 호출 모니터·진행 막대의 '🔁 자가 교정', ⛔ 부서장 검토 건너뛰기로 함께 끊긴다
-            fix = llm_factory.invoke_structured(head.plan.chain, agent.models, HeadFix,
-                                                head_fix_messages(head, question, request, before, extras, evidence, agent.skills),
-                                                f"{head.plan.who} (직접 수정)").parsed
+            fix = llm_factory.invoke_structured(head.plan.chain, agent.models, HeadFix, messages, who).parsed
+            text, missed = _patched(fix.revised_answer, fix.edits, before, log)
+            if missed:
+                log.append("부서장이 고칠 곳을 하나도 적용하지 못해 전문으로 다시 받음")
+                fix = llm_factory.invoke_structured(head.plan.chain, agent.models, HeadFix,
+                                                    with_feedback(messages, fix.model_dump_json(), full_text_message(missed)), who).parsed
+                text = _patched(fix.revised_answer, fix.edits, before, log)[0]
     except call_monitor.CallCancelled:
         return None, "사용자가 끊음"
     except NoAvailableModelError as e:
         return None, (str(e).splitlines() or [""])[0][:120] or "모델 호출 실패"
-    text = fix.revised_answer.strip()
+    text = text.strip()
     if len(text) < len(before) * HEAD_FIX_MIN_RATIO:
         return None, f"고친 글이 비었거나 많이 짧음 ({len(before):,}자 → {len(text):,}자, 잘린 것으로 봄)"
     results = harness.run_validators(validators, text, options or {}) if validators else []
@@ -472,12 +579,12 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
     log: list[str] = []
     if mode == "question":
         draft = _write(agent, messages, None, options, 0, log)
-        if _is_revision(draft.out):
+        if draft.out.revised and (draft.out.revised_answer.strip() or draft.out.edits):
             log.append("❓ 질문만 골라 수정본은 만들지 않았습니다")
-        draft = draft._replace(out=draft.out.model_copy(update={"revised": False, "revised_answer": "", "changes": []}))
+        draft = draft._replace(out=draft.out.model_copy(update={"revised": False, "revised_answer": "", "changes": [], "edits": []}))
         head = None
     else:
-        draft = _write(agent, messages, validators, options, max_retries, log)
+        draft = _write(agent, messages, validators, options, max_retries, log, current)
     reviewed: verification.Critique | None = None  # 지금 수정본(draft)에 대한 부서장 검토
     passed = True
     fixed: list[str] = []  # 부서장이 지금 수정본(draft)에 직접 고쳐 넣은 '추가로 고칠 점'
@@ -536,7 +643,7 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
             if (passed and not extras) or round_ == cfg["max_self_corrections"]:
                 break
             if passed:  # 합격 + 추가로 고칠 점 → 부서장이 직접 고친다 (사람에게 버튼으로 묻지 않는다)
-                again, why = _head_fix(head, agent, question, request, draft, extras, evidence, validators, options)
+                again, why = _head_fix(head, agent, question, request, draft, extras, evidence, validators, options, log)
                 if again is None:
                     log.append(f"부서장이 추가로 고칠 점 {len(extras)}개를 직접 고치지 못해 직전 수정본을 유지 ({why})")
                     break
@@ -546,10 +653,12 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
                 continue
             # 불합격 → 팀장이 지적을 받아 다시 고친다 (추가로 고칠 점은 넘기지 않는다 — 다음 검토 결과를 따른다)
             failed = f"부서장 검토 불합격({done.critic.score}/5)"
+            now = draft.out.revised_answer  # 다시 고칠 글 — 긴 글이면 고칠 곳(edits)만 받아 이 글에 적용한다
             try:
                 with call_monitor.purpose("self_correct"):
-                    again = _write(agent, with_feedback(messages, draft.out.model_dump_json(), refix_message(done.critic)),
-                                   validators, options, max_retries, log)
+                    again = _write(agent, with_feedback(messages, draft.out.model_dump_json(),
+                                                        refix_message(done.critic, len(now) >= PATCH_MIN_CHARS)),
+                                   validators, options, max_retries, log, now)
             except (call_monitor.CallCancelled, NoAvailableModelError) as e:
                 log.append(f"{failed} — 다시 고치지 못해 직전 수정본을 유지 ({(str(e).splitlines() or [''])[0][:120]})")
                 break
@@ -575,14 +684,82 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
     out, call, results = draft
     revised = _is_revision(out)
     version = sum(t.revised for t in turns) + 1 if revised else 0
+    content = out.revised_answer.strip() if revised else ""
+    diff = mark_unrequested(changed_blocks(current, content), current, [request, *out.changes, *fixed, *earlier]) if revised else []
     return FollowupTurn(
         request=request, reply=out.reply.strip(), revised=revised,
-        content=out.revised_answer.strip() if revised else "", changes=out.changes if revised else [],
+        content=content, changes=out.changes if revised else [],
         harness=results if revised else [], log=log, model=call.spec, elapsed_sec=call.elapsed_sec, version=version,
         critic=reviewed.critic if reviewed else None, critic_by=head.plan.who if reviewed else "",
         critic_model=reviewed.spec if reviewed else None, critic_passed=passed or reviewed is None,
         auto_fixed=fixed, auto_fixed_earlier=earlier, repeated=repeated,
+        diff=diff, diff_from=max(version - 1, 0),
     )
+
+
+# ─── 🔍 바뀐 곳 (코드가 계산 — 모델이 쓴 '바뀐 점'과 따로) ────────────────────────────
+
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+_PARTICLE = re.compile(r"(으로|에서|에게|까지|부터|처럼|보다|이랑|하고|을|를|이|가|은|는|의|에|도|로|와|과|만)$")
+# 요청 글에 흔한 말 — 어느 곳을 가리키는 말이 아니다
+_STOP = ("수정", "추가", "삭제", "내용", "부분", "문장", "표현", "다시", "전체", "고쳐", "바꿔", "반영", "넣어", "줄여", "해줘", "주세요")
+SPECIFIC_MAX = 3  # 글 전체에 이 횟수 이하로 나오는 낱말만 '그곳을 가리키는 말'로 본다 (추정값 — 가상 예시로만 맞춤)
+
+
+def changed_blocks(before: str, after: str) -> list[DiffBlock]:
+    """두 글을 줄 단위로 견줘 바뀐 곳만 (빈 줄은 보지 않는다 — LLM 이 쓴 문단은 대개 한 줄이라 문단 단위와 거의 같다).
+    바뀌지 않은 줄은 넣지 않는다 (화면에서 접힘). where = 바뀐 곳 바로 앞(또는 그 첫 줄)의 제목 줄."""
+    a = [x.rstrip() for x in before.splitlines() if x.strip()]
+    b = [x.rstrip() for x in after.splitlines() if x.strip()]
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes():
+        if tag == "equal":
+            continue
+        heads = [x for x in a[:i1 + (1 if i2 > i1 else 0)] if _HEADING.match(x)]
+        out.append(DiffBlock(before="\n".join(a[i1:i2]), after="\n".join(b[j1:j2]), where=heads[-1].strip() if heads else ""))
+    return out
+
+
+def _keys(texts: list[str]) -> set[str]:
+    out = set()
+    for t in texts:
+        for w in t.split():
+            n = _norm(w)
+            n = _PARTICLE.sub("", n) if len(n) > 2 else n
+            if len(n) >= 2 and not n.startswith(_STOP):
+                out.add(n)
+    return out
+
+
+def mark_unrequested(blocks: list[DiffBlock], before: str, texts: list[str]) -> list[DiffBlock]:
+    """바뀐 곳마다 요청·바뀐 점 설명(texts)에 그곳을 가리키는 말이 있는지 본다 — 없으면 unrequested (추정).
+
+    가리키는 말 = ① 글 전체에 SPECIFIC_MAX 번 이하로 나오는 낱말(또는 새로 넣은 낱말)이 바뀐 곳에 있다
+    ② 그 낱말이 바뀐 곳의 제목 줄에 있고, 그런 제목이 둘 이하다 ③ '3번'·'2절'의 번호가 제목 줄의 번호와 같다.
+    낱말 대조라 틀릴 수 있다 — 화면에는 '확인하세요'로만 보이고, 수정본을 막지 않는다."""
+    keys, doc = _keys(texts), _norm(before)
+    heads = [_norm(x) for x in before.splitlines() if _HEADING.match(x)]
+    rare = {k for k in keys if doc.count(k) <= SPECIFIC_MAX}
+    titled = {k for k in keys if sum(k in h for h in heads) <= 2}
+    numbers = set(re.findall(r"(\d+)\s*(?:번|절|장|항|째)", " ".join(texts)))
+    for blk in blocks:
+        text, head = _norm(f"{blk.before}\n{blk.after}"), _norm(blk.where)
+        near = (any(k in text for k in rare) or any(k in head for k in titled)
+                or any(re.search(rf"(?<!\d){n}(?!\d)", blk.where) for n in numbers))
+        blk.unrequested = not near
+    return blocks
+
+
+def diff_summary(turn: FollowupTurn) -> str:
+    """화면의 한 줄 — 코드가 앞 버전과 견준 바뀐 곳 수와 '요청하지 않은 곳일 수 있음' 수. 수정본이 아니면 ''."""
+    if not turn.revised:
+        return ""
+    base = f"수정본 v{turn.diff_from}" if turn.diff_from else "원래 결과"
+    if not turn.diff:
+        return f"🔍 코드가 앞 버전({base})과 견줘 보니 글자가 같습니다 (바뀐 곳 없음)"
+    odd = sum(b.unrequested for b in turn.diff)
+    return (f"🔍 코드가 앞 버전({base})과 견준 바뀐 곳 {len(turn.diff)}곳 (바뀌지 않은 부분은 접음)"
+            + (f" · ⚠️ 요청하지 않은 곳일 수 있음 {odd}곳 — 확인하세요" if odd else ""))
 
 
 def head_review_markdown(turn: FollowupTurn, by: str) -> str:
