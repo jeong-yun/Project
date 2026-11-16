@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS lessons (
     active      INTEGER NOT NULL DEFAULT 1, -- 0 이면 프롬프트에 주입하지 않음
     created_at  TEXT NOT NULL,
     hits        INTEGER NOT NULL DEFAULT 1, -- 같은 지시를 피드백에서 받은 횟수 (겹치는 교훈을 합칠 때 더한다 → 프롬프트에서 강조)
-    active_at   TEXT                        -- 켜짐을 마지막으로 바꾼 시각 (없으면 바꾼 적 없음) — PC 두 대가 다를 때 나중 것을 따른다 (feedback_sync)
+    active_at   TEXT,                       -- 켜짐을 마지막으로 바꾼 시각 (없으면 바꾼 적 없음) — PC 두 대가 다를 때 나중 것을 따른다 (feedback_sync)
+    promoted_to TEXT                        -- 고정 규칙으로 올린 곳 (공백으로 나눈 skill·critic·code, 없으면 NULL) — core/feedback.py promote_lesson
 );
 CREATE INDEX IF NOT EXISTS idx_lessons_team_agent ON lessons(team_id, agent_id, active);
 CREATE TABLE IF NOT EXISTS usage (
@@ -142,6 +143,8 @@ class Storage:
             conn.execute("ALTER TABLE lessons ADD COLUMN hits INTEGER NOT NULL DEFAULT 1")
         if lesson_columns and "active_at" not in lesson_columns:  # 켜짐을 바꾼 시각 칸 추가 (예전 교훈은 비어 있음)
             conn.execute("ALTER TABLE lessons ADD COLUMN active_at TEXT")
+        if lesson_columns and "promoted_to" not in lesson_columns:  # 고정 규칙으로 올린 곳 칸 추가 (예전 교훈은 비어 있음)
+            conn.execute("ALTER TABLE lessons ADD COLUMN promoted_to TEXT")
         if "start_rank" in columns("runs"):
             conn.execute("ALTER TABLE runs RENAME TO runs_legacy")
         usage_columns = columns("usage")
@@ -349,8 +352,9 @@ class Storage:
         return {r["agent_id"]: r["n"] for r in rows}
 
     def update_lesson(self, lesson_id: int, lesson: str | None = None, active: bool | None = None,
-                      agent_id: str | None = None) -> None:
-        """agent_id: 교훈을 받을 팀원 바꾸기 — 조직도가 바뀌어 지금 없는 팀원 id 로 남은 교훈을 옮길 때 (화면에서 사용자가 고름)."""
+                      agent_id: str | None = None, promoted_to: str | None = None) -> None:
+        """agent_id: 교훈을 받을 팀원 바꾸기 — 조직도가 바뀌어 지금 없는 팀원 id 로 남은 교훈을 옮길 때 (화면에서 사용자가 고름).
+        promoted_to: 고정 규칙으로 올린 곳 기록 (core/feedback.py promote_lesson)."""
         if lesson is not None:
             self._execute("UPDATE lessons SET lesson=? WHERE id=?", (lesson, lesson_id))
         if active is not None:  # 실제로 바뀔 때만 '바꾼 시각'을 남긴다 — 다른 PC 와 다를 때 나중에 바꾼 쪽을 따르는 근거
@@ -358,6 +362,8 @@ class Storage:
                           (int(active), _now(), lesson_id, int(active)))
         if agent_id is not None:
             self._execute("UPDATE lessons SET agent_id=? WHERE id=?", (agent_id, lesson_id))
+        if promoted_to is not None:
+            self._execute("UPDATE lessons SET promoted_to=? WHERE id=?", (promoted_to, lesson_id))
         self._sync_feedback()
 
     def delete_lesson(self, lesson_id: int) -> None:

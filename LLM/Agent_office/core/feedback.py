@@ -32,7 +32,7 @@ from core.config import load_skills, team_org
 from core.feedback_sync import COMMENT, public_lesson
 from core.llm_factory import NoAvailableModelError
 from core.schemas import (
-    AgentAnswer, CleanupProposal, HumanDecision, Lesson, LessonGroup, LessonGroupSet, LessonSet, ModelsConfig, Rank, Team,
+    AgentAnswer, CleanupProposal, HumanDecision, Lesson, LessonGroup, LessonGroupSet, LessonSet, ModelsConfig, Rank, RuleDraft, Team,
 )
 
 ANSWER_PREVIEW_CHARS = 600
@@ -576,3 +576,102 @@ def lesson_origin(storage, row: dict) -> dict:
         "score": decision.score if decision else None,
         "comment": decision.comment if decision else comment_body(split_lesson(row["lesson"])[1]),
     }
+
+
+# ─── 되풀이된 교훈 → 고정 규칙으로 올리기 — 사람이 문장을 확인하고 누를 때만 파일을 바꾼다 ─────────────
+# 교훈은 '부탁'이라 글자 한도에서 빠질 수 있고 모델이 무시하기도 한다 (2026-11-16 이 PC: 📚 개념 편집 팀 팀원 4명의 교훈이
+# 각각 같은 피드백 24회로 합쳐져 있었다). 같은 지적이 여러 번 오면 '규칙'으로 올린다:
+#   skill  : 팀 업무 지침(teams/<팀>/skills/promoted_rules.md) — 모든 팀원 프롬프트에 글자 한도와 상관없이 항상 들어간다
+#   critic : 부서장 검토 기준(team.yaml verification.critic.rules) — 부서장이 꼭 보고, 어기면 지적한다
+#   code   : 코드 검사 후보 — 검증기를 만드는 것은 개발 작업이라 표시만 해 둔다 (교훈은 켠 채로)
+# 올린 교훈은 지우지 않고 끈다 (정리 제안 반영과 같은 규칙). 어디로 올렸는지는 lessons.promoted_to 에 남는다.
+
+# 2026-11-16 이 PC 실측: 켜 둔 교훈 28개 중 반복 2회 이상은 4개(모두 24회), 나머지는 1회 — 사이 값이 없어 처음엔 단순하게 3
+PROMOTE_HITS = 3
+PROMOTE_TARGETS = {"skill": "팀 업무 지침(스킬)에 넣기", "critic": "부서장 검토 기준에 넣기", "code": "코드 검사 후보로 표시"}
+PROMOTED_LABELS = {"skill": "팀 업무 지침", "critic": "부서장 검토 기준", "code": "코드 검사 후보"}
+
+
+def promoted(row: dict) -> set[str]:
+    """그 교훈을 올린 곳들 (skill·critic·code)."""
+    return set((row.get("promoted_to") or "").split())
+
+
+def promotion_candidates(rows: list[dict]) -> list[dict]:
+    """고정 규칙으로 올리자고 제안할 교훈 — 켜 둔 교훈 중 같은 피드백을 PROMOTE_HITS 번 이상 받은 것 (반복 많은 것 먼저).
+    코드 검사 후보로만 표시한 교훈은 켠 채로 남아 있어 계속 제안한다 (지침·검토 기준으로도 올릴 수 있게)."""
+    return sorted((r for r in rows if r["active"] and r.get("hits", 1) >= PROMOTE_HITS), key=lambda r: (-r.get("hits", 1), -r["id"]))
+
+
+def clean_rule(text: str) -> str:
+    """공개 파일에 넣을 한 줄 — 사람 코멘트 원문('(사람 코멘트: …)')을 떼고(knowledge/ 내보내기와 같은 방식) 줄바꿈을 한 칸으로."""
+    return re.sub(r"\s+", " ", public_lesson(text)).strip().lstrip("-• ").strip()
+
+
+def rule_draft(row: dict) -> str:
+    """모델 없이 만든 첫 규칙 문장 — 교훈의 규칙 문장(사람 코멘트 뺀 것) 그대로."""
+    return clean_rule(row["lesson"])
+
+
+def polish_messages(team: Team, row: dict, target: str) -> list[BaseMessage]:
+    where = ("팀원 모두가 항상 따르는 팀 업무 지침의 한 줄" if target == "skill"
+             else "부서장이 팀 결과를 비평할 때 꼭 확인하고, 어기면 지적하는 검토 기준 한 줄")
+    system = "\n".join([
+        f"당신은 '{team.name}' 팀의 규칙 편집 담당이다. 아래 교훈은 사람에게 같은 지적을 {row.get('hits', 1)}번 받아 쌓인 것이다.",
+        f"이것을 {where}로 다듬는다.",
+        "",
+        "규칙:",
+        "- 한 문장으로 쓴다. 교훈의 지시는 빠뜨리지 않고, 교훈에 없는 지시는 더하지 않는다.",
+        "- 특정 질문·사람·회사·종목·일정 같은 그 업무에만 해당하는 내용과 개인 정보는 빼고, 다음 업무에도 통하는 일반 규칙으로 쓴다.",
+        *(["- '…하면 ○○ 위반이다'처럼 글만 보고 지켰는지 판정할 수 있게 쓴다."] if target == "critic" else
+          ["- '~한다'로 끝나는 행동 지침으로 쓴다."]),
+        "- 한국어로 쓴다.",
+    ])
+    return [SystemMessage(system), HumanMessage(f"[교훈]\n{rule_draft(row)}")]
+
+
+def polish_rule(team: Team, row: dict, target: str, models: ModelsConfig) -> tuple[str, list[str]]:
+    """보조 모델로 규칙 문장을 다듬는다 (화면에서 사람이 누를 때만 — 1번 호출). 저장하지 않는다.
+    모델을 못 부르면 교훈의 규칙 문장을 그대로 돌려준다. Returns: (제안 문장, 안내)"""
+    try:
+        call = llm_factory.invoke_structured(models.utility, models, RuleDraft, polish_messages(team, row, target), "고정 규칙 다듬기")
+        text = clean_rule(call.parsed.rule)
+        return (text or rule_draft(row)), call.errors
+    except NoAvailableModelError as e:
+        return rule_draft(row), [f"규칙 다듬기 모델을 부르지 못해 교훈 문장을 그대로 두었습니다: {e}"]
+
+
+def promote_lesson(storage, team: Team, lesson_id: int, target: str, text: str = "", private_ok: bool = False) -> str:
+    """사람이 확인한 규칙 문장(text)을 고정 규칙으로 저장한다 — 화면에서 '올리기'를 누를 때만 부른다. 화면에 보일 한 줄을 돌려준다.
+    바꾸지 않았으면 '⚠️'로 시작한다. skill·critic 은 파일에 넣고 교훈을 끈다(지우지 않음), code 는 표시만 한다.
+    비공개 팀(private: true)은 사람이 '개인 정보 없음'을 확인(private_ok)해야 공개 파일에 쓴다."""
+    from core import config
+    from core.config import ConfigError, add_critic_rule, add_skill_rule
+
+    row = next((r for r in storage.list_lessons(team.id) if r["id"] == lesson_id), None)
+    if row is None:
+        return f"⚠️ 교훈 #{lesson_id}을(를) 찾지 못해 바꾸지 않았습니다. 화면을 새로 고친 뒤 다시 골라 주세요."
+    marks = " ".join(sorted(promoted(row) | {target}))
+    if target == "code":
+        storage.update_lesson(lesson_id, promoted_to=marks)
+        return (f"교훈 #{lesson_id}을(를) 🧪 코드 검사 후보로 표시했습니다. 검증기를 만드는 것은 개발 작업이라 자동으로 만들지 않고, "
+                "교훈은 켠 채로 둡니다. 📚 교훈 관리 아래 '코드 검사 후보' 목록에 남습니다.")
+    if target not in ("skill", "critic"):
+        raise ValueError(f"모르는 대상: {target}")
+    rule = clean_rule(text)
+    if not rule:
+        return "⚠️ 규칙 문장이 비어 있어 바꾸지 않았습니다. 문장을 적고 다시 눌러 주세요."
+    if team.private and not private_ok:
+        return ("⚠️ 비공개 팀이라 바꾸지 않았습니다. 규칙은 GitHub 에 올라가는 공개 파일에 들어갑니다 — 문장에 이름·회사·경력 같은 "
+                "개인 정보가 없는지 확인하고 '개인 정보가 없음을 확인했습니다'에 체크한 뒤 다시 눌러 주세요.")
+    try:
+        path = (add_skill_rule if target == "skill" else add_critic_rule)(team.id, rule)
+    except ConfigError as e:
+        return f"⚠️ {e}"
+    storage.update_lesson(lesson_id, active=False, promoted_to=marks)
+    rel = path.relative_to(config.TEAMS_DIR.parent).as_posix()  # teams/<팀>/… (Agent_office 폴더 기준)
+    return (f"교훈 #{lesson_id}을(를) {PROMOTED_LABELS[target]}에 넣었습니다 (`{rel}`). 다음 업무부터 "
+            + ("모든 팀원 프롬프트에 글자 한도와 상관없이 항상 들어갑니다. " if target == "skill" else "부서장이 이 점을 꼭 확인합니다. ")
+            + "원래 교훈은 지우지 않고 꺼 두었습니다 (📚 교훈 관리에서 다시 켤 수 있음). "
+            "이 파일은 저장소에 올라가는 파일이라, 다른 PC·GitHub 에도 반영하려면 커밋해 올려 주세요 "
+            f"(예: `git add {rel}` → `git commit` → `git push`).")
