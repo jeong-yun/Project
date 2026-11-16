@@ -378,7 +378,7 @@ def test_head_assigns_with_model_pick(teams, use_script):
     pick = building_ui.assign(ROUTES[0][0], dept, teams, list(teams.values()), load_models(), None, cfg)
     assert pick["team_id"] == "edu_career" and pick["how"] == "llm" and pick["outside"] is None
     prompt = script.prompts("TeamPick")[0]
-    assert "교육부 부장" in prompt and "직무 전환 교육팀" in prompt and "새 직무 합격" in prompt
+    assert "교육부 부서장" in prompt and "직무 전환 교육팀" in prompt and "새 직무 합격" in prompt
 
 
 # ─── 화면 (AppTest): 과목 만들기 → 퀴즈 → 레벨업 → 커리큘럼 재생성 ─────────────

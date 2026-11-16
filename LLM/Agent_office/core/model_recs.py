@@ -1,6 +1,6 @@
 """⭐ 역할별 추천 모델 — config/model_recommendations.yaml 을 읽어 '고르지 않은 사람'의 기본 모델 목록을 정한다.
 
-적용 순서: 사람이 화면에서 고른 모델 > 이 추천 > models.yaml 의 직급 기본(ranks)·부장 기본(critic).
+적용 순서: 사람이 화면에서 고른 모델 > 이 추천 > models.yaml 의 직급 기본(ranks)·부서장 기본(critic).
   - 팀원·팀장: core/member_models.plan 이 default_chain() 으로 추천을 기본으로 쓴다 (상하 규칙은 plan 이 그대로 지킨다).
   - 부서장:    core/dept_heads.head_chain / critic_plan 이 head_rec() 를 쓴다.
 저장된 사람 선택(member_models.json · department_models.json)은 건드리지 않는다.

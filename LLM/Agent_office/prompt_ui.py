@@ -383,25 +383,25 @@ def render_orphans(team: Team, key: str) -> None:
                       use_container_width=True)
 
 
-# ─── 부서 전체 (부장 + 팀마다) ─────────────────────────────────────────
+# ─── 부서 전체 (부서장 + 팀마다) ─────────────────────────────────────────
 
 
 def critic_prompt(team: Team, head) -> str:
-    """부장이 이 팀 결과를 비평할 때의 시스템 프롬프트 — 실행과 같은 verification.build_critic_messages 로 만든다."""
+    """부서장이 이 팀 결과를 비평할 때의 시스템 프롬프트 — 실행과 같은 verification.build_critic_messages 로 만든다."""
     rules = verification.critic_settings(_context().verification_cfg, team.verification).get("rules")
     empty = ReviewResult(analysis="", issues=[], score=0, verdict="approve", revised_answer="", comment="")
     return str(verification.build_critic_messages("", "", empty, [], rules, "", head.critic_persona())[0].content)
 
 
 def render_dept(dept, head, teams: list[Team], key: str) -> None:
-    """부서 화면 '📜 프롬프트·📚 교훈' — 👔 부장의 비평 관점 + 팀마다 팀원 프롬프트·교훈 관리."""
+    """부서 화면 '📜 프롬프트·📚 교훈' — 👔 부서장의 비평 관점 + 팀마다 팀원 프롬프트·교훈 관리."""
     st.caption("팀원마다 다음 업무에서 실제로 받는 시스템 프롬프트입니다 (실행과 같은 코드로 만듦). "
                f"교훈은 팀원마다 {_context().budget:,}자 안에서 모두 들어가고, 넘치면 긴 세부 코멘트부터 빠집니다 (규칙 문장은 남습니다).")
     tabs = st.tabs([f"👔 {head.name}", *(f"{t.name}" for t in teams)])
     with tabs[0]:
         st.markdown(f"**비평·팀 배정 관점** — {head.persona}")
-        st.caption("부장은 팀의 최종 답변을 마지막으로 확인하는 비평가입니다 — 검토자의 '지적 → 수정'이 논리적으로 이어지는지, "
-                   "수정 답변이 검토 기준·근거 자료·팀 규칙에 맞는지를 봅니다. 부장에게는 교훈이 들어가지 않습니다. "
+        st.caption("부서장은 팀의 최종 답변을 마지막으로 확인하는 비평가입니다 — 검토자의 '지적 → 수정'이 논리적으로 이어지는지, "
+                   "수정 답변이 검토 기준·근거 자료·팀 규칙에 맞는지를 봅니다. 부서장에게는 교훈이 들어가지 않습니다. "
                    "관점은 config/departments.yaml 의 head.persona 에서 바꿉니다.")
         pick = st.selectbox("어느 팀을 비평할 때", range(len(teams)), format_func=lambda i: teams[i].name, key=f"critic_team_{key}")
         st.code(critic_prompt(teams[pick], head), language="markdown", wrap_lines=True, height=300)
