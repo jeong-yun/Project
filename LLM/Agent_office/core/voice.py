@@ -1,7 +1,7 @@
 """🎤 노래 음색 변환 팀 · 🗣 일상 말 음성 변환 팀 — so-vits-svc-fork 학습·변환 준비를 돕는 코드. 모델 호출·외부 실행·패키지 설치 없음.
 
 두 팀은 같은 도구·같은 원본 노트북을 쓰고, 종류(kind: song | speech — 업무 양식의 fixed.voice_kind)만 다르다:
-  song   : 반주가 있는 노래 → 보컬 분리 → 자르기 → 학습 → 변환 (원본 노트북 그대로)
+  song   : 반주가 있는 노래 → 보컬 분리 → 자르기 → 학습 → 변환 (원본 노트북 + 변환에 음높이 자동 예측 끄기 `-na` — SONG_SOURCES)
   speech : 말 녹음(낭독·대화) → 배경 음악이 없으면 보컬 분리 없이 Colab 에서 `svc pre-split` 로 자르기(C안) →
            학습 → 변환할 때 음높이 자동 예측(`-a`)을 켠다. 근거는 공식 문서 (SPEECH_SOURCES — 확인 못 한 값은 '확인 못 함')
 보컬 분리·학습·변환은 앱 밖(사용자 PC 의 preprocess.py · Colab 노트북)에서 돈다. 이 모듈이 하는 일:
@@ -135,6 +135,16 @@ SPEECH_UNKNOWN = [
     "f0 방식: 말에 더 맞는 방식은 확인 못 함 — 원본 노트북의 crepe 를 그대로 쓴다",
     "C안(svc pre-split)·말 녹음의 보컬 분리에 걸리는 시간: 재 보지 않음",
 ]
+# ─ 🎤 노래 변환 — 음높이 자동 예측을 끈다 (-na). 원본 노트북은 옵션을 적지 않아 fork 기본값(켜짐)으로 돌았다 (2026-11-16 원본 코드·README 확인)
+SONG_SOURCES = [
+    "음높이 자동 예측: so-vits-svc-fork `svc infer` 의 `-a/-na` 기본값은 켜짐(-a). 원조 so-vits-svc README `--auto_predict_f0`: "
+    "'노래(singing voice)를 변환할 때는 켜지 마라 — 심한 음높이 문제' → 맞춤 노트북 11번 셀에 `-na` 를 적어 끈다",
+    "키 조절: 원조 README `-t` '반음 단위, + · − 모두 됨', fork `svc infer -t/--transpose` 기본값 0, "
+    "fork 화면 안내 'Pitch (12 = 1 octave) … ADJUST THIS … when Auto predict F0 is turned off' — 자동 예측을 끈 노래 변환에서 키를 맞추는 값",
+]
+SONG_KEY_HELP = ("키를 바꾸려면 11번 셀의 `-t 0` 을 반음 수로 바꿉니다 (12 = 한 옥타브, + 올림 · − 내림). "
+                 "자동 예측을 껐으므로(`-na`) 변환할 보컬의 멜로디를 따르고 `-t` 만큼 옮깁니다 — 원래 부른 사람과 성별이 다르면 -12 또는 +12 를 먼저 해 봅니다")
+INFER_SONG = '"{WORK}/cover.wav" -m "{CKPT}" -c "{WORK}/logs/44k/config.json" -fm crepe -na -t 0 -o "{WORK}/cover_converted.wav"'
 SPEECH_INPUT, SPEECH_OUTPUT, SPEECH_ZIP = "speech.wav", "speech_converted.wav", "speech.zip"
 INFER_SPEECH = (f'"{{WORK}}/{SPEECH_INPUT}" -m "{{CKPT}}" -c "{{WORK}}/logs/44k/config.json" -fm crepe -a -t 0 '
                 f'-o "{{WORK}}/{SPEECH_OUTPUT}"')
@@ -249,7 +259,8 @@ def _speech_cells(nb: dict, kit: dict) -> None:
 
 def build_notebook(kit: dict) -> str:
     """원본 노트북을 JSON 으로 읽어 화자 이름·epochs·batch_size 줄의 값만 바꾼다 (노래는 셀 수·순서 그대로).
-    말(kind=speech)은 변환 셀의 옵션·파일 이름을 바꾸고, C안이면 자르기 셀 하나를 더한다 (_speech_cells)."""
+    노래는 변환 셀에 음높이 자동 예측 끄기(-na)를 적고, 말(kind=speech)은 변환 셀의 옵션·파일 이름을 바꾸고
+    C안이면 자르기 셀 하나를 더한다 (_speech_cells)."""
     nb = json.loads((ASSET_DIR / NOTEBOOK).read_text(encoding="utf-8"))
     _set_line(nb, r"^(SINGER = )'[^']*'", f"'{kit['singer']}'")
     _set_line(nb, r"^(cfg\['train'\]\['epochs'\] = )\d+", str(kit["epochs"]))
@@ -257,12 +268,17 @@ def build_notebook(kit: dict) -> str:
     speech = kit.get("kind") == "speech"
     if speech:
         _speech_cells(nb, kit)
+    else:  # 노래: 원본 셀은 옵션을 적지 않아 fork 기본값(자동 예측 켜짐)으로 돌았다 → -na 로 끈다 (SONG_SOURCES)
+        _set_line(nb, r"^(# )-t: 키 조절.*", "-na: 음높이 자동 예측 끔 (노래용 — 원조 so-vits-svc 안내: 노래에 켜면 음이 심하게 어긋남). "
+                  "-t: 키 조절(반음, 12 = 한 옥타브). 원곡 가수와 성별이 다르면 -12 또는 +12 시도")
+        _set_line(nb, r"^(!svc infer )\"\{WORK\}/cover\.wav\".*", INFER_SONG)
     nb["cells"][0]["source"] += [
         "\n", "\n",
         f"**이 노트북의 맞춤 값** (Agent Office {KIND_NAMES[kit.get('kind', 'song')]}이 양식 값으로 넣음): 화자 `{kit['singer']}` · "
         f"epochs {kit['epochs']} · batch_size {kit['batch_size']} · 전처리 {kit['mode']}안 — {SKIP[kit['mode']]}.\n",
         *(["\n", f"**말 음성 변환**: 11번 셀이 `{SPEECH_INPUT}` 를 음높이 자동 예측(`-a`)으로 바꿉니다 — 노래 커버용 설명(cover.wav)은 이 노트북에서는 쓰지 않습니다.\n"]
-          if speech else []),
+          if speech else ["\n", "**노래 변환**: 11번 셀은 음높이 자동 예측을 끕니다(`-na`) — 노래에 켜면 음이 심하게 어긋날 수 있습니다. "
+                             "키는 `-t` 값(반음, 12 = 한 옥타브)으로 바꿉니다.\n"]),
         "\n",
         f"목소리 출처: {kit['source']} (양식에서 사용해도 된다고 확인함). 변환한 결과물을 남에게 보이거나 올릴 때는 '{AI_LABEL}'이라고 표시하세요.\n",
     ]
@@ -305,7 +321,7 @@ def kit_readme(kit: dict) -> str:
     else:
         convert = [
             f"{n + 2}. 변환: 바꿀 노래의 **보컬만 분리한 wav** 를 `svc_project/cover.wav` 로 올리고 11번 셀을 실행합니다. "
-            "키는 `-t` 값(반음)으로 맞춥니다 — 원래 부른 사람과 성별이 다르면 -12 또는 +12 를 먼저 해 봅니다.",
+            "노래라 음높이 자동 예측은 꺼 두었습니다(`-na`). " + SONG_KEY_HELP + ".",
             f"{n + 3}. 12번 셀로 듣고, 반주는 오디오 편집기에서 변환된 보컬(`cover_converted.wav`)과 합칩니다.",
         ]
     return "\n".join([
@@ -337,7 +353,8 @@ def kit_readme(kit: dict) -> str:
         "## 걸리는 시간 (원본 파일에 적힌 어림값만)",
         *[f"- {note}" for note in (SPEECH_TIME_NOTES if speech else TIME_NOTES)],
         *(["", "## 말 변환의 근거 (공식 문서)", *[f"- {s}" for s in SPEECH_SOURCES],
-           "", "## 확인 못 한 것", *[f"- {s}" for s in SPEECH_UNKNOWN]] if speech else []),
+           "", "## 확인 못 한 것", *[f"- {s}" for s in SPEECH_UNKNOWN]] if speech
+          else ["", "## 노래 변환의 근거 (공식 문서)", *[f"- {s}" for s in SONG_SOURCES]]),
         "",
     ])
 
@@ -371,13 +388,16 @@ def plan_evidence(kit: dict) -> str:
         f"| 전처리 위치 | {prep} |",
         f"| epochs | {kit['epochs']} |",
         f"| batch_size | {kit['batch_size']} |",
-        *([f"| 변환 명령 (11번 셀) | `svc infer {INFER_SPEECH}` — `-a` = 음높이 자동 예측(말용), `-t 0` |"] if speech else []),
+        f"| 변환 명령 (11번 셀) | `svc infer {INFER_SPEECH}` — `-a` = 음높이 자동 예측(말용), `-t 0` |" if speech else
+        f"| 변환 명령 (11번 셀) | `svc infer {INFER_SONG}` — `-na` = 음높이 자동 예측 끔(노래용), `-t 0` = 키 그대로 |",
         "",
         *[f"- {note}" for note in kit["notes"]],
         "",
         "### ⏱ 걸리는 시간 — 원본 파일에 적힌 어림값만 쓴다 (그 밖의 숫자는 '재 보지 않음')",
         *[f"- {note}" for note in (SPEECH_TIME_NOTES if speech else TIME_NOTES)],
     ]
+    if not speech:
+        lines += [f"- {SONG_KEY_HELP}", "", "### 📚 노래 변환의 근거 — 공식 문서에서 확인한 것만", *[f"- {s}" for s in SONG_SOURCES]]
     if speech:
         lines += ["", "### 📚 말 변환의 근거 — 공식 문서에서 확인한 것만", *[f"- {s}" for s in SPEECH_SOURCES],
                   "", "### ❔ 확인 못 한 것 — 지어내지 말고 이대로 밝힌다", *[f"- {s}" for s in SPEECH_UNKNOWN]]
@@ -646,6 +666,15 @@ def check_plan(answer: str, options: dict) -> list[str]:
             problems.append("말 변환인데 음높이 자동 예측(`-a`)을 쓴다는 안내가 없다 — 근거 자료의 변환 명령(11번 셀)을 그대로 써라")
         if re.search(r"(?<![\w-])-na\b|--no-auto-predict-f0", answer):
             problems.append("말 변환인데 음높이 자동 예측을 끄라고(`-na`) 썼다 — 근거 자료의 변환 명령처럼 `-a` 를 켠다")
+    else:  # 노래 변환은 음높이 자동 예측을 끈다 (원조 so-vits-svc 안내 — 노래에 켜면 심한 음높이 문제)
+        if not re.search(r"(?<![\w-])-na\b|--no-auto-predict-f0", answer):
+            problems.append("노래 변환인데 음높이 자동 예측을 끄는 `-na` 가 없다 — 근거 자료의 변환 명령(11번 셀)을 그대로 써라 "
+                            "(so-vits-svc-fork 는 기본값이 켜짐이라 적지 않으면 켜진 채 돈다)")
+        on_cmd = any(re.search(r"svc\s+infer", line) and re.search(r"(?<![\w-])-a\b", line) for line in answer.splitlines())
+        on_words = re.search(r"(?<![\w-])--auto-predict-f0\b|음높이\s*자동\s*예측[^\n.]{0,12}켜(?:세요|라|고\s|서|\s*둡|\s*둔|요|십시오)", answer)
+        if on_cmd or on_words:
+            problems.append("노래 변환인데 음높이 자동 예측을 켜라고(`-a`) 썼다 — 노래에 켜면 음이 심하게 어긋난다(원조 so-vits-svc 안내). "
+                            "근거 자료의 변환 명령처럼 `-na` 로 끈다")
     if kit["singer"] not in answer:
         problems.append(f"화자 이름 `{kit['singer']}` 이 답에 없다 — 명령·폴더 경로에 이 이름을 그대로 써라")
     wrong = sorted({s for s in re.findall(r"(?:--singer\s+|SINGER\s*=\s*['\"]|dataset_raw/)([A-Za-z0-9_-]+)", answer) if s != kit["singer"]})

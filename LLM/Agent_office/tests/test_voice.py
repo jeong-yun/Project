@@ -146,10 +146,14 @@ def test_notebook_keeps_cells_and_changes_only_the_values():
     assert [c["cell_type"] for c in nb["cells"]] == [c["cell_type"] for c in original["cells"]]
     changed = [(i, a, b) for i, (c0, c1) in enumerate(zip(original["cells"], nb["cells"]))
                for a, b in zip(c0["source"], c1["source"]) if a != b]
-    # 화자 이름 줄 · batch_size 줄만 (epochs 는 규칙상 기본값 400 그대로라 원본과 같다)
-    assert [(i, a.split("=")[0]) for i, a, _ in changed] == [(8, "SINGER "), (11, "cfg['train']['batch_size'] ")]
+    # 화자 이름 줄 · batch_size 줄 · 변환 셀의 설명·명령 줄만 (epochs 는 규칙상 기본값 400 그대로라 원본과 같다)
+    assert [(i, a[:12]) for i, a, _ in changed] == [(8, "SINGER = 'si"), (11, "cfg['train']"), (15, "# -t: 키 조절(반"),
+                                                    (15, '!svc infer "')]
     code = "".join(nb["cells"][8]["source"] + nb["cells"][11]["source"])
     assert "SINGER = 'jiyun_01'" in code and "['epochs'] = 400 " in code and "['batch_size'] = 8 " in code
+    infer = changed[3][2]  # 노래 변환: 음높이 자동 예측을 끈다 (원본 셀은 옵션이 없어 fork 기본값 '켜짐'으로 돌았다)
+    assert infer == changed[3][1].replace(" -fm crepe -t 0 ", " -fm crepe -na -t 0 ")
+    assert "-na: 음높이 자동 예측 끔" in changed[2][2] and "12 = 한 옥타브" in changed[2][2]
     assert "AI 로 합성한 음성" in "".join(nb["cells"][0]["source"])  # 첫 설명 셀에 표시 안내 (뒤에 덧붙임)
     for c in nb["cells"]:  # 코드 셀이 파이썬으로 읽힌다 (! · % 줄은 빼고)
         if c["cell_type"] == "code":
@@ -250,10 +254,11 @@ GOOD_PLAN = """목소리 출처: 내 목소리 — 학습·변환에 써도 된�
 1. 전처리: `python preprocess.py --input songs --singer myvoice --fast` → `dataset_raw/myvoice/`
 2. `dataset_raw.zip` 을 Drive `MyDrive/svc_project/` 에 업로드
 3. 학습: epochs 400 · batch_size 16 으로 `svc train`
-4. 변환: `svc infer` 로 음색 변환, `-t` 로 키 조절 → 반주와 합치기
+4. 변환: `svc infer cover.wav -fm crepe -na -t 0` 로 음색 변환 (음높이 자동 예측 끔), `-t` 로 키 조절 → 반주와 합치기
 
 결과물을 남에게 보이거나 올릴 때는 'AI 로 합성한 음성'이라고 표시하세요.
 """
+SONG_INFER_LINE = "4. 변환: `svc infer cover.wav -fm crepe -na -t 0` 로 음색 변환 (음높이 자동 예측 끔), `-t` 로 키 조절 → 반주와 합치기"
 
 
 def check(name, answer, **options):
@@ -266,7 +271,7 @@ def test_voice_plan_validator():
     cases = {
         "출처": GOOD_PLAN.replace("목소리 출처: 내 목소리 — 학습·변환에 써도 된다고 확인함.", ""),
         "표시": GOOD_PLAN.replace("결과물을 남에게 보이거나 올릴 때는 'AI 로 합성한 음성'이라고 표시하세요.", ""),
-        "단계": GOOD_PLAN.replace("4. 변환: `svc infer` 로 음색 변환, `-t` 로 키 조절 → 반주와 합치기", ""),
+        "단계": GOOD_PLAN.replace(SONG_INFER_LINE, "4. 반주와 합치기 (`-na`)"),
         "epochs": GOOD_PLAN.replace("epochs 400", "epochs 800"),
         "batch_size": GOOD_PLAN + "\n```python\ncfg['train']['batch_size'] = 32\n```",
         "화자": GOOD_PLAN.replace("--singer myvoice", "--singer other"),
@@ -275,6 +280,27 @@ def test_voice_plan_validator():
         result = check("voice_plan", answer, voice_kit=kit)
         assert not result.passed and want in result.log, (want, result.log)
     assert check("voice_plan", "아무 글", voice_blocked="x").passed  # 범위 밖이면 voice_guard 가 본다
+
+
+def test_song_plan_turns_auto_f0_off():
+    """노래: 음높이 자동 예측 끔(-na) — 원조 so-vits-svc README '노래에는 켜지 마라', fork 의 기본값은 켜짐."""
+    kit = voice.kit_from_inputs(PLAN_OK)
+    no_na = check("voice_plan", GOOD_PLAN.replace(" -na", "").replace(" (음높이 자동 예측 끔)", ""), voice_kit=kit)
+    assert not no_na.passed and "-na" in no_na.log
+    for on in (GOOD_PLAN + "\n쇳소리가 나면 `svc infer cover.wav -a -t 0` 로 다시 해 보세요.",
+               GOOD_PLAN + "\n`--auto-predict-f0` 를 붙여 보세요.", GOOD_PLAN + "\n음높이 자동 예측을 켜세요."):
+        result = check("voice_plan", on, voice_kit=kit)
+        assert not result.passed and "켜라고" in result.log, on
+    for fine in (GOOD_PLAN + "\n음높이 자동 예측(`-a`)은 말 변환용이라 켜지 않습니다.",  # 켜지 말라는 설명은 괜찮다
+                 GOOD_PLAN.replace("-na", "--no-auto-predict-f0")):
+        assert check("voice_plan", fine, voice_kit=kit).passed, fine
+    # 맞춤 안내·근거 자료에 끄는 이유와 키 바꾸는 법 (지어낸 값 없이: 기본 0, 12 = 한 옥타브)
+    readme = voice.kit_readme(kit)
+    evidence = voice.plan_evidence(kit)
+    for text in (readme, evidence):
+        assert "-na" in text and "`-t 0` 을 반음 수로" in text and "12 = 한 옥타브" in text
+        assert all(s in text for s in voice.SONG_SOURCES)
+    assert f"`svc infer {voice.INFER_SONG}`" in evidence
 
 
 def test_voice_guard_validator():
@@ -483,7 +509,7 @@ def test_speech_notebook_turns_on_auto_f0_and_adds_one_split_cell():
     nb = json.loads(voice.build_notebook(voice.kit_from_inputs(SPEECH_OK)))
     song_infer = next(c for c in _code(song) if "!svc infer" in c)
     speech_infer = next(c for c in _code(nb) if "!svc infer" in c)
-    assert " -a " not in song_infer and "cover.wav" in song_infer  # 노래 노트북의 변환 셀은 원본 그대로
+    assert " -a " not in song_infer and " -fm crepe -na -t 0 " in song_infer and "cover.wav" in song_infer  # 노래는 끈다
     assert '"{WORK}/speech.wav"' in speech_infer and " -fm crepe -a -t 0 " in speech_infer and "speech_converted.wav" in speech_infer
     assert "cover" not in next(c for c in _code(nb) if "Audio(" in c)
     assert len(nb["cells"]) == len(original["cells"]) + 1  # C안: 자르기 셀 하나만 더함

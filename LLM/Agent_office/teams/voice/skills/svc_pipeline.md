@@ -15,7 +15,7 @@
 | 전처리 A안 (권장) | 내 PC | `run.bat` 더블클릭 또는 `python preprocess.py --input <음원 폴더> --singer <화자>` (`--fast`: 빠른 모델) → `dataset_raw/<화자>/*.wav` |
 | 올리기 | Google Drive | `dataset_raw` 폴더를 `dataset_raw.zip` 으로 묶어 `MyDrive/svc_project/` 에 올림 (B안은 원본 곡 `songs.zip`) |
 | 학습 | Colab (T4 GPU) | `svc_colab_training.ipynb` 셀 순서대로 |
-| 변환 | Colab | 바꿀 노래의 보컬만 분리한 wav 를 `svc_project/cover.wav` 로 올리고 11번 셀 |
+| 변환 | Colab | 바꿀 노래의 보컬만 분리한 wav 를 `svc_project/cover.wav` 로 올리고 11번 셀 (음높이 자동 예측 끔 `-na`) |
 | 합치기 | 오디오 편집기 | 변환된 보컬(`cover_converted.wav`)과 반주를 합침 |
 
 ## 2. 전처리 (`preprocess.py`)
@@ -49,7 +49,7 @@
 | 8 | 학습 설정: `epochs = 400` (데이터 30분~1시간 기준, 부족하면 늘려서 다시 실행 — 이어서 학습됨), `batch_size = 16` (T4 기준, 메모리 부족(OOM)이면 8) |
 | 9 | `svc train --model-path "{WORK}/logs/44k"` — 체크포인트를 Drive 에 저장. 사전 학습 기반 모델을 자동으로 받아 이어서 학습 |
 | 10 | (선택) TensorBoard 로 학습 곡선 보기 |
-| 11 | 변환: 가장 최근 `G_*.pth` 로 `svc infer cover.wav -fm crepe -t 0 -o cover_converted.wav` |
+| 11 | 변환: 가장 최근 `G_*.pth` 로 `svc infer cover.wav -fm crepe -na -t 0 -o cover_converted.wav` — `-na` 는 맞춤 노트북이 더한 것 (원본 셀은 옵션이 없어 fork 기본값인 '자동 예측 켜짐'으로 돌았다) |
 | 12 | 결과 듣기 |
 
 A안이면 5~6번 셀을, B안이면 4번 셀을 건너뛴다.
@@ -69,7 +69,8 @@ A안이면 5~6번 셀을, B안이면 4번 셀을 건너뛴다.
 
 ## 6. 변환 옵션
 
-- 키 조절 `-t`: 반음 단위. 원래 부른 사람과 성별이 다르면 `-12` 또는 `+12` 를 먼저 해 본다 (원본 노트북 11번 셀). 남자 목소리 모델로 여자 노래를 바꾸면 보통 내리는 쪽(−)을, 여자 목소리 모델로 남자 노래를 바꾸면 올리는 쪽(+)을 먼저 들어 본다. 그 밖의 세부 값은 들어 보고 고친다 (재 보지 않음).
+- 음높이 자동 예측: 노래는 **끈다 (`-na`)**. 원조 so-vits-svc README 는 `--auto_predict_f0` 를 '노래(singing voice)를 변환할 때는 켜지 마라 — 심한 음높이 문제'라고 적었고, so-vits-svc-fork 의 `svc infer` 는 `-a/-na` 기본값이 켜짐이라 적지 않으면 켜진 채 돈다. 그래서 맞춤 노트북 11번 셀에 `-na` 를 적었다. 노래 계획·답에서 `-a`(켜기)를 권하지 않는다 — 자동 예측은 말 변환(🗣 일상 말 음성 변환 팀)용이다.
+- 키 조절 `-t`: 반음 단위 (fork 기본값 0, 12 = 한 옥타브 — fork 화면 안내 'Pitch (12 = 1 octave) … when Auto predict F0 is turned off'). 자동 예측을 껐으므로 변환할 보컬의 멜로디를 따르고 `-t` 만큼 옮긴다. 키를 바꾸려면 11번 셀의 `-t 0` 을 반음 수로 바꿔 다시 실행한다. 원래 부른 사람과 성별이 다르면 `-12` 또는 `+12` 를 먼저 해 본다 (원본 노트북 11번 셀). 남자 목소리 모델로 여자 노래를 바꾸면 보통 내리는 쪽(−)을, 여자 목소리 모델로 남자 노래를 바꾸면 올리는 쪽(+)을 먼저 들어 본다. 그 밖의 세부 값은 들어 보고 고친다 (재 보지 않음).
 - f0 방식: 원본은 특징 추출과 변환 모두 `-fm crepe` 를 쓴다. 학습과 변환에서 같은 방식을 쓴다.
 - 반주: 변환된 보컬과 반주를 오디오 편집기에서 합친다 (원본 노트북). 앱의 🎵 음악 팀은 새 곡을 만드는 팀이라 이 합치기를 대신하지 않는다.
 

@@ -23,7 +23,7 @@
 | 분량 | 10분 미만 부족 · 30분~1시간 이상 권장 | **같은 값을 빌려 씀 — 말에 맞는 기준은 확인 못 함** | 원본 preprocess.py·README (노래용) |
 | 특징 추출 | `svc pre-hubert -fm crepe` | 같음 (말에 더 맞는 f0 방식은 확인 못 함) | 원본 노트북 7번 셀 |
 | epochs · batch_size | 400 · 16 (OOM 이면 8) | **같은 값 — 말에 맞는 값은 확인 못 함** | 원본 노트북 8번 셀 |
-| 변환 | `svc infer cover.wav -fm crepe -t 0` | `svc infer speech.wav -fm crepe -a -t 0 -o speech_converted.wav` | 원조 README: `--auto_predict_f0` 는 말용, 노래에는 켜지 마라 |
+| 변환 | `svc infer cover.wav -fm crepe -na -t 0` (자동 예측 끔) | `svc infer speech.wav -fm crepe -a -t 0 -o speech_converted.wav` | 원조 README: `--auto_predict_f0` 는 말용, 노래에는 켜지 마라 |
 | 키 조절 | `-t` 로 반음 단위 (성별이 다르면 ±12) | 자동 예측을 켜면 `-t 0` 그대로 | fork 화면 안내: 자동 예측을 끈 경우에 맞추라 |
 | 반주 합치기 | 함 | 없음 | — |
 
