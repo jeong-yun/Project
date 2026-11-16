@@ -1319,9 +1319,33 @@ def followup_evidence(run: dict) -> str:
     return "\n\n".join(x for x in (original, evidence) if x)
 
 
-def render_turn(t: followup.FollowupTurn, head_name: str, avatar: str | None = None):
-    """수정 대화 한 번 — 요청 · 답 · 수정본 vN · 모델·기록 · 👔 부서장 검토. 답 상자를 돌려준다 (버튼을 더 넣을 수 있게).
-    결정 전 화면(render_followup)과 🕘 지난 업무 창이 함께 쓴다."""
+def render_diff(t: followup.FollowupTurn, fold: bool = True) -> None:
+    """🔍 코드가 앞 버전과 견준 바뀐 곳 — 바뀐 줄만 전·후로 (바뀌지 않은 부분은 보이지 않음). 요청하지 않은 곳일 수 있으면 경고.
+    fold=False: 이미 접힌 칸 안(🕘 지난 업무)이라 펼친 채로 — Streamlit 은 접는 칸 안에 접는 칸을 둘 수 없다."""
+    summary = followup.diff_summary(t)
+    if not summary or not t.diff:
+        if summary:
+            st.caption(summary)
+        return
+    odd = any(b.unrequested for b in t.diff)
+    body = st.expander(summary, expanded=odd) if fold else st.container()
+    with body:
+        if not fold:
+            st.markdown(f"**{summary}**")
+        for b in t.diff:
+            where = b.where or "(글 맨 앞)"
+            if b.unrequested:
+                st.warning(f"⚠️ {where} — 요청·바뀐 점 설명에 이곳을 가리키는 말이 없습니다 (코드 추정). 요청하지 않은 변경인지 확인하세요.")
+            else:
+                st.caption(where)
+            before, after = st.columns(2)
+            before.code(b.before or "(없음 — 새로 넣은 곳)", language=None, wrap_lines=True)
+            after.code(b.after or "(지움)", language=None, wrap_lines=True)
+
+
+def render_turn(t: followup.FollowupTurn, head_name: str, avatar: str | None = None, fold: bool = True):
+    """수정 대화 한 번 — 요청 · 답 · 수정본 vN · 🔍 바뀐 곳 · 모델·기록 · 👔 부서장 검토. 답 상자를 돌려준다 (버튼을 더 넣을 수 있게).
+    결정 전 화면(render_followup)과 🕘 지난 업무 창(fold=False — 접힌 칸 안)이 함께 쓴다."""
     with st.chat_message("user"):
         st.markdown(t.request)
     box = st.chat_message("assistant", avatar=avatar)
@@ -1332,6 +1356,7 @@ def render_turn(t: followup.FollowupTurn, head_name: str, avatar: str | None = N
             if t.harness:
                 checks = " · 🧪 형식 검사 " + ("통과" if all(h.passed for h in t.harness) else "실패 — 채택 전에 확인")
             st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
+            render_diff(t, fold)
         meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
         st.caption(meta + "".join(f" · {x}" for x in t.log))
         if t.critic or t.auto_fixed or t.auto_fixed_earlier:  # 👔 부서장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부서장이 직접 고친 점, 남은 추가로 고칠 점
@@ -1727,7 +1752,7 @@ def history_dialog(run_id: str) -> None:
     if turns:
         with st.expander(f"💬 결정 전 문의·수정 요청 ({len(turns)}번) — 수정본·부서장 검토"):
             for t in turns:
-                box = render_turn(t, "부서장")
+                box = render_turn(t, "부서장", fold=False)
                 if t.revised:  # 채택하지 않은 수정본도 나중에 확인할 수 있게 (어느 글을 보고 결정했는지)
                     box.download_button(f"⬇ 수정본 v{t.version} 받기 (.md, {len(t.content):,}자)", data=t.content,
                                         file_name=f"{tid}_{run_id[:8]}_v{t.version}.md", mime="text/markdown",

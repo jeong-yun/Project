@@ -171,6 +171,9 @@ def test_app_restores_conversation_after_restart_and_adopts_the_revision(app_env
     after = _texts(at)
     for part in ("정의를 줄여줘", "정의를 줄였습니다.", "**✏️ 수정본 v1**", "검토** · 4/5 · ✅ 합격", "표 제목이 요청과 다름", "용어 통일"):
         assert part in before and part in after, part  # 대화 · 수정본 vN · 부장 검토(지적·남은 추가로 고칠 점)가 전과 같이 보인다
+    # 🔍 코드가 계산한 바뀐 곳도 다시 켠 뒤 그대로 (접는 칸 — 요청에 없는 말뿐인 변경이라 펼쳐져 있다)
+    diff_box = next(e for e in at.expander if e.label.startswith("🔍 코드가 앞 버전(원래 결과)과 견준 바뀐 곳 1곳"))
+    assert "⚠️" in diff_box.label and any(c.value == "수정본 하나" for c in diff_box.code)
     title, shown = _result_box(at)
     assert shown == "수정본 하나" and "수정본 v1" in title  # 지금 결과 = 최신 수정본
     assert not any("답하는 중" in m.value for m in at.markdown)
@@ -189,8 +192,9 @@ def test_app_restores_conversation_after_restart_and_adopts_the_revision(app_env
     at = at.button(key=f"hist_{run_id}").click().run()
     assert not at.exception, at.exception
     history = _texts(at)
-    for part in ("정의를 줄여줘", "**✏️ 수정본 v1**", "검토** · 4/5 · ✅ 합격", "표 제목이 요청과 다름"):
+    for part in ("정의를 줄여줘", "**✏️ 수정본 v1**", "검토** · 4/5 · ✅ 합격", "표 제목이 요청과 다름", "🔍 코드가 앞 버전(원래 결과)과 견준 바뀐 곳 1곳"):
         assert part in history, part
+    assert any(c.value == "수정본 하나" for c in at.code)  # 지난 업무에서도 바뀐 곳 전·후 (이미 접힌 칸 안이라 펼친 채로)
     assert not any((b.key or "").startswith("send_fixes_") for b in at.button)  # 지난 업무에서는 보기만 한다
     downloads = [d.proto.label for d in at.get("download_button")]
     assert any(label.startswith("⬇ 수정본 v1 받기") for label in downloads)  # 수정본 전문은 내려받아 확인한다
