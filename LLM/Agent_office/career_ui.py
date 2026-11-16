@@ -22,7 +22,7 @@ from urllib.parse import unquote
 
 import streamlit as st
 
-from core import career, career_search, llm_factory, search, usage, vision
+from core import career, career_search, followup, llm_factory, search, usage, vision
 from core.config import load_settings
 from core.doc_export import to_docx, to_hwpx
 from core.schemas import HumanDecision, ModelsConfig, ModelSpec, RankModels, ToolResult
@@ -254,6 +254,8 @@ def vision_step(request: dict, team_id: str, task_id: str, models: ModelsConfig,
 READ_NOTICE = ("📥 **읽기** — 주소의 글을 가져올 때는 **그 주소만 나갑니다** — 내 문서 내용은 나가지 않습니다. 그 주소 하나만 읽고 "
                "링크를 따라가지 않습니다. 가져온 글은 용어·프로젝트 이름을 참고하는 외부 자료이고(출처 URL 표시) 내 경력·숫자의 근거가 "
                "아닙니다 — '내 저장소'로 표시한 GitHub 글만 사실의 출처가 됩니다. 승인 전에는 아무것도 가져오지 않습니다.")
+MINE_OFF_NOTE = ("⚠️ 체크하지 않으면 이 GitHub 글은 참고용 외부 자료입니다 — 그 글의 프로젝트·숫자를 포트폴리오에 넣으면 부서장 검토에서 "
+                 "'외부 자료 오용'으로 불합격될 수 있습니다. 내 저장소라면 체크하세요.")
 SEND_NOTICE = ("🔍 **보내기** — 검색어는 검색 엔진(DuckDuckGo)으로 나갑니다 — 아래에서 확인하고 승인하세요. 검색어에는 직무 이름·"
                "일반 기술 용어·연도만 넣습니다 — 이름·회사·프로젝트 이름·숫자·문서 문장이 있으면 그 검색어는 보내지 않습니다. "
                "검색 결과는 용어·트렌드에만 쓰고, 내 경력·숫자는 내 문서에서만 씁니다 (출처는 URL 로 표시).")
@@ -384,6 +386,8 @@ def _read_section(plan: list[dict], inputs: dict, wkey: str, ask_source: bool) -
                              value=bool(inputs.get("github_as_source")),
                              help="끄면 용어·프로젝트 이름을 참고하는 외부 자료로만 씁니다 (그 글의 사실·숫자를 내 경력으로 쓰지 못합니다). "
                                   "프로젝트 내용을 포트폴리오에 넣으려면 켜세요 — 내가 쓴 저장소일 때만.")
+        if not picked:  # 도움말은 마우스를 올려야 보인다 — 끈 채 보내면 어떻게 되는지는 화면에 (2026-11-16 결과마다 불합격)
+            st.caption(MINE_OFF_NOTE)
     as_source = bool(inputs.get("github_as_source") if picked is None else picked)
     st.markdown("**가져올 주소**\n\n" + "\n".join(_plan_line(item, as_source) for item in plan))
     return picked
@@ -580,6 +584,9 @@ def _options(run: dict, text: str) -> dict:
     if "career_questions" not in opts and not inputs:
         opts["career_questions"] = [q.__dict__ for q in career.questions_from_request(str(run.get("question") or ""))]
     formats = [f for f in ("md", "docx", "hwpx") if inputs.get(f"fmt_{f}")] or (["md", "docx"] if inputs else ["md", "docx", "hwpx"])
+    mine = [m for m in followup.human_requests(run.get("followups") or [], "") if m] if "career_source" in opts else []
+    if mine:  # 💬 수정 대화에 사람이 쓴 사실 — 수정본의 하네스·부서장과 같은 근거로 문서 미리보기의 사실 검사도 본다
+        opts["career_source"] = "\n\n".join(x for x in (str(opts["career_source"] or ""), *mine) if x)
     return {**opts, "kind": _kind(inputs, text), "formats": formats, "web": list(inputs.get("web_results") or [])}
 
 

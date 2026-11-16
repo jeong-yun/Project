@@ -1343,13 +1343,19 @@ def render_followup(run: dict) -> None:
     st.markdown("#### 💬 결과에 대해 묻기 · 수정 요청")
     critic_cfg = verification.critic_settings(verification_cfg, team.verification)  # 비평을 껐거나 상한 0 인 팀은 안내가 다르다
     st.caption(f"궁금한 점을 묻거나 고칠 점을 말하면 **{name_of(root)}**이(가) 답하거나 수정본을 만듭니다. "
-               "질문인지 수정인지는 에이전트가 판단하고, 수정본은 아래 '채택할 안'에 추가됩니다. "
-               + followup.review_note(dept_head.name, critic_cfg))
+               "질문인지 수정인지는 에이전트가 판단하고('❓ 질문만'·'✏️ 고쳐 줘' 버튼으로 직접 정해 보낼 수도 있습니다), "
+               "수정본은 아래 '채택할 안'에 추가됩니다. " + followup.review_note(dept_head.name, critic_cfg))
     pending = run.get("followup_pending")
     newest = next((t for t in reversed(turns) if t.revised), None)  # 지금 결과인 수정본 — 여기에만 '다음 수정 요청' 버튼
     send_fixes = ""
     for t in turns:
         box = render_turn(t, dept_head.name, avatar_for_chat(root))
+        if t is newest and not pending and t.repeated and not t.waived and box.button(
+                "🙆 이 지적은 괜찮음", key=f"waive_{run['run_id']}_{t.version}",
+                help="부서장이 되풀이한 지적을 이 수정본에서만 넘깁니다. 넘긴 지적은 검증 기록에 남고, 다음 수정 요청에는 넣지 않습니다."):
+            followup.waive(t)
+            storage.save_followups(run["run_id"], followup.dump_turns(turns))
+            st.rerun()
         fixes = followup.next_request(t) if t is newest and not pending else ""  # 부장이 직접 고친 뒤에도 남은 것만 — 최신 수정본에만
         if fixes and box.button(f"🛠 {dept_head.name}이(가) 짚은 점을 고쳐 달라고 요청",
                                 key=f"send_fixes_{run['run_id']}_{t.version}",
@@ -1357,7 +1363,7 @@ def render_followup(run: dict) -> None:
                                      "다음 수정 요청으로 보냅니다. 누르지 않으면 더 고치지 않습니다."):
             send_fixes = fixes
     if send_fixes:
-        start_background_followup(run, send_fixes)
+        start_background_followup(run, send_fixes, "revise")
         st.rerun()
     if pending:  # 💬 백그라운드에서 답하는 중 — 사무실·⏱ 호출 모니터가 계속 움직인다 (바꾸기·중단도 거기서)
         with st.chat_message("user"):
@@ -1372,17 +1378,28 @@ def render_followup(run: dict) -> None:
     with st.form(f"followup_{run['run_id']}", clear_on_submit=True):
         text = st.text_area("요청", height=80, label_visibility="collapsed",
                             placeholder="예: 3번 근거가 뭐야? / 정의를 두 문장으로 줄여줘 / 비교 표에 항목 하나 추가해줘")
-        send = st.form_submit_button("💬 보내기")
-    request = text.strip() if send else ""
+        # 고르는 칸(라디오) 대신 보내기 버튼 셋 — 누르는 횟수가 같고, 라디오는 채택 뒤 폼이 사라질 때 AppTest 가 지난 화면의 값을 찾다 멈췄다
+        pressed = [mode for mode, col in zip(followup.MODES, st.columns(len(followup.MODES)))
+                   if col.form_submit_button(followup.MODES[mode], help=MODE_HELP[mode])]
+    mode = pressed[0] if pressed else "auto"
+    request = text.strip() if pressed else ""
+    mode_key = f"followup_mode_{run['run_id']}"  # 주소 확인 단계(커리어)를 거쳐 나중에 보내도 고른 것을 쓴다
+    if request:
+        st.session_state[mode_key] = mode
     if is_career:  # 글에 적은 GitHub·웹 주소 → 확인 뒤 가져와 이 업무의 근거 자료에 더한다 (career_ui.followup_step)
         request = career_ui.followup_step(run, request, lambda: followup_evidence(run))
     if not request:
         return
-    start_background_followup(run, request)
+    start_background_followup(run, request, st.session_state.pop(mode_key, "auto"))
     st.rerun()
 
 
-def start_background_followup(run: dict, request: str) -> None:
+MODE_HELP = {"auto": "질문인지 수정인지 에이전트가 판단합니다.",
+             "question": "결과를 고치지 않고 답만 합니다 — 수정본·형식 검사·부서장 검토가 없어 빠릅니다.",
+             "revise": "수정 요청으로 보고 수정본을 만듭니다 (부서장이 검토합니다)."}
+
+
+def start_background_followup(run: dict, request: str, mode: str = "auto") -> None:
     """💬 추가 질문·수정 요청을 본 업무처럼 백그라운드 스레드로 (core/live.start_followup). 값은 지금 미리 잡아 둔다."""
     root = run["root_id"]
     node = nodes[root]
@@ -1403,7 +1420,7 @@ def start_background_followup(run: dict, request: str) -> None:
 
     def work():
         return followup.respond(agent, run["question"], current.content, request, turns, evidence, lessons,
-                                validators, options, team.harness.max_retries, head)
+                                validators, options, team.harness.max_retries, head, mode)
 
     def on_finish(r: dict) -> None:
         # 대화를 실행 기록에 남긴다 — 앱을 다시 켜도 수정본(채택 후보)·부장 검토가 보이고, 채택한 뒤에도 🕘 지난 업무에서 다시 본다
