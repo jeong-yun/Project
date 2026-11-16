@@ -6,6 +6,7 @@ app.py 는 이 파일의 함수만 부른다 (화면 조각). 기록·끊기 로
   render_summary(ctx, run)    : 진행 중 한 줄 요약 (+ ⚠️ 응답 없음 경고)        — 1초마다 다시 그리는 영역(st.fragment)
   render_monitor(ctx, run)    : 진행 중·조작 / 시간표 / 전체 호출 / 요약 / 개입 기록 탭 — 같은 영역
   render_step_check(ctx, run) : 🔀 멈춘 곳의 선택 화면 → 사람의 답(dict) 또는 None — 바깥 영역 (입력 중 다시 그리지 않음)
+                                (🧭 가정 확인도 같은 멈춤이라 여기서 그린다 — 단계마다 확인을 꺼도 요청 정리가 가정을 냈으면)
   render_restart(ctx, run)    : ✏️ 질문·브리프 고쳐 다시 → 요청(dict) 또는 None    — 바깥 영역
   quick_toggle / render_quick_note : ⚡ 빠른 답 (팀장 혼자) 켜기 · 결과 위 안내와 '👥 팀 전체로 다시'
   render_attempts(ctx, run)   : 🆚 예전 시도와 지금 비교
@@ -321,6 +322,37 @@ def _brief_fields(prefix: str, brief: DesiredState | None) -> DesiredState:
 
 
 NO_DIRECTION, OWN_DIRECTION = "__none__", "__own__"
+ASSUME_WHY = ("질문이 여러 뜻으로 읽힐 수 있어, 요청 정리 단계가 아래처럼 이해했습니다. 다르면 고쳐 주세요 — "
+              "고친 내용은 모든 팀원이 받는 업무 지시에 '사람이 정한 해석'으로 들어갑니다. 맞으면 '모두 이대로 진행'을 누르면 됩니다. "
+              "(이미 나온 내용을 보여 주는 것이라 모델을 더 부르지 않습니다.)")
+
+
+def _assumption_fields(prefix: str, items: list[str]) -> dict[str, str]:
+    """가정마다 원문 + '다르면 고쳐 쓰기' 칸 (비워 두면 이대로). {가정 원문: 고쳐 쓴 글}."""
+    fixes = {}
+    for i, text in enumerate(items):
+        st.markdown(f"{i + 1}. {text}")
+        fixes[text] = st.text_input("다르면 고쳐 쓰기 (비워 두면 이대로 진행)", key=f"{prefix}_a{i}",
+                                    placeholder="예: 회사 보고용이 아니라 개인 공부용입니다")
+    return fixes
+
+
+def render_assumption_check(run: dict) -> dict | None:
+    """🧭 시작 전 확인 — 요청 정리가 스스로 정한 가정 1~3개. 누르면 사람의 답 {"fixes": {...}} (모두 이대로면 빈 fixes)."""
+    cp = run.get("checkpoint") or {}
+    rid = run["run_id"]
+    with st.form(f"assume_check_{rid}_{len(call_monitor.interventions(rid))}"):
+        st.markdown("##### 🧭 시작 전 확인 — 팀이 이렇게 이해했습니다")
+        st.caption(ASSUME_WHY)
+        fixes = _assumption_fields(f"ac_{rid}", cp.get("assumptions") or [])
+        if cp.get("more"):
+            st.caption(f"나머지 가정 {cp['more']}개는 그대로 진행합니다 (결과의 업무 브리프에서 볼 수 있습니다).")
+        c1, c2 = st.columns(2)
+        keep = c1.form_submit_button("▶ 모두 이대로 진행", type="primary")
+        edit = c2.form_submit_button("✏️ 고친 내용으로 진행")
+    if keep:
+        return {"fixes": {}}
+    return {"fixes": fixes} if edit else None
 
 
 def render_step_check(ctx: Ctx, run: dict) -> dict | None:
@@ -328,6 +360,8 @@ def render_step_check(ctx: Ctx, run: dict) -> dict | None:
     cp = run.get("checkpoint") or {}
     point = cp.get("point")
     rid = run["run_id"]
+    if point == "assumptions":
+        return render_assumption_check(run)
     st.markdown(f"#### 🔀 단계 확인 — {step_mode.POINTS.get(point, point)}")
     st.caption("단계마다 확인을 켠 업무입니다. 확인하고 고친 뒤 '▶ 이대로 진행'을 누르면 다음 단계로 갑니다. "
                "고칠 것이 없으면 그대로 누르면 됩니다.")
@@ -343,10 +377,14 @@ def render_step_check(ctx: Ctx, run: dict) -> dict | None:
             own = st.text_input("직접 쓰는 방향 (✍️ 직접 쓰기를 골랐을 때)", key=f"own_dir_{rid}")
             st.markdown("**브리프** (모든 팀원이 받는 업무 지시)")
             brief = _brief_fields(f"sc_{rid}", DesiredState.model_validate(cp["brief"]) if cp.get("brief") else None)
+            fixes = {}
+            if brief.assumptions:  # 🧭 가정 확인 — 단계마다 확인에서는 따로 멈추지 않고 여기서 함께 묻는다
+                st.markdown("**🧭 팀이 이렇게 이해했습니다** — 다르면 고쳐 주세요 (고친 내용은 '사람이 정한 해석'으로 들어갑니다)")
+                fixes = _assumption_fields(f"sc_{rid}", brief.assumptions)
             go = st.form_submit_button("▶ 이대로 진행", type="primary")
             if go:
                 direction = own.strip() if pick == OWN_DIRECTION else ("" if pick == NO_DIRECTION else labels.get(pick, pick))
-                answer = {"brief": brief.model_dump(), "direction": direction}
+                answer = {"brief": brief.model_dump(), "direction": direction, "fixes": fixes}
         elif point == "plan":
             if cp.get("analysis"):
                 st.caption(f"팀장의 분석: {cp['analysis']}")

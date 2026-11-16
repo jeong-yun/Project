@@ -8,6 +8,10 @@
 멈춤은 LangGraph interrupt 로 하므로 체크포인터가 있어야 한다 (app.py 는 SqliteSaver).
 멈추는 노드에는 LLM 호출을 두지 않는다 — 재개하면 그 노드를 처음부터 다시 실행하기 때문 (방향 제안은 앞 노드가 한다).
 
+🧭 가정 확인 (point="assumptions") — 단계마다 확인을 꺼도, 요청 정리 모델이 '질문이 모호해 스스로 정한 가정'(brief.assumptions)을
+냈으면 팀이 일을 시작하기 전에 한 번 멈춰 사람에게 보여 준다 (2026-11-16 — 가정이 틀린 채 끝까지 가서 사람이 다시 고치던 문제).
+질문은 이미 나온 가정을 그대로 쓴다 (모델 호출 없음). 묻지 않는 경우는 core/workflow.py 의 asks_assumptions 참고.
+
 이 파일은 '멈출 때 화면에 보낼 값'과 '사람의 답을 상태에 반영하는 법'만 맡는다 (순수 함수 → 테스트하기 쉬움).
 """
 
@@ -18,7 +22,10 @@ from core.brief import DesiredState
 from core.schemas import AgentAnswer
 
 CHECK = "step_check"  # interrupt 값의 type
-POINTS = {"brief": "① 브리프·방향", "plan": "② 팀장 업무 분배", "drafts": "③ 초안 (통합 전)"}
+POINTS = {"assumptions": "🧭 시작 전 확인 (팀이 이해한 내용)", "brief": "① 브리프·방향", "plan": "② 팀장 업무 분배",
+          "drafts": "③ 초안 (통합 전)"}
+MAX_ASSUMPTIONS = 3  # 🧭 가정 확인에서 묻는 최대 개수 (나머지는 그대로 둔다)
+DECIDED = "사람이 정한 해석 (목표·완료 기준보다 우선)"  # 고쳐 쓴 가정이 들어가는 브리프 제약 앞머리
 
 
 class DirectionOption(BaseModel):
@@ -48,6 +55,18 @@ def brief_payload(brief: DesiredState, options: list[DirectionOption], root: str
             "options": [o.model_dump() for o in options]}
 
 
+def new_assumptions(brief: DesiredState, given: DesiredState | None) -> list[str]:
+    """사람에게 물을 가정 — 요청 정리 모델이 새로 낸 것만 (사람이 직접 적은 가정은 묻지 않는다)."""
+    mine = set((given.assumptions if given else None) or [])
+    return [a for a in brief.assumptions if a.strip() and a not in mine]
+
+
+def assumptions_payload(pending: list[str], root: str) -> dict:
+    """화면에 보낼 값 — 앞에서부터 MAX_ASSUMPTIONS 개만 묻고, 나머지 개수(more)는 '그대로 둔다'고 알린다."""
+    asked = pending[:MAX_ASSUMPTIONS]
+    return {"type": CHECK, "point": "assumptions", "root": root, "assumptions": asked, "more": len(pending) - len(asked)}
+
+
 def plan_payload(root: str, chosen: list[tuple[str, str]], plan: AgentAnswer | None, children: list[str]) -> dict:
     return {"type": CHECK, "point": "plan", "root": root, "children": children,
             "assignments": [{"child_id": c, "subtask": t} for c, t in chosen],
@@ -63,19 +82,48 @@ def is_check(value) -> bool:
     return isinstance(value, dict) and value.get("type") == CHECK
 
 
+def wait_label(run: dict) -> str:
+    """멈춘 업무의 상태 글 — 🧭 가정 확인은 단계마다 확인을 켜지 않은 업무에도 오므로 따로 부른다."""
+    return "🧭 시작 전 확인 대기" if (run.get("checkpoint") or {}).get("point") == "assumptions" else "🔀 확인 대기"
+
+
 # ─── 사람의 답 → 상태 ──────────────────────────────────────────────
 def apply_brief(brief: DesiredState, answer: dict) -> tuple[DesiredState, str]:
-    """answer = {"brief": {...고친 브리프}?, "direction": "B: 성과 중심 — …"?}. (새 브리프, 기록 한 줄)"""
+    """answer = {"brief": {...고친 브리프}?, "direction": "B: 성과 중심 — …"?, "fixes": {가정: 고쳐 쓴 글}?}. (새 브리프, 기록 한 줄)
+
+    단계마다 확인을 켜면 🧭 가정 확인을 따로 멈추지 않고 이 ① 화면에서 함께 묻는다 (fixes — apply_assumptions 와 같은 모양).
+    """
     answer = answer or {}
-    new = DesiredState.model_validate(answer["brief"]) if answer.get("brief") else brief
+    edited = DesiredState.model_validate(answer["brief"]) if answer.get("brief") else brief
     direction = (answer.get("direction") or "").strip()
     note = []
-    if new != brief:
+    if edited != brief:
         note.append("브리프 고침")
+    new, fixed = apply_assumptions(edited, answer)
+    if new is not edited:
+        note.append(fixed)
     if direction:
         new = new.model_copy(update={"constraints": [*new.constraints, f"진행 방향(사용자 선택): {direction}"]})
         note.append(f"방향 선택 — {direction[:60]}")
     return new, " · ".join(note) or "그대로 승인"
+
+
+def apply_assumptions(brief: DesiredState, answer: dict) -> tuple[DesiredState, str]:
+    """answer = {"fixes": {가정 원문: 고쳐 쓴 글}} (비었거나 원문과 같으면 '이대로'). (새 브리프, 기록 한 줄)
+
+    고쳐 쓴 가정은 가정 목록에서 빼고, 모든 에이전트가 받는 브리프 제약에 '사람이 정한 해석'으로 넣는다
+    (목표·완료 기준이 틀린 가정을 바탕으로 쓰였을 수 있어 그보다 우선한다고 적는다). 모두 이대로면 브리프를 바꾸지 않는다.
+    """
+    fixes = {k: (v or "").strip() for k, v in ((answer or {}).get("fixes") or {}).items()}
+    fixed = [(a, fixes[a]) for a in brief.assumptions if fixes.get(a) and fixes[a] != a.strip()]
+    if not fixed:
+        return brief, "모두 이대로 진행"
+    gone = {a for a, _ in fixed}
+    new = brief.model_copy(update={
+        "assumptions": [a for a in brief.assumptions if a not in gone],
+        "constraints": [*brief.constraints, *(f"{DECIDED}: {text}" for _, text in fixed)],
+    })
+    return new, f"가정 {len(fixed)}개 고침 — " + " / ".join(text[:40] for _, text in fixed)
 
 
 def apply_plan(chosen: list[tuple[str, str]], answer: dict, valid: set[str]) -> tuple[list[tuple[str, str]], str]:

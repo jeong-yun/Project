@@ -16,7 +16,7 @@ import streamlit as st
 
 import autonomy_ui
 import office_ui
-from core import autonomy, call_monitor, office
+from core import autonomy, call_monitor, office, step_mode
 from core.live import STAGES, stage_of
 
 TABS = {
@@ -100,7 +100,7 @@ def lead_state(run: dict | None) -> str:
     if run.get("error"):
         return "⚠ 오류"
     if run["status"] == "step_check":
-        return "🔀 확인 대기"
+        return step_mode.wait_label(run)
     return "🔔 결정 대기" if run["status"] == "awaiting_human" else "✓ 끝남"
 
 
