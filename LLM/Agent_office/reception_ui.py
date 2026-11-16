@@ -65,7 +65,7 @@ def render(ctx: Ctx, depts: list) -> None:
     text = st.text_area("🛎 질문", key=TEXT_KEY, height=80, placeholder="예: 다음 달 오사카 3박 4일 / 이 테라폼 코드 보안 점검 / 부가세 신고서 써줘")
     files = attach_ui.uploader("info_files")  # 📎 첨부 — 배정된 팀까지 따라간다 (부서장 회의에는 파일 이름만)
     asked = st.button("🛎 부서장 회의에 묻기", key="info_go", type="primary", disabled=not text.strip(),
-                      help="보조(부장) 모델 1회로 모든 부서를 한꺼번에 판단합니다 (부서마다 따로 부르지 않음). 모델을 못 쓰면 낱말 비교.")
+                      help="보조(부서장) 모델 1회로 모든 부서를 한꺼번에 판단합니다 (부서마다 따로 부르지 않음). 모델을 못 쓰면 낱말 비교.")
     if asked and not attach_ui.blocked(files):
         items = attach_ui.carry(files, ctx.data_dir, replace=True)
         with st.spinner("👔 부서장 회의 중…"):

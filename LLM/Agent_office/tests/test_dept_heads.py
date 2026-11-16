@@ -52,7 +52,7 @@ def test_critic_resolution_order(org, team, models):
     # 1) 부장 모델을 고르면 그것이 먼저
     plan = dept_heads.critic_plan(with_critic, team, chains, org.id, head, "openai:gpt-5.5")
     assert plan.source == "chosen" and keys(plan.chain)[0] == "openai:gpt-5.5" and "openai:gpt-5.4" in keys(plan.chain)
-    assert plan.who == "🔬 리서치·지식부 부장"
+    assert plan.who == "🔬 리서치·지식부 부서장"
     # 지금 고를 수 없는 모델이 저장돼 있으면(지운 직접 입력 모델) 무시
     assert dept_heads.critic_plan(models, team, chains, org.id, head, "openai:gone-model").source == "utility"
 
@@ -80,10 +80,10 @@ def test_department_head_store_roundtrip(tmp_path):
 
 def test_head_identity_comes_from_departments_yaml():
     head = dept_heads.head_of(dept("security", ["security_governance", "infra_security"]))
-    assert head.name == "보안부 부장" and "통제 번호" in head.persona and head.label == "🛡️ 보안부 부장"
-    assert head.critic_persona().startswith("너는 보안부 부장이다.")
+    assert head.name == "보안부 부서장" and "통제 번호" in head.persona and head.label == "🛡️ 보안부 부서장"
+    assert head.critic_persona().startswith("너는 보안부 부서장이다.")
     bare = building.Department(id="x", name="실험부", emoji="🧪", color="#000000", description="실험한다.")
-    assert dept_heads.head_of(bare).name == "실험부 부장" and "실험한다." in dept_heads.head_of(bare).persona
+    assert dept_heads.head_of(bare).name == "실험부 부서장" and "실험한다." in dept_heads.head_of(bare).persona
 
 
 # ─── 무료만 · 비공개 팀 · 강도 경고 ──────────────────────────────────────
@@ -151,7 +151,7 @@ def test_router_uses_department_head_model(use_script, monkeypatch):
     models = building_models()
     picked = building.route_request("오사카 3박 4일", travel, [dom, abr], models, choice="openai:gpt-5.4")
     assert picked["how"] == "llm" and picked["model"] == "openai · gpt-5.4" and used == ["openai:gpt-5.4"]
-    assert "여행부 부장" in script.prompts("TeamPick")[0] and "운영 시간" in script.prompts("TeamPick")[0]  # 부장 관점
+    assert "여행부 부서장" in script.prompts("TeamPick")[0] and "운영 시간" in script.prompts("TeamPick")[0]  # 부서장 관점
     used.clear()
     building.route_request("오사카", travel, [dom, abr], models)  # 고르지 않으면 부장 기본(models.yaml critic)
     # claude_cli 는 테스트 PC 에 없으므로(꺼짐) 부장 기본의 다음 후보 — 팀 배정은 모델 1번 (낱말 비교는 실패할 때만)
@@ -181,9 +181,9 @@ def test_workflow_critic_is_department_head_with_chosen_model(org, ranks, team, 
     steps = [p for k, p in stream_office(graph, org, "질문", "am_action", brief=BRIEF) if k == "step"]
     final = steps[-1]
     assert final.critic.score == 5 and final.critic_model.label == "openai · gpt-5.4"
-    assert final.critic_by == "🔬 리서치·지식부 부장"
+    assert final.critic_by == "🔬 리서치·지식부 부서장"
     critic_prompt = script.prompts("CriticResult")[0]
-    assert critic_prompt.startswith("너는 리서치·지식부 부장이다.") and "원전" in critic_prompt
+    assert critic_prompt.startswith("너는 리서치·지식부 부서장이다.") and "원전" in critic_prompt
 
 
 def test_workflow_without_head_uses_default_head_chain(org, ranks, team, models, use_script):
@@ -355,7 +355,7 @@ def test_home_department_models_and_band_opens_department_screen(app_env):
     at = _app()
     at.run()
     assert not at.exception, at.exception
-    box = "🎛 부서별 모델 선택 — 👔 부장(비평가) · 팀원"
+    box = "🎛 부서별 모델 선택 — 👔 부서장(비평가) · 팀원"
     assert any(e.label == box for e in at.expander)
     assert not any(s.key and s.key.startswith("member_model_") for s in at.selectbox)  # 팀을 고르기 전에는 팀원 표 없음
     at = at.selectbox(key="dept_models_pick").set_value("security").run()  # 메인 '🎛 부서별 모델 선택'에서 부서 고르기

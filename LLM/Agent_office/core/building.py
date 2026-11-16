@@ -48,7 +48,7 @@ class Department:
     color: str
     description: str
     teams: list[str] = field(default_factory=list)
-    head: dict = field(default_factory=dict)  # 부서 부장 {name, persona} — 비평가·🧭 부서장 (core/dept_heads.py)
+    head: dict = field(default_factory=dict)  # 부서장 {name, persona} — 비평가·🧭 팀 배정 (core/dept_heads.py)
 
 
 # ─── 부서·층 ─────────────────────────────────────────────────────────
@@ -322,7 +322,7 @@ def route_messages(text: str, dept: Department, candidates: list[Team]):
     lines = [f"- {t.id}: {t.name} — {t.description} (업무: {', '.join(x.title for x in t.tasks) or '자유 질문'})"
              for t in map(with_scope, candidates)]
 
-    head = head_of(dept)  # 부서 부장 — 비평가와 같은 사람 (config/departments.yaml head)
+    head = head_of(dept)  # 부서장 — 비평가와 같은 사람 (config/departments.yaml head)
     system = (f"당신은 '{dept.name}' 부서장({head.name})입니다. 관점: {head.persona}\n부서 소개: {dept.description}\n"
               "사람의 요청을 읽고 아래 팀 중 가장 알맞은 팀 하나를 고르세요. 요청을 직접 처리하지 마세요.\n\n"
               "[팀 목록]\n" + "\n".join(lines))
@@ -330,9 +330,9 @@ def route_messages(text: str, dept: Department, candidates: list[Team]):
 
 
 def route_request(text: str, dept: Department, candidates: list[Team], models, choice: str = "") -> dict:
-    """{team_id, reason, how: one|llm|keyword, model, note} — 팀이 하나면 바로, 아니면 부장 모델 1회, 실패하면 낱말 비교.
+    """{team_id, reason, how: one|llm|keyword, model, note} — 팀이 하나면 바로, 아니면 부서장 모델 1회, 실패하면 낱말 비교.
 
-    choice = 화면에서 고른 부장 모델 ("provider:model", 없으면 ⭐ 추천 → models.yaml critic → utility — core/dept_heads.py)."""
+    choice = 화면에서 고른 부서장 모델 ("provider:model", 없으면 ⭐ 추천 → models.yaml critic → utility — core/dept_heads.py)."""
     if len(candidates) == 1:
         return {"team_id": candidates[0].id, "reason": "이 부서의 팀은 하나뿐입니다.", "how": "one", "model": "", "note": ""}
     from core import dept_heads, llm_factory, usage  # 순환·무거운 import 방지
@@ -348,7 +348,7 @@ def route_request(text: str, dept: Department, candidates: list[Team], models, c
             return {"team_id": pick.team_id, "reason": pick.reason, "how": "llm", "model": call.spec.label, "note": ""}
         note = f"모델이 목록에 없는 팀({pick.team_id})을 골라 낱말 비교로 정했습니다."
     except Exception as e:  # noqa: BLE001 — 키 없음·한도 초과 등: 배정은 낱말 비교로라도 끝낸다
-        note = f"부장 모델을 쓰지 못해 낱말 비교로 정했습니다 ({type(e).__name__})."
+        note = f"부서장 모델을 쓰지 못해 낱말 비교로 정했습니다 ({type(e).__name__})."
     team_id, reason = keyword_pick(text, candidates)
     return {"team_id": team_id, "reason": reason, "how": "keyword", "model": "", "note": note}
 

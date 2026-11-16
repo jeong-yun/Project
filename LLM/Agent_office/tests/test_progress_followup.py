@@ -320,7 +320,7 @@ def test_default_head_is_at_least_as_strong_as_team_lead(models):
 
 
 def test_weaker_head_gets_warning_not_blocked(models, org, team):
-    assert member_models.head_warning(models, "google:gemini-3.5-flash", LEAD).startswith("부장 모델 gemini-3.5-flash")
+    assert member_models.head_warning(models, "google:gemini-3.5-flash", LEAD).startswith("부서장 모델 gemini-3.5-flash")
     assert member_models.head_warning(models, LEAD, LEAD) == ""
     assert member_models.head_warning(models, "claude_cli:claude-fable-5-1", LEAD) == ""
     chains = member_models.team_rank_models(org, models, team, {})
@@ -464,9 +464,9 @@ def test_app_shows_head_review_and_sends_extra_fixes(app_env, use_script):
     at = wait_for(lambda: (lambda a: a if any("추가로 고칠 점" in m.value for m in a.markdown) else None)(_open().run()), 60)
     assert not at.exception, at.exception
     review = next(m.value for m in at.markdown if "추가로 고칠 점" in m.value)
-    assert "부장" in review and "5/5" in review and "합격" in review
+    assert "부서장" in review and "5/5" in review and "합격" in review
     fixed, left = review.split("**추가로 고칠 점**")  # 부장이 직접 고친 점 / 상한에 닿고도 남은 점
-    assert "부장" in fixed and "추가로 고칠 점 1개를 직접 고쳤습니다" in fixed and "표 제목에 기준일 넣기" in fixed
+    assert "부서장" in fixed and "추가로 고칠 점 1개를 직접 고쳤습니다" in fixed and "표 제목에 기준일 넣기" in fixed
     assert "용어 통일" in left
     assert "표 제목에 기준일 넣기" in script.prompts("HeadFix")[0]  # 버튼을 누르지 않아도 부장이 직접 고쳤다
     assert len(script.prompts("FollowupResult")) == 1 and not any("수정본 v2" in m.value for m in at.markdown)  # 같은 v1 안에서
