@@ -452,7 +452,7 @@ with st.sidebar:
             # 긴 이름은 앞(날짜·질문)과 끝(_지도·_자기소개서 같은 종류)을 함께 보이게
             stem = path.stem if len(path.stem) <= 34 else f"{path.stem[:16]}…{path.stem[-14:]}"
             st.download_button(
-                {".html": "🗺 ", ".mp3": "🎵 ", ".docx": "📝 ", ".hwpx": "📝 "}.get(path.suffix, "📄 ") + stem + path.suffix,
+                {".html": "🗺 ", ".mp3": "🎵 ", ".docx": "📝 ", ".hwpx": "📝 ", ".zip": "🎁 "}.get(path.suffix, "📄 ") + stem + path.suffix,
                 data=path.read_bytes(), file_name=path.name,
                 mime=MIME.get(path.suffix, "text/markdown"), key=f"dl_{path.name}", use_container_width=True,
             )
@@ -1480,6 +1480,8 @@ def save_adopted(run: dict, decision: HumanDecision) -> list[str]:
                 run["notes"].append(f"결과 파일 저장 일부 실패: {run['save_error']}")
         if is_edu:  # 선생님 만들기 → 과목 저장 · 질문 → 질문 기록 (data/learning/)
             education_ui.on_adopt(edu_ctx, run, decision)
+        if is_voice:  # 맞춤 Colab 묶음(노트북·안내·원본 스크립트 — 녹음은 넣지 않음) → 지난 업무 창에서 다시 받기
+            extra = voice_ui.adopted_files(run)
         paths = export_adopted(run, decision, team_id, team.name, names, RESULTS_DIR, team.disclaimer, html_text, appendix,
                                audio_path=audio_path, appendix_title=title, extra_files=extra)
         return [str(p) for p in paths]
@@ -1717,6 +1719,8 @@ def history_dialog(run_id: str) -> None:
             st.markdown(decision.final_answer)
         st.download_button("⬇ 이 결과 받기 (.md)", data=decision.final_answer, file_name=f"{tid}_{run_id[:8]}.md",
                            mime="text/markdown", key=f"hist_dl_{run_id}")
+        if tid in teams_by_id and voice_ui.FEATURE in teams_by_id[tid].features:
+            voice_ui.history_download(RESULTS_DIR, tid, run_id)  # 🎁 채택 때 저장한 맞춤 Colab 묶음
     elif decision:
         st.warning(f"❌ 전체 반려 · 만족도 {decision.score}/5")
     if decision and decision.comment:

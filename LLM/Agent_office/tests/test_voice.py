@@ -810,3 +810,64 @@ def test_slice_tool_needs_consent_before_cutting(app):
     at = at.button[[b.label for b in at.button].index("✂️ 자르기")].click().run()
     assert not at.exception, at.exception
     assert any("목소리 사용 확인" in w.value for w in at.warning)
+
+
+# ═══ 💾 채택 때 맞춤 묶음 저장 → 🕘 지난 업무에서 다시 받기 ═══════════════════════════════
+
+
+def kit_run(run_id: str = "abcdef12-3456") -> dict:
+    from core.schemas import ToolResult
+
+    kit = voice.kit_from_inputs(PLAN_OK)
+    return {"run_id": run_id, "question": "노래 음색 변환 학습 계획", "notes": [],
+            "tools": [ToolResult(tool="voice_svc", title="t", content="c", harness_options={"voice_kit": kit})]}
+
+
+def test_adopt_saves_kit_zip_without_recordings(tmp_path):
+    import sys
+
+    from core.exporter import export_adopted, list_results
+    from core.schemas import HumanDecision
+
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    import voice_ui
+
+    run = kit_run()
+    extra = voice_ui.adopted_files(run)
+    assert list(extra) == ["svc_myvoice_abcdef12.zip"]
+    decision = HumanDecision(action="adopt", adopted_node_id="lead", final_answer=GOOD_PLAN, score=4)
+    paths = export_adopted(run, decision, "voice", "팀", {}, tmp_path, extra_files=extra)
+    assert sorted(p.suffix for p in paths) == [".md", ".zip"] and {p.suffix for p in list_results(tmp_path, "voice")} == {".md", ".zip"}
+    saved = voice_ui.saved_kit(tmp_path, "voice", run["run_id"])
+    assert saved and saved.parent == tmp_path / "voice"
+    with zipfile.ZipFile(saved) as zf:  # 맞춤 노트북·안내·원본 스크립트만 — 녹음·데이터 zip 은 없다
+        assert set(zf.namelist()) == {voice.NOTEBOOK, "README.md", "preprocess.py", "run.bat"}
+    assert voice_ui.saved_kit(tmp_path, "voice", "ffffffff-0") is None and voice_ui.saved_kit(tmp_path, "nope", run["run_id"]) is None
+    no_kit = {**run, "tools": []}  # 데이터 점검·자유 질문 업무는 묶음이 없다
+    assert voice_ui.adopted_files(no_kit) is None
+
+
+def test_past_task_window_offers_saved_kit_again(app, tmp_path):
+    from core.exporter import export_adopted
+    from core.schemas import HumanDecision
+    from core.storage import Storage
+
+    run = kit_run()
+    decision = HumanDecision(action="adopt", adopted_node_id="lead", final_answer=GOOD_PLAN, score=4)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    db = Storage(tmp_path / "data" / "runs.db")
+    db.create_run(run["run_id"], "voice", "lead", run["question"])
+    db.save_decision(run["run_id"], decision)
+    export_adopted(run, decision, "voice", "팀", {}, tmp_path / "results", extra_files={"svc_myvoice_abcdef12.zip": voice.kit_zip(
+        voice.kit_from_inputs(PLAN_OK))})
+    import streamlit as st
+
+    st.cache_resource.clear()  # 앞 테스트의 앱이 캐시해 둔 저장소(다른 임시 폴더)를 쓰지 않게
+    at = app.run()  # 앱을 새로 켠 것과 같다 — 화면 메모리에는 이 업무가 없다
+    assert not at.exception, at.exception
+    assert any("🎁" in (d.proto.label or "") for d in at.get("download_button"))  # 사이드바 '📂 저장된 결과 파일'에도
+    at = at.button(key=f"hist_{run['run_id']}").click().run()
+    assert not at.exception, at.exception
+    labels = [d.proto.label for d in at.get("download_button")]
+    assert "⬇ 맞춤 실행 파일 다시 받기 (.zip)" in labels

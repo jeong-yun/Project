@@ -23,6 +23,38 @@ def tool_options(run: dict) -> dict:
     return {k: v for t in run.get("tools") or [] if t.tool == "voice_svc" for k, v in t.harness_options.items()}
 
 
+def kit_name(run: dict, kit: dict) -> str:
+    """맞춤 묶음 파일 이름 — 업무 번호 앞 8자리를 넣어 지난 업무 창이 저장 파일을 찾는다 (saved_kit)."""
+    return f"{'speech' if kit.get('kind') == 'speech' else 'svc'}_{kit['singer']}_{run['run_id'][:8]}.zip"
+
+
+def kit_bytes(run: dict, kit: dict) -> bytes:
+    if "voice_zip" not in run:  # 다시 그릴 때마다 만들지 않는다
+        run["voice_zip"] = voice.kit_zip(kit)
+    return run["voice_zip"]
+
+
+def adopted_files(run: dict) -> dict[str, bytes] | None:
+    """채택 시 results/<팀>/ 에 함께 저장할 맞춤 묶음 (노트북·안내·원본 스크립트만 — 녹음·데이터 zip 은 저장하지 않는다)."""
+    kit = tool_options(run).get("voice_kit")
+    return {kit_name(run, kit): kit_bytes(run, kit)} if kit else None
+
+
+def saved_kit(results_dir: Path, team_id: str, run_id: str) -> Path | None:
+    """채택 때 저장한 맞춤 묶음 — 파일 이름 끝의 업무 번호로 찾는다 (없으면 None: 채택 전 기능·학습 계획이 아닌 업무)."""
+    folder = results_dir / team_id
+    hits = sorted(folder.glob(f"*_{run_id[:8]}.zip")) if folder.is_dir() else []
+    return hits[-1] if hits else None
+
+
+def history_download(results_dir: Path, team_id: str, run_id: str) -> None:
+    """🕘 지난 업무 창 — 저장한 맞춤 묶음 다시 받기."""
+    path = saved_kit(results_dir, team_id, run_id)
+    if path:
+        st.download_button("⬇ 맞춤 실행 파일 다시 받기 (.zip)", data=path.read_bytes(), file_name=path.name,
+                           mime="application/zip", key=f"hist_voice_{run_id}")
+
+
 def preview(run: dict) -> None:
     opts = tool_options(run)
     stats, kit = opts.get("voice_dataset"), opts.get("voice_kit")
@@ -38,11 +70,9 @@ def preview(run: dict) -> None:
                     else "보컬 분리·학습·변환은 내 PC 와 Colab 에서")
             st.caption(f"화자 `{kit['singer']}` · epochs {kit['epochs']} · batch_size {kit['batch_size']} · 전처리 {kit['mode']}안 — "
                        f"Colab 노트북·preprocess.py·run.bat·안내(README) 묶음입니다. {work} 직접 돌립니다.")
-            if "voice_zip" not in run:  # 다시 그릴 때마다 만들지 않는다
-                run["voice_zip"] = voice.kit_zip(kit)
-            prefix = "speech" if speech else "svc"
-            st.download_button("⬇ 맞춤 실행 파일 받기 (.zip)", data=run["voice_zip"], file_name=f"{prefix}_{kit['singer']}_{run['run_id'][:8]}.zip",
+            st.download_button("⬇ 맞춤 실행 파일 받기 (.zip)", data=kit_bytes(run, kit), file_name=kit_name(run, kit),
                                mime="application/zip", key=f"dl_voice_{run['run_id']}")
+            st.caption("💾 채택하면 이 묶음을 결과 폴더에 저장해, 앱을 다시 켜도 '🕘 지난 업무'에서 다시 받을 수 있습니다.")
     if stats or kit:
         st.caption(f"🏷 변환한 결과물을 남에게 보이거나 올릴 때는 '{voice.AI_LABEL}'이라고 표시하세요.")
 
