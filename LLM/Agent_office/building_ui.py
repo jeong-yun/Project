@@ -4,7 +4,7 @@
   흐름 (부서장 중심 — 입력창은 메인에 하나, 부서 화면에 하나)
     🛎 인포메이션 센터 (메인, reception_ui.py) : 어느 부서인지 모를 때. 부서장 회의로 맡을 부서를 찾고 → 그 부서 업무 화면의
                                                  부서장 창구로 넘긴다. 맡을 부서가 없으면 새 부서를 제안한다 ([만들기] / [나중에]).
-    👔 부서장 창구 (부서 화면, head_desk)     : 부서장(부장 모델 1회, 실패하면 낱말 비교 — core/building.route_request)이 하위 팀 하나를
+    👔 부서장 창구 (부서 화면, head_desk)     : 부서장(모델 1회, 실패하면 낱말 비교 — core/building.route_request)이 하위 팀 하나를
                                                  고르고, 범위 확인(core/scope — 낱말, 애매하면 부서장 회의 1회)으로 다른 부서 일인지 본다.
                                                  이유·모델을 보여 주고, 다른 팀으로 바꿔 보낼 수 있다. [▶ 바로 맡기기]면 그 팀의 팀장이
                                                  곧바로 팀원에게 일을 나눈다 (기존 workflow — app.py 가 pop_assigned 로 받는다).
@@ -47,7 +47,7 @@ ASSIGNED_PREFIX = "dept_assigned_"  # 팀 화면에서 바로 시작할 요청 (
 NOTE_PREFIX = "dept_assigned_note_"  # 팀 화면 위에 보이는 '부서장이 배정' 안내
 COST_DAYS = 7
 LIVE_SEC = 3
-HOW_TEXT = {"llm": "부장 모델", "keyword": "낱말 비교 (모델 없이)", "one": "팀이 하나"}
+HOW_TEXT = {"llm": "부서장 모델", "keyword": "낱말 비교 (모델 없이)", "one": "팀이 하나"}
 SCOPE_TEXT = {"accept_all": "범용 팀", "keyword": "분야 낱말", "followup": "후속 질문", "router": "부서장 회의(보조 모델)",
               "router_keyword": "낱말 (보조 모델 없이)"}
 
@@ -120,7 +120,7 @@ def assignment_note(team_id: str, run: dict | None) -> dict | None:
 
 
 def assignment_banner(team_id: str, team_name: str, run: dict | None) -> bool:
-    """부서 화면 위 — '👔 여행부 부장 → 🌏 해외 여행팀 배정: 이유 (모델)'. 그린 것이 있으면 True."""
+    """부서 화면 위 — '👔 여행부 부서장 → 🌏 해외 여행팀 배정: 이유 (모델)'. 그린 것이 있으면 True."""
     note = assignment_note(team_id, run)
     if not note:
         return False
@@ -168,10 +168,10 @@ def render(storage, teams: list[Team], ranks: list[Rank], open_runs: list[dict],
 
 
 def _dept_models(ctx) -> None:
-    """🎛 부서별 모델 선택 — 부서 → 👔 부장(비평가·부서장) → 팀 → 팀원 (dept_models_ui.py)."""
+    """🎛 부서별 모델 선택 — 부서 → 👔 부서장(비평가·팀 배정) → 팀 → 팀원 (dept_models_ui.py)."""
     import dept_models_ui  # 메인 화면을 처음 그릴 때만
 
-    with st.expander("🎛 부서별 모델 선택 — 👔 부장(비평가) · 팀원", expanded=bool(st.session_state.pop(MODELS_OPEN_KEY, False))):
+    with st.expander("🎛 부서별 모델 선택 — 👔 부서장(비평가) · 팀원", expanded=bool(st.session_state.pop(MODELS_OPEN_KEY, False))):
         dept_models_ui.render_home(ctx, MODELS_PICK_KEY)
 
 
@@ -293,7 +293,7 @@ def head_desk(dept: building.Department, by_id: dict[str, Team], models, dept_st
     files = attach_ui.uploader("dept_head_files")
     auto = st.session_state.pop(AUTO_ROUTE_KEY, None) == dept.id and text.strip()
     clicked = st.button("👔 부서장에게 맡기기", key="dept_head_go", disabled=not text.strip(), type="primary",
-                        help="팀이 둘 이상이면 부장 모델 1회로 고릅니다. 모델을 못 쓰면 낱말 비교로 고릅니다. "
+                        help="팀이 둘 이상이면 부서장 모델 1회로 고릅니다. 모델을 못 쓰면 낱말 비교로 고릅니다. "
                              "그다음 다른 부서 일인지 범위를 확인합니다.")
     if (clicked or auto) and not attach_ui.blocked(files):
         with st.spinner(f"{head.name}이(가) 요청을 읽고 알맞은 팀을 고르는 중…"):

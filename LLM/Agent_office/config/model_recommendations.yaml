@@ -3,7 +3,7 @@
 # 적용 순서 (위가 우선)
 #   1) 사람이 화면 '🎛 부서별 모델 선택'에서 고른 모델 (데이터 폴더 member_models.json · department_models.json — 지우지 않는다)
 #   2) 이 파일의 추천          ← 고르지 않은 사람에게만
-#   3) config/models.yaml 의 직급 기본(ranks) · 부장 기본(critic) ← 이 파일에 없는 사람·팀 (새 팀 등)
+#   3) config/models.yaml 의 직급 기본(ranks) · 부서장 기본(critic) ← 이 파일에 없는 사람·팀 (새 팀 등)
 #
 # 추천도 다음 규칙을 모두 지킨다 (어긋나면 앱 시작 때 '⭐ 추천 모델 점검'에 ⚠️, tests/test_model_recs.py 도 실패)
 #   - 상하 규칙: 부서장 ≥ 팀장 ≥ 부장 ≥ 차장 ≥ 대리 ≥ 사원 (models.yaml model_tiers 의 강도 순서. 같은 강도는 허용)

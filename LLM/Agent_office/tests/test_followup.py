@@ -108,7 +108,7 @@ def test_head_reviews_revision_and_finds_extra_fixes(org, ranks, team, models, u
     for part in ("[사용자의 수정 요청]\n정의를 줄여줘", "[수정 전 결과]", "답변 본문", "[수정본]\n수정본 전문",
                  "숫자에는 출처를 붙인다", "[2] 자료", "extra_fixes"):
         assert part in prompt
-    assert "[부장이 직접 고친 점]" not in prompt  # 첫 검토에는 없다
+    assert "[부서장이 직접 고친 점]" not in prompt  # 첫 검토에는 없다
 
 
 # ─── 🛠 '추가로 고칠 점'은 부장이 직접 고치고 다시 검토한다 (2026-11-10 — 버튼을 누르지 않아도) ───
@@ -136,7 +136,7 @@ def test_head_fixes_extra_points_itself_and_reviews_again(org, ranks, team, mode
                  "[추가로 고칠 점]\n- 표 제목에 기준일 넣기", "숫자에는 출처를 붙인다", "[2] 자료", "완성 전문"):
         assert part in prompt
     # 다시 검토는 처음과 같은 온전한 검토 — 부장이 직접 고친 점만 더 알려 준다 ('요청과 무관한 변경'으로 지적하지 않게)
-    for part in ("[부장이 직접 고친 점]\n- 표 제목에 기준일 넣기", "[수정본]\n부장이 고친 수정본", "extra_fixes 에는", "[수정 전 결과]"):
+    for part in ("[부서장이 직접 고친 점]\n- 표 제목에 기준일 넣기", "[수정본]\n부장이 고친 수정본", "extra_fixes 에는", "[수정 전 결과]"):
         assert part in reviews[1]
     assert any("직접 고침" in x for x in turn.log)
     text = followup.head_review_markdown(turn, "🔬 연구부 부장 (gpt-5.5)")
@@ -312,7 +312,7 @@ def test_head_model_failure_keeps_revision_and_says_why(org, ranks, team, models
     turn = followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "줄여줘", [],
                             head=head_review(org, team, models))
     assert turn.revised and turn.content == "수정본" and turn.critic is None
-    assert any(x.startswith("👔 부장 검토를 하지 못했습니다 — ") for x in turn.log)
+    assert any(x.startswith("👔 부서장 검토를 하지 못했습니다 — ") for x in turn.log)
 
 
 def test_user_skip_goes_without_head_review(org, ranks, team, models, use_script):
@@ -385,7 +385,7 @@ def test_leftover_after_head_fix_is_not_shown_as_simply_fixed(org, ranks, team, 
     assert "다시 검토에서 남은 점" in left and "덜 고쳐진" in left and "직접 고치지 못하고" not in left
     # 부장이 고친 것이 없을 때(상한 0 · 고치지 못함)는 전과 같은 문구
     plain = followup.FollowupTurn(request="q", reply="a", revised=True, content="x", version=1, critic=judge(5, extra=["용어 통일"]))
-    assert "(부장이 직접 고치지 못하고 남은 점입니다)" in followup.head_review_markdown(plain, "부장")
+    assert "(부서장이 직접 고치지 못하고 남은 점입니다)" in followup.head_review_markdown(plain, "부장")
 
 
 def test_recheck_model_failure_goes_back_to_the_revision_that_passed(org, ranks, team, models, use_script):
@@ -406,7 +406,7 @@ def test_recheck_model_failure_without_a_passed_revision_keeps_the_rewrite(org, 
     turn = followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, "표 추가", [], head=head_review(org, team, models))
     assert turn.content == "수정본 B" and turn.critic is None
     assert any("불합격(2/5)" in x and "다시 고침" in x for x in turn.log)
-    assert any("부장 검토를 하지 못했습니다" in x and "요청한 표가 빠짐" in x for x in turn.log), turn.log
+    assert any("부서장 검토를 하지 못했습니다" in x and "요청한 표가 빠짐" in x for x in turn.log), turn.log
 
 
 def test_head_fixes_before_a_lead_rewrite_are_shown_as_earlier(org, ranks, team, models, use_script):
@@ -421,4 +421,4 @@ def test_head_fixes_before_a_lead_rewrite_are_shown_as_earlier(org, ranks, team,
     assert "앞선 수정본에서" in text and "팀장이 글을 다시 썼습니다" in text and "용어 통일" in text
     assert "개를 직접 고쳤습니다" not in text
     # 다시 쓴 글의 검토에도 '부장이 직접 고친 점'은 알려 준다 (그 변경을 '요청과 무관한 변경'으로 지적하지 않게)
-    assert "[부장이 직접 고친 점]\n- 용어 통일" in script.prompts("RevisionCritic")[2]
+    assert "[부서장이 직접 고친 점]\n- 용어 통일" in script.prompts("RevisionCritic")[2]
