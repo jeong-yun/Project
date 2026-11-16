@@ -418,7 +418,7 @@ with st.sidebar:
     is_design = design_ui.FEATURE in team.features  # 설계 팀: 최종 JSON → 도면(+3D) (design_ui.py)
     is_career = career_ui.FEATURE in team.features  # 포트폴리오·자소서 팀: 최종 답변 → .md · .docx · .hwpx (career_ui.py)
     is_edu = education_ui.FEATURE in team.features  # 교육부: 📚 내 과목 · 퀴즈 채점 · 과목 저장 (education_ui.py)
-    is_voice = voice_ui.FEATURE in team.features  # 음성 합성 팀: 맡기기 전 목소리 사용 확인 · 점검 표 · 맞춤 실행 파일 (voice_ui.py)
+    is_voice = voice_ui.FEATURE in team.features  # 노래·말 음색 변환 팀: 맡기기 전 목소리 사용 확인 · 점검 표 · 맞춤 실행 파일 (voice_ui.py)
     edu_ctx = education_ui.Ctx(DATA_DIR, models, teams_by_id, TASK_KEY, TEAM_KEY)
 
     # 결과 기록은 부서 단위로 모아 본다 — 팀 필터는 선택 (팀이 둘 이상인 부서만)

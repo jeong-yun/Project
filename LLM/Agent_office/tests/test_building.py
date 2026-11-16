@@ -78,8 +78,8 @@ def test_real_building_has_lobby_and_three_department_floors():
     teams = list_teams()
     cfg = building.load_config()
     assert building.floor_of("general", teams, cfg) == 2 and building.floor_of("travel_abroad", teams, cfg) == 3
-    # 크리에이티브부(음악·설계·음성 합성 3팀)는 3층에 남은 2칸에 못 들어가 4층을 쓴다 → 보안부는 5층
-    assert building.floor_of("voice", teams, cfg) == building.floor_of("music", teams, cfg) == 4
+    # 크리에이티브부(음악·설계·노래 음색 변환·일상 말 음성 변환 4팀)는 3층에 남은 2칸에 못 들어가 4층 네 칸을 다 쓴다 → 보안부는 5층
+    assert building.floor_of("voice", teams, cfg) == building.floor_of("voice_speech", teams, cfg) == building.floor_of("music", teams, cfg) == 4
     assert building.floor_of("infra_security", teams, cfg) == 5
 
 

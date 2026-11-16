@@ -1,4 +1,5 @@
-"""🎙 음성 합성 팀 자료 툴 — 코드가 정한 값만 근거 자료로 준다 (core/voice.py, 모델·외부 호출 없음).
+"""🎤 노래 음색 변환 팀 · 🗣 일상 말 음성 변환 팀 자료 툴 — 코드가 정한 값만 근거 자료로 준다 (core/voice.py, 모델·외부 호출 없음).
+두 팀이 함께 쓴다. 종류는 업무 양식의 fixed.voice_kind (song | speech) — 자유 질문은 종류와 상관없이 범위 밖 요청만 본다.
 
   범위 밖 요청(사칭·무단 복제)  → '돕지 않는다' 지시 + harness_options.voice_blocked (검증기 voice_guard 가 본다)
   📋 학습 계획 (voice_task=plan) → 학습 설정표(화자·epochs·batch_size)·원본 파일에 적힌 시간 어림값 + harness_options.voice_kit
@@ -36,7 +37,7 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     if task == "check":
         name = inputs.get("dataset_name") or "dataset_raw.zip"
         try:
-            stats = voice.inspect_zip(inputs.get("dataset") or "", name)
+            stats = voice.inspect_zip(inputs.get("dataset") or "", name, voice.kind_of(inputs))
         except voice.VoiceError as e:
             return ToolResult(tool=NAME, title="🔍 데이터 점검 (실패)", notes=[str(e)],
                               content=(f"**데이터를 점검하지 못했다:** {e}\n클립 수·길이 같은 숫자를 지어내지 말고, "

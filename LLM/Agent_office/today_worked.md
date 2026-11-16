@@ -2293,6 +2293,48 @@
     `langchain-text-splitters` 0.3.7 에도 권고가 있다 — `langchain>=0.3.30`·`langchain-community>=0.3.27`·`langchain-text-splitters>=0.3.9` 가 위 범위와 함께 풀리는 것을 임시 환경의 설치 시험(`--dry-run`)으로만 확인.
   - langchain 1.x · langgraph 1.x 로 올리기 검토 — 남은 권고 대부분이 사라진다. 갈래 만들기(`restart_from`) 회귀 테스트부터.
 
+## 2026-11-16
+
+**🎙 음성 합성 팀 → 🎤 노래 음색 변환 팀 · 🗣 일상 말 음성 변환 팀 (크리에이티브부 네 팀)**
+- 배경: 사용자 요청 '노래 음색 변환만 된다면 노래 팀과 일상 말(음성) 변환 팀으로 나눠 달라'. 먼저 같은 도구(so-vits-svc-fork)로 말 변환이 되는지, 노래와 무엇이 다른지
+  공식 문서로 확인했다 (so-vits-svc-fork README · `svc` 명령 원본 코드 `__main__.py`·`preprocess_split.py`·`gui.py`, 원조 so-vits-svc 4.1 README — 웹 읽기만, 설치·실행 없음).
+- 조사 결과 (근거를 찾은 값 / 못 찾은 값):
+
+  | 항목 | 말 변환에서 | 근거 |
+  |---|---|---|
+  | 도구 | 같은 so-vits-svc-fork — 새 의존성 없음 | 원조 README: 학습 때 f0 예측기도 학습돼 말 변환에 음높이 자동 예측 사용 |
+  | 보컬 분리 | 배경 음악이 섞였을 때만 | fork README 'BGM 이 있으면 제거' |
+  | 자르기 | 한 화자의 긴 녹음은 `svc pre-split` (기본 10초 이하, 짧은 조각을 버리지 않음) | fork README + 명령 기본값·코드 |
+  | 변환 | `-a`(음높이 자동 예측) 켬, `-t 0` | 원조 README '노래에는 켜지 마라', fork 화면 안내 '자동 예측을 끈 경우에 키를 맞춤' |
+  | 분량·epochs·batch_size·f0 방식 | **확인 못 함** → 노래용 원본 값을 빌려 쓰고 답·안내에 그렇게 밝힘 | 공식 문서에 말 기준 없음 |
+  | 클립 길이 | fork README '10초 이하', 원조 '5~15초' — 원본 자르기(2~15초)와 대체로 맞음 | 두 README |
+- 작업:
+  - 노래 팀은 **옛 id `voice` 를 그대로** 쓴다 (이름만 '🎤 노래 음색 변환 팀') → 지난 업무·교훈·팀원 모델 선택·저장 파일이 옮기지 않고 그대로 이어진다.
+    여행 팀 나누기(`legacy` 로 읽을 때 잇기)는 옛 id 가 없어질 때 쓰는 방식이라 여기서는 필요 없었다. 옛 팀은 말 변환을 범위 밖으로 돌려보냈으므로 말 팀이 이어 받을 기록도 없다.
+  - 새 팀 `teams/voice_speech/` (team.yaml · 스킬 글 `speech_vc.md`) — 같은 툴 `voice_svc`·같은 화면 기능 `voice_kit`, 업무 양식 `fixed: {voice_kind: speech}`.
+    녹음 상태 고르기: **C안 배경 음악 없는 녹음 → Colab 에서 `svc pre-split` 으로 자르기만** / A·B안(음악이 섞였으면 노래와 같은 보컬 분리).
+  - `core/voice.py` 를 종류(kind) 인자로 재사용 — `plan_settings`·`kit_from_inputs`·`build_notebook`·`kit_readme`·`plan_evidence`·`inspect_zip`·`check_plan`.
+    말 노트북: 변환 셀을 `svc infer speech.wav … -fm crepe -a -t 0 -o speech_converted.wav` 로, C안이면 A안 셀 뒤에 '4-C' 셀 하나(`speech.zip` 풀기 → `svc pre-split`). 노래 노트북은 그대로.
+    근거·확인 못 한 값 목록(`SPEECH_SOURCES`·`SPEECH_UNKNOWN`)을 근거 자료·안내 README 에 그대로 넣음.
+  - 안전 장치: 노래와 같은 확인 + **사칭 낱말을 더 촘촘히**(두 팀 공통) — 행세·대신 전화·상대가 모르게·진짜 본인인 줄, 가짜·조작 녹취·딥페이크·증거 조작,
+    목소리·성문·화자 인식·은행 ARS 본인 확인, 정치인·연예인·유튜버 등 유명인 목소리. 거절 문구는 두 팀 공통으로 '음색 변환(노래·말)'. 실시간 변환은 다루지 않음.
+  - 검증기 `voice_plan`: 말 계획은 `-a`(음높이 자동 예측)를 쓰는지, `-na` 로 끄라고 하지 않는지 추가. 노래 계획 검사는 그대로.
+  - 부서·배정: `config/departments.yaml` 크리에이티브부 팀 4개(한 층 네 칸을 다 씀 — 층 배치 그대로), 부서장 persona 에 노래/말 배정 기준.
+    역할별 추천 모델 `config/model_recommendations.yaml` 에 두 팀(팀장 lead_strong ≥ 권리 검수 manager_strong ≥ 데이터·학습 format_precise — 시작 시 점검 규칙 통과).
+  - 범위 낱말: 두 팀이 같이 쓰는 낱말(내 목소리·Colab·쇳소리 등)만 있는 질문은 두 팀이 비겨 부서장 배정으로 넘어간다. 노래 팀 자유 질문 예시 3개에 '노래·커버' 낱말을 넣음.
+  - 화면 `voice_ui.py`: 두 팀이 같은 코드, 종류에 따라 안내 문구·zip 이름(`speech_…`)만 다름. README 층 표·팀 표·7-5-1 절.
+- 기술: 같은 코드에 종류 인자(새 파일은 팀 설정·스킬 글뿐), JSON 노트북에 셀 하나 끼우기, 공식 문서·원본 코드로 기본값 확인(지어낸 값 없음), 낱말 범위 확인.
+- 성과:
+  - `tests/test_voice.py` 23 → 50건: 말 팀 27건 추가(팀 설정·같은 층·옛 기록이 노래 팀에만 보임·C/A/B 안·빌린 값 표시·노트북 `-a`·4-C 셀 위치·노래 노트북 그대로·zip/근거 자료·
+    사칭 16가지 거절(양식·툴 두 길)·평범한 요청 8가지 통과·`-a` 검증기·점검 표 안내·범위 갈림·화면 양식·내려받기). 기존 23건은 이름·팀 목록·범위 질문 문구만 고쳐 통과.
+  - `tests/test_building.py` 1건(크리에이티브부 4팀이 4층). 관련 4개 파일(`test_voice`·`test_scope`·`test_building`·`test_model_recs`) 105건 통과 4분 35초.
+  - 전체 `python -m pytest -q`: FULL_RESULT
+  - 확인 못 한 것: 실제 Colab 에서 말 노트북(4-C 셀·`-a` 변환) 실행 · 실제 모델의 답 · 실제 브라우저 화면 · 말 녹음에 맞는 분량·epochs(공식 문서에 없음).
+- 다음 할 일:
+  - 🔎 노래 팀 확인 필요: so-vits-svc-fork 의 `svc infer` 는 음높이 자동 예측이 **기본으로 켜져** 있다(`--auto-predict-f0` 기본값 True, 원본 코드 확인). 원본 노트북 11번 셀은 끄지 않으므로
+    노래 변환에도 켜진 채 돈다 — 원조 README 는 노래에는 켜지 말라고 한다. 노래 맞춤 노트북에 `-na` 를 넣을지 사용자에게 묻기 (이번에는 노래 팀 동작을 바꾸지 않음).
+  - 말 노트북을 Colab 에서 한 번 끝까지 돌려 보기 (C안 자르기 조각 수·2초 미만 조각 비율).
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

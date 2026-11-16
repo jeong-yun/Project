@@ -1,4 +1,6 @@
-# 🎙 음성 합성 팀 — 노래 음색 변환(SVC, so-vits-svc-fork) 준비를 돕는다. 말하는 목소리 합성(TTS)·실시간 변환은 다루지 않는다
+# 🎤 노래 음색 변환 팀 — 노래 음색 변환(SVC, so-vits-svc-fork) 준비를 돕는다. 말하는 목소리 합성(TTS)·실시간 변환은 다루지 않는다
+# 2026-11-16: 예전 '🎙 음성 합성 팀'을 노래(이 팀) · 일상 말(teams/voice_speech)로 나눴다. 이 팀이 옛 id `voice` 를 그대로 써서
+#   지난 업무·교훈·팀원 모델 선택·저장 파일이 옮기지 않고 그대로 이어진다 (legacy 연결이 필요 없음). 원본 파일(assets/)은 두 팀이 함께 쓴다.
 #
 # 이 앱이 하는 일 : 실행 계획 + 맞춤 파일(Colab 노트북·전처리 스크립트·안내) 만들기, 올린 dataset_raw.zip 을 코드로 점검·해석
 # 앱 밖에서 도는 일: 보컬 분리·자르기(사용자 PC 의 preprocess.py 또는 Colab B안) · 학습 · 변환(Colab T4 GPU)
@@ -9,8 +11,8 @@
 #   결과물에는 'AI 로 합성한 음성' 표시 안내 (voice_plan 이 검사, 맞춤 노트북·안내 글에도 넣음)
 
 id: voice
-name: 🎙 음성 합성 팀
-description: 내 목소리(또는 본인 동의를 받은 목소리)로 노래 음색 변환 모델(SVC)을 학습해 커버 보컬을 바꾸는 일을 준비한다 — 실행 계획과 맞춤 Colab 노트북을 만들고, 학습 데이터를 코드로 점검한다. 말하는 목소리 합성(TTS)은 다루지 않는다.
+name: 🎤 노래 음색 변환 팀
+description: 내 목소리(또는 본인 동의를 받은 목소리)로 노래 음색 변환 모델(SVC)을 학습해 커버 보컬을 바꾸는 일을 준비한다 — 실행 계획과 맞춤 Colab 노트북을 만들고, 학습 데이터를 코드로 점검한다. 말하는 녹음의 목소리 바꾸기는 일상 말 음성 변환 팀, 글을 읽어 주는 음성 합성(TTS)은 다루지 않는다.
 
 scope:
   summary: 노래 음색 변환(SVC) — 학습 데이터 준비(보컬 분리·자르기), Colab 학습·이어 학습, 변환 옵션, 흔한 문제 해결
@@ -21,13 +23,14 @@ scope:
   rejects:
     - 동의 확인이 없는 다른 사람·실존 가수·유명인의 목소리 복제
     - 남을 속이는 용도 (전화·음성 메시지로 다른 사람인 척하기, 본인 인증 통과·우회)
-    - 말하는 목소리 합성(TTS)·실시간 목소리 변환 (이 팀은 노래 음색 변환만 다룬다)
+    - 말하는 녹음(낭독·대화·내레이션)의 목소리 바꾸기 (→ 🗣 일상 말 음성 변환 팀)
+    - 글을 읽어 주는 음성 합성(TTS)·실시간 목소리 변환 (이 팀은 노래 음색 변환만 다룬다)
     - 새 노래·가사·반주 만들기 (→ 🎵 음악 팀)
-  keywords: [음색, 음색 변환, 목소리 모델, 내 목소리, SVC, so-vits, so-vits-svc, 보컬 분리, audio-separator, dataset_raw, preprocess,
+  keywords: [노래 음색, 노래 커버, 커버, 음색, 음색 변환, 목소리 모델, 내 목소리, SVC, so-vits, so-vits-svc, 보컬 분리, audio-separator, dataset_raw, preprocess,
              Colab, 체크포인트, 이어 학습, 쇳소리, 키 조절, 커버 보컬, 화자, crepe, HuBERT, 목소리 학습, 학습 데이터]
 free_examples:
   - title: 데이터 — 얼마나 필요한가
-    question: 내 목소리 모델을 학습하려면 학습 데이터는 몇 분이나 있어야 해?
+    question: 노래 커버용 내 목소리 모델을 학습하려면 학습 데이터는 몇 분이나 있어야 해?
     goal: 지금 가진 음원으로 시작해도 되는지 판단할 기준
     success_criteria:
       - 권장 분량과 부족한 분량의 기준을 근거(스킬 글)와 함께 쓴다
@@ -35,7 +38,7 @@ free_examples:
     constraints: [근거 없는 숫자는 '재 보지 않음'으로]
     output_format: 결론 → 기준 표 → 다음에 할 일
   - title: 학습 — Colab 세션이 끊겼을 때
-    question: Colab 에서 SVC 학습하다가 세션이 끊겼어. 처음부터 다시 해야 해?
+    question: Colab 에서 노래 음색 변환(SVC) 학습하다가 세션이 끊겼어. 처음부터 다시 해야 해?
     goal: 끊긴 지점부터 이어서 학습하는 순서
     success_criteria:
       - 다시 실행할 셀 순서를 쓴다
@@ -43,7 +46,7 @@ free_examples:
     constraints: []
     output_format: 결론 → 셀 순서 → 주의할 점
   - title: 변환 — 쇳소리가 날 때
-    question: 변환한 목소리가 쇳소리가 나고 군데군데 끊겨. 어떻게 고쳐?
+    question: 커버 보컬로 변환한 목소리가 쇳소리가 나고 군데군데 끊겨. 어떻게 고쳐?
     goal: 원인 후보와 하나씩 해 볼 조치
     success_criteria:
       - 원인 후보를 데이터·학습·변환 옵션으로 나눠 쓴다
@@ -118,7 +121,7 @@ tasks:
   - id: plan
     title: 📋 학습 계획 만들기
     description: 목소리 출처·가진 음원·작업 환경을 넣으면 단계별 실행 계획을 쓰고, 값을 넣은 Colab 노트북·전처리 스크립트·안내를 묶어 드립니다. 보컬 분리·학습·변환은 내 PC 와 Colab 에서 직접 돌립니다.
-    fixed: {voice_task: plan}
+    fixed: {voice_task: plan, voice_kind: song}
     fields:
       - {key: source, label: 목소리 출처, type: select, required: true, options: [내 목소리, 본인 동의를 받은 사람의 목소리, 사용이 허락된 공개 데이터셋]}
       - {key: consent, label: "이 목소리를 학습·변환에 써도 된다는 것을 확인했습니다", type: checkbox, required: true,
@@ -158,7 +161,7 @@ tasks:
   - id: check
     title: 🔍 데이터 점검
     description: preprocess.py 로 만든 dataset_raw.zip 을 올리면 화자 폴더별 클립 수·총 길이·클립 길이·무음·클리핑을 코드로 세고, 팀이 해석과 다음 조치를 씁니다. 음원 내용은 모델로 보내지 않고 숫자 요약만 근거 자료가 됩니다.
-    fixed: {voice_task: check}
+    fixed: {voice_task: check, voice_kind: song}
     fields:
       - {key: dataset, label: "dataset_raw.zip (200MB 까지)", type: file, required: true, options: [zip],
          help: "dataset_raw 폴더를 통째로 zip 으로 묶어 올리세요. 파일은 이 PC 의 data/uploads/ 에만 저장되고, 모델에는 숫자 요약만 보냅니다."}

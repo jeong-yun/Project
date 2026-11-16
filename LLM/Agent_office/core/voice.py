@@ -1,5 +1,9 @@
-"""🎙 음성 합성 팀 — 노래 음색 변환(SVC, so-vits-svc-fork) 준비를 돕는 코드. 모델 호출·외부 실행·패키지 설치 없음.
+"""🎤 노래 음색 변환 팀 · 🗣 일상 말 음성 변환 팀 — so-vits-svc-fork 학습·변환 준비를 돕는 코드. 모델 호출·외부 실행·패키지 설치 없음.
 
+두 팀은 같은 도구·같은 원본 노트북을 쓰고, 종류(kind: song | speech — 업무 양식의 fixed.voice_kind)만 다르다:
+  song   : 반주가 있는 노래 → 보컬 분리 → 자르기 → 학습 → 변환 (원본 노트북 그대로)
+  speech : 말 녹음(낭독·대화) → 배경 음악이 없으면 보컬 분리 없이 Colab 에서 `svc pre-split` 로 자르기(C안) →
+           학습 → 변환할 때 음높이 자동 예측(`-a`)을 켠다. 근거는 공식 문서 (SPEECH_SOURCES — 확인 못 한 값은 '확인 못 함')
 보컬 분리·학습·변환은 앱 밖(사용자 PC 의 preprocess.py · Colab 노트북)에서 돈다. 이 모듈이 하는 일:
   1) 책임 있는 사용 : check_form(양식 — 목소리 출처·확인 체크·화자 이름) · misuse(사칭·무단 복제 요청 낱말)
   2) 맞춤 파일      : plan_settings(epochs·batch 를 규칙으로) → build_notebook(JSON 으로 읽어 셀 값만 바꿈) → kit_zip
@@ -36,10 +40,17 @@ AI_LABEL = "AI 로 합성한 음성"
 CONSENT_HELP = ("목소리 사용 확인이 필요합니다 — '이 목소리를 학습·변환에 써도 된다는 것을 확인했습니다'에 표시해 주세요. "
                 "다른 사람의 목소리라면 먼저 그 사람에게 학습·변환에 써도 된다는 동의를 받아야 합니다. "
                 "확인이 없으면 이 팀은 학습 계획과 노트북을 만들지 않습니다.")
-MISUSE = [  # (찾을 표현, 화면·프롬프트에 쓸 이유)
-    (r"보이스\s*피싱|사칭|(?:인|한|는)\s?척(?=하|을|\s|$|[.,!?])|속이(?:려|기|고|는|다)|속여|속일|속였", "남을 속이거나 다른 사람인 척하는 용도"),
-    (r"(?:본인|음성|목소리|화자)\s*인증|인증\s*(?:을|를)?\s*(?:우회|통과|뚫)", "본인 인증을 통과하거나 피해 가는 용도"),
+MISUSE = [  # (찾을 표현, 화면·프롬프트에 쓸 이유) — 말 변환은 사칭 위험이 커서 전화·녹취·인증 표현을 촘촘히 본다 (두 팀 공통)
+    (r"보이스\s*피싱|피싱|스미싱|사칭|행세|(?:인|한|는)\s?척(?=하|을|\s|$|[.,!?])|속이(?:려|기|고|는|다)|속여|속일|속였"
+     r"|(?:진짜|본인|실제\s*사람)인\s*줄|(?:상대|듣는\s*사람|남)(?:이|가|은|는)?\s*(?:모르게|눈치\s*(?:못|안))"
+     r"|대신\s*(?:전화|통화)|흉내\s*내(?:서|어|고)?\s*(?:전화|통화)", "남을 속이거나 다른 사람인 척하는 용도"),
+    (r"(?:가짜|허위|조작(?:된|한)?)\s*(?:녹취|녹음|통화|음성\s*(?:메시지|파일))|녹취(?:록)?\s*(?:을|를)?\s*조작|딥\s*페이크|deep\s*fake"
+     r"|증거\s*(?:로|를)?\s*(?:만들|조작|제출)", "가짜 녹음·녹취로 남을 속이는 용도"),
+    (r"(?:본인|음성|목소리|화자)\s*인증|인증\s*(?:을|를)?\s*(?:우회|통과|뚫)|성문|화자\s*인식|(?i:voice\s*(?:id|print))"
+     r"|(?:은행|ARS|콜센터|전화)[^\n.]{0,10}(?:본인\s*확인|인증)", "본인 인증을 통과하거나 피해 가는 용도"),
     (r"(?:동의|허락)\s*(?:없이|없는|안\s*받|받지\s*않)|몰래|무단", "본인 동의를 받지 않은 목소리"),
+    (r"(?:대통령|정치인|국회의원|연예인|유명인|배우|아나운서|앵커|유튜버|스트리머|인플루언서)\s*(?:님|씨)?\s*(?:의\s*)?(?:목소리|음성|음색|말투)",
+     "실존 유명인의 목소리를 복제하는 용도"),
 ]
 RUN_STEPS = re.compile(r"svc\s+(?:train|infer|pre-\w+)|preprocess\.py|run\.bat|dataset_raw", re.IGNORECASE)
 
@@ -75,7 +86,7 @@ def misuse(text: str) -> str:
 
 def refusal_message(reason: str) -> str:
     return (f"이 팀은 {reason}에는 도움을 드리지 않습니다. "
-            "내 목소리이거나 본인에게 동의를 받은 목소리로, 노래 음색 변환을 준비하는 일만 돕습니다. "
+            "내 목소리이거나 본인에게 동의를 받은 목소리로, 음색 변환(노래·말)을 준비하는 일만 돕습니다. "
             "그런 경우라면 목소리 출처를 적어 다시 맡겨 주세요.")
 
 
@@ -108,12 +119,43 @@ def check_form(task_id: str, values: dict, extra: str = "") -> None:
 DEFAULT_EPOCHS, DEFAULT_BATCH, LOW_MEMORY_BATCH = 400, 16, 8
 MIN_MINUTES, GOOD_MINUTES, BASE_MAX_MINUTES = 10, 30, 60
 VERDICTS = ("부족", "주의", "충분")
+
+# ─ 🗣 말 변환 — 공식 문서에서 확인한 것만 (2026-11-16 읽음). 아래에 없는 값은 노래용 원본 값을 빌려 쓰고 '확인 못 함'이라고 밝힌다.
+SPEECH_SOURCES = [
+    "보컬 분리: so-vits-svc-fork README 'If your dataset has BGM, please remove the BGM' — 배경 음악이 있을 때만 분리하면 된다",
+    "자르기: 같은 README 'If your dataset is a long audio file with a single speaker, use `svc pre-split`' (기본 10초 이하 조각, `-l/--max-length 10`)",
+    "클립 길이: 같은 README 'Dataset audio duration per file should be <~ 10s', 원조 so-vits-svc README '5s - 15s' 권장",
+    "음높이 자동 예측: 원조 so-vits-svc README `--auto_predict_f0` — 말(voice conversion)용, '노래에는 켜지 마라(심한 음높이 문제)'. "
+    "so-vits-svc-fork 의 `svc infer -a/--auto-predict-f0` (지금 버전 기본값이 켜짐 — 맞춤 노트북에는 `-a` 를 적어 분명히 한다)",
+    "키 조절: so-vits-svc-fork 화면 안내 'Pitch … ADJUST THIS … when Auto predict F0 is turned off' — 자동 예측을 켜면 -t 는 0 그대로",
+]
+SPEECH_UNKNOWN = [
+    "말 녹음에 필요한 분량: 공식 문서에서 확인 못 함 — 노래용 원본 기준(10분 미만 부족 · 30분~1시간 이상 권장)을 그대로 쓴다",
+    "epochs·batch_size: 말에 맞는 값은 확인 못 함 — 원본 노트북 값(400 · 16, OOM 이면 8)을 그대로 쓴다",
+    "f0 방식: 말에 더 맞는 방식은 확인 못 함 — 원본 노트북의 crepe 를 그대로 쓴다",
+    "C안(svc pre-split)·말 녹음의 보컬 분리에 걸리는 시간: 재 보지 않음",
+]
+SPEECH_INPUT, SPEECH_OUTPUT, SPEECH_ZIP = "speech.wav", "speech_converted.wav", "speech.zip"
+INFER_SPEECH = (f'"{{WORK}}/{SPEECH_INPUT}" -m "{{CKPT}}" -c "{{WORK}}/logs/44k/config.json" -fm crepe -a -t 0 '
+                f'-o "{{WORK}}/{SPEECH_OUTPUT}"')
 TIME_NOTES = [
     "보컬 분리 — Colab GPU: 곡당 약 1분 (노트북 B안 설명에 적힌 어림값)",
     "보컬 분리 — GPU 없는 PC: 곡당 수 분~수십 분 (preprocess.py 안내 문구). 빠른 모델(--fast)을 쓰면 줄어든다",
     "so-vits-svc-fork 설치: 2~3분 (노트북 3번 셀)",
     "학습에 걸리는 시간: 재 보지 않음 — 데이터 분량과 epochs 에 따라 다르다. 체크포인트가 Drive 에 저장되므로 세션이 끊기면 이어서 학습한다",
 ]
+SPEECH_TIME_NOTES = [
+    TIME_NOTES[2],
+    "보컬 분리(A·B안 — 배경 음악이 섞인 녹음만): 원본의 어림값은 노래 한 곡 기준(Colab 곡당 약 1분 · GPU 없는 PC 곡당 수 분~수십 분). 말 녹음에서는 재 보지 않음",
+    "C안 자르기(`svc pre-split`): 재 보지 않음",
+    TIME_NOTES[3],
+]
+KIND_NAMES = {"song": "🎤 노래 음색 변환 팀", "speech": "🗣 일상 말 음성 변환 팀"}
+
+
+def kind_of(inputs: dict) -> str:
+    """업무 양식의 fixed.voice_kind — 'speech' 가 아니면 노래 (옛 업무·자유 질문도 노래)."""
+    return "speech" if inputs.get("voice_kind") == "speech" else "song"
 
 
 def verdict(minutes: float) -> str:
@@ -121,19 +163,24 @@ def verdict(minutes: float) -> str:
     return VERDICTS[0] if minutes < MIN_MINUTES else VERDICTS[1] if minutes < GOOD_MINUTES else VERDICTS[2]
 
 
-def plan_settings(minutes: float | None, oom: bool = False) -> dict:
-    """{epochs, batch_size, notes} — 모델이 아니라 규칙이 정한다. 근거 없는 구간은 기본값 + '늘려서 이어 학습' 안내."""
+def plan_settings(minutes: float | None, oom: bool = False, kind: str = "song") -> dict:
+    """{epochs, batch_size, notes} — 모델이 아니라 규칙이 정한다. 근거 없는 구간은 기본값 + '늘려서 이어 학습' 안내.
+
+    말(kind=speech)도 같은 규칙 — 말에 맞는 값은 공식 문서에서 확인 못 해 원본(노래용) 값을 빌려 쓴다고 notes 에 밝힌다."""
     notes = []
+    what, more = ("말 녹음", "녹음") if kind == "speech" else ("보컬", "음원")
     if minutes is None:
-        notes.append("보컬 분량을 모름 — epochs 는 기본값. 전처리 뒤 '🔍 데이터 점검'으로 분량을 확인한다")
+        notes.append(f"{what} 분량을 모름 — epochs 는 기본값. 전처리 뒤 '🔍 데이터 점검'으로 분량을 확인한다")
     elif minutes < MIN_MINUTES:
-        notes.append(f"보컬 약 {minutes:g}분 — 10분 미만이라 부족하다. 학습 전에 음원을 더 모으는 것이 먼저다 (30분~1시간 이상 권장)")
+        notes.append(f"{what} 약 {minutes:g}분 — 10분 미만이라 부족하다. 학습 전에 {more}을 더 모으는 것이 먼저다 (30분~1시간 이상 권장)")
     elif minutes < GOOD_MINUTES:
-        notes.append(f"보컬 약 {minutes:g}분 — 권장(30분~1시간)보다 적다. epochs 는 기본값 그대로 (이 구간의 알맞은 값은 재 보지 않음)")
+        notes.append(f"{what} 약 {minutes:g}분 — 권장(30분~1시간)보다 적다. epochs 는 기본값 그대로 (이 구간의 알맞은 값은 재 보지 않음)")
     elif minutes <= BASE_MAX_MINUTES:
-        notes.append(f"보컬 약 {minutes:g}분 — 기본값의 기준 구간(30분~1시간)이다")
+        notes.append(f"{what} 약 {minutes:g}분 — 기본값의 기준 구간(30분~1시간)이다")
     else:
-        notes.append(f"보컬 약 {minutes:g}분 — 기준 구간(30분~1시간)보다 많다. 기본값으로 시작하고, 부족하면 epochs 를 늘려 다시 실행한다 (이어서 학습됨)")
+        notes.append(f"{what} 약 {minutes:g}분 — 기준 구간(30분~1시간)보다 많다. 기본값으로 시작하고, 부족하면 epochs 를 늘려 다시 실행한다 (이어서 학습됨)")
+    if kind == "speech":
+        notes.append("분량 기준(10분·30분~1시간)과 epochs·batch_size 는 노래용 원본 파일의 값을 그대로 쓴다 — 말 녹음에 맞는 값은 공식 문서에서 확인 못 함")
     if oom:
         notes.append("메모리 부족(OOM)을 겪었다고 해서 batch_size 를 8 로 낮췄다 (노트북 8번 셀의 안내)")
     else:
@@ -149,11 +196,12 @@ def kit_from_inputs(inputs: dict) -> dict | None:
     if not SINGER.fullmatch(singer) or is_artist_name(singer):
         return None
     minutes = float(inputs["minutes"]) if inputs.get("minutes") not in (None, "") else None
-    mode = "B" if str(inputs.get("where") or "").startswith("Colab") else "A"
+    kind, where = kind_of(inputs), str(inputs.get("where") or "")
+    mode = "C" if kind == "speech" and "C안" in where else "B" if where.startswith("Colab") or "B안" in where else "A"
     has_gpu = str(inputs.get("gpu") or "").startswith("있")
-    settings = plan_settings(minutes, bool(inputs.get("oom")))
-    return {"singer": singer, "source": inputs["source"], "mode": mode, "fast": mode == "A" and not has_gpu,
-            "minutes": minutes, "songs": int(inputs["songs"]) if inputs.get("songs") else None, **settings}
+    settings = plan_settings(minutes, bool(inputs.get("oom")), kind)
+    return {"kind": kind, "singer": singer, "source": inputs["source"], "mode": mode, "fast": mode == "A" and not has_gpu,
+            "minutes": minutes, "songs": int(inputs["songs"]) if inputs.get("songs") and kind == "song" else None, **settings}
 
 
 def _set_line(nb: dict, pattern: str, value: str) -> None:
@@ -171,17 +219,50 @@ def _set_line(nb: dict, pattern: str, value: str) -> None:
         raise VoiceError(f"노트북 원본에서 값을 넣을 줄을 {hits}곳 찾았습니다 (1곳이어야 함): {pattern}")
 
 
+SKIP = {"A": "4번 셀(A안)을 실행하고 5~6번 셀(B안)은 건너뜁니다",
+        "B": "4번 셀(A안)은 건너뛰고 5~6번 셀(B안)을 실행합니다",
+        "C": "4번 셀(A안)과 5~6번 셀(B안)은 건너뛰고 '4-C' 셀(C안 — 보컬 분리 없이 자르기)을 실행합니다"}
+
+
+def _speech_cells(nb: dict, kit: dict) -> None:
+    """말 변환용으로 바꾼다 — 변환 셀에 음높이 자동 예측(-a)·말 파일 이름, C안이면 A안 셀 뒤에 'svc pre-split' 셀 하나를 넣는다."""
+    _set_line(nb, r"^(# )-t: 키 조절.*", "-a: 음높이 자동 예측 켬 — 말 변환용 (원조 so-vits-svc 안내: 노래에는 켜지 않는다). 켜 두면 -t 는 0 그대로")
+    _set_line(nb, r"^(!svc infer )\"\{WORK\}/cover\.wav\".*", INFER_SPEECH)
+    _set_line(nb, r"^(# 12\) 결과 듣기 \(파일은 Drive의 svc_project/)cover_converted\.wav", SPEECH_OUTPUT)
+    _set_line(nb, r"^(Audio\(f'\{WORK\}/)cover_converted\.wav'\)", f"{SPEECH_OUTPUT}')")
+    infer_md = next(c for c in nb["cells"] if c["cell_type"] == "markdown" and "".join(c["source"]).startswith("## 추론"))
+    infer_md["source"] = ["## 추론 (말 음성 변환)\n",
+                          f"바꿀 말 녹음 wav 를 Drive 의 `svc_project/{SPEECH_INPUT}` 로 올린 뒤 실행합니다. "
+                          f"결과는 `svc_project/{SPEECH_OUTPUT}` 에 저장됩니다."]
+    if kit["mode"] != "C":
+        return
+    at = next(i for i, c in enumerate(nb["cells"]) if c["cell_type"] == "code" and "".join(c["source"]).startswith("# 4) [A안]"))
+    nb["cells"].insert(at + 1, {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": [
+        "# 4-C) [C안 — 말 녹음] 보컬 분리 없이 자르기 (svc pre-split: 공식 기본값 10초 이하 조각)\n",
+        f"# Drive 의 {SPEECH_ZIP} = 배경 음악이 없는 말 녹음(wav·mp3 등)을 묶은 zip. A안·B안을 실행했다면 이 셀은 건너뛰세요.\n",
+        "%cd /content\n",
+        f"!unzip -qjo \"{{WORK}}/{SPEECH_ZIP}\" -d \"/content/speech_raw/{kit['singer']}\"\n",
+        "!svc pre-split -i /content/speech_raw -o /content/dataset_raw\n",
+        "!find dataset_raw -name \"*.wav\" | wc -l",
+    ]})
+
+
 def build_notebook(kit: dict) -> str:
-    """원본 노트북을 JSON 으로 읽어 화자 이름·epochs·batch_size 줄의 값만 바꾼다 (셀 수·순서는 그대로)."""
+    """원본 노트북을 JSON 으로 읽어 화자 이름·epochs·batch_size 줄의 값만 바꾼다 (노래는 셀 수·순서 그대로).
+    말(kind=speech)은 변환 셀의 옵션·파일 이름을 바꾸고, C안이면 자르기 셀 하나를 더한다 (_speech_cells)."""
     nb = json.loads((ASSET_DIR / NOTEBOOK).read_text(encoding="utf-8"))
     _set_line(nb, r"^(SINGER = )'[^']*'", f"'{kit['singer']}'")
     _set_line(nb, r"^(cfg\['train'\]\['epochs'\] = )\d+", str(kit["epochs"]))
     _set_line(nb, r"^(cfg\['train'\]\['batch_size'\] = )\d+", str(kit["batch_size"]))
-    skip = "4번 셀(A안)을 실행하고 5~6번 셀(B안)은 건너뜁니다" if kit["mode"] == "A" else "4번 셀(A안)은 건너뛰고 5~6번 셀(B안)을 실행합니다"
+    speech = kit.get("kind") == "speech"
+    if speech:
+        _speech_cells(nb, kit)
     nb["cells"][0]["source"] += [
         "\n", "\n",
-        f"**이 노트북의 맞춤 값** (Agent Office 🎙 음성 합성 팀이 양식 값으로 넣음): 화자 `{kit['singer']}` · "
-        f"epochs {kit['epochs']} · batch_size {kit['batch_size']} · 전처리 {kit['mode']}안 — {skip}.\n",
+        f"**이 노트북의 맞춤 값** (Agent Office {KIND_NAMES[kit.get('kind', 'song')]}이 양식 값으로 넣음): 화자 `{kit['singer']}` · "
+        f"epochs {kit['epochs']} · batch_size {kit['batch_size']} · 전처리 {kit['mode']}안 — {SKIP[kit['mode']]}.\n",
+        *(["\n", f"**말 음성 변환**: 11번 셀이 `{SPEECH_INPUT}` 를 음높이 자동 예측(`-a`)으로 바꿉니다 — 노래 커버용 설명(cover.wav)은 이 노트북에서는 쓰지 않습니다.\n"]
+          if speech else []),
         "\n",
         f"목소리 출처: {kit['source']} (양식에서 사용해도 된다고 확인함). 변환한 결과물을 남에게 보이거나 올릴 때는 '{AI_LABEL}'이라고 표시하세요.\n",
     ]
@@ -201,43 +282,62 @@ def kit_readme(kit: dict) -> str:
             "3. `dataset_raw.zip` 을 Google Drive `MyDrive/svc_project/` 에 올립니다.",
             f"4. **Colab**: `{NOTEBOOK}` 을 열고 `런타임 → 런타임 유형 변경 → T4 GPU` 를 고른 뒤 1~4번 셀을 실행합니다. 5~6번 셀(B안)은 건너뜁니다.",
         ]
-    else:
+    elif kit["mode"] == "B":
         prep = [
             "1. 원본 곡(mp3·wav)을 `songs.zip` 으로 묶어 Google Drive `MyDrive/svc_project/` 에 올립니다.",
             f"2. **Colab**: `{NOTEBOOK}` 을 열고 `런타임 → 런타임 유형 변경 → T4 GPU` 를 고른 뒤 1~3번 셀을 실행합니다. 4번 셀(A안)은 건너뜁니다.",
             f"3. 5~6번 셀(B안)을 실행합니다 — Colab GPU 로 보컬을 분리하고 `dataset_raw/{singer}/` 로 자릅니다 (화자 이름은 이미 넣어 두었습니다).",
         ]
+    else:
+        prep = [
+            f"1. 배경 음악이 없는 말 녹음(wav·mp3 등)을 `{SPEECH_ZIP}` 로 묶어 Google Drive `MyDrive/svc_project/` 에 올립니다.",
+            f"2. **Colab**: `{NOTEBOOK}` 을 열고 `런타임 → 런타임 유형 변경 → T4 GPU` 를 고른 뒤 1~3번 셀을 실행합니다. 4번 셀(A안)은 건너뜁니다.",
+            f"3. '4-C' 셀(C안)을 실행합니다 — 보컬 분리 없이 `svc pre-split` 으로 `dataset_raw/{singer}/` 에 10초 이하 조각을 만듭니다. 5~6번 셀(B안)은 건너뜁니다.",
+        ]
     n = len(prep)
+    speech = kit.get("kind") == "speech"
+    if speech:
+        convert = [
+            f"{n + 2}. 변환: 바꿀 **말 녹음 wav** 를 `svc_project/{SPEECH_INPUT}` 로 올리고 11번 셀을 실행합니다. "
+            "말 변환이라 음높이 자동 예측(`-a`)을 켜 두었고, 키 조절(`-t`)은 0 그대로 둡니다.",
+            f"{n + 3}. 12번 셀로 듣습니다. 결과는 `svc_project/{SPEECH_OUTPUT}` 에 저장됩니다.",
+        ]
+    else:
+        convert = [
+            f"{n + 2}. 변환: 바꿀 노래의 **보컬만 분리한 wav** 를 `svc_project/cover.wav` 로 올리고 11번 셀을 실행합니다. "
+            "키는 `-t` 값(반음)으로 맞춥니다 — 원래 부른 사람과 성별이 다르면 -12 또는 +12 를 먼저 해 봅니다.",
+            f"{n + 3}. 12번 셀로 듣고, 반주는 오디오 편집기에서 변환된 보컬(`cover_converted.wav`)과 합칩니다.",
+        ]
     return "\n".join([
-        f"# 내 맞춤 SVC 실행 안내 — 화자 `{singer}`",
+        f"# 내 맞춤 {'말 음성 변환' if speech else 'SVC'} 실행 안내 — 화자 `{singer}`",
         "",
-        "Agent Office 🎙 음성 합성 팀이 양식 값으로 만든 묶음입니다. 보컬 분리·학습·변환은 이 앱이 아니라 내 PC 와 Colab 에서 돕니다.",
+        f"Agent Office {KIND_NAMES[kit.get('kind', 'song')]}이 양식 값으로 만든 묶음입니다. 보컬 분리·학습·변환은 이 앱이 아니라 내 PC 와 Colab 에서 돕니다.",
         "",
         "## 먼저 확인한 것",
         f"- 목소리 출처: **{kit['source']}** — 학습·변환에 써도 된다고 양식에서 확인했습니다.",
         f"- 변환한 결과물을 남에게 보이거나 올릴 때는 **'{AI_LABEL}'** 이라고 표시합니다.",
-        "- 다른 사람인 척 남을 속이는 데(전화·음성 메시지 등) 쓰지 않습니다.",
+        "- 다른 사람인 척 남을 속이는 데(전화·음성 메시지·가짜 녹취·본인 인증 등) 쓰지 않습니다.",
         "",
         "## 파일",
         "| 파일 | 용도 |",
         "|---|---|",
         f"| `{NOTEBOOK}` | Colab 학습·변환 노트북 — 화자 `{singer}` · epochs {kit['epochs']} · batch_size {kit['batch_size']} 를 넣어 둠 |",
-        "| `preprocess.py` | 내 PC 전처리: wav 변환 → 보컬 분리 → 5~15초로 자르기 |",
+        "| `preprocess.py` | 내 PC 전처리: wav 변환 → 보컬 분리 → 5~15초로 자르기" + (" (A안 — 배경 음악이 섞인 녹음일 때만)" if speech else "") + " |",
         "| `run.bat` | `preprocess.py` 를 더블클릭으로 실행 (Python 3.10 이상이 설치돼 있어야 함) |",
         "",
         f"## 순서 ({kit['mode']}안)",
         *prep,
         f"{n + 1}. 7~9번 셀: 특징 추출 → 학습 설정(epochs {kit['epochs']} · batch_size {kit['batch_size']}) → 학습. "
         "체크포인트는 Drive 에 저장됩니다. 세션이 끊기면 1~3번 셀을 실행한 뒤 9번 셀만 다시 실행하면 이어집니다.",
-        f"{n + 2}. 변환: 바꿀 노래의 **보컬만 분리한 wav** 를 `svc_project/cover.wav` 로 올리고 11번 셀을 실행합니다. "
-        "키는 `-t` 값(반음)으로 맞춥니다 — 원래 부른 사람과 성별이 다르면 -12 또는 +12 를 먼저 해 봅니다.",
-        f"{n + 3}. 12번 셀로 듣고, 반주는 오디오 편집기에서 변환된 보컬(`cover_converted.wav`)과 합칩니다.",
+        *convert,
         "",
         "## 설정 메모 (코드가 규칙으로 정함)",
         *[f"- {note}" for note in kit["notes"]],
         "",
         "## 걸리는 시간 (원본 파일에 적힌 어림값만)",
-        *[f"- {note}" for note in TIME_NOTES],
+        *[f"- {note}" for note in (SPEECH_TIME_NOTES if speech else TIME_NOTES)],
+        *(["", "## 말 변환의 근거 (공식 문서)", *[f"- {s}" for s in SPEECH_SOURCES],
+           "", "## 확인 못 한 것", *[f"- {s}" for s in SPEECH_UNKNOWN]] if speech else []),
         "",
     ])
 
@@ -259,29 +359,37 @@ def kit_zip(kit: dict) -> bytes:
 
 def plan_evidence(kit: dict) -> str:
     """팀원에게 줄 근거 자료 — 코드가 정한 값. 팀은 이 값을 그대로 쓴다."""
-    prep = "내 PC (A안)" + (" · 빠른 모델 --fast" if kit["fast"] else " · 품질 우선 모델") if kit["mode"] == "A" else "Colab (B안)"
+    speech = kit.get("kind") == "speech"
+    prep = {"A": "내 PC (A안)" + (" · 빠른 모델 --fast" if kit["fast"] else " · 품질 우선 모델"), "B": "Colab (B안) — 보컬 분리",
+            "C": f"Colab (C안) — 보컬 분리 없이 `svc pre-split` 으로 자르기 ({SPEECH_ZIP} 를 올림)"}[kit["mode"]]
     lines = [
         "### 🎛 코드가 정한 학습 설정 — 이 값을 그대로 쓴다 (바꿔 쓰지 않는다)",
         "| 항목 | 값 |", "|---|---|",
+        f"| 종류 | {'말 음성 변환 (낭독·대화 녹음)' if speech else '노래 음색 변환'} |",
         f"| 목소리 출처 | {kit['source']} — 양식에서 사용해도 된다고 확인함 |",
         f"| 화자 이름 (폴더) | {kit['singer']} → dataset_raw/{kit['singer']}/ |",
         f"| 전처리 위치 | {prep} |",
         f"| epochs | {kit['epochs']} |",
         f"| batch_size | {kit['batch_size']} |",
+        *([f"| 변환 명령 (11번 셀) | `svc infer {INFER_SPEECH}` — `-a` = 음높이 자동 예측(말용), `-t 0` |"] if speech else []),
         "",
         *[f"- {note}" for note in kit["notes"]],
         "",
         "### ⏱ 걸리는 시간 — 원본 파일에 적힌 어림값만 쓴다 (그 밖의 숫자는 '재 보지 않음')",
-        *[f"- {note}" for note in TIME_NOTES],
+        *[f"- {note}" for note in (SPEECH_TIME_NOTES if speech else TIME_NOTES)],
     ]
+    if speech:
+        lines += ["", "### 📚 말 변환의 근거 — 공식 문서에서 확인한 것만", *[f"- {s}" for s in SPEECH_SOURCES],
+                  "", "### ❔ 확인 못 한 것 — 지어내지 말고 이대로 밝힌다", *[f"- {s}" for s in SPEECH_UNKNOWN]]
     if kit["songs"] and kit["mode"] == "B":
         lines.append(f"- 이번 요청: 곡 {kit['songs']}개 × 곡당 약 1분 = 보컬 분리 약 {kit['songs']}분 (어림, 재 보지 않음)")
     lines += [
         "",
         "### 🎁 사용자가 받는 파일 (코드가 만듦 — 최종 결과 아래 '맞춤 실행 파일'에서 내려받는다)",
         f"- `{NOTEBOOK}` (위 화자 이름·epochs·batch_size 가 들어감) · `preprocess.py` · `run.bat` · `README.md`",
-        f"- 실행 명령: `python preprocess.py --input <음원 폴더> --singer {kit['singer']}" + (" --fast`" if kit["fast"] else "`"),
     ]
+    if kit["mode"] != "C":  # C안은 내 PC 전처리를 쓰지 않는다
+        lines.append(f"- 실행 명령: `python preprocess.py --input <음원 폴더> --singer {kit['singer']}" + (" --fast`" if kit["fast"] else "`"))
     return "\n".join(lines)
 
 
@@ -408,8 +516,9 @@ def _clip_stats(audio, sr: int, threshold_db: float) -> dict:
     return {"sec": len(mono) / sr, "voiced": voiced, "clipped": hot >= max(5, int(audio.size * 0.0001))}
 
 
-def inspect_zip(path: str | Path, name: str = "") -> dict:
-    """dataset_raw.zip 점검 — 화자 폴더별 클립 수·길이·샘플레이트·무음·클리핑. 디스크에 풀지 않고 wav 만 메모리에서 읽는다."""
+def inspect_zip(path: str | Path, name: str = "", kind: str = "song") -> dict:
+    """dataset_raw.zip 점검 — 화자 폴더별 클립 수·길이·샘플레이트·무음·클리핑. 디스크에 풀지 않고 wav 만 메모리에서 읽는다.
+    kind 는 표 아래 기준 설명에만 쓴다 (말 녹음도 같은 기준으로 센다)."""
     cfg = slice_defaults()
     entries = scan_zip(path)
     issues: set[str] = set()
@@ -461,7 +570,7 @@ def inspect_zip(path: str | Path, name: str = "") -> dict:
         issues.add("샘플레이트가 섞여 있다 — 학습 전에 `svc pre-resample` 이 맞춰 주지만, 같은 방법으로 만든 클립인지 확인한다")
     total = round(sum(sum(s["secs"]) for s in singers.values()) / 60, 1)
     worst = min((r["verdict"] for r in rows), key=VERDICTS.index, default=VERDICTS[0])
-    return {"file": name or Path(path).name, "singers": rows, "clips": sum(r["clips"] for r in rows), "minutes": total,
+    return {"file": name or Path(path).name, "kind": kind, "singers": rows, "clips": sum(r["clips"] for r in rows), "minutes": total,
             "verdict": worst, "issues": sorted(issues), "ignored": ignored, "skipped": skipped,
             "min_keep": cfg["min_keep"], "max_len": cfg["max_len"], "threshold_db": cfg["threshold_db"]}
 
@@ -489,6 +598,9 @@ def dataset_table(stats: dict) -> str:
         lines.append(f"- wav 가 아니어서 세지 않은 파일 {stats['ignored']}개 · 읽지 못했거나 너무 큰 wav {stats['skipped']}개")
     lines.append(f"- 기준: 소리 크기 {stats['threshold_db']:g}dB 보다 큰 10ms 구간이 {SILENT_RATIO:.0%} 미만이면 '거의 무음', "
                  f"최댓값({CLIP_LEVEL})에 닿은 샘플이 여럿이면 '클리핑 의심'. 자르는 기준(−40dB · {stats['min_keep']:g}초 · {stats['max_len']:g}초)은 preprocess.py 와 같다.")
+    if stats.get("kind") == "speech":
+        lines.append("- 말 녹음: 분량 판정은 노래용 원본 기준을 그대로 쓴다 (말에 맞는 분량은 공식 문서에서 확인 못 함). "
+                     "C안(`svc pre-split`)으로 자른 조각은 10초 이하이고 짧은 조각을 버리지 않아 '2초 미만'이 많을 수 있다")
     return "\n".join(lines)
 
 
@@ -523,10 +635,17 @@ def check_plan(answer: str, options: dict) -> list[str]:
         problems.append(f"목소리 출처와 사용 확인을 한 줄로 밝혀라 (예: '목소리 출처: {kit['source']} — 학습·변환에 써도 된다고 확인함')")
     if not (re.search(r"AI\s*(?:로|가|를 써서)?\s*(?:합성|생성|변환)", answer) and "표시" in answer):
         problems.append(f"결과물을 남에게 보이거나 올릴 때 '{AI_LABEL}'이라고 표시하라는 안내가 없다")
-    stages = {"전처리": "전처리", "Drive 에 올리기": "업로드|올리|올린|올립", "학습": "학습", "변환": r"svc infer|음색 변환|변환 실행|변환합|변환한|변환할|변환\b"}
+    speech = kit.get("kind") == "speech"
+    stages = {"전처리": r"전처리|자르기|pre-split" if speech else "전처리", "Drive 에 올리기": "업로드|올리|올린|올립", "학습": "학습",
+              "변환": r"svc infer|음색 변환|음성 변환|변환 실행|변환합|변환한|변환할|변환\b"}
     missing = [name for name, pattern in stages.items() if not re.search(pattern, answer)]
     if missing:
         problems.append(f"실행 단계가 빠졌다: {missing} — 전처리 → Drive 에 올리기 → 학습 → 변환 순서로 모두 써라")
+    if speech:  # 말 변환은 음높이 자동 예측을 켠다 (원조 so-vits-svc 안내 — 노래에는 끈다)
+        if not re.search(r"(?<![\w-])-a\b|auto[-_]predict[-_]f0|음높이\s*자동\s*예측|자동\s*음높이\s*예측", answer, re.IGNORECASE):
+            problems.append("말 변환인데 음높이 자동 예측(`-a`)을 쓴다는 안내가 없다 — 근거 자료의 변환 명령(11번 셀)을 그대로 써라")
+        if re.search(r"(?<![\w-])-na\b|--no-auto-predict-f0", answer):
+            problems.append("말 변환인데 음높이 자동 예측을 끄라고(`-na`) 썼다 — 근거 자료의 변환 명령처럼 `-a` 를 켠다")
     if kit["singer"] not in answer:
         problems.append(f"화자 이름 `{kit['singer']}` 이 답에 없다 — 명령·폴더 경로에 이 이름을 그대로 써라")
     wrong = sorted({s for s in re.findall(r"(?:--singer\s+|SINGER\s*=\s*['\"]|dataset_raw/)([A-Za-z0-9_-]+)", answer) if s != kit["singer"]})
