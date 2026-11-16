@@ -56,7 +56,7 @@ class ModelsConfig(BaseModel):
     disabled_providers: list[Provider] = Field(default_factory=list)
     ranks: dict[str, RankModels]
     utility: RankModels  # 검색어 생성·교훈 생성 등 보조 작업용 (비평가의 마지막 기본값)
-    # 비평가 전용 모델 (선택) — 부서 부장의 모델을 화면에서 고르지 않았을 때 쓴다. 없으면 utility (core/dept_heads.py)
+    # 비평가 전용 모델 (선택) — 부서장의 모델을 화면에서 고르지 않았을 때 쓴다. 없으면 utility (core/dept_heads.py)
     critic: RankModels | None = None
     # 모델 강도 순서 — 위(앞)가 가장 강함, 한 줄 안은 같은 강도. 항목은 "provider:model" (팀원 모델 선택 규칙에 쓴다)
     model_tiers: list[list[str]] = Field(default_factory=list)
@@ -334,6 +334,12 @@ class LessonGroupSet(BaseModel):
     groups: list[LessonGroup] = Field(description="겹치거나 충돌하는 교훈 묶음 (없으면 빈 목록)")
 
 
+class RuleDraft(BaseModel):
+    """되풀이된 교훈을 고정 규칙(팀 업무 지침·부서장 검토 기준)으로 올릴 때 보조 모델이 다듬은 한 줄 — 사람이 확인·고친 뒤에만 저장한다."""
+
+    rule: str = Field(description="한 줄 규칙 문장 (한국어)")
+
+
 class CleanupProposal(BaseModel):
     """화면에 보일 교훈 정리 제안 — 사용자가 고르기 전에는 아무것도 바꾸지 않는다."""
 
@@ -394,7 +400,7 @@ class AgentAnswer(BaseModel):
     delegation: Delegation | None = None  # plan 일 때
     critic: CriticResult | None = None  # 비평가가 채점했으면
     critic_model: ModelSpec | None = None  # 실제로 비평한 모델 (대안 모델로 넘어갔으면 그 모델)
-    critic_by: str = ""  # 비평한 사람 (예: '🛡️ 보안부 부장') — 화면 배지
+    critic_by: str = ""  # 비평한 사람 (예: '🛡️ 보안부 부서장') — 화면 배지
     harness: list[HarnessResult] = Field(default_factory=list)  # 하네스 검증 결과 (마지막 시도)
     verification_log: list[str] = Field(default_factory=list)  # 자가 교정·재시도 기록 (사람이 읽는 용)
     attempts: int = 1  # 자가 교정·하네스 재시도를 포함한 총 작성 횟수

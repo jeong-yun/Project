@@ -3,7 +3,7 @@
 # 적용 순서 (위가 우선)
 #   1) 사람이 화면 '🎛 부서별 모델 선택'에서 고른 모델 (데이터 폴더 member_models.json · department_models.json — 지우지 않는다)
 #   2) 이 파일의 추천          ← 고르지 않은 사람에게만
-#   3) config/models.yaml 의 직급 기본(ranks) · 부장 기본(critic) ← 이 파일에 없는 사람·팀 (새 팀 등)
+#   3) config/models.yaml 의 직급 기본(ranks) · 부서장 기본(critic) ← 이 파일에 없는 사람·팀 (새 팀 등)
 #
 # 추천도 다음 규칙을 모두 지킨다 (어긋나면 앱 시작 때 '⭐ 추천 모델 점검'에 ⚠️, tests/test_model_recs.py 도 실패)
 #   - 상하 규칙: 부서장 ≥ 팀장 ≥ 부장 ≥ 차장 ≥ 대리 ≥ 사원 (models.yaml model_tiers 의 강도 순서. 같은 강도는 허용)
@@ -83,7 +83,7 @@ heads:
   research:  {role: head_strong, why: 원전·출처와 어긋난 설명을 잡는 비평이라 가장 강한 모델 (업무마다 1번)}
   invest:    {role: head_strong, why: 숫자 출처·계산·위험 누락을 잡는 비평 — 틀리면 손실로 이어져 가장 강한 모델}
   travel:    {role: head_light, why: 날짜·이동 시간 확인 위주라 Sonnet 이면 충분 — 구독 한도 절약}
-  creative:  {role: head_strong, why: 곡 형식·설계 면적 조건을 모두 확인하는 비평 — 팀장(Opus)과 같은 강도}
+  creative:  {role: head_strong, why: 곡 형식·설계 면적 조건·목소리 사용 동의를 모두 확인하는 비평 — 팀장(Opus)과 같은 강도}
   security:  {role: head_strong, why: 통제 번호·표준 조항을 지어낸 인용을 잡아야 해 가장 강한 모델}
   career:    {role: head_strong, why: 개인 문서 — 믿을 수 있는 구독 Opus 로 지어낸 경력을 잡음 (무료 모델 제외)}
   education: {role: head_strong, why: 학습자 수준·퀴즈 정답 노출을 보는 비평 — 선생님(Opus)과 같은 강도 (무료 모델 제외)}
@@ -144,6 +144,16 @@ teams:
     gm_review:  {role: manager_strong, why: 구역·동선·채광 지표 검토 — 조건 위반을 잡는 검토}
     dgm_layout: {role: reader_long,    why: 방 프로그램 → 레이아웃 JSON — 형식 출력이 안정적이고 gpt-5.4-mini 보다 강하고 쌈}
     am_program: {role: vision_reader,  why: 도면 그림을 함께 받는 역할 — 그림을 읽는 모델 (무료·구독 모델은 그림을 못 받음)}
+  voice:
+    lead:       {role: lead_strong,    why: 실행 계획 확정·최종 정리 — 목소리 출처·사칭 거절 판단과 코드 값 그대로 쓰기를 책임짐}
+    gm_rights:  {role: manager_strong, why: 동의·권리·'AI 합성 음성' 표시 검수 — 무단 복제·속이는 용도를 놓치지 않게 강한 모델}
+    data_eng:   {role: format_precise, why: 데이터 점검 표 해석 — 코드가 센 숫자를 그대로 옮기는 형식 정확도}
+    train_eng:  {role: format_precise, why: Colab 셀·명령·설정 값 안내 — 명령 글자 그대로의 정확도}
+  voice_speech:
+    lead:       {role: lead_strong,    why: 말 변환 계획 확정 — 말은 사칭 위험이 커서 거절 판단을 가장 강한 모델이}
+    gm_rights:  {role: manager_strong, why: 동의·사칭 용도(전화·녹취·본인 인증) 검수 — 놓치면 피해로 이어져 강한 모델}
+    data_eng:   {role: format_precise, why: 데이터 점검 표 해석 — 코드가 센 숫자를 그대로 옮기는 형식 정확도}
+    train_eng:  {role: format_precise, why: 변환 명령(-a)·Colab 셀 안내 — 명령 글자 그대로의 정확도}
 
   # ── 🛡️ 보안부 (근거 인용·정확성) ──
   security_governance:

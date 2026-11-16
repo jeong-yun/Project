@@ -7,6 +7,7 @@ app.py 는 이 파일의 함수만 부른다 (화면 조각). 기록·끊기 로
   render_monitor(ctx, run)    : 진행 중·조작 / 시간표 / 전체 호출 / 요약 / 개입 기록 탭 — 같은 영역
   render_step_check(ctx, run) : 🔀 멈춘 곳의 선택 화면 → 사람의 답(dict) 또는 None — 바깥 영역 (입력 중 다시 그리지 않음)
   render_restart(ctx, run)    : ✏️ 질문·브리프 고쳐 다시 → 요청(dict) 또는 None    — 바깥 영역
+  quick_toggle / render_quick_note : ⚡ 빠른 답 (팀장 혼자) 켜기 · 결과 위 안내와 '👥 팀 전체로 다시'
   render_attempts(ctx, run)   : 🆚 예전 시도와 지금 비교
   render_history(data, names) : 🕘 지난 업무 창의 ⏱ 호출 기록
 """
@@ -47,6 +48,37 @@ def step_mode_toggle(team_id: str) -> bool:
         help="켜면 ① 브리프 뒤(팀장이 내놓은 방향 A·B·C 중 고르기) ② 팀장 업무 분배 뒤 ③ 초안 뒤(통합 전)에 멈추고 "
              "내 선택을 기다립니다. 끄면(기본) 지금처럼 끝까지 한 번에 진행합니다.",
     )
+
+
+def quick_key(team_id: str) -> str:
+    return f"quick_{team_id}"
+
+
+QUICK_HELP = ("켜면 팀장 한 명이 근거 자료(데이터·첨부·웹 검색)를 받아 한 번에 답합니다. 팀원 분배·초안·중간 검토와 "
+              "👔 부서장 검토를 건너뛰어 빠릅니다 (모델 호출 약 10번 → 1번). 코드 검사(하네스)는 그대로 하고, 걸리면 다시 씁니다. "
+              "결과가 마음에 안 들면 '👥 팀 전체로 다시'로 같은 질문을 지금 방식으로 맡길 수 있습니다. 끄면(기본) 지금처럼 팀 전체가 일합니다.")
+
+
+def quick_toggle(team_id: str, hint: str = "") -> bool:
+    """⚡ 빠른 답 (팀장 혼자) — 기본 꺼짐. hint = 꺼져 있을 때 보일 권유 한 줄 (짧은 자유 질문일 때만 — 모델로 판정하지 않음)."""
+    on = st.toggle("⚡ 빠른 답 (팀장 혼자)", key=quick_key(team_id), help=QUICK_HELP)
+    if on and st.session_state.get(step_key(team_id)):
+        st.caption("⚡ 빠른 답에는 멈출 단계가 없어 이번에는 🔀 단계마다 확인을 쓰지 않습니다.")
+    elif hint and not on:
+        st.caption(hint)
+    return on
+
+
+def render_quick_note(run: dict) -> bool:
+    """⚡ 빠른 답 결과 위 안내 — 부서장 검토가 없었다고 알리고, 결정 전이면 '👥 팀 전체로 다시' 버튼. 눌렀으면 True."""
+    if not run.get("quick") or not run["done"] or run.get("error"):
+        return False
+    st.info("⚡ 빠른 답 — 👔 부서장 검토 없이 팀장이 바로 답했습니다. 팀원 분배·검토는 건너뛰었고, 코드 검사(하네스)만 거쳤습니다.")
+    if run["status"] != "awaiting_human" or run.get("restored"):
+        return False
+    return st.button("👥 팀 전체로 다시", key=f"quick_full_{run['run_id']}",
+                     help="같은 질문·입력으로 요청 정리부터 팀 전체(분배·초안·검토·부서장 검토)가 다시 일합니다. "
+                          "지금 답은 '🆚 이전 시도'에 남아 비교할 수 있습니다.")
 
 
 def run_models(ctx: Ctx, run: dict) -> ModelsConfig:
@@ -151,16 +183,16 @@ def _controls(ctx: Ctx, run: dict, recs, now) -> None:
     if run["done"]:
         return
     ctl = call_monitor.control(rid)
-    if run.get("status") == "followup_running":  # 💬 추가 질문 — 👔 부장 검토 건너뛰기 · 중단
+    if run.get("status") == "followup_running":  # 💬 추가 질문 — 👔 부서장 검토 건너뛰기 · 중단
         c1, c2 = st.columns(2)
-        if c1.button("⛔ 부장 검토 건너뛰기" if "critic" not in ctl.skips else "⛔ 부장 검토 건너뜀", key=f"skip_head_{rid}",
+        if c1.button("⛔ 부서장 검토 건너뛰기" if "critic" not in ctl.skips else "⛔ 부서장 검토 건너뜀", key=f"skip_head_{rid}",
                      disabled="critic" in ctl.skips, use_container_width=True,
-                     help="수정본에 대한 부장 검토와 그에 따른 재수정을 건너뜁니다 (진행 중인 검토 호출도 끊음). 수정본은 그대로 나옵니다."):
+                     help="수정본에 대한 부서장 검토와 그에 따른 재수정을 건너뜁니다 (진행 중인 검토 호출도 끊음). 수정본은 그대로 나옵니다."):
             n = call_monitor.skip(rid, "critic")
-            st.toast(f"⛔ 부장 검토를 건너뜁니다 (끊은 호출 {n}개)")
+            st.toast(f"⛔ 부서장 검토를 건너뜁니다 (끊은 호출 {n}개)")
         if c2.button("⏹ 추가 질문 중단", key=f"stop_followup_{rid}", disabled=ctl.stopped, use_container_width=True,
                      help="진행 중인 호출을 끊습니다. 팀장이 답하는 중이면 결과는 그대로 두고 결정 대기로 돌아가고, "
-                          "부장이 검토하는 중이면 이미 쓴 수정본을 검토 없이 냅니다."):
+                          "부서장이 검토하는 중이면 이미 쓴 수정본을 검토 없이 냅니다."):
             n = call_monitor.stop(rid, "💬 추가 질문 중단")
             st.toast(f"⏹ 추가 질문을 중단합니다 (끊은 호출 {n}개)")
         return

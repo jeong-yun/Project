@@ -160,7 +160,7 @@ def test_concept_team_speed_settings():
     team = load_team("concept")
     assert team.review_mode == "edit"
     assert team.verification["critic"]["scope"] == "final"  # 부장 통합 뒤 비평은 생략 (편집장 단계에서 1회)
-    assert team.harness.final_only == ["concept_entry"]  # 형식 검사는 그대로 최종본에
+    assert team.harness.final_only == ["concept_entry", "concept_pending"]  # 형식 검사는 그대로 최종본에
 
 
 # ─── 편집장 검토: 고칠 곳만 ──────────────────────────────────────────

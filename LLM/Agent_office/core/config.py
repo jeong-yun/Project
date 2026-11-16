@@ -12,7 +12,9 @@
 """
 
 import copy
+import json
 import os
+import re
 from datetime import date
 from pathlib import Path
 
@@ -127,6 +129,90 @@ def skill_dirs(team_id: str) -> list[Path]:
     """스킬 폴더 — skills_from 의 공용 폴더가 먼저, 그 팀의 skills/ 가 나중 (있는 폴더만)."""
     shared = _team_yaml(team_id).get("skills_from") or []
     return [d for d in (*(TEAMS_DIR / s for s in shared), TEAMS_DIR / team_id / "skills") if d.is_dir()]
+
+
+# ─── 되풀이된 교훈 → 고정 규칙 (core/feedback.py promote_lesson 이 사람이 확인한 뒤에만 부른다) ─────────────
+# 둘 다 저장소에 커밋되는 파일이다. 공용 스킬 폴더(skills_from)는 다른 팀도 읽으므로 그 팀의 skills/ 에만 쓴다.
+
+PROMOTED_SKILL = "promoted_rules"  # teams/<팀>/skills/promoted_rules.md
+# 첫 줄은 '[' 로 시작하지 않는다 — skill_sections(맡은 절만 받는 실무자)가 절 제목으로 보고 걸러 내지 않게 (규칙 줄도 '- ')
+PROMOTED_HEAD = "사람 피드백에서 올린 고정 규칙 — 같은 지적이 여러 번 되풀이되어 교훈에서 올렸다 (📚 교훈 관리의 '⬆ 고정 규칙으로 올리기')"
+CRITIC_RULES = ("verification", "critic", "rules")  # team.yaml 안의 부서장 검토 기준 위치
+
+
+def promoted_skill_path(team_id: str) -> Path:
+    return TEAMS_DIR / team_id / "skills" / f"{PROMOTED_SKILL}.md"
+
+
+def add_skill_rule(team_id: str, rule: str) -> Path:
+    """팀 업무 지침(스킬)에 규칙 한 줄을 더한다 — 이미 같은 줄이 있으면 그대로. 바꾼(또는 확인한) 파일 경로."""
+    path = promoted_skill_path(team_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else [PROMOTED_HEAD]
+    if f"- {rule}" not in lines:
+        path.write_text("\n".join([*lines, f"- {rule}"]).strip() + "\n", encoding="utf-8")
+    return path
+
+
+def add_critic_rule(team_id: str, rule: str) -> Path:
+    """team.yaml 의 verification.critic.rules 에 한 줄을 더한다 — 주석·순서를 그대로 두려고 글자로 끼워 넣고,
+    다시 읽어 '그 한 줄만 늘었는지' 코드로 확인한 뒤에만 저장한다 (아니면 ConfigError, 파일은 그대로). 이미 있으면 그대로."""
+    path = TEAMS_DIR / team_id / "team.yaml"
+    text = path.read_text(encoding="utf-8")
+    before = yaml.safe_load(text) or {}
+    node = before
+    for key in CRITIC_RULES[:-1]:
+        node = node.get(key) or {} if isinstance(node, dict) else {}
+    if rule in ((node.get(CRITIC_RULES[-1]) if isinstance(node, dict) else None) or []):
+        return path
+    new = _insert_yaml_item(text, CRITIC_RULES, rule)
+    expected = copy.deepcopy(before)
+    node = expected
+    for key in CRITIC_RULES[:-1]:
+        node[key] = node.get(key) or {}
+        node = node[key]
+    node[CRITIC_RULES[-1]] = [*(node.get(CRITIC_RULES[-1]) or []), rule]
+    if yaml.safe_load(new) != expected:
+        raise ConfigError(f"teams/{team_id}/team.yaml 에 부서장 검토 기준을 자동으로 넣지 못했습니다 (파일 모양이 예상과 달라 "
+                          "바꾸지 않았습니다). 파일의 verification → critic → rules 목록에 직접 한 줄 더해 주세요.")
+    path.write_text(new, encoding="utf-8")
+    return path
+
+
+def _content(line: str) -> bool:
+    return bool(line.strip()) and not line.lstrip().startswith("#")
+
+
+def _indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _insert_yaml_item(text: str, keys: tuple[str, ...], item: str) -> str:
+    """YAML 글에서 keys 경로의 목록 끝에 item 을 한 줄로 끼워 넣는다 (없는 키는 만든다). 맞는지는 부른 쪽이 다시 읽어 확인한다."""
+    lines = text.splitlines()
+    start, end, parent = 0, len(lines), -1  # 지금 보는 블록 [start, end) 과 그 블록을 연 키의 들여쓰기
+    for depth, key in enumerate(keys):
+        body = [i for i in range(start, end) if _content(lines[i])]
+        child = _indent(lines[body[0]]) if body else parent + 2
+        found = next((i for i in body if _indent(lines[i]) == child
+                      and re.match(rf"^ *{re.escape(key)}\s*:\s*(#.*)?$", lines[i])), None)
+        last = body[-1] if body else start - 1  # 블록의 마지막 내용 줄 — 뒤따르는 주석은 다음 절 것이라 그 앞에 넣는다
+        if found is None:  # 남은 키를 블록 끝에 만든다
+            new = [" " * (child + 2 * j) + f"{k}:" for j, k in enumerate(keys[depth:])]
+            new.append(" " * (child + 2 * len(keys[depth:])) + "- " + json.dumps(item, ensure_ascii=False))
+            return "\n".join(lines[:last + 1] + new + lines[last + 1:]) + "\n"
+        is_list = depth == len(keys) - 1
+        start, parent, end = found + 1, child, len(lines)
+        for i in range(found + 1, len(lines)):  # 블록 끝 = 들여쓰기가 키보다 얕거나 같은 다음 내용 줄 (목록은 같은 깊이의 '- ' 도 포함)
+            if _content(lines[i]) and _indent(lines[i]) <= child and not (is_list and _indent(lines[i]) == child
+                                                                            and lines[i].lstrip().startswith("- ")):
+                end = i
+                break
+    items = [i for i in range(start, end) if _content(lines[i])]
+    first = next((i for i in items if lines[i].lstrip().startswith("- ")), None)
+    pad = _indent(lines[first]) if first is not None else parent + 2
+    at = (items[-1] if items else start - 1) + 1
+    return "\n".join(lines[:at] + [" " * pad + "- " + json.dumps(item, ensure_ascii=False)] + lines[at:]) + "\n"
 
 
 # ─── 조직도 ──────────────────────────────────────────────────────────

@@ -211,7 +211,8 @@ def test_waiving_one_of_several_points_keeps_the_result_failed(org, ranks, team,
     turn = followup.respond(lead_agent(org, ranks, team, models), "원 질문", ANSWER, REQUEST, [],
                             head=head_review(org, team, models, max_self_corrections=1))
     followup.waive(turn)
-    assert not turn.critic_passed and followup.next_request(turn) == "부장 검토에서 나온 고칠 점을 반영해 주세요.\n- " + other
+    left = followup.next_request(turn)
+    assert not turn.critic_passed and left.endswith("\n- " + other) and "61건" not in left  # 넘긴 지적은 빼고 남은 것만
 
 
 @pytest.mark.parametrize(("a", "b", "same"), [

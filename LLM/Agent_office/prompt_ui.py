@@ -13,9 +13,10 @@ from dataclasses import dataclass, field
 import streamlit as st
 
 from core import verification
-from core.config import load_models, load_ranks, team_org
+from core.config import load_models, load_ranks, load_verification, promoted_skill_path, team_org
 from core.feedback import (
-    DEFAULT_LESSON_CHARS, AgentPrompt, PromptLessons, active_lessons, apply_cleanup, lesson_origin, orphan_lessons, propose_cleanup,
+    DEFAULT_LESSON_CHARS, PROMOTE_HITS, PROMOTE_TARGETS, PROMOTED_LABELS, AgentPrompt, PromptLessons, active_lessons, apply_cleanup,
+    lesson_origin, orphan_lessons, polish_rule, promote_lesson, promoted, promotion_candidates, propose_cleanup, rule_draft,
     split_lesson, suggest_owner, team_lessons, team_prompts, undo_merge,
 )
 from core.schemas import CleanupProposal, ModelsConfig, Rank, ReviewResult, Team
@@ -80,12 +81,19 @@ def budget_warning(teams: list[Team], where: str) -> None:
     ctx = _context()
     if ctx.storage is None:
         return
+    picks = {team.id: team_lessons(ctx.storage, team.id, ctx.budget) for team in teams}
     over = [f"{team.name} {_names(team, ctx.ranks).get(agent, agent)}({_dropped(pick)})"
-            for team in teams for agent, pick in team_lessons(ctx.storage, team.id, ctx.budget).items() if _dropped(pick)]
+            for team in teams for agent, pick in picks[team.id].items() if _dropped(pick)]
     if over:
         st.warning(f"⚠️ 교훈이 많아 글자 한도({ctx.budget:,}자)를 넘었습니다: {', '.join(over)}  \n{DROP_ORDER}  \n"
                    f"{where}에서 무엇이 빠지는지 보고, 필요 없는 교훈은 꺼 주세요. "
                    "같은 피드백이 다시 오면 결정 때 자동으로 하나로 합쳐집니다.")
+    repeated = [f"{t.name} {n}개" for t in teams
+                if (n := sum(len(promotion_candidates(p.kept + p.left_out)) for p in picks[t.id].values()))]
+    if repeated:
+        st.info(f"🔁 같은 지적이 {PROMOTE_HITS}번 이상 되풀이된 교훈이 있습니다: {', '.join(repeated)}  \n"
+                "교훈은 '부탁'이라 글자 한도에서 빠지거나 무시될 수 있습니다. 아래 '📜 프롬프트·📚 교훈 보기' → 팀원 → '📚 교훈 관리'에서 "
+                "팀 업무 지침이나 부서장 검토 기준 같은 고정 규칙으로 올릴 수 있습니다 (문장을 확인하고 누를 때만 바뀝니다).")
     lost = [f"{t.name} {sum(map(len, o.values()))}개" for t in teams if (o := orphan_lessons(ctx.storage, t, ctx.ranks))]
     if lost:
         st.warning(f"⚠️ 지금 조직도에 없는 팀원 이름으로 남은 교훈이 있어 어느 프롬프트에도 들어가지 않습니다: {', '.join(lost)}  \n"
@@ -187,6 +195,7 @@ def render_lessons(team: Team, ap: AgentPrompt, key: str) -> None:
     cut = {r["id"]: r["partial"] for r in ap.lessons.cut}  # 세부 코멘트가 다 못 들어간 교훈 → 들어간 앞부분 글자 수 (0 = 모두 빠짐)
     st.caption(f"켜 둔 교훈 {sum(bool(r['active']) for r in rows)}개 · 꺼 둔 교훈 {sum(not r['active'] for r in rows)}개 · "
                f"프롬프트에 넣는 교훈 {len(kept)}개 ({ap.lessons.chars:,}자 / 한도 {ap.lessons.budget:,}자)")
+    render_promotions(team, rows, key)
     store = f"cleanup_{team.id}_{ap.node_id}"
     st.button("🧹 정리 제안 받기", key=f"ask_{store}", on_click=_ask_cleanup, args=(team, ap.node_id, store),
               disabled=sum(bool(r["active"]) for r in rows) < 2,
@@ -202,8 +211,10 @@ def render_lessons(team: Team, ap: AgentPrompt, key: str) -> None:
                   else "✂ 규칙 문장만 들어감 (세부 코멘트는 한도 넘어 빠짐)") if lid in cut
                  else "✅ 프롬프트에 들어감" if lid in kept else "⚠️ 한도 넘어 빠짐") if row["active"] else "⏸ 꺼 둠"
         hits = f" · 🔁 같은 피드백 {row['hits']}회" if row.get("hits", 1) > 1 else ""
+        up = "".join(f" · ⬆ {PROMOTED_LABELS[t]}{'에 올림' if t != 'code' else ''}" for t in sorted(promoted(row)) if t in PROMOTED_LABELS)
         with st.container(border=True):
-            st.caption(f"#{lid} · {row['created_at'][:10]} · {KIND.get(row['kind'], row['kind'])} · {state}{hits} · {len(row['lesson']):,}자")
+            st.caption(f"#{lid} · {row['created_at'][:10]} · {KIND.get(row['kind'], row['kind'])} · {state}{hits}{up} · "
+                       f"{len(row['lesson']):,}자")
             widget = f"lesson_text_{lid}"
             st.text_area("교훈 문장", value=row["lesson"], key=widget, height=110 if len(row["lesson"]) > 200 else 68,
                          label_visibility="collapsed")
@@ -224,6 +235,74 @@ def render_lessons(team: Team, ap: AgentPrompt, key: str) -> None:
                 c3.button("🗑 지우기", key=f"lesson_del_btn_{lid}", on_click=_confirm_delete, args=(lid, True),
                           use_container_width=True)
     st.caption(PRIVATE_NOTE)
+
+
+# ─── ⬆ 되풀이된 지적 → 고정 규칙으로 올리기 (사람이 문장을 확인하고 누를 때만 파일이 바뀐다) ────────────
+
+
+def _polish(team: Team, row: dict, target_widget: str, widget: str, key: str) -> None:
+    """✍️ 모델로 문장 다듬기 — 보조 모델 1번. 글 상자만 바꾸고 저장하지 않는다."""
+    text, notes = polish_rule(team, row, st.session_state.get(target_widget, "skill"), _context().models)
+    st.session_state[widget] = text
+    _flash(key, "✍️ 모델이 다듬은 문장을 글 상자에 넣었습니다. 아직 저장하지 않았습니다 — 확인하고 고친 뒤 '⬆ 올리기'를 눌러 주세요."
+           + (f" (참고: {' / '.join(notes)})" if notes else ""))
+
+
+def _promote(team: Team, lesson_id: int, target_widget: str, widget: str, ok_widget: str, key: str) -> None:
+    _flash(key, promote_lesson(_context().storage, team, lesson_id, st.session_state.get(target_widget, "skill"),
+                               st.session_state.get(widget, ""), bool(st.session_state.get(ok_widget))))
+
+
+def _target_file(team: Team, target: str) -> str:
+    return (f"teams/{team.id}/skills/{promoted_skill_path(team.id).name}" if target == "skill"
+            else f"teams/{team.id}/team.yaml 의 verification → critic → rules")
+
+
+def render_promotions(team: Team, rows: list[dict], key: str) -> None:
+    """같은 피드백을 PROMOTE_HITS 번 이상 받은 교훈 — '고정 규칙으로 올릴까요?'. 누르기 전에는 아무 파일도 바꾸지 않는다."""
+    cands = promotion_candidates(rows)
+    marked = [r for r in rows if "code" in promoted(r)]
+    if not cands and not marked:
+        return
+    if cands:
+        st.markdown("##### ⬆ 되풀이된 지적 — 고정 규칙으로 올리기")
+        st.caption("교훈은 '부탁'이라 글자 한도에서 빠지거나 무시될 수 있습니다. 규칙으로 올리면 교훈과 달리 글자 한도와 상관없이 항상 들어갑니다. "
+                   "팀 업무 지침과 team.yaml 은 저장소에 올라가는 파일이라, 올린 뒤 커밋하면 다른 PC·GitHub 에도 반영됩니다.")
+    critic_on = verification.critic_settings(load_verification(), team.verification).get("enabled", True)
+    for r in cands:
+        lid = r["id"]
+        target_widget, widget, ok_widget = f"promote_to_{lid}", f"promote_text_{lid}", f"promote_ok_{lid}"
+        if widget not in st.session_state:  # 처음엔 교훈의 규칙 문장 그대로 (사람 코멘트 원문은 뺀다)
+            st.session_state[widget] = rule_draft(r)
+        with st.container(border=True):
+            badge = " · 🧪 코드 검사 후보로 표시됨" if "code" in promoted(r) else ""
+            st.markdown(f"**이 지적이 {r['hits']}번 되풀이됐습니다. 고정 규칙으로 올릴까요?** (교훈 #{lid}{badge})")
+            target = st.radio("어디로 올릴까요", list(PROMOTE_TARGETS), format_func=PROMOTE_TARGETS.get, horizontal=True,
+                              key=target_widget)
+            if target == "code":
+                st.caption("필수 절 제목이 다 있는지처럼 코드로 셀 수 있는 지적이면 고르세요. 검증기를 만드는 것은 개발 작업이라 "
+                           "자동으로 만들지 않고 '코드 검사 후보' 목록에 표시만 합니다 (교훈은 켠 채로).")
+            else:
+                st.text_area("규칙 문장 (확인하고 고쳐 주세요 — 이 문장 그대로 저장됩니다)", key=widget, height=90)
+                st.caption(f"넣을 곳: `{_target_file(team, target)}` · 원래 교훈은 지우지 않고 꺼 둡니다. "
+                           "'(사람 코멘트: …)' 원문은 공개 파일에 넣지 않습니다.")
+                if target == "critic" and not critic_on:
+                    st.warning("⚠️ 이 팀은 부서장 비평이 꺼져 있어(verification.critic.enabled: false) 검토 기준을 넣어도 쓰이지 않습니다. "
+                               "팀 업무 지침에 넣기를 권합니다.")
+                if team.private:
+                    st.warning("⚠️ 비공개 팀입니다. 교훈 문장에 이름·회사·경력 같은 개인 정보가 들어 있을 수 있는데, 규칙은 GitHub 에 "
+                               "올라가는 공개 파일에 들어갑니다. 문장에서 개인 정보를 빼고 아래에 체크해야 올릴 수 있습니다.")
+                    st.checkbox("개인 정보가 없음을 확인했습니다", key=ok_widget)
+            c1, c2 = st.columns(2)
+            if target != "code":
+                c1.button("✍️ 모델로 문장 다듬기", key=f"promote_polish_{lid}", on_click=_polish,
+                          args=(team, r, target_widget, widget, key), use_container_width=True,
+                          help="보조 모델을 한 번 불러 한 줄 규칙으로 다듬어 글 상자에 넣습니다. 파일은 바뀌지 않습니다.")
+            c2.button("🧪 코드 검사 후보로 표시" if target == "code" else "⬆ 올리기", key=f"promote_go_{lid}", type="primary",
+                      on_click=_promote, args=(team, lid, target_widget, widget, ok_widget, key), use_container_width=True)
+    if marked:
+        st.caption("🧪 코드 검사 후보 (검증기를 만들면 사람이 직접 고칠 일이 줄어듭니다 — 개발 작업): "
+                   + " · ".join(f"#{r['id']} {rule_draft(r)[:60]}{'…' if len(rule_draft(r)) > 60 else ''}" for r in marked))
 
 
 # ─── 🧹 정리 제안 (결정 직후 · 교훈 관리) ─────────────────────────────────
@@ -383,25 +462,25 @@ def render_orphans(team: Team, key: str) -> None:
                       use_container_width=True)
 
 
-# ─── 부서 전체 (부장 + 팀마다) ─────────────────────────────────────────
+# ─── 부서 전체 (부서장 + 팀마다) ─────────────────────────────────────────
 
 
 def critic_prompt(team: Team, head) -> str:
-    """부장이 이 팀 결과를 비평할 때의 시스템 프롬프트 — 실행과 같은 verification.build_critic_messages 로 만든다."""
+    """부서장이 이 팀 결과를 비평할 때의 시스템 프롬프트 — 실행과 같은 verification.build_critic_messages 로 만든다."""
     rules = verification.critic_settings(_context().verification_cfg, team.verification).get("rules")
     empty = ReviewResult(analysis="", issues=[], score=0, verdict="approve", revised_answer="", comment="")
     return str(verification.build_critic_messages("", "", empty, [], rules, "", head.critic_persona())[0].content)
 
 
 def render_dept(dept, head, teams: list[Team], key: str) -> None:
-    """부서 화면 '📜 프롬프트·📚 교훈' — 👔 부장의 비평 관점 + 팀마다 팀원 프롬프트·교훈 관리."""
+    """부서 화면 '📜 프롬프트·📚 교훈' — 👔 부서장의 비평 관점 + 팀마다 팀원 프롬프트·교훈 관리."""
     st.caption("팀원마다 다음 업무에서 실제로 받는 시스템 프롬프트입니다 (실행과 같은 코드로 만듦). "
                f"교훈은 팀원마다 {_context().budget:,}자 안에서 모두 들어가고, 넘치면 긴 세부 코멘트부터 빠집니다 (규칙 문장은 남습니다).")
     tabs = st.tabs([f"👔 {head.name}", *(f"{t.name}" for t in teams)])
     with tabs[0]:
         st.markdown(f"**비평·팀 배정 관점** — {head.persona}")
-        st.caption("부장은 팀의 최종 답변을 마지막으로 확인하는 비평가입니다 — 검토자의 '지적 → 수정'이 논리적으로 이어지는지, "
-                   "수정 답변이 검토 기준·근거 자료·팀 규칙에 맞는지를 봅니다. 부장에게는 교훈이 들어가지 않습니다. "
+        st.caption("부서장은 팀의 최종 답변을 마지막으로 확인하는 비평가입니다 — 검토자의 '지적 → 수정'이 논리적으로 이어지는지, "
+                   "수정 답변이 검토 기준·근거 자료·팀 규칙에 맞는지를 봅니다. 부서장에게는 교훈이 들어가지 않습니다. "
                    "관점은 config/departments.yaml 의 head.persona 에서 바꿉니다.")
         pick = st.selectbox("어느 팀을 비평할 때", range(len(teams)), format_func=lambda i: teams[i].name, key=f"critic_team_{key}")
         st.code(critic_prompt(teams[pick], head), language="markdown", wrap_lines=True, height=300)

@@ -8,6 +8,7 @@
   budget_total  : 여행 계획서의 합계가 양식의 총예산을 넘는데 요약에서 밝히지 않았는지 (금액은 코드가 읽음, 확실할 때만)
   stock_plan    : 주식 점수표·매매 계획 JSON 을 코드로 검산 (core/stock_calc.py)
   concept_entry : 개념 카탈로그 결과 형식 검사 (core/concept.py)
+  concept_pending: 개념 최종본·변경 제안에 'PENDING·미확인 후보' 표시가 남지 않았는지 (되풀이된 사람 지적을 코드로)
   music_prompt  : 음악 팀 가사·Lyria 프롬프트 형식 검사 (core/music.py)
   floorplan     : 설계 팀 레이아웃 JSON 을 코드로 완성·검증 (겹침·외곽·면적·동선·계단·최소 치수, core/floorplan.py)
   control_ids   : 통제 번호가 고른 프레임워크 공개 목록(config/controls)에 있는지 (core/governance.py)
@@ -20,7 +21,7 @@
   portfolio_format: 포트폴리오 절(요약·역량 표·프로젝트)과 프로젝트 카드 다섯 항목 — 형식 지정이 있으면 원본 절 제목·표 머리글,
                   원본 그림이 있으면 [그림 N] 표시
   jd_recommend  : JD 추천 — 모든 JD·요구사항 판정 + 순위·추천이 코드가 계산한 점수 순서와 같은지 (점수는 코드가 셈)
-  voice_guard · voice_plan · voice_data: 음성 합성 팀 — 목소리 사용 범위 · 학습 계획 값 대조 · 데이터 점검 숫자 대조 (core/voice.py)
+  voice_guard · voice_plan · voice_data: 노래 음색 변환 · 일상 말 음성 변환 팀 — 목소리 사용 범위 · 학습 계획 값 대조 · 데이터 점검 숫자 대조 (core/voice.py)
   portfolio_changes: 포트폴리오 최신화 변경 목록 — 이전 글 그대로 · 문서 인용 그대로 · 외부 출처는 승인한 URL · 외부 숫자 금지
 
 ClickHouse 같은 실제 분석 DB 로 검증하려면, 같은 방식으로 Validator 를 하나 더 만들어
@@ -271,6 +272,34 @@ class ConceptEntryValidator(Validator):
         if problems:
             return self.fail("개념 결과 형식 오류: " + " / ".join(problems) + " — 이 부분을 고쳐 같은 형식으로 다시 작성하라.")
         return self.ok("개념 결과 형식 통과")
+
+
+# 확인 안 된 내용을 따로 모아 둔다는 표시 — <review_log> 에만 둔다. '확인되지 않음'은 스킬이 최종본에 쓰라는 문구라 여기 넣지 않는다
+# (2026-11-16 실측: 지금 카탈로그 158개 항목에 이 표시 0건 · '미확인'은 15건이라 넣지 않음, 저장된 개념 결과의 최종본 54개에도 0건)
+PENDING_MARK = re.compile(r"\bPENDING\b|미확인 후보|검증 후보")
+
+
+@register
+class ConceptPendingValidator(Validator):
+    """되풀이된 사람 지적('확인 안 된 원전·수치는 PENDING 으로 분리')을 코드로 — 분리했다는 표시가 최종본에 남으면 실패.
+
+    무엇이 확인 안 됐는지는 코드가 판정할 수 없다. 코드가 셀 수 있는 것은 'PENDING·미확인 후보' 목록이 최종본(<final>)이나
+    변경 제안의 바꿀 글(replace)에 섞여 카탈로그로 들어가는 것뿐이다 — 그런 것은 <review_log> 에만 둔다.
+    """
+
+    name = "concept_pending"
+    description = "개념 최종본·변경 제안에 'PENDING·미확인 후보·검증 후보' 표시가 남지 않았는지 (<review_log> 에만 둔다)"
+
+    def check(self, answer: str, options: dict):
+        from core.concept import parse_result  # concept 가 harness.base 를 쓰므로 늦게 불러온다
+
+        res = parse_result(answer, options)
+        texts = [c.replace for c in res.changes] if res.changes is not None else [res.final_entry]
+        found = [line.strip()[:40] for text in texts for line in (text or "").splitlines() if PENDING_MARK.search(line)]
+        if found:
+            return self.fail(f"최종본·변경 제안에 확인 안 된 내용 표시가 남아 있다 {found[:3]} — 확인되지 않은 원전·수치는 "
+                             "최종본에서 빼고 <review_log> 의 PENDING(미확인 후보) 목록에만 적어 같은 형식으로 다시 작성하라.")
+        return self.ok("최종본에 PENDING 표시 없음")
 
 
 @register
@@ -563,7 +592,7 @@ class PortfolioChangesValidator(Validator):
 
 
 class _VoiceValidator(Validator):
-    """음성 합성 팀 검증기 공통 — core/voice.py 의 검사 함수 하나를 부른다."""
+    """노래·말 음색 변환 팀 검증기 공통 — core/voice.py 의 검사 함수 하나를 부른다."""
 
     label = ""
 
@@ -581,7 +610,7 @@ class _VoiceValidator(Validator):
 class VoiceGuardValidator(_VoiceValidator):
     name = "voice_guard"
     label = "목소리 사용 범위"
-    description = "음성 합성 팀 — 실존 가수·유명인 목소리를 대상으로 적지 않았는지, 범위 밖 요청에 실행 방법을 주지 않았는지 (core/voice.py)"
+    description = "노래·말 음색 변환 팀 — 실존 가수·유명인 목소리를 대상으로 적지 않았는지, 범위 밖 요청에 실행 방법을 주지 않았는지 (core/voice.py)"
 
     def problems(self, answer, options):
         from core import voice
@@ -593,7 +622,7 @@ class VoiceGuardValidator(_VoiceValidator):
 class VoicePlanValidator(_VoiceValidator):
     name = "voice_plan"
     label = "학습 계획"
-    description = "음성 합성 팀 학습 계획 — 출처·동의 문장, 'AI 합성 음성' 표시, 네 단계, 화자·epochs·batch_size 가 코드가 만든 노트북과 같은지"
+    description = "노래·말 음색 변환 팀 학습 계획 — 출처·동의 문장, 'AI 합성 음성' 표시, 네 단계, 화자·epochs·batch_size 가 코드가 만든 노트북과 같은지 (말은 음높이 자동 예측 -a 도)"
 
     def problems(self, answer, options):
         from core import voice
@@ -605,7 +634,7 @@ class VoicePlanValidator(_VoiceValidator):
 class VoiceDataValidator(_VoiceValidator):
     name = "voice_data"
     label = "데이터 점검"
-    description = "음성 합성 팀 데이터 점검 — 답의 클립 수·길이·분량 판정이 코드가 계산한 점검 표와 같은지"
+    description = "노래·말 음색 변환 팀 데이터 점검 — 답의 클립 수·길이·분량 판정이 코드가 계산한 점검 표와 같은지"
 
     def problems(self, answer, options):
         from core import voice

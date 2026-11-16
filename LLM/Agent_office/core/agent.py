@@ -80,7 +80,7 @@ def apply_text_edits(text: str, edits) -> tuple[str, list[str]]:
     return text, skipped
 
 
-# '고칠 곳만 바꾸기'(review_mode: edit) 검토를 다시 하는 회차(부장 불합격·형식 검사 실패)에 되돌림 글 끝에 붙인다.
+# '고칠 곳만 바꾸기'(review_mode: edit) 검토를 다시 하는 회차(부서장 불합격·형식 검사 실패)에 되돌림 글 끝에 붙인다.
 # 되돌림 글은 "다시 작성하라"로 끝나는데 앞서 낸 edits 는 이미 글에 적용돼 있다 — 이 말이 없으면 모델이 예전 edits 를 다시 적어
 # 대부분 '찾지 못함'이 된다 (2026-11-10 실행 기록 14건: 첫 검토 174개 중 173개 적용, 다시 쓰는 회차 136개 중 43개).
 EDIT_RETRY_NOTE = (

@@ -83,8 +83,8 @@ from core.config import (
 from core.harness import REGISTRY as HARNESS_REGISTRY
 from core.llm_factory import NoAvailableModelError
 from core.live import (
-    FOLLOWUP_RUNNING, KIND_LABELS, STAGES, archive_attempt, new_run, prepare_resume, recover_followup, restore_run, stage_of,
-    start_followup, start_run,
+    FOLLOWUP_RUNNING, KIND_LABELS, STAGES, archive_attempt, new_run, prepare_resume, quick_hint, recover_followup, restore_run,
+    run_members, skipped_stages, stage_of, start_followup, start_run,
 )
 from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTemplate, ToolResult
 from core.search import WebContext
@@ -132,7 +132,7 @@ MUSIC_TRACK = "music_track"  # team.yaml features 에 있으면 끝난 뒤 Lyria
 MUSIC_CFG = music.music_settings(settings)  # settings.yaml 의 music: (모델·가격·채점·자동 재생성)
 # 화면에서 고른 팀원별 모델 — 데이터 폴더의 member_models.json (config/*.yaml 은 바꾸지 않는다)
 member_store = member_models.MemberModelStore(DATA_DIR)
-# 화면에서 고른 부서 부장 모델 (비평가·🧭 부서장) — 데이터 폴더의 department_models.json (core/dept_heads.py)
+# 화면에서 고른 부서장 모델 (비평가·🧭 팀 배정) — 데이터 폴더의 department_models.json (core/dept_heads.py)
 dept_store = dept_heads.DeptModelStore(DATA_DIR)
 
 # 고를 수 있는 모델 = yaml + 각 사 목록 API 로 찾은 모델 + 직접 입력한 모델 (core/model_catalog.py)
@@ -418,7 +418,7 @@ with st.sidebar:
     is_design = design_ui.FEATURE in team.features  # 설계 팀: 최종 JSON → 도면(+3D) (design_ui.py)
     is_career = career_ui.FEATURE in team.features  # 포트폴리오·자소서 팀: 최종 답변 → .md · .docx · .hwpx (career_ui.py)
     is_edu = education_ui.FEATURE in team.features  # 교육부: 📚 내 과목 · 퀴즈 채점 · 과목 저장 (education_ui.py)
-    is_voice = voice_ui.FEATURE in team.features  # 음성 합성 팀: 맡기기 전 목소리 사용 확인 · 점검 표 · 맞춤 실행 파일 (voice_ui.py)
+    is_voice = voice_ui.FEATURE in team.features  # 노래·말 음색 변환 팀: 맡기기 전 목소리 사용 확인 · 점검 표 · 맞춤 실행 파일 (voice_ui.py)
     edu_ctx = education_ui.Ctx(DATA_DIR, models, teams_by_id, TASK_KEY, TEAM_KEY)
 
     # 결과 기록은 부서 단위로 모아 본다 — 팀 필터는 선택 (팀이 둘 이상인 부서만)
@@ -471,7 +471,7 @@ with st.sidebar:
         st.caption(
             f"⚖️ 비평가: {'켜짐' if critic.get('enabled', True) else '꺼짐'} "
             f"({'최종 통합만' if critic.get('scope', 'final') == 'final' else '모든 검토'}, 자가 교정 최대 {critic.get('max_self_corrections', 1)}회)"
-            " — 비평은 이 팀 부서의 👔 부장이 합니다 (모델: 본문 '🎛 부서별 모델 선택')"
+            " — 비평은 이 팀 부서의 👔 부서장이 합니다 (모델: 본문 '🎛 부서별 모델 선택')"
         )
         validators = team.harness.validators
         st.caption(
@@ -502,7 +502,7 @@ runtime_states = llm_factory.provider_status(models)
 # 추천은 '지금 쓸 수 있는 첫 모델'로 보여 준다 (runtime_states — 맡길 때 workflow 도 같은 기준으로 상하 규칙을 맞춘다)
 member_plans = member_models.plan(org, models, team, member_choices, runtime_states)
 member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
-# 이 팀이 속한 부서와 부장 — 부장이 이 팀의 ⚖️ 비평가 (core/dept_heads.py)
+# 이 팀이 속한 부서와 부서장 — 부서장이 이 팀의 ⚖️ 비평가 (core/dept_heads.py)
 dept_head = dept_head_info
 
 
@@ -567,7 +567,7 @@ def dept_run_of(tid: str) -> tuple[dict | None, set[str] | None]:
     run = runs.get(run_key) if tid == team_id else open_run_of(tid)
     if tid == team_id:
         return run, active_ids
-    return run, ({n.id for n in subtree(dept_infos[tid].org, run["root_id"]).walk()} if run else None)
+    return run, (run_members(dept_infos[tid].org, run["root_id"], run) if run else None)
 
 
 # 🏢 픽셀 사무실·🖥️ 커맨드 센터가 쓰는 팀 정보 (office_ui.py · command_center_ui.py)
@@ -613,7 +613,9 @@ def run_progress(run: dict | None) -> progress.Estimate | None:
         critic_enabled=bool(PROGRESS_CRITIC.get("enabled")), critic_scope=PROGRESS_CRITIC.get("scope", "final"),
         max_self_corrections=int(PROGRESS_CRITIC.get("max_self_corrections") or 0),
         harness=bool(team.harness.validators or run.get("extra_validators")), max_retries=team.harness.max_retries,
-        brief=hints.get("brief", run.get("brief") is None), web=hints.get("web", False), step_mode=bool(run.get("step_mode")),
+        # ⚡ 빠른 답은 요청 정리·검색어를 모델로 하지 않는다 (hints 는 팀 전체 방식 기준 — '👥 팀 전체로 다시'에서 그대로 쓴다)
+        brief=hints.get("brief", run.get("brief") is None) and not run.get("quick"),
+        web=hints.get("web", False) and not run.get("quick"), step_mode=bool(run.get("step_mode")), quick=bool(run.get("quick")),
         concurrency=settings.get("llm_concurrency") or {},
     )
     return progress.estimate(plan, run, recs, progress.history(team_id, storage.monitor_history))
@@ -636,7 +638,7 @@ def make_graph():
         org, ranks, team, models, settings, verification_cfg, storage=storage, checkpointer=get_checkpointer(),
         # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로. 사라진·못 하는 모델은 대체·기본으로 (core/model_caps.py)
         member_models=model_caps.check_choices(member_store.load(team_id, LEGACY_ID), model_caps.TEAM_WORK)[0],
-        dept_head=dept_head, head_choice=dept_store.get(dept.id),  # 비평가 = 이 부서 부장 (맡기는 순간의 모델)
+        dept_head=dept_head, head_choice=dept_store.get(dept.id),  # 비평가 = 이 부서장 (맡기는 순간의 모델)
     )
 
 
@@ -849,7 +851,7 @@ def render_meta(step: AgentAnswer) -> None:
 
 
 def critic_badge(step: AgentAnswer) -> str:
-    """'🛡️ 보안부 부장 (gpt-5.4)' — 누가 어느 모델로 비평했는지 (예전 기록은 빈 문자열)."""
+    """'🛡️ 보안부 부서장 (gpt-5.4)' — 누가 어느 모델로 비평했는지 (예전 기록은 빈 문자열)."""
     if not step.critic_model:
         return step.critic_by
     return f"{step.critic_by or '비평가'} ({step.critic_model.model})"
@@ -1247,8 +1249,9 @@ def render_agent_panel(node_id: str, run: dict | None) -> None:
                     if drafting:
                         st.markdown("**✍️ 지금 작성 중인 초안**")
                         st.markdown(drafting + "▌")
-            elif node_id not in {n.id for n in subtree(org, run["root_id"]).walk()}:
-                st.caption("이번 업무의 문의 대상 아래에 있지 않은 에이전트입니다.")
+            elif node_id not in run_members(org, run["root_id"], run):
+                st.caption(f"⚡ 빠른 답 — 이번 업무는 {name_of(run['root_id'])}이(가) 혼자 답합니다." if run.get("quick")
+                           else "이번 업무의 문의 대상 아래에 있지 않은 에이전트입니다.")
             elif not run["done"]:
                 st.caption("아직 차례가 오지 않았습니다.")
             else:
@@ -1276,7 +1279,7 @@ def revisions(run: dict) -> list[tuple[followup.FollowupTurn, AgentAnswer]]:
             out.append((t, AgentAnswer(
                 node_id=final.node_id, rank_id=final.rank_id, kind=final.kind, content=t.content,
                 model=t.model or final.model, harness=t.harness, verification_log=t.log, elapsed_sec=t.elapsed_sec,
-                critic=t.critic, critic_model=t.critic_model, critic_by=t.critic_by,  # 👔 부장 검토 — 채택하면 기록에 남는다
+                critic=t.critic, critic_model=t.critic_model, critic_by=t.critic_by,  # 👔 부서장 검토 — 채택하면 기록에 남는다
             )))
     return out
 
@@ -1317,7 +1320,7 @@ def followup_evidence(run: dict) -> str:
 
 
 def render_turn(t: followup.FollowupTurn, head_name: str, avatar: str | None = None):
-    """수정 대화 한 번 — 요청 · 답 · 수정본 vN · 모델·기록 · 👔 부장 검토. 답 상자를 돌려준다 (버튼을 더 넣을 수 있게).
+    """수정 대화 한 번 — 요청 · 답 · 수정본 vN · 모델·기록 · 👔 부서장 검토. 답 상자를 돌려준다 (버튼을 더 넣을 수 있게).
     결정 전 화면(render_followup)과 🕘 지난 업무 창이 함께 쓴다."""
     with st.chat_message("user"):
         st.markdown(t.request)
@@ -1331,7 +1334,7 @@ def render_turn(t: followup.FollowupTurn, head_name: str, avatar: str | None = N
             st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
         meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
         st.caption(meta + "".join(f" · {x}" for x in t.log))
-        if t.critic or t.auto_fixed or t.auto_fixed_earlier:  # 👔 부장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부장이 직접 고친 점, 남은 추가로 고칠 점
+        if t.critic or t.auto_fixed or t.auto_fixed_earlier:  # 👔 부서장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부서장이 직접 고친 점, 남은 추가로 고칠 점
             st.markdown(followup.head_review_markdown(t, critic_badge(t) or head_name))
     return box
 
@@ -1356,7 +1359,7 @@ def render_followup(run: dict) -> None:
             followup.waive(t)
             storage.save_followups(run["run_id"], followup.dump_turns(turns))
             st.rerun()
-        fixes = followup.next_request(t) if t is newest and not pending else ""  # 부장이 직접 고친 뒤에도 남은 것만 — 최신 수정본에만
+        fixes = followup.next_request(t) if t is newest and not pending else ""  # 부서장이 직접 고친 뒤에도 남은 것만 — 최신 수정본에만
         if fixes and box.button(f"🛠 {dept_head.name}이(가) 짚은 점을 고쳐 달라고 요청",
                                 key=f"send_fixes_{run['run_id']}_{t.version}",
                                 help=f"{dept_head.name}이(가) 직접 고친 뒤에도 남은 지적과 '추가로 고칠 점'을 그대로 "
@@ -1413,7 +1416,7 @@ def start_background_followup(run: dict, request: str, mode: str = "auto") -> No
     lessons = pick.texts if pick else None
     options = {**team.harness.options, **check_options(run)}
     brief = run.get("brief")
-    head = followup.HeadReview(  # 👔 수정본은 부서 부장이 마지막으로 검토 — 본 업무의 비평과 같은 모델·설정·검토 기준
+    head = followup.HeadReview(  # 👔 수정본은 부서장이 마지막으로 검토 — 본 업무의 비평과 같은 모델·설정·검토 기준
         plan=dept_heads.critic_plan(models, team, member_chains, org.id, dept_head, dept_store.get(dept.id)),
         cfg=verification.critic_settings(verification_cfg, team.verification),
         criteria=[*team.review_criteria, *(brief.success_criteria if brief else [])])
@@ -1423,7 +1426,7 @@ def start_background_followup(run: dict, request: str, mode: str = "auto") -> No
                                 validators, options, team.harness.max_retries, head, mode)
 
     def on_finish(r: dict) -> None:
-        # 대화를 실행 기록에 남긴다 — 앱을 다시 켜도 수정본(채택 후보)·부장 검토가 보이고, 채택한 뒤에도 🕘 지난 업무에서 다시 본다
+        # 대화를 실행 기록에 남긴다 — 앱을 다시 켜도 수정본(채택 후보)·부서장 검토가 보이고, 채택한 뒤에도 🕘 지난 업무에서 다시 본다
         storage.save_followups(r["run_id"], followup.dump_turns(r.get("followups") or []))
         storage.set_status(r["run_id"], "awaiting_human")
         save_monitor(r)  # 💬 문의 호출까지 포함한 ⏱ 호출 기록
@@ -1677,10 +1680,13 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
 def render_stages(run: dict) -> None:
     """🎯 요청 정리 → … → 👤 결정 — 지금 어디까지 왔는지 한 줄로."""
     now = stage_of(run)
+    skipped = skipped_stages(run)  # ⚡ 빠른 답 — 팀장 혼자라 분배·검토·통합은 건너뜀
     pills = []
     for i, label in enumerate(STAGES):
         state = "done" if i < now else ("now" if i == now and not run["error"] else "todo")
-        if i == now and run["error"]:
+        if i in skipped:
+            state, label = "todo", label + " (건너뜀)"
+        elif i == now and run["error"]:
             state, label = "fail", label + " ⚠️"
         pills.append(f"<span class='ao-step ao-step-{state}'>{'✓ ' if state == 'done' else ''}{html.escape(label)}</span>")
     st.markdown("<div class='ao-steps'>" + "<span class='ao-step-sep'>›</span>".join(pills) + "</div>",
@@ -1719,9 +1725,9 @@ def history_dialog(run_id: str) -> None:
     if problem:
         st.caption(f"💬 {problem}")
     if turns:
-        with st.expander(f"💬 결정 전 문의·수정 요청 ({len(turns)}번) — 수정본·부장 검토"):
+        with st.expander(f"💬 결정 전 문의·수정 요청 ({len(turns)}번) — 수정본·부서장 검토"):
             for t in turns:
-                box = render_turn(t, "부장")
+                box = render_turn(t, "부서장")
                 if t.revised:  # 채택하지 않은 수정본도 나중에 확인할 수 있게 (어느 글을 보고 결정했는지)
                     box.download_button(f"⬇ 수정본 v{t.version} 받기 (.md, {len(t.content):,}자)", data=t.content,
                                         file_name=f"{tid}_{run_id[:8]}_v{t.version}.md", mime="text/markdown",
@@ -1792,8 +1798,8 @@ with st.expander(f"🎯 {team.name} 문의 대상 — 기본은 팀장 (팀장�
         horizontal=True,
         key=TARGET_KEY,
     )
-active_ids = {n.id for n in subtree(org, target).walk()}
 run_key = (team_id, target)
+active_ids = run_members(org, target, runs.get(run_key))  # ⚡ 빠른 답이면 문의 대상 한 명만 일한다
 FOCUS_KEY, CLICK_KEY, PENDING_FOCUS_KEY = f"focus_{team_id}", f"last_click_{team_id}", f"pending_focus_{team_id}"
 # 기본은 '아무 에이전트도 고르지 않음' — 조직도와 질문만 보이고, 칸을 누른 에이전트의 내용만 펼친다
 NO_FOCUS = "__none__"
@@ -1847,7 +1853,7 @@ def render_head_panel() -> None:
     """👔 부서장을 누르면 — 하는 일·관점·모델·부서 팀 상태."""
     model, source = building_ui.head_model(models, dept_store, dept.id, dept_heads.dept_private(dept, teams_by_id))
     with st.container(border=True):
-        st.markdown(f"#### 👔 {dept_head.name} · {dept.emoji} {dept.name} 부서장")
+        st.markdown(f"#### 👔 {dept_head.name} · {dept.emoji} {dept.name}")
         st.caption(f"🧭 요청을 읽고 맡을 팀을 고릅니다 · ⚖️ 이 부서 모든 팀의 최종 답변을 비평합니다 · 모델 {model} — {source}")
         st.markdown(f"**관점** — {dept_head.persona}")
         for tid in dept.teams:
@@ -2008,7 +2014,7 @@ def live_area() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 본문 ③-1 부서별 모델 선택 — 부서 → 👔 부장(비평가·🧭 부서장) → 팀 → 팀원 (dept_models_ui.py)
+# 본문 ③-1 부서별 모델 선택 — 부서 → 👔 부서장(비평가·🧭 팀 배정) → 팀 → 팀원 (dept_models_ui.py)
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -2096,7 +2102,7 @@ def cc_scope_check(question: str) -> dict:
 
 def cc_redirect(other_id: str, question: str, decision: dict) -> None:
     """커맨드 센터에서 '➡️ 맞는 팀에 맡기기' — 그 팀 화면으로 가서 곧바로 시작 (부서장 배정과 같은 길, building_ui)."""
-    how = "부장 모델" if decision.get("stage") == "router" else "낱말 확인"
+    how = "부서장 모델" if decision.get("stage") == "router" else "낱말 확인"
     attach_ui.clear()  # 터미널 한 줄에는 첨부가 없다 — 창구에 남아 있던 첨부가 따라가지 않게
     building_ui.navigate({"kind": "team", "id": other_id, "question": question, "start": True,
                           "assigned": {"head": "🧭 범위 확인", "reason": decision.get("reason", ""), "how": how,
@@ -2150,6 +2156,7 @@ def take_assigned() -> dict:
     assigned = building_ui.pop_assigned(team_id, web_available)
     if assigned:
         assigned["step_mode"] = bool(st.session_state.get(run_control_ui.step_key(DEPT_STEP)))
+        assigned["quick"] = bool(st.session_state.get(run_control_ui.quick_key(DEPT_STEP)))
     return assigned
 
 
@@ -2172,6 +2179,7 @@ def render_task_input() -> dict:
                         format_func=task_label, key=TASK_KEY, on_change=on_task_pick)
     if pick == HEAD_TASK:
         run_control_ui.step_mode_toggle(DEPT_STEP)  # 🔀 단계마다 확인 — 배정된 팀의 업무에 적용
+        run_control_ui.quick_toggle(DEPT_STEP)  # ⚡ 빠른 답 (팀장 혼자) — 배정된 팀의 팀장이 혼자 답한다
         with st.container(border=True):
             building_ui.head_desk(dept, teams_by_id, models, dept_store, teams, go_to_dept, DATA_DIR)
         # 배정된 요청의 📎 첨부에 그림·스캔 PDF 가 있으면 여기서 글자를 확인한 뒤 시작한다 (없으면 그대로 시작)
@@ -2181,6 +2189,13 @@ def render_task_input() -> dict:
     st.caption(f"👔 {dept_head.name} → **{team.name}** · 직접 고른 업무 — 부서장 배정 없이 이 팀의 {name_of(target)}에게 바로 맡깁니다")
     warn_chosen_off()
     run_control_ui.step_mode_toggle(team_id)  # 🔀 단계마다 확인 (기본 꺼짐)
+    # ⚡ 빠른 답 (기본 꺼짐) — 업무 양식이 아닌 자유 질문이면 권유 한 줄 (모델로 판정하지 않음: 호출을 줄이려는 기능이라)
+    quick_tip = ""
+    if mode == FREE_FORM:
+        quick_tip = ("💡 지금 질문은 짧아서 ⚡ 빠른 답을 권합니다 — 팀장 혼자 한 번에 답해 훨씬 빠릅니다."
+                     if quick_hint(st.session_state.get("q_text", ""))
+                     else "💡 한두 문장짜리 짧은 질문이면 ⚡ 빠른 답을 권합니다 — 팀장 혼자 한 번에 답해 훨씬 빠릅니다.")
+    run_control_ui.quick_toggle(team_id, quick_tip)
     # (안쪽에 '원하는 최종 상태' 접기 상자가 있어 바깥은 접기 상자가 아닌 테두리 상자로 둔다 — Streamlit 은 접기 상자 중첩 불가)
     with st.container(border=True):
         task: TaskTemplate | None = next((t for t in team.tasks if t.id == mode), None)
@@ -2344,7 +2359,7 @@ for done_id in st.session_state.pop(NOTICE_KEY, []):
 render_member_models()
 # 📜 팀원마다 실제로 받는 시스템 프롬프트 · 📚 교훈 관리 (prompt_ui.py) — 켰을 때만 그린다 (다시 그릴 때 드는 시간 없음)
 if st.toggle(f"📜 {dept.name} 프롬프트·📚 교훈 보기", key=f"prompts_{dept_id}",
-             help="부장의 비평 관점, 팀원마다 다음 업무에서 받는 시스템 프롬프트(교훈 포함)를 보고 교훈을 고치거나 끕니다."):
+             help="부서장의 비평 관점, 팀원마다 다음 업무에서 받는 시스템 프롬프트(교훈 포함)를 보고 교훈을 고치거나 끕니다."):
     with st.container(border=True):
         prompt_ui.render_dept(dept, dept_head, DEPT_TEAMS, key=dept_id)
 
@@ -2423,15 +2438,20 @@ def restart_run(run: dict, req: dict) -> str | None:
     if req["point"] == "plan" and run.get("brief") is not None and req["brief"] != run["brief"]:
         what.append("브리프 고침")
     why = f"{run_control_ui.RESTART_POINTS[req['point']]} · " + (", ".join(what) or "그대로 다시")
+    # ⚡ 빠른 답 켜기·끄기 — '👥 팀 전체로 다시'는 끄고, 🔀 단계마다 확인을 고르면 팀 전체 방식으로 (빠른 답에는 멈출 단계가 없다)
+    quick = req.get("quick", False if req["step_mode"] else None)
+    if quick is False and run.get("quick"):
+        why = "👥 팀 전체로 다시 (⚡ 빠른 답 → 팀 전체)" if req.get("quick") is False else why + " · 팀 전체로"
     archive_attempt(run, why)  # 💬 수정 대화도 이전 시도로 옮긴다 (옛 결과를 고친 수정본이 새 결과의 채택 후보로 남지 않게)
     storage.save_followups(rid, "")  # 실행 기록도 같은 상태로 — 다시 하는 도중에 앱을 꺼도 옛 수정본이 되살아나지 않는다
     call_monitor.new_round(rid)
     call_monitor.log(rid, "✏️ 고쳐 다시", why + (" · 🔀 단계마다 확인" if req["step_mode"] else ""))
     # 업무 분배부터면 고친 브리프가 곧 이번 브리프 (요청 정리를 다시 하지 않아 브리프 이벤트가 오지 않는다), 처음부터면 새로 정리될 때까지 비움
-    run.update(question=req["question"], step_mode=req["step_mode"], brief=req["brief"] if req["point"] == "plan" else None)
+    run.update(question=req["question"], step_mode=req["step_mode"], brief=req["brief"] if req["point"] == "plan" else None,
+               quick=run.get("quick", False) if quick is None else quick)
     prepare_resume(run, "✏️ 고쳐 다시")
     graph = make_graph()
-    launch(run, lambda: restart_from(graph, org, rid, req["point"], req["question"], req["brief"], req["step_mode"]))
+    launch(run, lambda: restart_from(graph, org, rid, req["point"], req["question"], req["brief"], req["step_mode"], quick))
     return None
 
 
@@ -2444,6 +2464,14 @@ if current and (current["done"] or current["status"] == FOLLOWUP_RUNNING):
             continue_step(current, step_answer)
             st.rerun()
     elif current["steps"]:
+        if run_control_ui.render_quick_note(current):  # ⚡ 빠른 답 — 부서장 검토 없음 안내 · 👥 팀 전체로 다시
+            # 같은 체크포인트에서 요청 정리부터 (같은 질문·브리프 입력·첨부·웹 설정) — 지금 답은 🆚 이전 시도로 남는다
+            problem = restart_run(current, {"point": "brief", "question": current["question"], "brief": None,
+                                            "step_mode": False, "quick": False})
+            if problem:
+                st.warning(problem)
+            else:
+                st.rerun()
         render_final_and_decision(current, run_key)
 
 if (current and not current["error"] and current["status"] not in (*DECIDED, FOLLOWUP_RUNNING)
@@ -2491,6 +2519,9 @@ if request:
         run["edu_inputs"] = request["tool_inputs"] if education_ui.FEATURE in features else None  # 과목 id·업무 종류
         # 🔀 단계마다 확인 · ⏭ 다른 모델로 고를 때의 규칙(🆓 무료만·팀원 모델)은 맡기는 순간 값으로
         run["step_mode"] = bool(request.get("step_mode", st.session_state.get(run_control_ui.step_key(team_id))))
+        run["quick"] = bool(request.get("quick", st.session_state.get(run_control_ui.quick_key(team_id))))  # ⚡ 빠른 답
+        if run["quick"]:
+            run["step_mode"] = False  # 빠른 답에는 멈출 단계가 없다
         run["free_only"] = bool(st.session_state.get("free_only"))
         run["member_choices"] = member_store.load(team_id, LEGACY_ID)
         given = request.get("brief")  # 📊 진행률: 요청 정리(브리프)를 AI 가 하는지 · 웹 검색을 하는지
@@ -2509,7 +2540,7 @@ if request:
                 graph, org, run["question"], target, thread_id=run["run_id"],
                 use_web=request["use_web"], brief=request["brief"], auto_brief=request["auto_brief"],
                 tool_inputs=request["tool_inputs"], extra_validators=request["extra_validators"],
-                harness_options=request["harness_options"], step_mode=run["step_mode"],
+                harness_options=request["harness_options"], step_mode=run["step_mode"], quick=run["quick"],
             )
 
         launch(run, events)
