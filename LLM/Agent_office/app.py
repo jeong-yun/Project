@@ -132,7 +132,7 @@ MUSIC_TRACK = "music_track"  # team.yaml features 에 있으면 끝난 뒤 Lyria
 MUSIC_CFG = music.music_settings(settings)  # settings.yaml 의 music: (모델·가격·채점·자동 재생성)
 # 화면에서 고른 팀원별 모델 — 데이터 폴더의 member_models.json (config/*.yaml 은 바꾸지 않는다)
 member_store = member_models.MemberModelStore(DATA_DIR)
-# 화면에서 고른 부서 부장 모델 (비평가·🧭 부서장) — 데이터 폴더의 department_models.json (core/dept_heads.py)
+# 화면에서 고른 부서장 모델 (비평가·🧭 팀 배정) — 데이터 폴더의 department_models.json (core/dept_heads.py)
 dept_store = dept_heads.DeptModelStore(DATA_DIR)
 
 # 고를 수 있는 모델 = yaml + 각 사 목록 API 로 찾은 모델 + 직접 입력한 모델 (core/model_catalog.py)
@@ -471,7 +471,7 @@ with st.sidebar:
         st.caption(
             f"⚖️ 비평가: {'켜짐' if critic.get('enabled', True) else '꺼짐'} "
             f"({'최종 통합만' if critic.get('scope', 'final') == 'final' else '모든 검토'}, 자가 교정 최대 {critic.get('max_self_corrections', 1)}회)"
-            " — 비평은 이 팀 부서의 👔 부장이 합니다 (모델: 본문 '🎛 부서별 모델 선택')"
+            " — 비평은 이 팀 부서의 👔 부서장이 합니다 (모델: 본문 '🎛 부서별 모델 선택')"
         )
         validators = team.harness.validators
         st.caption(
@@ -502,7 +502,7 @@ runtime_states = llm_factory.provider_status(models)
 # 추천은 '지금 쓸 수 있는 첫 모델'로 보여 준다 (runtime_states — 맡길 때 workflow 도 같은 기준으로 상하 규칙을 맞춘다)
 member_plans = member_models.plan(org, models, team, member_choices, runtime_states)
 member_chains = {nid: member_models.member_rank_models(p, models, team) for nid, p in member_plans.items()}
-# 이 팀이 속한 부서와 부장 — 부장이 이 팀의 ⚖️ 비평가 (core/dept_heads.py)
+# 이 팀이 속한 부서와 부서장 — 부서장이 이 팀의 ⚖️ 비평가 (core/dept_heads.py)
 dept_head = dept_head_info
 
 
@@ -638,7 +638,7 @@ def make_graph():
         org, ranks, team, models, settings, verification_cfg, storage=storage, checkpointer=get_checkpointer(),
         # 맡기는 순간의 선택으로 고정 — 진행 중에 바꿔도 이번 업무는 그대로. 사라진·못 하는 모델은 대체·기본으로 (core/model_caps.py)
         member_models=model_caps.check_choices(member_store.load(team_id, LEGACY_ID), model_caps.TEAM_WORK)[0],
-        dept_head=dept_head, head_choice=dept_store.get(dept.id),  # 비평가 = 이 부서 부장 (맡기는 순간의 모델)
+        dept_head=dept_head, head_choice=dept_store.get(dept.id),  # 비평가 = 이 부서장 (맡기는 순간의 모델)
     )
 
 
@@ -851,7 +851,7 @@ def render_meta(step: AgentAnswer) -> None:
 
 
 def critic_badge(step: AgentAnswer) -> str:
-    """'🛡️ 보안부 부장 (gpt-5.4)' — 누가 어느 모델로 비평했는지 (예전 기록은 빈 문자열)."""
+    """'🛡️ 보안부 부서장 (gpt-5.4)' — 누가 어느 모델로 비평했는지 (예전 기록은 빈 문자열)."""
     if not step.critic_model:
         return step.critic_by
     return f"{step.critic_by or '비평가'} ({step.critic_model.model})"
@@ -1279,7 +1279,7 @@ def revisions(run: dict) -> list[tuple[followup.FollowupTurn, AgentAnswer]]:
             out.append((t, AgentAnswer(
                 node_id=final.node_id, rank_id=final.rank_id, kind=final.kind, content=t.content,
                 model=t.model or final.model, harness=t.harness, verification_log=t.log, elapsed_sec=t.elapsed_sec,
-                critic=t.critic, critic_model=t.critic_model, critic_by=t.critic_by,  # 👔 부장 검토 — 채택하면 기록에 남는다
+                critic=t.critic, critic_model=t.critic_model, critic_by=t.critic_by,  # 👔 부서장 검토 — 채택하면 기록에 남는다
             )))
     return out
 
@@ -1320,7 +1320,7 @@ def followup_evidence(run: dict) -> str:
 
 
 def render_turn(t: followup.FollowupTurn, head_name: str, avatar: str | None = None):
-    """수정 대화 한 번 — 요청 · 답 · 수정본 vN · 모델·기록 · 👔 부장 검토. 답 상자를 돌려준다 (버튼을 더 넣을 수 있게).
+    """수정 대화 한 번 — 요청 · 답 · 수정본 vN · 모델·기록 · 👔 부서장 검토. 답 상자를 돌려준다 (버튼을 더 넣을 수 있게).
     결정 전 화면(render_followup)과 🕘 지난 업무 창이 함께 쓴다."""
     with st.chat_message("user"):
         st.markdown(t.request)
@@ -1334,7 +1334,7 @@ def render_turn(t: followup.FollowupTurn, head_name: str, avatar: str | None = N
             st.markdown(f"**✏️ 수정본 v{t.version}**{checks}" + "".join(f"\n- {c}" for c in t.changes))
         meta = f"{t.model.label} · {t.elapsed_sec}초" if t.model else ""
         st.caption(meta + "".join(f" · {x}" for x in t.log))
-        if t.critic or t.auto_fixed or t.auto_fixed_earlier:  # 👔 부장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부장이 직접 고친 점, 남은 추가로 고칠 점
+        if t.critic or t.auto_fixed or t.auto_fixed_earlier:  # 👔 부서장 검토 — 누가·어느 모델로, 점수·합격 여부, 지적, 부서장이 직접 고친 점, 남은 추가로 고칠 점
             st.markdown(followup.head_review_markdown(t, critic_badge(t) or head_name))
     return box
 
@@ -1353,7 +1353,7 @@ def render_followup(run: dict) -> None:
     send_fixes = ""
     for t in turns:
         box = render_turn(t, dept_head.name, avatar_for_chat(root))
-        fixes = followup.next_request(t) if t is newest and not pending else ""  # 부장이 직접 고친 뒤에도 남은 것만 — 최신 수정본에만
+        fixes = followup.next_request(t) if t is newest and not pending else ""  # 부서장이 직접 고친 뒤에도 남은 것만 — 최신 수정본에만
         if fixes and box.button(f"🛠 {dept_head.name}이(가) 짚은 점을 고쳐 달라고 요청",
                                 key=f"send_fixes_{run['run_id']}_{t.version}",
                                 help=f"{dept_head.name}이(가) 직접 고친 뒤에도 남은 지적과 '추가로 고칠 점'을 그대로 "
@@ -1399,7 +1399,7 @@ def start_background_followup(run: dict, request: str) -> None:
     lessons = pick.texts if pick else None
     options = {**team.harness.options, **check_options(run)}
     brief = run.get("brief")
-    head = followup.HeadReview(  # 👔 수정본은 부서 부장이 마지막으로 검토 — 본 업무의 비평과 같은 모델·설정·검토 기준
+    head = followup.HeadReview(  # 👔 수정본은 부서장이 마지막으로 검토 — 본 업무의 비평과 같은 모델·설정·검토 기준
         plan=dept_heads.critic_plan(models, team, member_chains, org.id, dept_head, dept_store.get(dept.id)),
         cfg=verification.critic_settings(verification_cfg, team.verification),
         criteria=[*team.review_criteria, *(brief.success_criteria if brief else [])])
@@ -1409,7 +1409,7 @@ def start_background_followup(run: dict, request: str) -> None:
                                 validators, options, team.harness.max_retries, head)
 
     def on_finish(r: dict) -> None:
-        # 대화를 실행 기록에 남긴다 — 앱을 다시 켜도 수정본(채택 후보)·부장 검토가 보이고, 채택한 뒤에도 🕘 지난 업무에서 다시 본다
+        # 대화를 실행 기록에 남긴다 — 앱을 다시 켜도 수정본(채택 후보)·부서장 검토가 보이고, 채택한 뒤에도 🕘 지난 업무에서 다시 본다
         storage.save_followups(r["run_id"], followup.dump_turns(r.get("followups") or []))
         storage.set_status(r["run_id"], "awaiting_human")
         save_monitor(r)  # 💬 문의 호출까지 포함한 ⏱ 호출 기록
@@ -1708,9 +1708,9 @@ def history_dialog(run_id: str) -> None:
     if problem:
         st.caption(f"💬 {problem}")
     if turns:
-        with st.expander(f"💬 결정 전 문의·수정 요청 ({len(turns)}번) — 수정본·부장 검토"):
+        with st.expander(f"💬 결정 전 문의·수정 요청 ({len(turns)}번) — 수정본·부서장 검토"):
             for t in turns:
-                box = render_turn(t, "부장")
+                box = render_turn(t, "부서장")
                 if t.revised:  # 채택하지 않은 수정본도 나중에 확인할 수 있게 (어느 글을 보고 결정했는지)
                     box.download_button(f"⬇ 수정본 v{t.version} 받기 (.md, {len(t.content):,}자)", data=t.content,
                                         file_name=f"{tid}_{run_id[:8]}_v{t.version}.md", mime="text/markdown",
@@ -1836,7 +1836,7 @@ def render_head_panel() -> None:
     """👔 부서장을 누르면 — 하는 일·관점·모델·부서 팀 상태."""
     model, source = building_ui.head_model(models, dept_store, dept.id, dept_heads.dept_private(dept, teams_by_id))
     with st.container(border=True):
-        st.markdown(f"#### 👔 {dept_head.name} · {dept.emoji} {dept.name} 부서장")
+        st.markdown(f"#### 👔 {dept_head.name} · {dept.emoji} {dept.name}")
         st.caption(f"🧭 요청을 읽고 맡을 팀을 고릅니다 · ⚖️ 이 부서 모든 팀의 최종 답변을 비평합니다 · 모델 {model} — {source}")
         st.markdown(f"**관점** — {dept_head.persona}")
         for tid in dept.teams:
@@ -1997,7 +1997,7 @@ def live_area() -> None:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 본문 ③-1 부서별 모델 선택 — 부서 → 👔 부장(비평가·🧭 부서장) → 팀 → 팀원 (dept_models_ui.py)
+# 본문 ③-1 부서별 모델 선택 — 부서 → 👔 부서장(비평가·🧭 팀 배정) → 팀 → 팀원 (dept_models_ui.py)
 # ════════════════════════════════════════════════════════════════════
 
 
@@ -2085,7 +2085,7 @@ def cc_scope_check(question: str) -> dict:
 
 def cc_redirect(other_id: str, question: str, decision: dict) -> None:
     """커맨드 센터에서 '➡️ 맞는 팀에 맡기기' — 그 팀 화면으로 가서 곧바로 시작 (부서장 배정과 같은 길, building_ui)."""
-    how = "부장 모델" if decision.get("stage") == "router" else "낱말 확인"
+    how = "부서장 모델" if decision.get("stage") == "router" else "낱말 확인"
     attach_ui.clear()  # 터미널 한 줄에는 첨부가 없다 — 창구에 남아 있던 첨부가 따라가지 않게
     building_ui.navigate({"kind": "team", "id": other_id, "question": question, "start": True,
                           "assigned": {"head": "🧭 범위 확인", "reason": decision.get("reason", ""), "how": how,
@@ -2342,7 +2342,7 @@ for done_id in st.session_state.pop(NOTICE_KEY, []):
 render_member_models()
 # 📜 팀원마다 실제로 받는 시스템 프롬프트 · 📚 교훈 관리 (prompt_ui.py) — 켰을 때만 그린다 (다시 그릴 때 드는 시간 없음)
 if st.toggle(f"📜 {dept.name} 프롬프트·📚 교훈 보기", key=f"prompts_{dept_id}",
-             help="부장의 비평 관점, 팀원마다 다음 업무에서 받는 시스템 프롬프트(교훈 포함)를 보고 교훈을 고치거나 끕니다."):
+             help="부서장의 비평 관점, 팀원마다 다음 업무에서 받는 시스템 프롬프트(교훈 포함)를 보고 교훈을 고치거나 끕니다."):
     with st.container(border=True):
         prompt_ui.render_dept(dept, dept_head, DEPT_TEAMS, key=dept_id)
 

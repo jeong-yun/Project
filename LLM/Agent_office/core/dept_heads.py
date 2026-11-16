@@ -1,35 +1,35 @@
-"""👔 부서 부장 — 부서마다 한 명. ① 그 부서 모든 팀의 ⚖️ 비평가 ② 🧭 부서장(요청을 알맞은 팀으로 보냄).
+"""👔 부서장 — 부서마다 한 명. ① 그 부서 모든 팀의 ⚖️ 비평가 ② 🧭 팀 배정(요청을 알맞은 팀으로 보냄).
 
-부장은 팀 조직도 안의 팀원이 아니다 (팀 조직도는 그대로). 부서 전체를 보는 사람이다.
-  이름·관점(persona) : config/departments.yaml 의 부서마다 head: {name, persona} (없으면 '<부서 이름> 부장' + 부서 소개)
+부서장은 팀 조직도 안의 팀원이 아니다 (팀 조직도는 그대로). 부서 전체를 보는 사람이다.
+  이름·관점(persona) : config/departments.yaml 의 부서마다 head: {name, persona} (없으면 '<부서 이름> 부서장' + 부서 소개)
   모델               : 화면 '🎛 부서별 모델'에서 고른다 → 데이터 폴더 department_models.json {부서 id: "provider:model"}
                        (config/*.yaml 은 바꾸지 않는다. 바꾼 모델은 다음에 맡기는 업무부터)
 
 비평가 모델 정하는 순서 (critic_plan)
-  1. 부장 모델을 화면에서 골랐으면 그 모델
+  1. 부서장 모델을 화면에서 골랐으면 그 모델
   2. ⭐ 추천 (config/model_recommendations.yaml heads — core/model_recs.py). 비공개 팀이면 추천에서 무료 모델을 뺀다.
      추천이 모두 꺼져 있으면(비공개 팀 + '🆓 무료 모델만' 등) 다음 순서로
   3. 비공개 팀(team.yaml private: true)이면 팀장 모델 후보 그대로 — 문서가 팀원이 쓰는 제공처 밖으로 나가지 않게
-  4. config/models.yaml 의 critic: = 부장 기본 (팀장과 같거나 더 강한 모델 — 지금은 Claude 구독 Opus 5.5 → gpt-5.5 → … → 무료)
+  4. config/models.yaml 의 critic: = 부서장 기본 (팀장과 같거나 더 강한 모델 — 지금은 Claude 구독 Opus 5.5 → gpt-5.5 → … → 무료)
   5. utility (critic 을 지웠을 때만 — 예전 동작)
   고른 모델의 대안(fallback) = 3·4 의 후보 중 고른 모델보다 강하지 않은 것 (대안으로 넘어가도 더 비싼 모델로 올라가지 않음).
   무료(freellm) 모델을 골랐으면 대안도 무료만 (팀원 모델 선택과 같은 규칙). '🆓 무료 모델만 사용'이면 유료가 꺼지므로
   후보 중 무료 모델이 쓰인다 — 후보에 무료 모델이 하나도 없으면 utility 의 무료 모델을 끝에 붙인다.
 
 강도 규칙 (결정)
-  부장은 조직의 맨 위다 — 기본 모델은 팀장과 같거나 더 강하게 둔다 (2026-11-05: 예전 기본 utility(gemini-3.5-flash)가
+  부서장은 조직의 맨 위다 — 기본 모델은 팀장과 같거나 더 강하게 둔다 (2026-11-05: 예전 기본 utility(gemini-3.5-flash)가
   팀장(Opus 5.5)보다 약했던 문제를 고침). 화면에서 고를 때는 위아래 제한을 두지 않는다 — 비용·한도 때문에 가벼운 모델도 고를 수 있다.
   대신 비평가가 채점 대상(팀장)보다 약한 모델이면 화면과 검증 기록에 경고한다 (member_models.head_warning).
 
 비용·한도 (기본 = claude_cli Opus 5.5)
   비평: 업무 하나에 1번 + 불합격이면 (자가 교정 + 다시 비평) × 최대 max_self_corrections 번 — 모두 구독 한도를 쓴다.
-  💬 수정 요청(core/followup.py): 수정본마다 검토 1번 + 추가로 고칠 점이 있으면 (부장 직접 수정 1 + 다시 검토 1),
-  불합격이면 (팀장 다시 고침 + 다시 검토 1) — 둘을 합쳐 같은 상한. 부장의 직접 수정도 부장 모델(구독 한도)을 쓴다.
+  💬 수정 요청(core/followup.py): 수정본마다 검토 1번 + 추가로 고칠 점이 있으면 (부서장 직접 수정 1 + 다시 검토 1),
+  불합격이면 (팀장 다시 고침 + 다시 검토 1) — 둘을 합쳐 같은 상한. 부서장의 직접 수정도 부서장 모델(구독 한도)을 쓴다.
   🧭 팀 배정(route_request): 팀이 둘 이상인 부서에서 맡길 때마다 모델 1번 (낱말 비교는 모델이 실패할 때만). claude -p 는 한 번에
   약 8초의 시작 시간이 더해진다. 🛎 인포메이션 센터(core/reception.py)는 이 기본을 쓰지 않고 가벼운 assist_chain 을 쓴다.
 
 비공개 팀 (결정)
-  부장 모델을 고르지 않았으면 팀장 모델로 비평한다 (위 2). 골랐는데 그 제공처가 팀원들이 쓰는 제공처에 없으면 경고한다.
+  부서장 모델을 고르지 않았으면 팀장 모델로 비평한다 (위 2). 골랐는데 그 제공처가 팀원들이 쓰는 제공처에 없으면 경고한다.
 """
 
 import json
@@ -45,22 +45,22 @@ FILE_NAME = "department_models.json"
 FREE = member_models.FREE_PROVIDER
 
 SOURCE_LABELS = {
-    "chosen": "부장 모델 (화면에서 고름)",
+    "chosen": "부서장 모델 (화면에서 고름)",
     "recommended": "⭐ 추천 (config/model_recommendations.yaml)",
     "private": "팀장 모델 (비공개 팀 — 팀 밖 제공처로 보내지 않음)",
-    "critic": "부장 기본 — models.yaml critic",
+    "critic": "부서장 기본 — models.yaml critic",
     "utility": "models.yaml utility (critic 없음)",
 }
 
 
 @dataclass
 class DeptHead:
-    """부서 부장 한 명."""
+    """부서장 한 명."""
 
     dept_id: str
     dept_name: str
     emoji: str
-    name: str  # 예: '보안부 부장'
+    name: str  # 예: '보안부 부서장'
     persona: str  # 비평·배정할 때의 관점
 
     @property
@@ -72,9 +72,9 @@ class DeptHead:
 
 
 def head_of(dept) -> DeptHead:
-    """building.Department → 부장. departments.yaml 에 head 가 없으면 부서 이름·소개로 만든다."""
+    """building.Department → 부서장. departments.yaml 에 head 가 없으면 부서 이름·소개로 만든다."""
     raw = getattr(dept, "head", None) or {}
-    name = str(raw.get("name") or f"{dept.name} 부장")
+    name = str(raw.get("name") or f"{dept.name} 부서장")
     persona = str(raw.get("persona") or f"부서 소개: {dept.description} 이 부서 결과물을 마지막으로 확인하는 책임자로서 본다.")
     return DeptHead(dept_id=dept.id, dept_name=dept.name, emoji=dept.emoji, name=name, persona=persona)
 
@@ -93,7 +93,7 @@ def base_chain(models: ModelsConfig) -> tuple[RankModels, str]:
 
 
 def assist_chain(models: ModelsConfig, choice: str = "") -> RankModels:
-    """🛎 인포메이션 센터처럼 부서장이 아닌 가벼운 안내 호출 — 고른 모델이 있으면 그것, 없으면 utility (부장 기본을 쓰지 않음)."""
+    """🛎 인포메이션 센터처럼 부서장이 아닌 가벼운 안내 호출 — 고른 모델이 있으면 그것, 없으면 utility (부서장 기본을 쓰지 않음)."""
     choice = valid_choice(choice, models)
     return _with_free_tail(chosen_chain(choice, models), models) if choice else models.utility
 
@@ -141,7 +141,7 @@ def chosen_chain(key: str, models: ModelsConfig) -> RankModels:
 
 def head_chain(models: ModelsConfig, choice: str = "", dept_id: str | None = None,
                private: bool = False) -> tuple[RankModels, str]:
-    """부장 모델 후보와 출처 — 🧭 팀 배정에 쓴다 (비공개 팀 규칙은 팀이 정해진 뒤 critic_plan 에서).
+    """부서장 모델 후보와 출처 — 🧭 팀 배정에 쓴다 (비공개 팀 규칙은 팀이 정해진 뒤 critic_plan 에서).
     dept_id 를 주면 ⭐ 추천(heads)을 기본으로 쓴다. private = 비공개 팀만 있는 부서 (추천에서 무료 모델을 뺀다)."""
     choice = valid_choice(choice, models)
     if choice:
@@ -221,7 +221,7 @@ def critic_plan(models: ModelsConfig, team: Team | None, chains: dict[str, RankM
 
 
 class DeptModelStore:
-    """부서 부장 모델 저장소 — {부서 id: "provider:model"}. 없으면 기본(critic → utility)."""
+    """부서장 모델 저장소 — {부서 id: "provider:model"}. 없으면 기본(critic → utility)."""
 
     _lock = threading.Lock()
 

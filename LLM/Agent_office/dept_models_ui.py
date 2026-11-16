@@ -1,16 +1,16 @@
-"""🎛 부서별 모델 선택 — 부서 → 👔 부장(⚖️ 비평가 · 🧭 부서장) 모델 → 그 부서의 팀 → 팀원 모델.
+"""🎛 부서별 모델 선택 — 부서 → 👔 부서장(⚖️ 비평가 · 🧭 팀 배정) 모델 → 그 부서의 팀 → 팀원 모델.
 
 어디서 여나
   - 🏠 메인: 빌딩 아래 '🎛 부서별 모델 선택' (빌딩의 부서 띠를 누르면 그 부서로 펼쳐진다)
   - 🏢 팀 화면: '🎛 부서별 모델 선택 — <부서>' (지금 팀이 속한 부서, 팀원 표는 지금 팀부터)
-로직은 core/dept_heads.py(부장·비평가) · core/member_models.py(팀원 상하 관계 규칙) · core/model_recs.py(⭐ 역할별 추천),
+로직은 core/dept_heads.py(부서장·비평가) · core/member_models.py(팀원 상하 관계 규칙) · core/model_recs.py(⭐ 역할별 추천),
 저장은 데이터 폴더의 department_models.json · member_models.json (config/*.yaml 은 안 고침). 바꾼 선택은 다음에 맡기는 업무부터.
 
 ⭐ 추천 (config/model_recommendations.yaml): 고르지 않은 사람의 기본 = 부서·역할에 맞는 추천 모델. 선택 상자의 기본 칸에
 '⭐ 추천: 모델 — 이유'. 사람이 고른 값이 추천과 다르면 ✋ 표시와 '⭐ 추천으로' 버튼 (한 명 · 부서 전체).
 팀마다 '1회 실행 예상 비용 · 구독 호출' 한 줄 (지난 7일 사용 기록의 평균 토큰 + 가격표 — core/model_recs.estimate_team).
 
-화면을 가볍게: 부장 칸과 팀 요약 한 줄씩은 늘 그리고, 팀원 표는 고른 팀 하나만 그린다 (PC 가 자주 CPU 100%).
+화면을 가볍게: 부서장 칸과 팀 요약 한 줄씩은 늘 그리고, 팀원 표는 고른 팀 하나만 그린다 (PC 가 자주 CPU 100%).
 """
 
 import time
@@ -88,19 +88,19 @@ def rec_label(ctx: Ctx, rec_key: str, effective: str, why: str, states: dict) ->
     return f"⭐ 추천: {_label(ctx, rec_key, states)}{now}" + (f" — {why}" if why else "")
 
 
-# ─── 👔 부장 ──────────────────────────────────────────────────────────
+# ─── 👔 부서장 ──────────────────────────────────────────────────────────
 
 
 def _on_head_change(ctx: Ctx, dept_id: str, widget: str) -> None:
     key = st.session_state.get(widget) or ""
     ctx.dept_store.set(dept_id, key)
-    st.session_state[HEAD_NOTE_KEY] = (dept_id, f"👔 부장 모델을 {'기본(⭐ 추천)으로 되돌렸' if not key else _short(ctx, key) + ' 로 바꿨'}습니다 — "
+    st.session_state[HEAD_NOTE_KEY] = (dept_id, f"👔 부서장 모델을 {'기본(⭐ 추천)으로 되돌렸' if not key else _short(ctx, key) + ' 로 바꿨'}습니다 — "
                                                 "다음에 맡기는 업무의 비평가·🧭 팀 배정부터 씁니다.")
 
 
 def _revert_head(ctx: Ctx, dept_id: str) -> None:
     ctx.dept_store.set(dept_id, "")
-    st.session_state[HEAD_NOTE_KEY] = (dept_id, "👔 부장 모델을 ⭐ 추천으로 되돌렸습니다 — 다음에 맡기는 업무부터 씁니다.")
+    st.session_state[HEAD_NOTE_KEY] = (dept_id, "👔 부서장 모델을 ⭐ 추천으로 되돌렸습니다 — 다음에 맡기는 업무부터 씁니다.")
 
 
 def render_head(ctx: Ctx, dept: building.Department, where: str) -> None:
@@ -135,13 +135,13 @@ def render_head(ctx: Ctx, dept: building.Department, where: str) -> None:
     if choice and source == "recommended" and choice != base_key:  # 사람이 고른 값이 추천과 다름
         c2.markdown(f"✋ **직접 고름** — ⭐ 추천은 {_short(ctx, base_key)}")
         c2.button("⭐ 추천으로", key=f"dept_head_rec_{where}_{dept.id}", on_click=_revert_head, args=(ctx, dept.id),
-                  help="부장 선택을 지우고 ⭐ 추천 모델을 기본으로 씁니다.")
+                  help="부서장 선택을 지우고 ⭐ 추천 모델을 기본으로 씁니다.")
     models_ui.hidden_note(hidden, ctx.merged)
     for w in head_lead_warnings(ctx, dept, choice or base_key):
         c2.markdown(f":orange[⚠️ {w}]")
-    st.caption(f"관점: {head.persona}  \n부장은 팀 조직도 밖에서 이 부서 **모든 팀의 최종 답변을 비평**하고, 🧭 부서장으로 요청을 알맞은 팀에 보냅니다. "
-               "부장은 맨 위라 **기본은 팀장과 같거나 더 강한 모델**입니다. 더 약한 모델도 고를 수 있지만 ⚠️ 로 알립니다. "
-               "비공개 팀은 부장 모델을 고르지 않으면 팀장 모델로 비평합니다 (문서가 팀 밖 제공처로 가지 않게).")
+    st.caption(f"관점: {head.persona}  \n부서장은 팀 조직도 밖에서 이 부서 **모든 팀의 최종 답변을 비평**하고, 🧭 팀 배정으로 요청을 알맞은 팀에 보냅니다. "
+               "부서장은 맨 위라 **기본은 팀장과 같거나 더 강한 모델**입니다. 더 약한 모델도 고를 수 있지만 ⚠️ 로 알립니다. "
+               "비공개 팀은 부서장 모델을 고르지 않으면 팀장 모델로 비평합니다 (문서가 팀 밖 제공처로 가지 않게).")
     if member_models.split_key(choice or base_key)[0] == "claude_cli":
         st.caption("💳 Claude 구독(claude_cli): 청구는 없지만 **구독 사용 한도**를 씁니다 (내 Claude 대화·Claude Code 와 공유, 동시 1개). "
                    "업무마다 비평 1번 + 불합격이면 자가 교정·다시 비평이 더해지고, 팀이 둘 이상인 부서는 🧭 팀 배정마다 1번 더 부릅니다. "
@@ -153,7 +153,7 @@ def render_head(ctx: Ctx, dept: building.Department, where: str) -> None:
 
 
 def head_lead_warnings(ctx: Ctx, dept: building.Department, head_key: str) -> list[str]:
-    """부장(맨 위)이 이 부서 어느 팀장보다 약하면 팀마다 한 줄 (비공개 팀은 고르지 않았으면 팀장 모델로 비평하므로 뺀다)."""
+    """부서장(맨 위)이 이 부서 어느 팀장보다 약하면 팀마다 한 줄 (비공개 팀은 고르지 않았으면 팀장 모델로 비평하므로 뺀다)."""
     out = []
     chosen = bool(dept_heads.valid_choice(ctx.dept_store.get(dept.id), ctx.models))
     for tid in dept.teams:
@@ -262,15 +262,15 @@ def _revert_member(ctx: Ctx, team: Team, org: OrgNode, node_id: str, name: str) 
 
 
 def _revert_dept(ctx: Ctx, dept: building.Department) -> None:
-    """부서 전체(부장 + 모든 팀 팀원)를 ⭐ 추천으로 — 이 부서의 선택만 지운다 (다른 부서는 그대로)."""
+    """부서 전체(부서장 + 모든 팀 팀원)를 ⭐ 추천으로 — 이 부서의 선택만 지운다 (다른 부서는 그대로)."""
     ctx.dept_store.set(dept.id, "")
     for tid in dept.teams:
         ctx.member_store.save(tid, {}, _legacy(_team(ctx, tid)))
-    st.session_state[HEAD_NOTE_KEY] = (dept.id, f"⭐ {dept.name}의 부장과 모든 팀원을 추천 모델로 되돌렸습니다.")
+    st.session_state[HEAD_NOTE_KEY] = (dept.id, f"⭐ {dept.name}의 부서장과 모든 팀원을 추천 모델로 되돌렸습니다.")
 
 
 def dept_differs(ctx: Ctx, dept: building.Department) -> int:
-    """이 부서에서 ⭐ 추천과 다르게 고른 사람 수 (부장 포함)."""
+    """이 부서에서 ⭐ 추천과 다르게 고른 사람 수 (부서장 포함)."""
     n = 0
     head_choice = dept_heads.valid_choice(ctx.dept_store.get(dept.id), ctx.models)
     if head_choice:
@@ -380,7 +380,7 @@ def render_members(ctx: Ctx, team: Team) -> None:
 
 
 def render_dept(ctx: Ctx, dept: building.Department, where: str, team_id: str | None = None) -> None:
-    """부서 → 부장 → 팀 요약 → 팀원 표(고른 팀 하나). team_id = 처음에 펼칠 팀 (팀 화면 = 지금 팀, 메인 = 없음)."""
+    """부서 → 부서장 → 팀 요약 → 팀원 표(고른 팀 하나). team_id = 처음에 펼칠 팀 (팀 화면 = 지금 팀, 메인 = 없음)."""
     if ctx.running:
         st.info("진행 중인 업무는 시작할 때의 모델을 그대로 씁니다. 바꾼 선택은 다음에 맡기는 업무부터 적용됩니다.")
     differs = dept_differs(ctx, dept)
@@ -388,7 +388,7 @@ def render_dept(ctx: Ctx, dept: building.Department, where: str, team_id: str | 
         c1, c2 = st.columns([5, 2])
         c1.caption(f"✋ 이 부서에 ⭐ 추천과 다르게 고른 사람이 {differs}명 있습니다.")
         c2.button("⭐ 부서 전체 추천으로", key=f"dept_rec_all_{where}_{dept.id}", on_click=_revert_dept, args=(ctx, dept),
-                  help="이 부서의 부장·모든 팀원 선택을 지우고 ⭐ 추천 모델을 기본으로 씁니다 (다른 부서는 그대로).")
+                  help="이 부서의 부서장·모든 팀원 선택을 지우고 ⭐ 추천 모델을 기본으로 씁니다 (다른 부서는 그대로).")
     render_head(ctx, dept, where)
     st.markdown(f"**{dept.emoji} {dept.name}의 팀** — 팀장 모델과 이 팀을 비평할 모델")
     render_team_summaries(ctx, dept)
@@ -408,7 +408,7 @@ def render_dept(ctx: Ctx, dept: building.Department, where: str, team_id: str | 
 
 
 def render_home(ctx: Ctx, pick_key: str) -> None:
-    """🏠 메인 — 부서를 고르면 그 부서의 부장·팀·팀원 (빌딩의 부서 띠를 누르면 그 부서로)."""
+    """🏠 메인 — 부서를 고르면 그 부서의 부서장·팀·팀원 (빌딩의 부서 띠를 누르면 그 부서로)."""
     depts = departments(ctx)
     ids = [d.id for d in depts]
     if st.session_state.get(pick_key) not in ids:

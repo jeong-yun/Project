@@ -2,8 +2,8 @@
 
 흐름
   1) meeting()        : 모든 부서장의 판단을 모은다 → {dept_id(또는 ""), verdicts[부서마다 할 수 있음/없음·이유], how, model}
-     - 비용: 부서장마다 1회씩(부서 6개 → 6회) 부르지 않고, **보조(부장) 모델 1회 구조화 출력**으로 모든 부서를 한꺼번에 판단한다.
-       프롬프트에 부서마다 부장 이름·관점(persona)·소속 팀·다루는/다루지 않는 질문을 넣어 '부서장 회의'를 흉내 낸다.
+     - 비용: 부서장마다 1회씩(부서 6개 → 6회) 부르지 않고, **보조(부서장) 모델 1회 구조화 출력**으로 모든 부서를 한꺼번에 판단한다.
+       프롬프트에 부서마다 부서장 이름·관점(persona)·소속 팀·다루는/다루지 않는 질문을 넣어 '부서장 회의'를 흉내 낸다.
        → 호출 1회·대기 1번이고, 부서끼리 비교해 가장 알맞은 곳을 고를 수 있다 (따로 부르면 서로를 모른다).
      - 모델을 못 쓰면 낱말 비교: 팀 scope.keywords 가 가장 많이 맞는 부서. 아무 낱말도 안 맞으면 범용 기본 팀(accept_all)의 부서.
   2) 부서가 정해지면 → 그 부서장이 팀을 고른다 (core/building.route_request — 2번 흐름, building_ui 부서 데스크)
@@ -78,7 +78,7 @@ class NewDeptProposal(BaseModel):
 
 
 def dept_brief(dept, teams: dict[str, Team]) -> str:
-    """'- travel (✈️ 여행부, 부장 관점: …): 소개 / 팀: 국내 여행팀(다루는 질문: …; 다루지 않음: …), …'"""
+    """'- travel (✈️ 여행부, 부서장 관점: …): 소개 / 팀: 국내 여행팀(다루는 질문: …; 다루지 않음: …), …'"""
     from core.dept_heads import head_of
 
     head = head_of(dept)
@@ -161,7 +161,7 @@ def meeting(question: str, depts: list, teams: list[Team], models, choice: str =
     from core import dept_heads, llm_factory, usage  # 무거운 import 는 실제로 부를 때만
 
     note = ""
-    chain = dept_heads.assist_chain(models, choice)  # 가벼운 안내 — 부장 기본(Opus 구독)이 아니라 utility
+    chain = dept_heads.assist_chain(models, choice)  # 가벼운 안내 — 부서장 기본(Opus 구독)이 아니라 utility
     try:
         with usage.scope(purpose="인포메이션 센터"):
             call = llm_factory.invoke_structured(chain, models, MeetingResult, meeting_messages(question, depts, by_id),
@@ -234,7 +234,7 @@ def propose(question: str, depts: list, teams: list[Team], models, rank_ids: lis
     from core import dept_heads, llm_factory, usage
 
     note = ""
-    chain = dept_heads.assist_chain(models, choice)  # 가벼운 안내 — 부장 기본(Opus 구독)이 아니라 utility
+    chain = dept_heads.assist_chain(models, choice)  # 가벼운 안내 — 부서장 기본(Opus 구독)이 아니라 utility
     try:
         with usage.scope(purpose="새 부서 제안"):
             call = llm_factory.invoke_structured(chain, models, NewDeptProposal,
