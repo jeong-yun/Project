@@ -449,7 +449,7 @@ class CareerFactsValidator(Validator):
             problems.append("JSON evidence(본문 주장마다 문서 원문 인용)가 없다")
         if problems:
             return self.fail(" / ".join(problems) + " — quote 에는 근거 자료에서 '원문'이라고 적힌 내 문서 절(올린 문서 원문 · 내 요약 문서 원문 · "
-                             "최신 요약 문서 원문 · 지금 포트폴리오)의 글을 한 글자도 바꾸지 말고 복사하고, 숫자는 문서에 "
+                             "최신 요약 문서 원문 · 지금 포트폴리오 · 👤 사람이 직접 알려 준 사실 (원문))의 글을 한 글자도 바꾸지 말고 복사하고, 숫자는 문서에 "
                              "적힌 값·단위 그대로 쓴다. 문서에 없는 경험·숫자는 지우거나 그 문장 끝에 [확인 필요]를 붙이고 needs_check 에 적는다.")
         return self.ok(f"인용 {result.quotes_checked}건 모두 문서에 있음 · 본문 숫자 모두 문서·JD·문항에 있음")
 

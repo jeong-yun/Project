@@ -691,6 +691,22 @@ def answers_block(inputs: dict) -> str:
             + "\n".join(f"- {a.get('question')} → **{a.get('answer')}**" for a in answers))
 
 
+# 업무 양식에서 사람이 직접 쓴 글 칸 — 사실이 섞여 있을 수 있다 ('추가 요청: AI_Agent 에 RAG 를 추가했어'). 회사·직무·희망 방향은 목표라 뺀다.
+# 🎯 JD 추천은 넣지 않는다: 그 점수는 코드가 문서 원문 인용으로 계산한다 (사람이 쓴 글이 '근거 있음'이 되면 점수가 흔들린다)
+FORM_FACT_KEYS = ("tone", "extra_request")
+
+
+def form_facts(inputs: dict, parts: list[str]) -> list[str]:
+    """업무 양식에 사람이 쓴 글 → 근거 자료 맨 앞(줄일 때 잘리지 않게)에 '👤 사람이 직접 알려 준 사실' 절을 넣고, 그 글 목록을 돌려준다
+    (부르는 쪽이 career_source 에 더한다 — 인용·숫자 검사가 받아들이게). 💬 수정 대화의 같은 절은 core/followup.py 가 더한다."""
+    from core import followup  # followup 은 모델·하네스 모듈을 불러온다 — 이 툴만 쓰는 곳이 미리 부르지 않게 늦게
+
+    mine = [str(inputs.get(k) or "").strip() for k in FORM_FACT_KEYS if str(inputs.get(k) or "").strip()]
+    if mine:
+        parts.insert(0, followup.human_block(mine, "###", "업무 양식에 쓴 글"))
+    return mine
+
+
 # 자유 질문에 첨부가 없으면 툴 입력이 비어 있다 — 경고(notes)는 화면에만 가므로 모델이 볼 근거 자료에 적는다
 NO_DOCS = ("### ⚠️ 올린 자료 없음 — 사실의 출처가 될 문서가 없다\n"
            "경력 사실(경험·회사·프로젝트·숫자·기간)이 들어갈 자리는 [확인 필요]로 비워 두고 지어내지 않는다. 쓰는 법·뼈대·점검 순서까지만 답한다. "
@@ -744,6 +760,7 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     if external and not parts:  # 자유 질문에 주소만 넣었다 — 사실의 출처가 없다는 안내를 외부 글 앞에
         parts.append(NO_DOCS)
     parts += external
+    mine = form_facts(inputs, parts)  # 먼저 답한 질문(사람이 정한 답) 다음 자리 — 아래 insert(0) 이 그 앞에 온다
     if answers_block(inputs):
         parts.insert(0, answers_block(inputs))
 
@@ -757,7 +774,7 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
         content="\n\n".join(parts) or NO_DOCS,
         notes=notes,
         harness_options={
-            "career_source": "\n\n".join(d.text for d in docs),
+            "career_source": "\n\n".join([*(d.text for d in docs), *mine]),
             "career_reference": reference,
             "career_questions": [q.__dict__ for q in questions],
             "career_requirements": [r.id for r in reqs],
@@ -886,6 +903,7 @@ def _run_update(inputs: dict, docs: list[DocText], notes: list[str]) -> ToolResu
         parts.append(format_block(fmt))
     if refs:
         parts.append(format_refs_block(refs, notes))
+    mine = form_facts(inputs, parts)  # 먼저 답한 질문(사람이 정한 답) 다음 자리 — 아래 insert(0) 이 그 앞에 온다
     if answers_block(inputs):
         parts.insert(0, answers_block(inputs))
 
@@ -899,7 +917,7 @@ def _run_update(inputs: dict, docs: list[DocText], notes: list[str]) -> ToolResu
         content="\n\n".join(parts),
         notes=notes,
         harness_options={
-            "career_source": "\n\n".join([*(d.text for d in olds), latest]),  # 지금 포트폴리오(모든 판)도 내 문서 — 사실의 출처
+            "career_source": "\n\n".join([*(d.text for d in olds), latest, *mine]),  # 지금 포트폴리오(모든 판)도 내 문서 — 사실의 출처
             "career_reference": "\n".join([*(str(inputs.get(k) or "") for k in ("role", "role_custom", "extra_request")),
                                            *(d.text for d in refs), jd]),
             "career_questions": [],
