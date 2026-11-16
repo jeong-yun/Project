@@ -14,9 +14,10 @@ from pathlib import Path
 
 from core.schemas import HumanDecision
 
-RESULT_SUFFIXES = (".md", ".html", ".mp3", ".docx", ".hwpx")
+RESULT_SUFFIXES = (".md", ".html", ".mp3", ".docx", ".hwpx", ".zip")  # .zip = 음성 팀의 맞춤 Colab 묶음
 MIME = {".md": "text/markdown", ".html": "text/html", ".mp3": "audio/mpeg",
-        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".hwpx": "application/hwp+zip"}
+        ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".hwpx": "application/hwp+zip",
+        ".zip": "application/zip"}
 
 
 def slugify(text: str, limit: int = 40) -> str:

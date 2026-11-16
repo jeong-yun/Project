@@ -146,10 +146,14 @@ def test_notebook_keeps_cells_and_changes_only_the_values():
     assert [c["cell_type"] for c in nb["cells"]] == [c["cell_type"] for c in original["cells"]]
     changed = [(i, a, b) for i, (c0, c1) in enumerate(zip(original["cells"], nb["cells"]))
                for a, b in zip(c0["source"], c1["source"]) if a != b]
-    # 화자 이름 줄 · batch_size 줄만 (epochs 는 규칙상 기본값 400 그대로라 원본과 같다)
-    assert [(i, a.split("=")[0]) for i, a, _ in changed] == [(8, "SINGER "), (11, "cfg['train']['batch_size'] ")]
+    # 화자 이름 줄 · batch_size 줄 · 변환 셀의 설명·명령 줄만 (epochs 는 규칙상 기본값 400 그대로라 원본과 같다)
+    assert [(i, a[:12]) for i, a, _ in changed] == [(8, "SINGER = 'si"), (11, "cfg['train']"), (15, "# -t: 키 조절(반"),
+                                                    (15, '!svc infer "')]
     code = "".join(nb["cells"][8]["source"] + nb["cells"][11]["source"])
     assert "SINGER = 'jiyun_01'" in code and "['epochs'] = 400 " in code and "['batch_size'] = 8 " in code
+    infer = changed[3][2]  # 노래 변환: 음높이 자동 예측을 끈다 (원본 셀은 옵션이 없어 fork 기본값 '켜짐'으로 돌았다)
+    assert infer == changed[3][1].replace(" -fm crepe -t 0 ", " -fm crepe -na -t 0 ")
+    assert "-na: 음높이 자동 예측 끔" in changed[2][2] and "12 = 한 옥타브" in changed[2][2]
     assert "AI 로 합성한 음성" in "".join(nb["cells"][0]["source"])  # 첫 설명 셀에 표시 안내 (뒤에 덧붙임)
     for c in nb["cells"]:  # 코드 셀이 파이썬으로 읽힌다 (! · % 줄은 빼고)
         if c["cell_type"] == "code":
@@ -173,7 +177,7 @@ def test_slice_rules_are_read_from_the_original_script():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)  # 맨 위는 import 만 — 설치·실행은 main() 안에서만 한다
     params = inspect.signature(module.slice_wav).parameters
-    assert voice.slice_defaults() == {k: params[k].default for k in ("threshold_db", "min_keep", "max_len")}
+    assert voice.slice_defaults() == {k: params[k].default for k in ("threshold_db", "min_interval", "min_keep", "max_len")}
 
 
 # ─── 데이터 점검 ─────────────────────────────────────────────────────
@@ -250,10 +254,11 @@ GOOD_PLAN = """목소리 출처: 내 목소리 — 학습·변환에 써도 된�
 1. 전처리: `python preprocess.py --input songs --singer myvoice --fast` → `dataset_raw/myvoice/`
 2. `dataset_raw.zip` 을 Drive `MyDrive/svc_project/` 에 업로드
 3. 학습: epochs 400 · batch_size 16 으로 `svc train`
-4. 변환: `svc infer` 로 음색 변환, `-t` 로 키 조절 → 반주와 합치기
+4. 변환: `svc infer cover.wav -fm crepe -na -t 0` 로 음색 변환 (음높이 자동 예측 끔), `-t` 로 키 조절 → 반주와 합치기
 
 결과물을 남에게 보이거나 올릴 때는 'AI 로 합성한 음성'이라고 표시하세요.
 """
+SONG_INFER_LINE = "4. 변환: `svc infer cover.wav -fm crepe -na -t 0` 로 음색 변환 (음높이 자동 예측 끔), `-t` 로 키 조절 → 반주와 합치기"
 
 
 def check(name, answer, **options):
@@ -266,7 +271,7 @@ def test_voice_plan_validator():
     cases = {
         "출처": GOOD_PLAN.replace("목소리 출처: 내 목소리 — 학습·변환에 써도 된다고 확인함.", ""),
         "표시": GOOD_PLAN.replace("결과물을 남에게 보이거나 올릴 때는 'AI 로 합성한 음성'이라고 표시하세요.", ""),
-        "단계": GOOD_PLAN.replace("4. 변환: `svc infer` 로 음색 변환, `-t` 로 키 조절 → 반주와 합치기", ""),
+        "단계": GOOD_PLAN.replace(SONG_INFER_LINE, "4. 반주와 합치기 (`-na`)"),
         "epochs": GOOD_PLAN.replace("epochs 400", "epochs 800"),
         "batch_size": GOOD_PLAN + "\n```python\ncfg['train']['batch_size'] = 32\n```",
         "화자": GOOD_PLAN.replace("--singer myvoice", "--singer other"),
@@ -275,6 +280,27 @@ def test_voice_plan_validator():
         result = check("voice_plan", answer, voice_kit=kit)
         assert not result.passed and want in result.log, (want, result.log)
     assert check("voice_plan", "아무 글", voice_blocked="x").passed  # 범위 밖이면 voice_guard 가 본다
+
+
+def test_song_plan_turns_auto_f0_off():
+    """노래: 음높이 자동 예측 끔(-na) — 원조 so-vits-svc README '노래에는 켜지 마라', fork 의 기본값은 켜짐."""
+    kit = voice.kit_from_inputs(PLAN_OK)
+    no_na = check("voice_plan", GOOD_PLAN.replace(" -na", "").replace(" (음높이 자동 예측 끔)", ""), voice_kit=kit)
+    assert not no_na.passed and "-na" in no_na.log
+    for on in (GOOD_PLAN + "\n쇳소리가 나면 `svc infer cover.wav -a -t 0` 로 다시 해 보세요.",
+               GOOD_PLAN + "\n`--auto-predict-f0` 를 붙여 보세요.", GOOD_PLAN + "\n음높이 자동 예측을 켜세요."):
+        result = check("voice_plan", on, voice_kit=kit)
+        assert not result.passed and "켜라고" in result.log, on
+    for fine in (GOOD_PLAN + "\n음높이 자동 예측(`-a`)은 말 변환용이라 켜지 않습니다.",  # 켜지 말라는 설명은 괜찮다
+                 GOOD_PLAN.replace("-na", "--no-auto-predict-f0")):
+        assert check("voice_plan", fine, voice_kit=kit).passed, fine
+    # 맞춤 안내·근거 자료에 끄는 이유와 키 바꾸는 법 (지어낸 값 없이: 기본 0, 12 = 한 옥타브)
+    readme = voice.kit_readme(kit)
+    evidence = voice.plan_evidence(kit)
+    for text in (readme, evidence):
+        assert "-na" in text and "`-t 0` 을 반음 수로" in text and "12 = 한 옥타브" in text
+        assert all(s in text for s in voice.SONG_SOURCES)
+    assert f"`svc infer {voice.INFER_SONG}`" in evidence
 
 
 def test_voice_guard_validator():
@@ -392,7 +418,7 @@ def test_voice_forms_open_and_consent_is_required(app):
 
     at = at.selectbox(key="dept_task_creative").set_value("voice:check").run()
     assert not at.exception, at.exception
-    assert len(at.get("file_uploader")) == 1
+    assert len(at.get("file_uploader")) == 3  # 데이터 점검의 zip 칸 + 🧰 도구의 로그 파일 칸 · 자르기 파일 칸
 
 
 def kit_page(root: str) -> None:
@@ -483,7 +509,7 @@ def test_speech_notebook_turns_on_auto_f0_and_adds_one_split_cell():
     nb = json.loads(voice.build_notebook(voice.kit_from_inputs(SPEECH_OK)))
     song_infer = next(c for c in _code(song) if "!svc infer" in c)
     speech_infer = next(c for c in _code(nb) if "!svc infer" in c)
-    assert " -a " not in song_infer and "cover.wav" in song_infer  # 노래 노트북의 변환 셀은 원본 그대로
+    assert " -a " not in song_infer and " -fm crepe -na -t 0 " in song_infer and "cover.wav" in song_infer  # 노래는 끈다
     assert '"{WORK}/speech.wav"' in speech_infer and " -fm crepe -a -t 0 " in speech_infer and "speech_converted.wav" in speech_infer
     assert "cover" not in next(c for c in _code(nb) if "Audio(" in c)
     assert len(nb["cells"]) == len(original["cells"]) + 1  # C안: 자르기 셀 하나만 더함
@@ -617,3 +643,231 @@ def test_speech_kit_download_uses_same_screen_code():
     buttons = at.get("download_button")
     assert len(buttons) == 1 and "맞춤 실행 파일" in buttons[0].proto.label
     assert any("음높이 자동 예측" in c.value for c in at.caption)
+
+
+# ═══ 📈 학습 로그 진단 (두 팀 공통 — 모델 없이 코드만) ═══════════════════════════════
+
+METRICS = ("loss/g/total", "loss/g/fm", "loss/g/mel", "loss/g/kl", "loss/g/lf0", "loss/d/total")
+
+
+def bar_line(epoch: int, g_total: float, last: int = 399) -> str:
+    """so-vits-svc-fork 학습 셀의 진행 막대 한 줄 — Lightning RichProgressBar 가 그리는 꼴 (지표는 'name: value', 값은 '.3f')."""
+    values = {"loss/g/total": g_total, "loss/g/fm": 7.89, "loss/g/mel": g_total / 2, "loss/g/kl": 1.234, "loss/g/lf0": 0.012,
+              "loss/d/total": 2.345}
+    metrics = " ".join(f"{k}: {values[k]:.3f}" for k in METRICS)
+    return f"Epoch {epoch}/{last} ━━━━━━━━━━━━━━ 45/45 0:00:12 • 0:00:00 3.21it/s v_num: 0.000 {metrics}"
+
+
+def log_of(values, start: int = 0) -> str:
+    return "\n".join(["[11:02:03] INFO Setting current epoch to 0", "", *(bar_line(start + i, v) for i, v in enumerate(values)),
+                      "UserWarning: something unrelated"])
+
+
+@pytest.mark.parametrize("values, verdict", [
+    ([80 * 0.97 ** i + 20 for i in range(30)], "줄어드는 중"),
+    ([max(40.0, 80 - 4 * i) for i in range(30)], "평평해짐"),
+    ([max(40.0, 80 - 4 * i) + (3 * (i - 24) if i > 24 else 0) for i in range(30)], "다시 오르는 중"),
+    ([40 + i for i in range(30)], "늘어나는 중"),
+    ([40.0 + (i % 2) * 0.1 for i in range(30)], "거의 그대로"),
+    ([40.0, 39.0, 38.0], "값이 적음"),
+])
+def test_log_trend_verdicts_come_from_code(values, verdict):
+    diag = voice.diagnose_log(log_of(values))
+    assert diag["main"] == "loss/g/total" and diag["verdict"] == verdict and diag["next"] == voice.NEXT_STEP[verdict]
+    assert diag["rows"]["loss/g/total"]["n"] == len(values)
+    assert diag["lines"] == len(values) + 2 and diag["read"] == len(values)  # 설명·경고 줄은 건너뛰고 센다
+    report = voice.log_report(diag)
+    assert f"**판정: {verdict}**" in report and f"건너뛴 줄 2줄" in report and "공식 기준이 아님" in report
+
+
+def test_log_numbers_spikes_nan_and_epochs():
+    values = [50.0] * 12 + [120.0] + [50.0] * 12
+    diag = voice.diagnose_log(log_of(values, start=375))
+    row = diag["rows"]["loss/g/total"]
+    assert row["spikes"] == [13] and row["first"] == 50.0 and row["last"] == 50.0 and row["change"] == pytest.approx(0)
+    assert (diag["last_epoch"], diag["max_epoch"]) == (399, 399)
+    report = voice.log_report(diag)
+    assert "튄 곳 1번" in report and "설정한 마지막 epoch 에 닿았습니다" in report and "epoch 375~399" in report
+    assert set(diag["rows"]) == {"loss/g/total", "loss/d/total", "loss/g/mel"}  # 표에 보일 지표만
+    broken = voice.diagnose_log(log_of([50.0] * 8).replace("loss/g/total: 50.000", "loss/g/total: nan", 1))
+    assert broken["verdict"] == "망가짐 의심" and broken["rows"]["loss/g/total"]["bad"] == 1
+    # 지표가 줄을 넘어가 다음 줄에 나와도 (좁은 화면) 바로 앞 Epoch 줄의 번호를 붙인다
+    wrapped = voice.parse_log("Epoch 7/399 ━━━ 45/45\nloss/g/total: 41.000 loss/d/total: 2.000")
+    assert wrapped["series"]["loss/g/total"] == [(7, 41.0)] and wrapped["read"] == 1
+
+
+def test_log_reads_tensorboard_csv_and_says_when_nothing_was_read():
+    csv = "Wall time,Step,Value\n" + "\n".join(f"1700000000.{i},{i * 100},{60 - i:.3f}" for i in range(20)) + "\nnot,a,row"
+    diag = voice.diagnose_log(csv)
+    assert diag["main"] == voice.CSV_SERIES and diag["verdict"] == "줄어드는 중" and diag["read"] == 20 and diag["lines"] == 22
+    assert "Step 0~1,900" in voice.log_report(diag)
+    assert voice.diagnose_log("1,2,3\n4,5,6")["read"] == 0  # 머리줄 없는 숫자 줄은 CSV 로 보지 않는다
+    nothing = voice.diagnose_log("Traceback (most recent call last):\n  File x")
+    assert nothing["main"] is None and nothing["verdict"] == "값이 적음"
+    assert "하나도 읽지 못했습니다" in voice.log_report(nothing) and "TensorBoard" in nothing["next"]
+
+
+def test_log_tool_on_team_page_needs_no_model(app, use_script):
+    script = use_script(Script(text=[]))  # 모델을 부르면 대본이 없어 실패한다
+    at = app.run()
+    at = at.selectbox(key="dept_task_creative").set_value("voice_speech:plan").run()
+    assert not at.exception, at.exception
+    at.text_area(key="voice_log_text_voice_speech").set_value(log_of([80 * 0.97 ** i + 20 for i in range(30)]))
+    at = at.button[[b.label for b in at.button].index("📈 진단하기")].click().run()
+    assert not at.exception, at.exception
+    assert any("**판정: 줄어드는 중**" in m.value for m in at.markdown)
+    assert not script.calls
+
+
+# ═══ ✂️ 자르기만 (보컬이 분리된 wav → dataset_raw.zip, 두 팀 공통) ═══════════════════════════
+
+
+def tones(*parts: tuple[str, float], sr: int = SR) -> np.ndarray:
+    """('on', 초) · ('off', 초) 를 이어 붙인 소리 — 소리 구간은 사인파, 쉬는 구간은 무음."""
+    return np.concatenate([sine(sec, sr=sr) if kind == "on" else np.zeros(int(sec * sr)) for kind, sec in parts])
+
+
+TALK_PARTS = (("off", 0.5), ("on", 3.0), ("off", 0.2), ("on", 2.0), ("off", 1.0), ("on", 1.5), ("off", 1.0), ("on", 20.0), ("off", 0.7))
+TALK = tones(*TALK_PARTS)
+
+
+def test_slice_ranges_match_the_original_slice_wav(monkeypatch):
+    """원본 preprocess.py 의 slice_wav 를 그대로 실행해(soundfile 만 가짜) 잘라 낸 구간이 같은지 — 기준을 옮겨 적다 틀리지 않게."""
+    import sys
+    import types
+
+    written = []
+    fake_sf = types.SimpleNamespace(read=lambda src, always_2d: (np.stack([TALK, TALK], axis=1), SR),
+                                    write=lambda out, data, sr, subtype: written.append((Path(out).name, len(data), subtype)))
+    monkeypatch.setitem(sys.modules, "soundfile", fake_sf)
+    spec = importlib.util.spec_from_file_location("svc_preprocess_slice", voice.ASSET_DIR / "preprocess.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    count, _ = module.slice_wav("in.wav", "out", "song")
+    ranges = voice.slice_ranges(TALK, SR)
+    assert count == len(ranges) == len(written) == 3  # 3초+2초(짧은 쉼은 이어 붙임) · 1.5초는 버림 · 20초는 15초 + 나머지
+    assert [n for _, n, _ in written] == [b - a for a, b in ranges] and {s for *_, s in written} == {"PCM_16"}
+    assert [name for name, *_ in written] == [f"song_{i:04d}.wav" for i in range(3)]
+    assert voice.slice_defaults()["min_interval"] == inspect.signature(module.slice_wav).parameters["min_interval"].default
+
+
+def test_slice_upload_makes_dataset_raw_zip(tmp_path):
+    talk = tones(*TALK_PARTS, sr=22050)
+    stereo = np.stack([talk, talk * 0.5], axis=1)  # 다른 샘플레이트·스테레오도 같은 구간으로 (모노로 섞어 자른다)
+    src = make_zip(tmp_path / "vocals.zip", {"vocals/곡 1.wav": wav_bytes(TALK), "vocals/b.wav": wav_bytes(stereo, sr=22050),
+                                             "vocals/readme.txt": b"memo", "vocals/broken.wav": b"RIFF0000"})
+    data, summary = voice.slice_upload(src, "vocals.zip", "myvoice")
+    assert (summary["clips"], summary["ignored"], summary["skipped"], len(summary["files"])) == (6, 1, 1, 2)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = sorted(zf.namelist())
+        clip = zf.read(names[0])
+    assert names[0].startswith("dataset_raw/myvoice/") and "dataset_raw/myvoice/곡_1_0000.wav" in names
+    with wave.open(io.BytesIO(clip)) as w:
+        assert (w.getnchannels(), w.getsampwidth()) == (1, 2)  # preprocess.py 처럼 모노 16비트
+    out = tmp_path / "dataset_raw.zip"
+    out.write_bytes(data)
+    stats = voice.inspect_zip(out)  # 잘라 낸 결과는 데이터 점검을 그대로 통과한다
+    assert [i[:9] for i in stats["issues"]] == ["샘플레이트가 섞여"]  # 폴더 구조는 맞다 (샘플레이트는 원본 그대로 — 학습 전에 svc pre-resample)
+    assert stats["clips"] == 6 and stats["singers"][0]["short"] == 0 and stats["singers"][0]["long"] == 0
+    assert stats["minutes"] == pytest.approx(summary["minutes"], abs=0.1)
+    one = tmp_path / "upload.wav"
+    one.write_bytes(wav_bytes(TALK))
+    assert voice.slice_upload(one, "내 보컬.wav", "myvoice")[1]["clips"] == 3
+
+
+@pytest.mark.parametrize("name", ["../evil.wav", "/abs.wav", "C:/win.wav"])
+def test_slice_upload_reuses_zip_safety_checks(tmp_path, name, monkeypatch):
+    bad = make_zip(tmp_path / "bad.zip", {"v/ok.wav": wav_bytes(TALK), name: wav_bytes(TALK)})
+    with pytest.raises(voice.VoiceError, match="폴더 밖"):
+        voice.slice_upload(bad, "bad.zip", "myvoice")
+    good = make_zip(tmp_path / "good.zip", {"v/ok.wav": wav_bytes(TALK)})
+    monkeypatch.setattr(voice, "MAX_ZIP_BYTES", 1000)
+    with pytest.raises(voice.VoiceError, match="너무 큽니다"):
+        voice.slice_upload(good, "good.zip", "myvoice")
+
+
+def test_slice_upload_refuses_bad_input(tmp_path, monkeypatch):
+    quiet = tmp_path / "q.wav"
+    quiet.write_bytes(wav_bytes(np.zeros(5 * SR)))
+    with pytest.raises(voice.VoiceError, match="하나도 없습니다"):
+        voice.slice_upload(quiet, "q.wav", "myvoice")
+    with monkeypatch.context() as m:  # 너무 큰 wav 는 '무음'이 아니라 크기 한도를 알린다
+        m.setattr(voice, "MAX_CLIP_BYTES", 1000)
+        with pytest.raises(voice.VoiceError, match="MB 까지 자릅니다"):
+            voice.slice_upload(quiet, "q.wav", "myvoice")
+    for singer in ("내 목소리", "../x", "IU"):  # 폴더 이름 규칙 · 실존 가수 이름
+        with pytest.raises(voice.VoiceError, match="화자 이름"):
+            voice.slice_upload(quiet, "q.wav", singer)
+    with pytest.raises(voice.VoiceError, match="wav 파일 하나 또는"):
+        voice.slice_upload(quiet, "song.mp3", "myvoice")
+
+
+def test_slice_tool_needs_consent_before_cutting(app):
+    at = app.run()
+    at = at.selectbox(key="dept_task_creative").set_value("voice:plan").run()
+    assert not at.exception, at.exception
+    at.text_input(key="voice_slice_singer_voice").set_value("myvoice")
+    at = at.button[[b.label for b in at.button].index("✂️ 자르기")].click().run()
+    assert not at.exception, at.exception
+    assert any("목소리 사용 확인" in w.value for w in at.warning)
+
+
+# ═══ 💾 채택 때 맞춤 묶음 저장 → 🕘 지난 업무에서 다시 받기 ═══════════════════════════════
+
+
+def kit_run(run_id: str = "abcdef12-3456") -> dict:
+    from core.schemas import ToolResult
+
+    kit = voice.kit_from_inputs(PLAN_OK)
+    return {"run_id": run_id, "question": "노래 음색 변환 학습 계획", "notes": [],
+            "tools": [ToolResult(tool="voice_svc", title="t", content="c", harness_options={"voice_kit": kit})]}
+
+
+def test_adopt_saves_kit_zip_without_recordings(tmp_path):
+    import sys
+
+    from core.exporter import export_adopted, list_results
+    from core.schemas import HumanDecision
+
+    if ROOT not in sys.path:
+        sys.path.insert(0, ROOT)
+    import voice_ui
+
+    run = kit_run()
+    extra = voice_ui.adopted_files(run)
+    assert list(extra) == ["svc_myvoice_abcdef12.zip"]
+    decision = HumanDecision(action="adopt", adopted_node_id="lead", final_answer=GOOD_PLAN, score=4)
+    paths = export_adopted(run, decision, "voice", "팀", {}, tmp_path, extra_files=extra)
+    assert sorted(p.suffix for p in paths) == [".md", ".zip"] and {p.suffix for p in list_results(tmp_path, "voice")} == {".md", ".zip"}
+    saved = voice_ui.saved_kit(tmp_path, "voice", run["run_id"])
+    assert saved and saved.parent == tmp_path / "voice"
+    with zipfile.ZipFile(saved) as zf:  # 맞춤 노트북·안내·원본 스크립트만 — 녹음·데이터 zip 은 없다
+        assert set(zf.namelist()) == {voice.NOTEBOOK, "README.md", "preprocess.py", "run.bat"}
+    assert voice_ui.saved_kit(tmp_path, "voice", "ffffffff-0") is None and voice_ui.saved_kit(tmp_path, "nope", run["run_id"]) is None
+    no_kit = {**run, "tools": []}  # 데이터 점검·자유 질문 업무는 묶음이 없다
+    assert voice_ui.adopted_files(no_kit) is None
+
+
+def test_past_task_window_offers_saved_kit_again(app, tmp_path):
+    from core.exporter import export_adopted
+    from core.schemas import HumanDecision
+    from core.storage import Storage
+
+    run = kit_run()
+    decision = HumanDecision(action="adopt", adopted_node_id="lead", final_answer=GOOD_PLAN, score=4)
+    (tmp_path / "data").mkdir(exist_ok=True)
+    db = Storage(tmp_path / "data" / "runs.db")
+    db.create_run(run["run_id"], "voice", "lead", run["question"])
+    db.save_decision(run["run_id"], decision)
+    export_adopted(run, decision, "voice", "팀", {}, tmp_path / "results", extra_files={"svc_myvoice_abcdef12.zip": voice.kit_zip(
+        voice.kit_from_inputs(PLAN_OK))})
+    import streamlit as st
+
+    st.cache_resource.clear()  # 앞 테스트의 앱이 캐시해 둔 저장소(다른 임시 폴더)를 쓰지 않게
+    at = app.run()  # 앱을 새로 켠 것과 같다 — 화면 메모리에는 이 업무가 없다
+    assert not at.exception, at.exception
+    assert any("🎁" in (d.proto.label or "") for d in at.get("download_button"))  # 사이드바 '📂 저장된 결과 파일'에도
+    at = at.button(key=f"hist_{run['run_id']}").click().run()
+    assert not at.exception, at.exception
+    labels = [d.proto.label for d in at.get("download_button")]
+    assert "⬇ 맞춤 실행 파일 다시 받기 (.zip)" in labels

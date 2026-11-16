@@ -1,7 +1,7 @@
 """🎤 노래 음색 변환 팀 · 🗣 일상 말 음성 변환 팀 — so-vits-svc-fork 학습·변환 준비를 돕는 코드. 모델 호출·외부 실행·패키지 설치 없음.
 
 두 팀은 같은 도구·같은 원본 노트북을 쓰고, 종류(kind: song | speech — 업무 양식의 fixed.voice_kind)만 다르다:
-  song   : 반주가 있는 노래 → 보컬 분리 → 자르기 → 학습 → 변환 (원본 노트북 그대로)
+  song   : 반주가 있는 노래 → 보컬 분리 → 자르기 → 학습 → 변환 (원본 노트북 + 변환에 음높이 자동 예측 끄기 `-na` — SONG_SOURCES)
   speech : 말 녹음(낭독·대화) → 배경 음악이 없으면 보컬 분리 없이 Colab 에서 `svc pre-split` 로 자르기(C안) →
            학습 → 변환할 때 음높이 자동 예측(`-a`)을 켠다. 근거는 공식 문서 (SPEECH_SOURCES — 확인 못 한 값은 '확인 못 함')
 보컬 분리·학습·변환은 앱 밖(사용자 PC 의 preprocess.py · Colab 노트북)에서 돈다. 이 모듈이 하는 일:
@@ -9,6 +9,8 @@
   2) 맞춤 파일      : plan_settings(epochs·batch 를 규칙으로) → build_notebook(JSON 으로 읽어 셀 값만 바꿈) → kit_zip
   3) 데이터 점검    : inspect_zip(dataset_raw.zip 을 풀지 않고 메모리에서 wav 만 읽어 숫자 계산) → dataset_table
   4) 하네스 검사    : check_guard · check_plan · check_data (core/harness/validators.py 의 voice_* 검증기가 쓴다)
+  5) 📈 학습 로그 진단 : diagnose_log → log_report (붙여 넣은 Colab 학습 로그의 손실 추이 — 모델 없이 코드만)
+  6) ✂️ 자르기만      : slice_upload (보컬만 남은 wav·zip → dataset_raw.zip, preprocess.py slice_wav 와 같은 계산 slice_ranges)
 
 원본 스크립트·노트북은 teams/voice/assets/ 에 있다 (사용자가 만든 파일 그대로). 슬라이싱 기준(−40dB·2초·15초)은
 그 스크립트의 slice_wav 기본값을 읽어 쓴다 → 기준이 한 곳에만 있다.
@@ -135,6 +137,16 @@ SPEECH_UNKNOWN = [
     "f0 방식: 말에 더 맞는 방식은 확인 못 함 — 원본 노트북의 crepe 를 그대로 쓴다",
     "C안(svc pre-split)·말 녹음의 보컬 분리에 걸리는 시간: 재 보지 않음",
 ]
+# ─ 🎤 노래 변환 — 음높이 자동 예측을 끈다 (-na). 원본 노트북은 옵션을 적지 않아 fork 기본값(켜짐)으로 돌았다 (2026-11-16 원본 코드·README 확인)
+SONG_SOURCES = [
+    "음높이 자동 예측: so-vits-svc-fork `svc infer` 의 `-a/-na` 기본값은 켜짐(-a). 원조 so-vits-svc README `--auto_predict_f0`: "
+    "'노래(singing voice)를 변환할 때는 켜지 마라 — 심한 음높이 문제' → 맞춤 노트북 11번 셀에 `-na` 를 적어 끈다",
+    "키 조절: 원조 README `-t` '반음 단위, + · − 모두 됨', fork `svc infer -t/--transpose` 기본값 0, "
+    "fork 화면 안내 'Pitch (12 = 1 octave) … ADJUST THIS … when Auto predict F0 is turned off' — 자동 예측을 끈 노래 변환에서 키를 맞추는 값",
+]
+SONG_KEY_HELP = ("키를 바꾸려면 11번 셀의 `-t 0` 을 반음 수로 바꿉니다 (12 = 한 옥타브, + 올림 · − 내림). "
+                 "자동 예측을 껐으므로(`-na`) 변환할 보컬의 멜로디를 따르고 `-t` 만큼 옮깁니다 — 원래 부른 사람과 성별이 다르면 -12 또는 +12 를 먼저 해 봅니다")
+INFER_SONG = '"{WORK}/cover.wav" -m "{CKPT}" -c "{WORK}/logs/44k/config.json" -fm crepe -na -t 0 -o "{WORK}/cover_converted.wav"'
 SPEECH_INPUT, SPEECH_OUTPUT, SPEECH_ZIP = "speech.wav", "speech_converted.wav", "speech.zip"
 INFER_SPEECH = (f'"{{WORK}}/{SPEECH_INPUT}" -m "{{CKPT}}" -c "{{WORK}}/logs/44k/config.json" -fm crepe -a -t 0 '
                 f'-o "{{WORK}}/{SPEECH_OUTPUT}"')
@@ -249,7 +261,8 @@ def _speech_cells(nb: dict, kit: dict) -> None:
 
 def build_notebook(kit: dict) -> str:
     """원본 노트북을 JSON 으로 읽어 화자 이름·epochs·batch_size 줄의 값만 바꾼다 (노래는 셀 수·순서 그대로).
-    말(kind=speech)은 변환 셀의 옵션·파일 이름을 바꾸고, C안이면 자르기 셀 하나를 더한다 (_speech_cells)."""
+    노래는 변환 셀에 음높이 자동 예측 끄기(-na)를 적고, 말(kind=speech)은 변환 셀의 옵션·파일 이름을 바꾸고
+    C안이면 자르기 셀 하나를 더한다 (_speech_cells)."""
     nb = json.loads((ASSET_DIR / NOTEBOOK).read_text(encoding="utf-8"))
     _set_line(nb, r"^(SINGER = )'[^']*'", f"'{kit['singer']}'")
     _set_line(nb, r"^(cfg\['train'\]\['epochs'\] = )\d+", str(kit["epochs"]))
@@ -257,12 +270,17 @@ def build_notebook(kit: dict) -> str:
     speech = kit.get("kind") == "speech"
     if speech:
         _speech_cells(nb, kit)
+    else:  # 노래: 원본 셀은 옵션을 적지 않아 fork 기본값(자동 예측 켜짐)으로 돌았다 → -na 로 끈다 (SONG_SOURCES)
+        _set_line(nb, r"^(# )-t: 키 조절.*", "-na: 음높이 자동 예측 끔 (노래용 — 원조 so-vits-svc 안내: 노래에 켜면 음이 심하게 어긋남). "
+                  "-t: 키 조절(반음, 12 = 한 옥타브). 원곡 가수와 성별이 다르면 -12 또는 +12 시도")
+        _set_line(nb, r"^(!svc infer )\"\{WORK\}/cover\.wav\".*", INFER_SONG)
     nb["cells"][0]["source"] += [
         "\n", "\n",
         f"**이 노트북의 맞춤 값** (Agent Office {KIND_NAMES[kit.get('kind', 'song')]}이 양식 값으로 넣음): 화자 `{kit['singer']}` · "
         f"epochs {kit['epochs']} · batch_size {kit['batch_size']} · 전처리 {kit['mode']}안 — {SKIP[kit['mode']]}.\n",
         *(["\n", f"**말 음성 변환**: 11번 셀이 `{SPEECH_INPUT}` 를 음높이 자동 예측(`-a`)으로 바꿉니다 — 노래 커버용 설명(cover.wav)은 이 노트북에서는 쓰지 않습니다.\n"]
-          if speech else []),
+          if speech else ["\n", "**노래 변환**: 11번 셀은 음높이 자동 예측을 끕니다(`-na`) — 노래에 켜면 음이 심하게 어긋날 수 있습니다. "
+                             "키는 `-t` 값(반음, 12 = 한 옥타브)으로 바꿉니다.\n"]),
         "\n",
         f"목소리 출처: {kit['source']} (양식에서 사용해도 된다고 확인함). 변환한 결과물을 남에게 보이거나 올릴 때는 '{AI_LABEL}'이라고 표시하세요.\n",
     ]
@@ -305,7 +323,7 @@ def kit_readme(kit: dict) -> str:
     else:
         convert = [
             f"{n + 2}. 변환: 바꿀 노래의 **보컬만 분리한 wav** 를 `svc_project/cover.wav` 로 올리고 11번 셀을 실행합니다. "
-            "키는 `-t` 값(반음)으로 맞춥니다 — 원래 부른 사람과 성별이 다르면 -12 또는 +12 를 먼저 해 봅니다.",
+            "노래라 음높이 자동 예측은 꺼 두었습니다(`-na`). " + SONG_KEY_HELP + ".",
             f"{n + 3}. 12번 셀로 듣고, 반주는 오디오 편집기에서 변환된 보컬(`cover_converted.wav`)과 합칩니다.",
         ]
     return "\n".join([
@@ -337,7 +355,8 @@ def kit_readme(kit: dict) -> str:
         "## 걸리는 시간 (원본 파일에 적힌 어림값만)",
         *[f"- {note}" for note in (SPEECH_TIME_NOTES if speech else TIME_NOTES)],
         *(["", "## 말 변환의 근거 (공식 문서)", *[f"- {s}" for s in SPEECH_SOURCES],
-           "", "## 확인 못 한 것", *[f"- {s}" for s in SPEECH_UNKNOWN]] if speech else []),
+           "", "## 확인 못 한 것", *[f"- {s}" for s in SPEECH_UNKNOWN]] if speech
+          else ["", "## 노래 변환의 근거 (공식 문서)", *[f"- {s}" for s in SONG_SOURCES]]),
         "",
     ])
 
@@ -371,13 +390,16 @@ def plan_evidence(kit: dict) -> str:
         f"| 전처리 위치 | {prep} |",
         f"| epochs | {kit['epochs']} |",
         f"| batch_size | {kit['batch_size']} |",
-        *([f"| 변환 명령 (11번 셀) | `svc infer {INFER_SPEECH}` — `-a` = 음높이 자동 예측(말용), `-t 0` |"] if speech else []),
+        f"| 변환 명령 (11번 셀) | `svc infer {INFER_SPEECH}` — `-a` = 음높이 자동 예측(말용), `-t 0` |" if speech else
+        f"| 변환 명령 (11번 셀) | `svc infer {INFER_SONG}` — `-na` = 음높이 자동 예측 끔(노래용), `-t 0` = 키 그대로 |",
         "",
         *[f"- {note}" for note in kit["notes"]],
         "",
         "### ⏱ 걸리는 시간 — 원본 파일에 적힌 어림값만 쓴다 (그 밖의 숫자는 '재 보지 않음')",
         *[f"- {note}" for note in (SPEECH_TIME_NOTES if speech else TIME_NOTES)],
     ]
+    if not speech:
+        lines += [f"- {SONG_KEY_HELP}", "", "### 📚 노래 변환의 근거 — 공식 문서에서 확인한 것만", *[f"- {s}" for s in SONG_SOURCES]]
     if speech:
         lines += ["", "### 📚 말 변환의 근거 — 공식 문서에서 확인한 것만", *[f"- {s}" for s in SPEECH_SOURCES],
                   "", "### ❔ 확인 못 한 것 — 지어내지 말고 이대로 밝힌다", *[f"- {s}" for s in SPEECH_UNKNOWN]]
@@ -407,12 +429,12 @@ LONG_SLACK = 0.05  # 15.0초로 딱 잘린 클립을 '초과'로 세지 않게
 
 @lru_cache(maxsize=1)
 def slice_defaults() -> dict:
-    """preprocess.py 의 slice_wav 기본값 {threshold_db, min_keep, max_len} — 스크립트를 실행하지 않고 읽기만 한다."""
+    """preprocess.py 의 slice_wav 기본값 {threshold_db, min_interval, min_keep, max_len} — 스크립트를 실행하지 않고 읽기만 한다."""
     tree = ast.parse((ASSET_DIR / "preprocess.py").read_text(encoding="utf-8"))
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "slice_wav")
     names = [a.arg for a in fn.args.args][-len(fn.args.defaults):]
     values = dict(zip(names, (ast.literal_eval(d) for d in fn.args.defaults)))
-    return {k: float(values[k]) for k in ("threshold_db", "min_keep", "max_len")}
+    return {k: float(values[k]) for k in ("threshold_db", "min_interval", "min_keep", "max_len")}
 
 
 def _entry_name(info: zipfile.ZipInfo) -> str:
@@ -646,6 +668,15 @@ def check_plan(answer: str, options: dict) -> list[str]:
             problems.append("말 변환인데 음높이 자동 예측(`-a`)을 쓴다는 안내가 없다 — 근거 자료의 변환 명령(11번 셀)을 그대로 써라")
         if re.search(r"(?<![\w-])-na\b|--no-auto-predict-f0", answer):
             problems.append("말 변환인데 음높이 자동 예측을 끄라고(`-na`) 썼다 — 근거 자료의 변환 명령처럼 `-a` 를 켠다")
+    else:  # 노래 변환은 음높이 자동 예측을 끈다 (원조 so-vits-svc 안내 — 노래에 켜면 심한 음높이 문제)
+        if not re.search(r"(?<![\w-])-na\b|--no-auto-predict-f0", answer):
+            problems.append("노래 변환인데 음높이 자동 예측을 끄는 `-na` 가 없다 — 근거 자료의 변환 명령(11번 셀)을 그대로 써라 "
+                            "(so-vits-svc-fork 는 기본값이 켜짐이라 적지 않으면 켜진 채 돈다)")
+        on_cmd = any(re.search(r"svc\s+infer", line) and re.search(r"(?<![\w-])-a\b", line) for line in answer.splitlines())
+        on_words = re.search(r"(?<![\w-])--auto-predict-f0\b|음높이\s*자동\s*예측[^\n.]{0,12}켜(?:세요|라|고\s|서|\s*둡|\s*둔|요|십시오)", answer)
+        if on_cmd or on_words:
+            problems.append("노래 변환인데 음높이 자동 예측을 켜라고(`-a`) 썼다 — 노래에 켜면 음이 심하게 어긋난다(원조 so-vits-svc 안내). "
+                            "근거 자료의 변환 명령처럼 `-na` 로 끈다")
     if kit["singer"] not in answer:
         problems.append(f"화자 이름 `{kit['singer']}` 이 답에 없다 — 명령·폴더 경로에 이 이름을 그대로 써라")
     wrong = sorted({s for s in re.findall(r"(?:--singer\s+|SINGER\s*=\s*['\"]|dataset_raw/)([A-Za-z0-9_-]+)", answer) if s != kit["singer"]})
@@ -686,3 +717,275 @@ def check_data(answer: str, options: dict) -> list[str]:
     if stats["verdict"] not in answer:
         problems.append(f"분량 판정 '{stats['verdict']}' 이 답에 없다 — 코드의 판정을 그대로 밝히고 다음 조치를 써라")
     return list(dict.fromkeys(problems))
+
+
+# ─── 5) 📈 학습 로그 진단 (모델 없이 코드만 — 두 팀 공통) ───────────────────
+# 읽는 형식 (2026-11-16 원본 코드 확인): so-vits-svc-fork train.py 는 손실을 화면 진행 막대(Lightning RichProgressBar)와 TensorBoard 에만 쓴다.
+#   진행 막대 한 줄 : 'Epoch 12/399 ━━━ 23/45 0:00:12 • 0:00:05 3.21it/s v_num: 0.000 loss/g/total: 45.123 … loss/d/total: 2.345'
+#                     (지표 이름 loss/g/total·loss/g/fm·loss/g/mel·loss/g/kl·loss/g/lf0·loss/d/total, 값은 소수 셋째 자리 '.3f')
+#   TensorBoard CSV : 스칼라 그래프의 내려받기 — 머리줄 'Wall time,Step,Value' + 한 줄에 한 값 (Step = 학습 배치 번호)
+# 진행 막대는 끝난 epoch 의 줄을 지운다(leave=False 기본값) → 붙여 넣은 글에 값이 적으면 10번 셀 TensorBoard 의 CSV 를 권한다.
+LOG_KEYS = ("loss/g/total", "loss/d/total", "loss/g/mel")  # 표에 보일 지표 — 판정은 첫째(생성기 전체 손실)로, CSV 만 있으면 CSV 로
+CSV_SERIES = "TensorBoard CSV"
+LOG_MAX_CHARS = 5 * MB
+LOG_MIN_POINTS = 6
+# 판정 어림 기준 — 이 앱이 정한 값이다 (so-vits-svc-fork 공식 기준이 아님. 화면에 그렇게 밝힌다)
+TREND_DROP = 0.05  # 처음 1/3 과 마지막 1/3 의 중앙값 차이
+RECENT_DROP = 0.02  # 마지막 1/3 안의 앞 절반과 뒤 절반 중앙값 차이 (아직 줄어드는지)
+SPIKE_RATIO = 1.5  # 바로 앞 5개 값의 중앙값보다 이만큼 크면 '튐'
+_NUM = r"(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|nan|[-+]?inf)"
+_METRIC = re.compile(rf"(loss/[a-z]+/[a-z0-9_]+)\s*[:=]\s*({_NUM})", re.IGNORECASE)
+_EPOCH = re.compile(r"\bEpoch\s+(\d+)(?:\s*/\s*(\d+))?")
+_CSV_HEAD = re.compile(r"^\s*\"?Wall time\"?\s*,\s*\"?Step\"?\s*,\s*\"?Value\"?\s*$", re.IGNORECASE)
+_CSV_ROW = re.compile(rf"^\s*{_NUM}\s*,\s*(\d+)\s*,\s*({_NUM})\s*$", re.IGNORECASE)
+NEXT_STEP = {
+    "줄어드는 중": "아직 줄어드는 중입니다 — 학습을 이어 가세요. 9번 셀이 Drive 의 마지막 체크포인트에서 이어 학습합니다. "
+                   "설정한 epochs 에 닿았으면 8번 셀에서 epochs 를 늘려 다시 실행합니다 (원본 노트북 8·9번 셀 안내).",
+    "평평해짐": "처음보다 줄어든 뒤 더 줄지 않습니다 — 학습을 멈추고 지금 체크포인트로 11번 셀에서 변환해 들어 보세요. "
+                "들어 보고 부족하면 학습을 이어 가거나, '🔍 데이터 점검'으로 분량·무음·클리핑을 확인합니다.",
+    "다시 오르는 중": "줄던 값이 최근에 다시 오릅니다 — 지금 체크포인트로 11번 셀에서 변환해 들어 보고, '🔍 데이터 점검'으로 데이터를 확인하세요. "
+                      "원본 파일에 정해진 해법은 없습니다.",
+    "늘어나는 중": "처음보다 커졌습니다 — 학습을 멈추고 '🔍 데이터 점검'으로 분량·무음·클리핑을 먼저 확인하세요. 원본 파일에 정해진 해법은 없습니다.",
+    "거의 그대로": "처음과 마지막이 거의 같습니다 — 학습 초반이면 더 학습한 뒤 다시 진단하고, 오래 학습했다면 11번 셀에서 변환해 들어 보세요.",
+    "망가짐 의심": "숫자가 아닌 값(nan·inf)이 나왔습니다 — 학습이 망가졌을 수 있습니다. 학습을 멈추고 '🔍 데이터 점검'(클리핑·무음)부터 확인하세요. "
+                   "원본 파일에 정해진 해법은 없습니다.",
+    "값이 적음": f"손실 값이 {LOG_MIN_POINTS}개보다 적어 추이를 판단할 수 없습니다. 진행 막대는 끝난 epoch 의 줄을 지우므로, "
+                 "10번 셀 TensorBoard 에서 loss/g/total 그래프의 CSV 를 내려받아 붙여 넣어 주세요 (왼쪽 'Show data download links').",
+}
+
+
+def parse_log(text: str) -> dict:
+    """붙여 넣은 학습 로그 → {series: {지표: [(epoch 또는 step, 값)]}, lines, read, last_epoch, max_epoch}. 못 읽는 줄은 건너뛴다."""
+    series: dict[str, list] = {}
+    lines = read = 0
+    csv = False
+    epoch = last_epoch = max_epoch = None
+    for line in text[:LOG_MAX_CHARS].splitlines():
+        if not line.strip():
+            continue
+        lines += 1
+        m = _EPOCH.search(line)
+        if m:
+            epoch = int(m.group(1))
+            max_epoch = int(m.group(2)) if m.group(2) else max_epoch
+        pairs = _METRIC.findall(line)
+        if pairs:
+            read += 1
+            last_epoch = epoch
+            for key, value in pairs:
+                series.setdefault(key.lower(), []).append((epoch, float(value)))
+        elif _CSV_HEAD.match(line):
+            csv = True
+        elif csv and (row := _CSV_ROW.match(line)):
+            read += 1
+            series.setdefault(CSV_SERIES, []).append((int(row.group(1)), float(row.group(2))))
+    return {"series": series, "lines": lines, "read": read, "last_epoch": last_epoch, "max_epoch": max_epoch}
+
+
+def loss_trend(values: list[float]) -> dict:
+    """값 목록 → {n, bad, first, last, head, tail, change, recent, spikes, verdict}. 숫자 해석은 모두 여기서 한다."""
+    import math
+
+    finite = [v for v in values if math.isfinite(v)]
+    out = {"n": len(finite), "bad": len(values) - len(finite), "first": finite[0] if finite else None,
+           "last": finite[-1] if finite else None, "head": None, "tail": None, "change": None, "recent": None, "spikes": []}
+    if out["bad"]:
+        return {**out, "verdict": "망가짐 의심"}
+    if len(finite) < LOG_MIN_POINTS:
+        return {**out, "verdict": "값이 적음"}
+    k = len(finite) // 3
+    head, tail = median(finite[:k]), median(finite[-k:])
+    last = finite[-k:]
+    early, late = median(last[: len(last) // 2]), median(last[len(last) // 2:])
+    change = (tail - head) / abs(head) if head else 0.0
+    recent = (late - early) / abs(early) if early else 0.0
+    spikes = [i + 1 for i in range(5, len(finite)) if (w := median(finite[i - 5:i])) > 0 and finite[i] > SPIKE_RATIO * w]
+    if recent <= -RECENT_DROP:
+        verdict = "줄어드는 중"
+    elif change <= -TREND_DROP:
+        verdict = "다시 오르는 중" if recent >= RECENT_DROP else "평평해짐"
+    elif change >= TREND_DROP:
+        verdict = "늘어나는 중"
+    else:
+        verdict = "거의 그대로"
+    return {**out, "head": head, "tail": tail, "change": change, "recent": recent, "spikes": spikes, "verdict": verdict}
+
+
+def diagnose_log(text: str) -> dict:
+    """학습 로그 진단 — 판정할 지표(loss/g/total, 없으면 TensorBoard CSV)·표에 보일 지표들의 추이·다음 할 일."""
+    parsed = parse_log(text)
+    series = parsed["series"]
+    main = next((k for k in (LOG_KEYS[0], CSV_SERIES) if k in series), None)
+    rows = {k: loss_trend([v for _, v in series[k]]) for k in (*LOG_KEYS, CSV_SERIES) if k in series}
+    verdict = rows[main]["verdict"] if main else "값이 적음"
+    return {**parsed, "main": main, "rows": rows, "verdict": verdict, "next": NEXT_STEP[verdict]}
+
+
+def log_report(diag: dict) -> str:
+    """진단 표 (마크다운) — 숫자·판정은 모두 코드 계산값."""
+    def num(x):
+        return "-" if x is None else f"{x:,.3f}"
+
+    def pct(x):
+        return "-" if x is None else f"{x:+.1%}"
+
+    main = diag["main"]
+    if main is None:
+        head = f"**판정: {diag['verdict']}** — 손실 값을 하나도 읽지 못했습니다"
+    else:
+        xs = [x for x, _ in diag["series"][main] if x is not None]
+        span = (f" · Step {xs[0]:,}~{xs[-1]:,}" if main == CSV_SERIES else f" · epoch {xs[0]}~{xs[-1]}") if xs else ""
+        head = f"**판정: {diag['verdict']}** — `{main}` 값 {diag['rows'][main]['n']}개{span}"
+    lines = [head, "", f"➡️ {diag['next']}", ""]
+    if diag["rows"]:
+        lines += ["| 지표 | 값 수 | 처음 → 마지막 | 처음 1/3 중앙값 → 마지막 1/3 중앙값 | 변화 | 최근 변화 | 튐 | 판정 |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for key, r in diag["rows"].items():
+            spikes = f"{len(r['spikes'])}번" + (f" ({', '.join(map(str, r['spikes'][:5]))}번째 값{' …' if len(r['spikes']) > 5 else ''})" if r["spikes"] else "")
+            lines.append(f"| `{key}` | {r['n']}개" + (f" (+숫자 아님 {r['bad']}개)" if r["bad"] else "")
+                         + f" | {num(r['first'])} → {num(r['last'])} | {num(r['head'])} → {num(r['tail'])} | {pct(r['change'])} "
+                         f"| {pct(r['recent'])} | {spikes} | {r['verdict']} |")
+        lines.append("")
+    if main and diag["rows"][main]["spikes"]:
+        lines.append(f"- 튄 곳 {len(diag['rows'][main]['spikes'])}번 — 원인은 로그만으로 알 수 없습니다. 위 판정(추이)과 함께 보세요")
+    if diag["last_epoch"] is not None and diag["max_epoch"] is not None:
+        done = " — 설정한 마지막 epoch 에 닿았습니다" if diag["last_epoch"] >= diag["max_epoch"] else ""
+        lines.append(f"- 진행: 마지막으로 읽은 epoch {diag['last_epoch']} / 설정의 마지막 epoch {diag['max_epoch']}{done}")
+    lines += [
+        f"- 읽은 줄: 빈 줄을 뺀 {diag['lines']:,}줄 중 손실 값을 읽은 줄 {diag['read']:,}줄 · 건너뛴 줄 {diag['lines'] - diag['read']:,}줄 "
+        "(설명·경고처럼 손실 값이 없는 줄)",
+        "- 읽는 형식: 학습 셀(9번)의 진행 막대 줄 `loss/g/total: 12.345` 꼴 · TensorBoard 그래프에서 내려받은 CSV (`Wall time,Step,Value`)",
+        f"- 판정 기준(이 앱의 어림 기준 — so-vits-svc-fork 공식 기준이 아님): 처음 1/3 과 마지막 1/3 의 중앙값이 {TREND_DROP:.0%} 넘게 줄면 '줄었다', "
+        f"마지막 1/3 안에서 {RECENT_DROP:.0%} 넘게 줄면 '줄어드는 중', 바로 앞 5개 값의 중앙값보다 {SPIKE_RATIO:g}배 넘게 크면 '튐'. 판정은 `{LOG_KEYS[0]}`(없으면 CSV)로 합니다",
+        "- 손실 숫자만으로 음질을 알 수 없습니다 — 최종 확인은 11~12번 셀로 변환해 들어 보는 것입니다. 이 진단은 모델을 부르지 않고 코드로만 계산했습니다.",
+    ]
+    return "\n".join(lines)
+
+
+# ─── 6) ✂️ 자르기만 (보컬이 이미 분리된 wav → dataset_raw.zip, 모델·새 패키지 없이) ─────────────
+SLICE_PAD_SEC = 0.1  # slice_wav 안에 값으로 적힌 앞뒤 여유 (pad = int(0.1 / 0.010)) — 인자가 아니라 여기 옮겨 적는다
+
+
+def slice_ranges(mono, sr: int, cfg: dict | None = None) -> list[tuple[int, int]]:
+    """preprocess.py slice_wav 와 같은 계산으로 자를 구간 [(시작 샘플, 끝 샘플)] — 기준은 slice_defaults() (원본 기본값)."""
+    import numpy as np
+
+    cfg = cfg or slice_defaults()
+    hop = int(sr * FRAME_SEC)
+    n = len(mono) // hop if hop else 0
+    if n == 0:
+        return []
+    rms = np.sqrt(np.mean(mono[: n * hop].reshape(n, hop) ** 2, axis=1) + 1e-12)
+    voiced = 20 * np.log10(rms + 1e-12) > cfg["threshold_db"]
+    segs, start = [], None
+    for i, v in enumerate(voiced):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            segs.append([start, i])
+            start = None
+    if start is not None:
+        segs.append([start, n])
+    gap, merged = max(1, int(cfg["min_interval"] / FRAME_SEC)), []
+    for s in segs:
+        if merged and s[0] - merged[-1][1] <= gap:
+            merged[-1][1] = s[1]
+        else:
+            merged.append(s)
+    out, pad, chunk = [], int(SLICE_PAD_SEC / FRAME_SEC), int(cfg["max_len"] * sr)
+    for s0, s1 in merged:
+        pos, b = max(0, (s0 - pad) * hop), min(len(mono), (s1 + pad) * hop)
+        while pos < b:
+            end = min(pos + chunk, b)
+            if (end - pos) / sr >= cfg["min_keep"]:
+                out.append((pos, end))
+            pos = end
+    return out
+
+
+def _pcm16(mono, sr: int) -> bytes:
+    """모노 소리 → 16비트 PCM wav (preprocess.py 가 쓰는 형식: subtype PCM_16)."""
+    import wave
+
+    import numpy as np
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(sr))
+        w.writeframes(np.rint(np.clip(mono, -1, 1) * 32767).astype("<i2").tobytes())
+    return buf.getvalue()
+
+
+def slice_upload(path: str | Path, name: str, singer: str) -> tuple[bytes, dict]:
+    """보컬만 남은 wav 하나 또는 wav 묶음 zip → (dataset_raw.zip 바이트, 요약). 원본은 읽기만 하고 저장하지 않는다.
+
+    zip 은 데이터 점검과 같은 안전 확인(scan_zip: 크기·파일 수·폴더 밖 경로)을 거치고, wav 하나는 MAX_CLIP_BYTES 까지,
+    읽은 wav 의 합은 MAX_ZIP_BYTES 까지만 자른다 (결과 zip 을 메모리에 들고 있어서)."""
+    if not SINGER.fullmatch(singer) or is_artist_name(singer):
+        raise VoiceError("화자 이름은 영문·숫자·`-`·`_` 만 쓸 수 있습니다 (폴더 이름이 됩니다, 40자까지). 예: myvoice, jiyun_01")
+    path = Path(path)
+    if name.lower().endswith(".zip"):
+        entries = scan_zip(path)
+    elif name.lower().endswith(".wav"):
+        if not path.exists():
+            raise VoiceError("올린 wav 파일을 찾지 못했습니다 — 다시 올려 주세요.")
+        entries = None
+    else:
+        raise VoiceError("보컬만 남은 wav 파일 하나 또는 wav 를 묶은 zip 을 올려 주세요.")
+    cfg = slice_defaults()
+    files, ignored, skipped, total = [], 0, 0, 0
+    out = io.BytesIO()
+    used: set[str] = set()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        sources = [(name, None)] if entries is None else [(entry, info) for info, entry in entries]
+        src_zip = zipfile.ZipFile(path) if entries is not None else None
+        try:
+            for entry, info in sources:
+                if not entry.lower().endswith(".wav"):
+                    ignored += 1
+                    continue
+                size = info.file_size if info else path.stat().st_size
+                if size > MAX_CLIP_BYTES:
+                    skipped += 1
+                    continue
+                if info:
+                    with src_zip.open(info) as f:
+                        data = f.read(MAX_CLIP_BYTES + 1)
+                else:
+                    data = path.read_bytes()
+                total += len(data)
+                if total > MAX_ZIP_BYTES:
+                    raise VoiceError(f"wav 를 합치면 너무 큽니다 — 한 번에 {MAX_ZIP_BYTES // MB}MB 까지 자릅니다. 나눠서 올려 주세요.")
+                try:
+                    audio, sr = read_wav(data)
+                except ValueError:
+                    skipped += 1
+                    continue
+                if len(data) > MAX_CLIP_BYTES or not len(audio):
+                    skipped += 1
+                    continue
+                mono = audio.mean(axis=1)
+                stem = PurePosixPath(entry).stem
+                base = "".join(c if (c.isalnum() or c in "-_") else "_" for c in stem) or "clip"  # preprocess.py 와 같은 이름 규칙
+                if base in used:
+                    base = f"{base}_{len(used)}"
+                used.add(base)
+                ranges = slice_ranges(mono, sr, cfg)
+                for count, (a, b) in enumerate(ranges):
+                    dst.writestr(f"dataset_raw/{singer}/{base}_{count:04d}.wav", _pcm16(mono[a:b], sr))
+                files.append({"name": entry, "sec": round(len(mono) / sr, 1), "clips": len(ranges),
+                              "kept_sec": round(sum(b - a for a, b in ranges) / sr, 1)})
+        finally:
+            if src_zip:
+                src_zip.close()
+    if not files:
+        raise VoiceError(f"자를 수 있는 wav 가 없습니다 — wav 하나는 {MAX_CLIP_BYTES // MB}MB 까지 자릅니다 (더 크면 나눠서 zip 으로 묶어 주세요). "
+                         "정수 PCM wav(16비트 등)인지도 확인해 주세요.")
+    if not any(f["clips"] for f in files):
+        raise VoiceError("잘라 낸 조각이 하나도 없습니다 — 소리가 작아 모두 무음으로 보였거나 조각이 너무 짧습니다 "
+                         f"(소리 크기 {cfg['threshold_db']:g}dB · {cfg['min_keep']:g}초 기준). 보컬만 남긴 wav 인지 확인해 주세요.")
+    summary = {"files": files, "clips": sum(f["clips"] for f in files), "minutes": round(sum(f["kept_sec"] for f in files) / 60, 1),
+               "ignored": ignored, "skipped": skipped, **cfg}
+    return out.getvalue(), summary
