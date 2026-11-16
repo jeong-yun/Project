@@ -2188,7 +2188,7 @@ def render_task_input() -> dict:
     mode = pick.split(":", 1)[1]
     st.caption(f"👔 {dept_head.name} → **{team.name}** · 직접 고른 업무 — 부서장 배정 없이 이 팀의 {name_of(target)}에게 바로 맡깁니다")
     if is_voice:
-        voice_ui.tools_panel(team_id)  # 🧰 모델 없이 바로 쓰는 도구 (📈 학습 로그 진단)
+        voice_ui.tools_panel(team)  # 🧰 모델 없이 바로 쓰는 도구 (📈 학습 로그 진단 · ✂️ 자르기만)
     warn_chosen_off()
     run_control_ui.step_mode_toggle(team_id)  # 🔀 단계마다 확인 (기본 꺼짐)
     # ⚡ 빠른 답 (기본 꺼짐) — 업무 양식이 아닌 자유 질문이면 권유 한 줄 (모델로 판정하지 않음: 호출을 줄이려는 기능이라)

@@ -177,7 +177,7 @@ def test_slice_rules_are_read_from_the_original_script():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)  # 맨 위는 import 만 — 설치·실행은 main() 안에서만 한다
     params = inspect.signature(module.slice_wav).parameters
-    assert voice.slice_defaults() == {k: params[k].default for k in ("threshold_db", "min_keep", "max_len")}
+    assert voice.slice_defaults() == {k: params[k].default for k in ("threshold_db", "min_interval", "min_keep", "max_len")}
 
 
 # ─── 데이터 점검 ─────────────────────────────────────────────────────
@@ -418,7 +418,7 @@ def test_voice_forms_open_and_consent_is_required(app):
 
     at = at.selectbox(key="dept_task_creative").set_value("voice:check").run()
     assert not at.exception, at.exception
-    assert len(at.get("file_uploader")) == 2  # 데이터 점검의 zip 칸 + 🧰 도구의 로그 파일 칸
+    assert len(at.get("file_uploader")) == 3  # 데이터 점검의 zip 칸 + 🧰 도구의 로그 파일 칸 · 자르기 파일 칸
 
 
 def kit_page(root: str) -> None:
@@ -717,3 +717,96 @@ def test_log_tool_on_team_page_needs_no_model(app, use_script):
     assert not at.exception, at.exception
     assert any("**판정: 줄어드는 중**" in m.value for m in at.markdown)
     assert not script.calls
+
+
+# ═══ ✂️ 자르기만 (보컬이 분리된 wav → dataset_raw.zip, 두 팀 공통) ═══════════════════════════
+
+
+def tones(*parts: tuple[str, float], sr: int = SR) -> np.ndarray:
+    """('on', 초) · ('off', 초) 를 이어 붙인 소리 — 소리 구간은 사인파, 쉬는 구간은 무음."""
+    return np.concatenate([sine(sec, sr=sr) if kind == "on" else np.zeros(int(sec * sr)) for kind, sec in parts])
+
+
+TALK_PARTS = (("off", 0.5), ("on", 3.0), ("off", 0.2), ("on", 2.0), ("off", 1.0), ("on", 1.5), ("off", 1.0), ("on", 20.0), ("off", 0.7))
+TALK = tones(*TALK_PARTS)
+
+
+def test_slice_ranges_match_the_original_slice_wav(monkeypatch):
+    """원본 preprocess.py 의 slice_wav 를 그대로 실행해(soundfile 만 가짜) 잘라 낸 구간이 같은지 — 기준을 옮겨 적다 틀리지 않게."""
+    import sys
+    import types
+
+    written = []
+    fake_sf = types.SimpleNamespace(read=lambda src, always_2d: (np.stack([TALK, TALK], axis=1), SR),
+                                    write=lambda out, data, sr, subtype: written.append((Path(out).name, len(data), subtype)))
+    monkeypatch.setitem(sys.modules, "soundfile", fake_sf)
+    spec = importlib.util.spec_from_file_location("svc_preprocess_slice", voice.ASSET_DIR / "preprocess.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    count, _ = module.slice_wav("in.wav", "out", "song")
+    ranges = voice.slice_ranges(TALK, SR)
+    assert count == len(ranges) == len(written) == 3  # 3초+2초(짧은 쉼은 이어 붙임) · 1.5초는 버림 · 20초는 15초 + 나머지
+    assert [n for _, n, _ in written] == [b - a for a, b in ranges] and {s for *_, s in written} == {"PCM_16"}
+    assert [name for name, *_ in written] == [f"song_{i:04d}.wav" for i in range(3)]
+    assert voice.slice_defaults()["min_interval"] == inspect.signature(module.slice_wav).parameters["min_interval"].default
+
+
+def test_slice_upload_makes_dataset_raw_zip(tmp_path):
+    talk = tones(*TALK_PARTS, sr=22050)
+    stereo = np.stack([talk, talk * 0.5], axis=1)  # 다른 샘플레이트·스테레오도 같은 구간으로 (모노로 섞어 자른다)
+    src = make_zip(tmp_path / "vocals.zip", {"vocals/곡 1.wav": wav_bytes(TALK), "vocals/b.wav": wav_bytes(stereo, sr=22050),
+                                             "vocals/readme.txt": b"memo", "vocals/broken.wav": b"RIFF0000"})
+    data, summary = voice.slice_upload(src, "vocals.zip", "myvoice")
+    assert (summary["clips"], summary["ignored"], summary["skipped"], len(summary["files"])) == (6, 1, 1, 2)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        names = sorted(zf.namelist())
+        clip = zf.read(names[0])
+    assert names[0].startswith("dataset_raw/myvoice/") and "dataset_raw/myvoice/곡_1_0000.wav" in names
+    with wave.open(io.BytesIO(clip)) as w:
+        assert (w.getnchannels(), w.getsampwidth()) == (1, 2)  # preprocess.py 처럼 모노 16비트
+    out = tmp_path / "dataset_raw.zip"
+    out.write_bytes(data)
+    stats = voice.inspect_zip(out)  # 잘라 낸 결과는 데이터 점검을 그대로 통과한다
+    assert [i[:9] for i in stats["issues"]] == ["샘플레이트가 섞여"]  # 폴더 구조는 맞다 (샘플레이트는 원본 그대로 — 학습 전에 svc pre-resample)
+    assert stats["clips"] == 6 and stats["singers"][0]["short"] == 0 and stats["singers"][0]["long"] == 0
+    assert stats["minutes"] == pytest.approx(summary["minutes"], abs=0.1)
+    one = tmp_path / "upload.wav"
+    one.write_bytes(wav_bytes(TALK))
+    assert voice.slice_upload(one, "내 보컬.wav", "myvoice")[1]["clips"] == 3
+
+
+@pytest.mark.parametrize("name", ["../evil.wav", "/abs.wav", "C:/win.wav"])
+def test_slice_upload_reuses_zip_safety_checks(tmp_path, name, monkeypatch):
+    bad = make_zip(tmp_path / "bad.zip", {"v/ok.wav": wav_bytes(TALK), name: wav_bytes(TALK)})
+    with pytest.raises(voice.VoiceError, match="폴더 밖"):
+        voice.slice_upload(bad, "bad.zip", "myvoice")
+    good = make_zip(tmp_path / "good.zip", {"v/ok.wav": wav_bytes(TALK)})
+    monkeypatch.setattr(voice, "MAX_ZIP_BYTES", 1000)
+    with pytest.raises(voice.VoiceError, match="너무 큽니다"):
+        voice.slice_upload(good, "good.zip", "myvoice")
+
+
+def test_slice_upload_refuses_bad_input(tmp_path, monkeypatch):
+    quiet = tmp_path / "q.wav"
+    quiet.write_bytes(wav_bytes(np.zeros(5 * SR)))
+    with pytest.raises(voice.VoiceError, match="하나도 없습니다"):
+        voice.slice_upload(quiet, "q.wav", "myvoice")
+    with monkeypatch.context() as m:  # 너무 큰 wav 는 '무음'이 아니라 크기 한도를 알린다
+        m.setattr(voice, "MAX_CLIP_BYTES", 1000)
+        with pytest.raises(voice.VoiceError, match="MB 까지 자릅니다"):
+            voice.slice_upload(quiet, "q.wav", "myvoice")
+    for singer in ("내 목소리", "../x", "IU"):  # 폴더 이름 규칙 · 실존 가수 이름
+        with pytest.raises(voice.VoiceError, match="화자 이름"):
+            voice.slice_upload(quiet, "q.wav", singer)
+    with pytest.raises(voice.VoiceError, match="wav 파일 하나 또는"):
+        voice.slice_upload(quiet, "song.mp3", "myvoice")
+
+
+def test_slice_tool_needs_consent_before_cutting(app):
+    at = app.run()
+    at = at.selectbox(key="dept_task_creative").set_value("voice:plan").run()
+    assert not at.exception, at.exception
+    at.text_input(key="voice_slice_singer_voice").set_value("myvoice")
+    at = at.button[[b.label for b in at.button].index("✂️ 자르기")].click().run()
+    assert not at.exception, at.exception
+    assert any("목소리 사용 확인" in w.value for w in at.warning)

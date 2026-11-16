@@ -10,6 +10,7 @@
   3) 데이터 점검    : inspect_zip(dataset_raw.zip 을 풀지 않고 메모리에서 wav 만 읽어 숫자 계산) → dataset_table
   4) 하네스 검사    : check_guard · check_plan · check_data (core/harness/validators.py 의 voice_* 검증기가 쓴다)
   5) 📈 학습 로그 진단 : diagnose_log → log_report (붙여 넣은 Colab 학습 로그의 손실 추이 — 모델 없이 코드만)
+  6) ✂️ 자르기만      : slice_upload (보컬만 남은 wav·zip → dataset_raw.zip, preprocess.py slice_wav 와 같은 계산 slice_ranges)
 
 원본 스크립트·노트북은 teams/voice/assets/ 에 있다 (사용자가 만든 파일 그대로). 슬라이싱 기준(−40dB·2초·15초)은
 그 스크립트의 slice_wav 기본값을 읽어 쓴다 → 기준이 한 곳에만 있다.
@@ -428,12 +429,12 @@ LONG_SLACK = 0.05  # 15.0초로 딱 잘린 클립을 '초과'로 세지 않게
 
 @lru_cache(maxsize=1)
 def slice_defaults() -> dict:
-    """preprocess.py 의 slice_wav 기본값 {threshold_db, min_keep, max_len} — 스크립트를 실행하지 않고 읽기만 한다."""
+    """preprocess.py 의 slice_wav 기본값 {threshold_db, min_interval, min_keep, max_len} — 스크립트를 실행하지 않고 읽기만 한다."""
     tree = ast.parse((ASSET_DIR / "preprocess.py").read_text(encoding="utf-8"))
     fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "slice_wav")
     names = [a.arg for a in fn.args.args][-len(fn.args.defaults):]
     values = dict(zip(names, (ast.literal_eval(d) for d in fn.args.defaults)))
-    return {k: float(values[k]) for k in ("threshold_db", "min_keep", "max_len")}
+    return {k: float(values[k]) for k in ("threshold_db", "min_interval", "min_keep", "max_len")}
 
 
 def _entry_name(info: zipfile.ZipInfo) -> str:
@@ -860,3 +861,131 @@ def log_report(diag: dict) -> str:
     ]
     return "\n".join(lines)
 
+
+# ─── 6) ✂️ 자르기만 (보컬이 이미 분리된 wav → dataset_raw.zip, 모델·새 패키지 없이) ─────────────
+SLICE_PAD_SEC = 0.1  # slice_wav 안에 값으로 적힌 앞뒤 여유 (pad = int(0.1 / 0.010)) — 인자가 아니라 여기 옮겨 적는다
+
+
+def slice_ranges(mono, sr: int, cfg: dict | None = None) -> list[tuple[int, int]]:
+    """preprocess.py slice_wav 와 같은 계산으로 자를 구간 [(시작 샘플, 끝 샘플)] — 기준은 slice_defaults() (원본 기본값)."""
+    import numpy as np
+
+    cfg = cfg or slice_defaults()
+    hop = int(sr * FRAME_SEC)
+    n = len(mono) // hop if hop else 0
+    if n == 0:
+        return []
+    rms = np.sqrt(np.mean(mono[: n * hop].reshape(n, hop) ** 2, axis=1) + 1e-12)
+    voiced = 20 * np.log10(rms + 1e-12) > cfg["threshold_db"]
+    segs, start = [], None
+    for i, v in enumerate(voiced):
+        if v and start is None:
+            start = i
+        elif not v and start is not None:
+            segs.append([start, i])
+            start = None
+    if start is not None:
+        segs.append([start, n])
+    gap, merged = max(1, int(cfg["min_interval"] / FRAME_SEC)), []
+    for s in segs:
+        if merged and s[0] - merged[-1][1] <= gap:
+            merged[-1][1] = s[1]
+        else:
+            merged.append(s)
+    out, pad, chunk = [], int(SLICE_PAD_SEC / FRAME_SEC), int(cfg["max_len"] * sr)
+    for s0, s1 in merged:
+        pos, b = max(0, (s0 - pad) * hop), min(len(mono), (s1 + pad) * hop)
+        while pos < b:
+            end = min(pos + chunk, b)
+            if (end - pos) / sr >= cfg["min_keep"]:
+                out.append((pos, end))
+            pos = end
+    return out
+
+
+def _pcm16(mono, sr: int) -> bytes:
+    """모노 소리 → 16비트 PCM wav (preprocess.py 가 쓰는 형식: subtype PCM_16)."""
+    import wave
+
+    import numpy as np
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(sr))
+        w.writeframes(np.rint(np.clip(mono, -1, 1) * 32767).astype("<i2").tobytes())
+    return buf.getvalue()
+
+
+def slice_upload(path: str | Path, name: str, singer: str) -> tuple[bytes, dict]:
+    """보컬만 남은 wav 하나 또는 wav 묶음 zip → (dataset_raw.zip 바이트, 요약). 원본은 읽기만 하고 저장하지 않는다.
+
+    zip 은 데이터 점검과 같은 안전 확인(scan_zip: 크기·파일 수·폴더 밖 경로)을 거치고, wav 하나는 MAX_CLIP_BYTES 까지,
+    읽은 wav 의 합은 MAX_ZIP_BYTES 까지만 자른다 (결과 zip 을 메모리에 들고 있어서)."""
+    if not SINGER.fullmatch(singer) or is_artist_name(singer):
+        raise VoiceError("화자 이름은 영문·숫자·`-`·`_` 만 쓸 수 있습니다 (폴더 이름이 됩니다, 40자까지). 예: myvoice, jiyun_01")
+    path = Path(path)
+    if name.lower().endswith(".zip"):
+        entries = scan_zip(path)
+    elif name.lower().endswith(".wav"):
+        if not path.exists():
+            raise VoiceError("올린 wav 파일을 찾지 못했습니다 — 다시 올려 주세요.")
+        entries = None
+    else:
+        raise VoiceError("보컬만 남은 wav 파일 하나 또는 wav 를 묶은 zip 을 올려 주세요.")
+    cfg = slice_defaults()
+    files, ignored, skipped, total = [], 0, 0, 0
+    out = io.BytesIO()
+    used: set[str] = set()
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        sources = [(name, None)] if entries is None else [(entry, info) for info, entry in entries]
+        src_zip = zipfile.ZipFile(path) if entries is not None else None
+        try:
+            for entry, info in sources:
+                if not entry.lower().endswith(".wav"):
+                    ignored += 1
+                    continue
+                size = info.file_size if info else path.stat().st_size
+                if size > MAX_CLIP_BYTES:
+                    skipped += 1
+                    continue
+                if info:
+                    with src_zip.open(info) as f:
+                        data = f.read(MAX_CLIP_BYTES + 1)
+                else:
+                    data = path.read_bytes()
+                total += len(data)
+                if total > MAX_ZIP_BYTES:
+                    raise VoiceError(f"wav 를 합치면 너무 큽니다 — 한 번에 {MAX_ZIP_BYTES // MB}MB 까지 자릅니다. 나눠서 올려 주세요.")
+                try:
+                    audio, sr = read_wav(data)
+                except ValueError:
+                    skipped += 1
+                    continue
+                if len(data) > MAX_CLIP_BYTES or not len(audio):
+                    skipped += 1
+                    continue
+                mono = audio.mean(axis=1)
+                stem = PurePosixPath(entry).stem
+                base = "".join(c if (c.isalnum() or c in "-_") else "_" for c in stem) or "clip"  # preprocess.py 와 같은 이름 규칙
+                if base in used:
+                    base = f"{base}_{len(used)}"
+                used.add(base)
+                ranges = slice_ranges(mono, sr, cfg)
+                for count, (a, b) in enumerate(ranges):
+                    dst.writestr(f"dataset_raw/{singer}/{base}_{count:04d}.wav", _pcm16(mono[a:b], sr))
+                files.append({"name": entry, "sec": round(len(mono) / sr, 1), "clips": len(ranges),
+                              "kept_sec": round(sum(b - a for a, b in ranges) / sr, 1)})
+        finally:
+            if src_zip:
+                src_zip.close()
+    if not files:
+        raise VoiceError(f"자를 수 있는 wav 가 없습니다 — wav 하나는 {MAX_CLIP_BYTES // MB}MB 까지 자릅니다 (더 크면 나눠서 zip 으로 묶어 주세요). "
+                         "정수 PCM wav(16비트 등)인지도 확인해 주세요.")
+    if not any(f["clips"] for f in files):
+        raise VoiceError("잘라 낸 조각이 하나도 없습니다 — 소리가 작아 모두 무음으로 보였거나 조각이 너무 짧습니다 "
+                         f"(소리 크기 {cfg['threshold_db']:g}dB · {cfg['min_keep']:g}초 기준). 보컬만 남긴 wav 인지 확인해 주세요.")
+    summary = {"files": files, "clips": sum(f["clips"] for f in files), "minutes": round(sum(f["kept_sec"] for f in files) / 60, 1),
+               "ignored": ignored, "skipped": skipped, **cfg}
+    return out.getvalue(), summary
