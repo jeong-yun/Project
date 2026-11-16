@@ -418,7 +418,7 @@ def test_voice_forms_open_and_consent_is_required(app):
 
     at = at.selectbox(key="dept_task_creative").set_value("voice:check").run()
     assert not at.exception, at.exception
-    assert len(at.get("file_uploader")) == 1
+    assert len(at.get("file_uploader")) == 2  # 데이터 점검의 zip 칸 + 🧰 도구의 로그 파일 칸
 
 
 def kit_page(root: str) -> None:
@@ -643,3 +643,77 @@ def test_speech_kit_download_uses_same_screen_code():
     buttons = at.get("download_button")
     assert len(buttons) == 1 and "맞춤 실행 파일" in buttons[0].proto.label
     assert any("음높이 자동 예측" in c.value for c in at.caption)
+
+
+# ═══ 📈 학습 로그 진단 (두 팀 공통 — 모델 없이 코드만) ═══════════════════════════════
+
+METRICS = ("loss/g/total", "loss/g/fm", "loss/g/mel", "loss/g/kl", "loss/g/lf0", "loss/d/total")
+
+
+def bar_line(epoch: int, g_total: float, last: int = 399) -> str:
+    """so-vits-svc-fork 학습 셀의 진행 막대 한 줄 — Lightning RichProgressBar 가 그리는 꼴 (지표는 'name: value', 값은 '.3f')."""
+    values = {"loss/g/total": g_total, "loss/g/fm": 7.89, "loss/g/mel": g_total / 2, "loss/g/kl": 1.234, "loss/g/lf0": 0.012,
+              "loss/d/total": 2.345}
+    metrics = " ".join(f"{k}: {values[k]:.3f}" for k in METRICS)
+    return f"Epoch {epoch}/{last} ━━━━━━━━━━━━━━ 45/45 0:00:12 • 0:00:00 3.21it/s v_num: 0.000 {metrics}"
+
+
+def log_of(values, start: int = 0) -> str:
+    return "\n".join(["[11:02:03] INFO Setting current epoch to 0", "", *(bar_line(start + i, v) for i, v in enumerate(values)),
+                      "UserWarning: something unrelated"])
+
+
+@pytest.mark.parametrize("values, verdict", [
+    ([80 * 0.97 ** i + 20 for i in range(30)], "줄어드는 중"),
+    ([max(40.0, 80 - 4 * i) for i in range(30)], "평평해짐"),
+    ([max(40.0, 80 - 4 * i) + (3 * (i - 24) if i > 24 else 0) for i in range(30)], "다시 오르는 중"),
+    ([40 + i for i in range(30)], "늘어나는 중"),
+    ([40.0 + (i % 2) * 0.1 for i in range(30)], "거의 그대로"),
+    ([40.0, 39.0, 38.0], "값이 적음"),
+])
+def test_log_trend_verdicts_come_from_code(values, verdict):
+    diag = voice.diagnose_log(log_of(values))
+    assert diag["main"] == "loss/g/total" and diag["verdict"] == verdict and diag["next"] == voice.NEXT_STEP[verdict]
+    assert diag["rows"]["loss/g/total"]["n"] == len(values)
+    assert diag["lines"] == len(values) + 2 and diag["read"] == len(values)  # 설명·경고 줄은 건너뛰고 센다
+    report = voice.log_report(diag)
+    assert f"**판정: {verdict}**" in report and f"건너뛴 줄 2줄" in report and "공식 기준이 아님" in report
+
+
+def test_log_numbers_spikes_nan_and_epochs():
+    values = [50.0] * 12 + [120.0] + [50.0] * 12
+    diag = voice.diagnose_log(log_of(values, start=375))
+    row = diag["rows"]["loss/g/total"]
+    assert row["spikes"] == [13] and row["first"] == 50.0 and row["last"] == 50.0 and row["change"] == pytest.approx(0)
+    assert (diag["last_epoch"], diag["max_epoch"]) == (399, 399)
+    report = voice.log_report(diag)
+    assert "튄 곳 1번" in report and "설정한 마지막 epoch 에 닿았습니다" in report and "epoch 375~399" in report
+    assert set(diag["rows"]) == {"loss/g/total", "loss/d/total", "loss/g/mel"}  # 표에 보일 지표만
+    broken = voice.diagnose_log(log_of([50.0] * 8).replace("loss/g/total: 50.000", "loss/g/total: nan", 1))
+    assert broken["verdict"] == "망가짐 의심" and broken["rows"]["loss/g/total"]["bad"] == 1
+    # 지표가 줄을 넘어가 다음 줄에 나와도 (좁은 화면) 바로 앞 Epoch 줄의 번호를 붙인다
+    wrapped = voice.parse_log("Epoch 7/399 ━━━ 45/45\nloss/g/total: 41.000 loss/d/total: 2.000")
+    assert wrapped["series"]["loss/g/total"] == [(7, 41.0)] and wrapped["read"] == 1
+
+
+def test_log_reads_tensorboard_csv_and_says_when_nothing_was_read():
+    csv = "Wall time,Step,Value\n" + "\n".join(f"1700000000.{i},{i * 100},{60 - i:.3f}" for i in range(20)) + "\nnot,a,row"
+    diag = voice.diagnose_log(csv)
+    assert diag["main"] == voice.CSV_SERIES and diag["verdict"] == "줄어드는 중" and diag["read"] == 20 and diag["lines"] == 22
+    assert "Step 0~1,900" in voice.log_report(diag)
+    assert voice.diagnose_log("1,2,3\n4,5,6")["read"] == 0  # 머리줄 없는 숫자 줄은 CSV 로 보지 않는다
+    nothing = voice.diagnose_log("Traceback (most recent call last):\n  File x")
+    assert nothing["main"] is None and nothing["verdict"] == "값이 적음"
+    assert "하나도 읽지 못했습니다" in voice.log_report(nothing) and "TensorBoard" in nothing["next"]
+
+
+def test_log_tool_on_team_page_needs_no_model(app, use_script):
+    script = use_script(Script(text=[]))  # 모델을 부르면 대본이 없어 실패한다
+    at = app.run()
+    at = at.selectbox(key="dept_task_creative").set_value("voice_speech:plan").run()
+    assert not at.exception, at.exception
+    at.text_area(key="voice_log_text_voice_speech").set_value(log_of([80 * 0.97 ** i + 20 for i in range(30)]))
+    at = at.button[[b.label for b in at.button].index("📈 진단하기")].click().run()
+    assert not at.exception, at.exception
+    assert any("**판정: 줄어드는 중**" in m.value for m in at.markdown)
+    assert not script.calls

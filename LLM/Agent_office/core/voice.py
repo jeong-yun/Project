@@ -9,6 +9,7 @@
   2) 맞춤 파일      : plan_settings(epochs·batch 를 규칙으로) → build_notebook(JSON 으로 읽어 셀 값만 바꿈) → kit_zip
   3) 데이터 점검    : inspect_zip(dataset_raw.zip 을 풀지 않고 메모리에서 wav 만 읽어 숫자 계산) → dataset_table
   4) 하네스 검사    : check_guard · check_plan · check_data (core/harness/validators.py 의 voice_* 검증기가 쓴다)
+  5) 📈 학습 로그 진단 : diagnose_log → log_report (붙여 넣은 Colab 학습 로그의 손실 추이 — 모델 없이 코드만)
 
 원본 스크립트·노트북은 teams/voice/assets/ 에 있다 (사용자가 만든 파일 그대로). 슬라이싱 기준(−40dB·2초·15초)은
 그 스크립트의 slice_wav 기본값을 읽어 쓴다 → 기준이 한 곳에만 있다.
@@ -715,3 +716,147 @@ def check_data(answer: str, options: dict) -> list[str]:
     if stats["verdict"] not in answer:
         problems.append(f"분량 판정 '{stats['verdict']}' 이 답에 없다 — 코드의 판정을 그대로 밝히고 다음 조치를 써라")
     return list(dict.fromkeys(problems))
+
+
+# ─── 5) 📈 학습 로그 진단 (모델 없이 코드만 — 두 팀 공통) ───────────────────
+# 읽는 형식 (2026-11-16 원본 코드 확인): so-vits-svc-fork train.py 는 손실을 화면 진행 막대(Lightning RichProgressBar)와 TensorBoard 에만 쓴다.
+#   진행 막대 한 줄 : 'Epoch 12/399 ━━━ 23/45 0:00:12 • 0:00:05 3.21it/s v_num: 0.000 loss/g/total: 45.123 … loss/d/total: 2.345'
+#                     (지표 이름 loss/g/total·loss/g/fm·loss/g/mel·loss/g/kl·loss/g/lf0·loss/d/total, 값은 소수 셋째 자리 '.3f')
+#   TensorBoard CSV : 스칼라 그래프의 내려받기 — 머리줄 'Wall time,Step,Value' + 한 줄에 한 값 (Step = 학습 배치 번호)
+# 진행 막대는 끝난 epoch 의 줄을 지운다(leave=False 기본값) → 붙여 넣은 글에 값이 적으면 10번 셀 TensorBoard 의 CSV 를 권한다.
+LOG_KEYS = ("loss/g/total", "loss/d/total", "loss/g/mel")  # 표에 보일 지표 — 판정은 첫째(생성기 전체 손실)로, CSV 만 있으면 CSV 로
+CSV_SERIES = "TensorBoard CSV"
+LOG_MAX_CHARS = 5 * MB
+LOG_MIN_POINTS = 6
+# 판정 어림 기준 — 이 앱이 정한 값이다 (so-vits-svc-fork 공식 기준이 아님. 화면에 그렇게 밝힌다)
+TREND_DROP = 0.05  # 처음 1/3 과 마지막 1/3 의 중앙값 차이
+RECENT_DROP = 0.02  # 마지막 1/3 안의 앞 절반과 뒤 절반 중앙값 차이 (아직 줄어드는지)
+SPIKE_RATIO = 1.5  # 바로 앞 5개 값의 중앙값보다 이만큼 크면 '튐'
+_NUM = r"(?:[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?|nan|[-+]?inf)"
+_METRIC = re.compile(rf"(loss/[a-z]+/[a-z0-9_]+)\s*[:=]\s*({_NUM})", re.IGNORECASE)
+_EPOCH = re.compile(r"\bEpoch\s+(\d+)(?:\s*/\s*(\d+))?")
+_CSV_HEAD = re.compile(r"^\s*\"?Wall time\"?\s*,\s*\"?Step\"?\s*,\s*\"?Value\"?\s*$", re.IGNORECASE)
+_CSV_ROW = re.compile(rf"^\s*{_NUM}\s*,\s*(\d+)\s*,\s*({_NUM})\s*$", re.IGNORECASE)
+NEXT_STEP = {
+    "줄어드는 중": "아직 줄어드는 중입니다 — 학습을 이어 가세요. 9번 셀이 Drive 의 마지막 체크포인트에서 이어 학습합니다. "
+                   "설정한 epochs 에 닿았으면 8번 셀에서 epochs 를 늘려 다시 실행합니다 (원본 노트북 8·9번 셀 안내).",
+    "평평해짐": "처음보다 줄어든 뒤 더 줄지 않습니다 — 학습을 멈추고 지금 체크포인트로 11번 셀에서 변환해 들어 보세요. "
+                "들어 보고 부족하면 학습을 이어 가거나, '🔍 데이터 점검'으로 분량·무음·클리핑을 확인합니다.",
+    "다시 오르는 중": "줄던 값이 최근에 다시 오릅니다 — 지금 체크포인트로 11번 셀에서 변환해 들어 보고, '🔍 데이터 점검'으로 데이터를 확인하세요. "
+                      "원본 파일에 정해진 해법은 없습니다.",
+    "늘어나는 중": "처음보다 커졌습니다 — 학습을 멈추고 '🔍 데이터 점검'으로 분량·무음·클리핑을 먼저 확인하세요. 원본 파일에 정해진 해법은 없습니다.",
+    "거의 그대로": "처음과 마지막이 거의 같습니다 — 학습 초반이면 더 학습한 뒤 다시 진단하고, 오래 학습했다면 11번 셀에서 변환해 들어 보세요.",
+    "망가짐 의심": "숫자가 아닌 값(nan·inf)이 나왔습니다 — 학습이 망가졌을 수 있습니다. 학습을 멈추고 '🔍 데이터 점검'(클리핑·무음)부터 확인하세요. "
+                   "원본 파일에 정해진 해법은 없습니다.",
+    "값이 적음": f"손실 값이 {LOG_MIN_POINTS}개보다 적어 추이를 판단할 수 없습니다. 진행 막대는 끝난 epoch 의 줄을 지우므로, "
+                 "10번 셀 TensorBoard 에서 loss/g/total 그래프의 CSV 를 내려받아 붙여 넣어 주세요 (왼쪽 'Show data download links').",
+}
+
+
+def parse_log(text: str) -> dict:
+    """붙여 넣은 학습 로그 → {series: {지표: [(epoch 또는 step, 값)]}, lines, read, last_epoch, max_epoch}. 못 읽는 줄은 건너뛴다."""
+    series: dict[str, list] = {}
+    lines = read = 0
+    csv = False
+    epoch = last_epoch = max_epoch = None
+    for line in text[:LOG_MAX_CHARS].splitlines():
+        if not line.strip():
+            continue
+        lines += 1
+        m = _EPOCH.search(line)
+        if m:
+            epoch = int(m.group(1))
+            max_epoch = int(m.group(2)) if m.group(2) else max_epoch
+        pairs = _METRIC.findall(line)
+        if pairs:
+            read += 1
+            last_epoch = epoch
+            for key, value in pairs:
+                series.setdefault(key.lower(), []).append((epoch, float(value)))
+        elif _CSV_HEAD.match(line):
+            csv = True
+        elif csv and (row := _CSV_ROW.match(line)):
+            read += 1
+            series.setdefault(CSV_SERIES, []).append((int(row.group(1)), float(row.group(2))))
+    return {"series": series, "lines": lines, "read": read, "last_epoch": last_epoch, "max_epoch": max_epoch}
+
+
+def loss_trend(values: list[float]) -> dict:
+    """값 목록 → {n, bad, first, last, head, tail, change, recent, spikes, verdict}. 숫자 해석은 모두 여기서 한다."""
+    import math
+
+    finite = [v for v in values if math.isfinite(v)]
+    out = {"n": len(finite), "bad": len(values) - len(finite), "first": finite[0] if finite else None,
+           "last": finite[-1] if finite else None, "head": None, "tail": None, "change": None, "recent": None, "spikes": []}
+    if out["bad"]:
+        return {**out, "verdict": "망가짐 의심"}
+    if len(finite) < LOG_MIN_POINTS:
+        return {**out, "verdict": "값이 적음"}
+    k = len(finite) // 3
+    head, tail = median(finite[:k]), median(finite[-k:])
+    last = finite[-k:]
+    early, late = median(last[: len(last) // 2]), median(last[len(last) // 2:])
+    change = (tail - head) / abs(head) if head else 0.0
+    recent = (late - early) / abs(early) if early else 0.0
+    spikes = [i + 1 for i in range(5, len(finite)) if (w := median(finite[i - 5:i])) > 0 and finite[i] > SPIKE_RATIO * w]
+    if recent <= -RECENT_DROP:
+        verdict = "줄어드는 중"
+    elif change <= -TREND_DROP:
+        verdict = "다시 오르는 중" if recent >= RECENT_DROP else "평평해짐"
+    elif change >= TREND_DROP:
+        verdict = "늘어나는 중"
+    else:
+        verdict = "거의 그대로"
+    return {**out, "head": head, "tail": tail, "change": change, "recent": recent, "spikes": spikes, "verdict": verdict}
+
+
+def diagnose_log(text: str) -> dict:
+    """학습 로그 진단 — 판정할 지표(loss/g/total, 없으면 TensorBoard CSV)·표에 보일 지표들의 추이·다음 할 일."""
+    parsed = parse_log(text)
+    series = parsed["series"]
+    main = next((k for k in (LOG_KEYS[0], CSV_SERIES) if k in series), None)
+    rows = {k: loss_trend([v for _, v in series[k]]) for k in (*LOG_KEYS, CSV_SERIES) if k in series}
+    verdict = rows[main]["verdict"] if main else "값이 적음"
+    return {**parsed, "main": main, "rows": rows, "verdict": verdict, "next": NEXT_STEP[verdict]}
+
+
+def log_report(diag: dict) -> str:
+    """진단 표 (마크다운) — 숫자·판정은 모두 코드 계산값."""
+    def num(x):
+        return "-" if x is None else f"{x:,.3f}"
+
+    def pct(x):
+        return "-" if x is None else f"{x:+.1%}"
+
+    main = diag["main"]
+    if main is None:
+        head = f"**판정: {diag['verdict']}** — 손실 값을 하나도 읽지 못했습니다"
+    else:
+        xs = [x for x, _ in diag["series"][main] if x is not None]
+        span = (f" · Step {xs[0]:,}~{xs[-1]:,}" if main == CSV_SERIES else f" · epoch {xs[0]}~{xs[-1]}") if xs else ""
+        head = f"**판정: {diag['verdict']}** — `{main}` 값 {diag['rows'][main]['n']}개{span}"
+    lines = [head, "", f"➡️ {diag['next']}", ""]
+    if diag["rows"]:
+        lines += ["| 지표 | 값 수 | 처음 → 마지막 | 처음 1/3 중앙값 → 마지막 1/3 중앙값 | 변화 | 최근 변화 | 튐 | 판정 |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for key, r in diag["rows"].items():
+            spikes = f"{len(r['spikes'])}번" + (f" ({', '.join(map(str, r['spikes'][:5]))}번째 값{' …' if len(r['spikes']) > 5 else ''})" if r["spikes"] else "")
+            lines.append(f"| `{key}` | {r['n']}개" + (f" (+숫자 아님 {r['bad']}개)" if r["bad"] else "")
+                         + f" | {num(r['first'])} → {num(r['last'])} | {num(r['head'])} → {num(r['tail'])} | {pct(r['change'])} "
+                         f"| {pct(r['recent'])} | {spikes} | {r['verdict']} |")
+        lines.append("")
+    if main and diag["rows"][main]["spikes"]:
+        lines.append(f"- 튄 곳 {len(diag['rows'][main]['spikes'])}번 — 원인은 로그만으로 알 수 없습니다. 위 판정(추이)과 함께 보세요")
+    if diag["last_epoch"] is not None and diag["max_epoch"] is not None:
+        done = " — 설정한 마지막 epoch 에 닿았습니다" if diag["last_epoch"] >= diag["max_epoch"] else ""
+        lines.append(f"- 진행: 마지막으로 읽은 epoch {diag['last_epoch']} / 설정의 마지막 epoch {diag['max_epoch']}{done}")
+    lines += [
+        f"- 읽은 줄: 빈 줄을 뺀 {diag['lines']:,}줄 중 손실 값을 읽은 줄 {diag['read']:,}줄 · 건너뛴 줄 {diag['lines'] - diag['read']:,}줄 "
+        "(설명·경고처럼 손실 값이 없는 줄)",
+        "- 읽는 형식: 학습 셀(9번)의 진행 막대 줄 `loss/g/total: 12.345` 꼴 · TensorBoard 그래프에서 내려받은 CSV (`Wall time,Step,Value`)",
+        f"- 판정 기준(이 앱의 어림 기준 — so-vits-svc-fork 공식 기준이 아님): 처음 1/3 과 마지막 1/3 의 중앙값이 {TREND_DROP:.0%} 넘게 줄면 '줄었다', "
+        f"마지막 1/3 안에서 {RECENT_DROP:.0%} 넘게 줄면 '줄어드는 중', 바로 앞 5개 값의 중앙값보다 {SPIKE_RATIO:g}배 넘게 크면 '튐'. 판정은 `{LOG_KEYS[0]}`(없으면 CSV)로 합니다",
+        "- 손실 숫자만으로 음질을 알 수 없습니다 — 최종 확인은 11~12번 셀로 변환해 들어 보는 것입니다. 이 진단은 모델을 부르지 않고 코드로만 계산했습니다.",
+    ]
+    return "\n".join(lines)
+

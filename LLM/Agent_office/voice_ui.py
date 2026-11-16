@@ -3,6 +3,7 @@
 
   check_form : '맡기기' 전에 양식 확인 (목소리 사용 확인 · 화자 이름 · zip 안전) — 문제가 있으면 TaskInputError
   preview    : 최종 결과 아래 — 🔍 데이터 점검 표(코드 계산) · 🎁 맞춤 실행 파일(zip) 내려받기 · AI 합성 음성 표시 안내
+  tools_panel: 업무 양식 위 '🧰 모델 없이 바로 쓰는 도구' — 📈 학습 로그 진단 (코드 계산만)
 """
 
 import streamlit as st
@@ -40,3 +41,30 @@ def preview(run: dict) -> None:
                                mime="application/zip", key=f"dl_voice_{run['run_id']}")
     if stats or kit:
         st.caption(f"🏷 변환한 결과물을 남에게 보이거나 올릴 때는 '{voice.AI_LABEL}'이라고 표시하세요.")
+
+
+def tools_panel(team_id: str) -> None:
+    """업무 양식 위 — 모델을 부르지 않고 코드만 쓰는 도구. 접혀 있고, 버튼을 누를 때만 계산한다 (다시 그릴 때는 결과만 보여 줌)."""
+    with st.expander("🧰 모델 없이 바로 쓰는 도구 — 📈 학습 로그 진단"):
+        _log_tool(team_id)
+
+
+def _log_tool(team_id: str) -> None:
+    key = f"voice_log_report_{team_id}"
+    st.caption("Colab 학습(9번 셀) 화면의 진행 막대 줄이나, 10번 셀 TensorBoard 그래프에서 내려받은 CSV 를 붙여 넣으면 "
+               "손실 값(loss) 추이를 코드로 계산해 다음에 할 일을 알려 드립니다. 모델을 부르지 않습니다.")
+    with st.form(f"voice_log_form_{team_id}"):
+        text = st.text_area("학습 로그 붙여 넣기", height=140, key=f"voice_log_text_{team_id}",
+                            placeholder="Epoch 12/399 ━━━ 45/45 … loss/g/total: 45.123 … loss/d/total: 2.345\n"
+                                        "또는 TensorBoard CSV — Wall time,Step,Value")
+        file = st.file_uploader("또는 로그·CSV 파일 올리기", type=["txt", "log", "csv"], key=f"voice_log_file_{team_id}")
+        go = st.form_submit_button("📈 진단하기")
+    if go:
+        raw = (text or "") + ("\n" + file.getvalue()[: voice.LOG_MAX_CHARS].decode("utf-8", "replace") if file else "")
+        if raw.strip():
+            st.session_state[key] = voice.log_report(voice.diagnose_log(raw))
+        else:
+            st.session_state.pop(key, None)
+            st.warning("학습 로그를 붙여 넣거나 파일을 올려 주세요.")
+    if st.session_state.get(key):
+        st.markdown(st.session_state[key])
