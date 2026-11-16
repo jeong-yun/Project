@@ -334,6 +334,12 @@ class LessonGroupSet(BaseModel):
     groups: list[LessonGroup] = Field(description="겹치거나 충돌하는 교훈 묶음 (없으면 빈 목록)")
 
 
+class RuleDraft(BaseModel):
+    """되풀이된 교훈을 고정 규칙(팀 업무 지침·부서장 검토 기준)으로 올릴 때 보조 모델이 다듬은 한 줄 — 사람이 확인·고친 뒤에만 저장한다."""
+
+    rule: str = Field(description="한 줄 규칙 문장 (한국어)")
+
+
 class CleanupProposal(BaseModel):
     """화면에 보일 교훈 정리 제안 — 사용자가 고르기 전에는 아무것도 바꾸지 않는다."""
 

@@ -123,8 +123,9 @@ search:
 review_mode: edit
 
 harness:
-  validators: [concept_entry]
-  final_only: [concept_entry]
+  # concept_pending: 사람이 24번 되풀이한 지적('확인 안 된 원전·수치는 PENDING 으로 분리')을 코드 검사로 (2026-11-16)
+  validators: [concept_entry, concept_pending]
+  final_only: [concept_entry, concept_pending]
   max_retries: 2
 
 verification:
