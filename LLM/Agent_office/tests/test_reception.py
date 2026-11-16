@@ -139,7 +139,7 @@ def check(dept_text, team_text, teams, depts, tmp_path=None):
 def test_draft_uses_template_and_turns_tools_off(teams, depts):
     dept_text, team_text = drafted(teams, depts)
     dept, team = check(dept_text, team_text, teams, depts)
-    assert dept["teams"] == ["vat_team"] and dept["head"]["name"] == "세무부 부장" and dept["color"] not in {d.color for d in depts}
+    assert dept["teams"] == ["vat_team"] and dept["head"]["name"] == "세무부 부서장" and dept["color"] not in {d.color for d in depts}
     assert team["tools"] == [] and "웹 검색 (필요하면 사람이 켬)" in team_text  # 위험한 도구는 꺼 두고 주석으로만
     assert team["harness"] == load_yaml(BASE_DIR / "teams" / "_template" / "team.yaml")["harness"]  # _template 바탕
     assert team["scope"]["keywords"] == ["부가세", "신고서", "세금"] and team["free_examples"][0]["question"] == TAX_Q
@@ -175,7 +175,7 @@ def test_save_writes_team_and_department_keeping_comments(tmp_path, teams, depts
     assert data["other"]["id"] == "etc" and data["departments"][-1]["id"] == "tax_dept"
     new_ids = [t.id for t in teams] + ["vat_team"]
     got = building.departments(new_ids, data)
-    assert got[-1].id == "tax_dept" and got[-1].teams == ["vat_team"] and got[-1].head["name"] == "세무부 부장"
+    assert got[-1].id == "tax_dept" and got[-1].teams == ["vat_team"] and got[-1].head["name"] == "세무부 부서장"
     floors = building.plan_floors(got, building.per_floor(data))
     assert ("tax_dept", "vat_team") in floors[-1]  # 새 층(또는 맨 위층 빈 칸)에 방이 생긴다
     with pytest.raises(DeptBuildError, match="이미 있습니다"):
@@ -246,7 +246,7 @@ def test_home_is_a_floor_guide_with_info_desk_and_full_rooms(app_env, teams):
         assert len(room["people"]) == min(room["card"]["headcount"], building.MAX_SEATS)
         assert len(room["people"]) + room["more"] == room["card"]["headcount"]
     travel = snap["depts"]["travel"]
-    assert travel["head"] == "여행부 부장" and travel["headcount"] == sum(c["headcount"] for c in travel["teamCards"])
+    assert travel["head"] == "여행부 부서장" and travel["headcount"] == sum(c["headcount"] for c in travel["teamCards"])
     assert travel["teamCards"][0]["tasks"] and travel["state"] == "○ 모두 쉬는 중"
     text = "\n".join(m.value for m in at.markdown)
     assert "🗂 층별 부서 안내" in text and "##### 3층 — ✈️ 여행부" in text
@@ -271,7 +271,7 @@ def test_dept_desk_assigns_and_starts_the_team(app_env, use_script):
     assert not at.exception, at.exception
     assert at.session_state["view"] == "dept" and at.session_state["team_pick"] == "travel_abroad"
     assert app_env["started"] == [("travel_abroad", DOM_Q)]  # 팀장이 바로 시작 (기존 workflow)
-    assert "여행부 부장" in at.info[0].value and "다른 팀으로 바꿔 보냄" in at.info[0].value
+    assert "여행부 부서장" in at.info[0].value and "다른 팀으로 바꿔 보냄" in at.info[0].value
 
 
 def test_info_center_hands_off_to_department_head(app_env, use_script, depts):

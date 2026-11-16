@@ -21,9 +21,9 @@
   - 추천 기본도 상하 규칙을 지킨다: 추천 모델이 상사가 실제로 쓸 모델보다 강하면 (상사의 추천 모델이 지금 안 돼서 다음 후보로
     넘어간 경우 포함 — plan(status=...)) 추천 목록에서 허용되는 첫 모델로 낮춘다 (저장하지 않음).
 
-부서 부장 (맨 위)
-  - 👔 부장(⚖️ 비평가 · 🧭 팀 배정)은 팀 조직도 밖, 팀장보다 위다. 기본 부장 모델(models.yaml critic)은 팀장과 같거나 더 강하다.
-  - 부장을 팀장보다 약한 모델로 고르거나 팀장을 부장보다 강한 모델로 골라도 막지 않는다 — ⚠️ 경고만 (head_warning).
+부서장 (맨 위)
+  - 👔 부서장(⚖️ 비평가 · 🧭 팀 배정)은 팀 조직도 밖, 팀장보다 위다. 기본 부서장 모델(models.yaml critic)은 팀장과 같거나 더 강하다.
+  - 부서장을 팀장보다 약한 모델로 고르거나 팀장을 부서장보다 강한 모델로 골라도 막지 않는다 — ⚠️ 경고만 (head_warning).
     (비평가는 글을 쓰지 않고 채점만 하므로 비용·한도 때문에 가벼운 모델을 일부러 고를 수 있다)
 
 저장: 데이터 폴더(AGENT_OFFICE_DATA_DIR)의 member_models.json — {팀 id: {에이전트 id: "provider:model"}}.
@@ -99,11 +99,11 @@ def weaker(models: ModelsConfig, key: str, than: str) -> bool:
 
 
 def head_warning(models: ModelsConfig, head_key: str, lead_key: str, lead_name: str = "팀장") -> str:
-    """부장(맨 위)이 팀장보다 약한 모델이면 경고 한 줄, 아니면 ''. 막지는 않는다."""
+    """부서장(맨 위)이 팀장보다 약한 모델이면 경고 한 줄, 아니면 ''. 막지는 않는다."""
     if not head_key or not lead_key or not weaker(models, head_key, lead_key):
         return ""
-    return (f"부장 모델 {split_key(head_key)[1]} 가 {lead_name} 모델({split_key(lead_key)[1]})보다 약합니다 — "
-            "부장은 조직의 맨 위(⚖️ 비평가)라 약한 모델은 팀장의 실수를 놓치기 쉽습니다.")
+    return (f"부서장 모델 {split_key(head_key)[1]} 가 {lead_name} 모델({split_key(lead_key)[1]})보다 약합니다 — "
+            "부서장은 조직의 맨 위(⚖️ 비평가)라 약한 모델은 팀장의 실수를 놓치기 쉽습니다.")
 
 
 @dataclass

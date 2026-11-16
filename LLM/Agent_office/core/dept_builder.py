@@ -43,7 +43,7 @@ def draft(p: dict, question: str, rank_ids: list[str], used_colors: set[str] = f
     dept = {
         "id": p["dept_id"], "name": p["dept_name"], "emoji": p.get("emoji") or "🆕", "color": pick_color(set(used_colors)),
         "description": p["dept_description"], "teams": [p["team_id"]],
-        "head": {"name": f"{p['dept_name']} 부장", "persona": p.get("head_persona") or "요청한 내용에 답했는지, 근거 없는 단정이 없는지를 본다."},
+        "head": {"name": f"{p['dept_name']} 부서장", "persona": p.get("head_persona") or "요청한 내용에 답했는지, 근거 없는 단정이 없는지를 본다."},
     }
     base = load_yaml(template or TEAMS_DIR / "_template" / "team.yaml")
     members = p["members"]

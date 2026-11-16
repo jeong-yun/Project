@@ -181,7 +181,7 @@ def test_single_team_department_and_department_org_chart(app_env):
     assert not at.exception, at.exception
     chart = next(e for e in at.get("component_instance") if "click_detector" in e.proto.component_name)
     html_text = json.loads(chart.proto.json_args)["html_content"]
-    assert "node:__head__" in html_text and "node:career/lead" in html_text and "커리어부 부장" in html_text
+    assert "node:__head__" in html_text and "node:career/lead" in html_text and "커리어부 부서장" in html_text
 
 
 def test_head_assigns_team_and_team_workflow_starts(app_env, use_script):
@@ -190,14 +190,14 @@ def test_head_assigns_team_and_team_workflow_starts(app_env, use_script):
     at.text_area(key="dept_head_text").input(ABR_Q).run()
     at = at.button(key="dept_head_go").click().run()
     assert not at.exception, at.exception
-    assert "여행부 부장 → **🌏 해외 여행팀**" in at.success[0].value and "비자·환전" in at.success[0].value
-    assert any("판단: 부장 모델" in c.value and "사용 모델" in c.value and "범위 확인" in c.value for c in at.caption)
+    assert "여행부 부서장 → **🌏 해외 여행팀**" in at.success[0].value and "비자·환전" in at.success[0].value
+    assert any("판단: 부서장 모델" in c.value and "사용 모델" in c.value and "범위 확인" in c.value for c in at.caption)
     at = at.button(key="dept_head_start").click().run()  # ▶ 바로 맡기기 → 해외 팀의 팀장이 곧바로 시작
     assert not at.exception, at.exception
     assert app_env["started"] == [("travel_abroad", ABR_Q)]
     assert at.session_state["dept_pick"] == "travel" and at.session_state["team_pick"] == "travel_abroad"
     assert at.selectbox(key="dept_task_travel").value == "head"  # 부서 화면 그대로
-    assert "여행부 부장** → **🌏 해외 여행팀** 배정" in at.info[0].value
+    assert "여행부 부서장** → **🌏 해외 여행팀** 배정" in at.info[0].value
     snap = office_snapshot(at)
     assert snap["running"] and snap["activeTeam"] == "travel_abroad"
     assert (office.USER, office.HEAD) in [(e["from"], e["to"]) for e in snap["events"]]  # 사용자 → 부서장 쪽지
@@ -213,7 +213,7 @@ def test_direct_task_pick_goes_straight_to_that_team(app_env):
     at = next(b for b in at.button if b.label == "맡기기").click().run()
     assert not at.exception, at.exception
     assert app_env["started"] == [("travel_domestic", DOM_Q)]
-    assert any("여행부 부장 → **🚄 국내 여행팀**" in c.value for c in at.caption)
+    assert any("여행부 부서장 → **🚄 국내 여행팀**" in c.value for c in at.caption)
     # 팀 업무 양식도 같은 목록에서 — 고르면 그 팀 양식이 그대로 나온다
     at = at.selectbox(key="dept_task_travel").set_value("travel_abroad:plan").run()
     assert not at.exception and at.session_state["team_pick"] == "travel_abroad"

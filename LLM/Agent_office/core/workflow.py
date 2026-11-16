@@ -120,7 +120,7 @@ def build_office_graph(
 
     member_models: 화면에서 고른 팀원별 모델 {에이전트 id: "provider:model"} (core/member_models.py).
     모델 후보는 여기서 한 번 정해 에이전트에 넣으므로, 실행 중에 선택을 바꿔도 이번 실행은 시작할 때의 모델 그대로다.
-    dept_head / head_choice: 이 팀이 속한 부서의 부장과 화면에서 고른 부장 모델 — 비평가 (core/dept_heads.py).
+    dept_head / head_choice: 이 팀이 속한 부서의 부서장과 화면에서 고른 부서장 모델 — 비평가 (core/dept_heads.py).
     없으면 models.yaml critic → utility 로 비평한다 (비공개 팀은 팀장 모델).
     """
     verification_cfg = verification_cfg or {}
@@ -144,7 +144,7 @@ def build_office_graph(
         for n in nodes.values()
     }
     parents = parent_map(org)
-    critic_plan = dept_heads.critic_plan(models, team, chains, org.id, dept_head, head_choice)  # 비평가 = 부서 부장
+    critic_plan = dept_heads.critic_plan(models, team, chains, org.id, dept_head, head_choice)  # 비평가 = 부서장
 
     # ── 작은 도우미 ──────────────────────────────────────────────
 
@@ -856,7 +856,7 @@ def restart_from(
 
 
 def saved_evidence(graph, org: OrgNode, thread_id: str) -> tuple[list[ToolResult], WebContext | None]:
-    """체크포인트에 남은 근거 자료 (데이터 툴 결과 · 웹 검색) — 앱을 다시 켜서 되살린 업무의 💬 수정 요청·부장 검토가 쓴다.
+    """체크포인트에 남은 근거 자료 (데이터 툴 결과 · 웹 검색) — 앱을 다시 켜서 되살린 업무의 💬 수정 요청·부서장 검토가 쓴다.
     (실행 기록 runs.db 에는 근거 자료를 저장하지 않는다.) 체크포인트가 없으면 ([], None)."""
     try:
         values = graph.get_state(_config(org, thread_id)).values
