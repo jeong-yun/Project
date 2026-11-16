@@ -56,7 +56,7 @@ import run_control_ui
 import voice_ui
 from core import (
     audio_edit, building, call_monitor, concept, dept_heads, followup, iac_patch, llm_factory, member_models, model_caps,
-    model_catalog, model_recs, music, office, progress, stock_calc, usage, verification,
+    model_catalog, model_recs, music, office, progress, step_mode, stock_calc, usage, verification,
 )
 from core.agent import OrgAgent
 from core.feedback import lesson_budget, team_lessons
@@ -399,7 +399,7 @@ with st.sidebar:
         st.markdown("### 🔔 진행 중인 업무")
         for r in sorted(open_runs, key=lambda r: r["started_at"], reverse=True):
             state = "💬 추가 질문 중" if r["status"] == FOLLOWUP_RUNNING else "⏳ 진행 중" if not r["done"] else ("⚠️ 오류" if r["error"] else
-                                                       "🔀 확인 대기" if r["status"] == "step_check" else "👤 결정 대기")
+                                                       step_mode.wait_label(r) if r["status"] == "step_check" else "👤 결정 대기")
             where = dept_by_id[dept_of_team[r["team_id"]]]
             st.button(f"{state} · {where.emoji} {team_names[r['team_id']]}\n\n{short(run_title(r))}", key=f"go_{r['run_id']}",
                       on_click=go_to_run, args=(r,), use_container_width=True)
@@ -1781,7 +1781,7 @@ if len(dept.teams) > 1:
         r = open_run_of(tid)
         state = ("○ 쉬는 중" if not r else "💬 추가 질문 중" if r["status"] == FOLLOWUP_RUNNING
                  else "⏳ 진행 중" if not r["done"] else "⚠️ 오류" if r["error"]
-                 else "🔀 확인 대기" if r["status"] == "step_check" else "👤 결정 대기" if r["status"] == "awaiting_human"
+                 else step_mode.wait_label(r) if r["status"] == "step_check" else "👤 결정 대기" if r["status"] == "awaiting_human"
                  else "✅ 결정함")
         col.button(f"{'👁 ' if tid == team_id else ''}{team_names[tid]} · {state}", key=f"see_team_{tid}",
                    type="primary" if tid == team_id else "secondary", on_click=see_team, args=(tid,), use_container_width=True,
@@ -2351,6 +2351,9 @@ for done_id in st.session_state.pop(NOTICE_KEY, []):
                      + f": {short(run_title(done_run), 24)}", icon="💬")
         elif done_run["error"]:
             st.toast(f"⚠️ {where} 업무가 오류로 멈췄습니다: {short(run_title(done_run), 24)}", icon="⚠️")
+        elif done_run["status"] == "step_check" and (done_run.get("checkpoint") or {}).get("point") == "assumptions":
+            st.toast(f"🧭 {where} 업무가 시작 전 확인을 기다립니다 — 팀이 이해한 내용을 확인해 주세요: "
+                     f"{short(run_title(done_run), 24)}", icon="🧭")
         elif done_run["status"] == "step_check":
             st.toast(f"🔀 {where} 업무가 단계 확인을 기다립니다 — 확인하고 '▶ 이대로 진행'을 눌러 주세요: "
                      f"{short(run_title(done_run), 24)}", icon="🔀")

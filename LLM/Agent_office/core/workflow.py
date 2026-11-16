@@ -6,6 +6,11 @@
   research : 데이터 툴 + 웹 검색(선택)을 동시에 — 결과를 모든 에이전트 프롬프트에 근거 자료로 넣는다
   work     : 조직도 전체의 분배·초안·검토·통합 (서로 독립인 형제 서브트리는 동시에 진행)
 
+🧭 가정 확인 (check_assumptions — 2026-11-16, 화면이 있는 실행만)
+  요청 정리 모델이 '질문이 모호해 스스로 정한 가정'을 냈으면 brief 뒤에 한 번 멈춰 사람에게 1~3개 보여 준다
+  ('모두 이대로 진행' 또는 고쳐 쓰기 → 고친 것은 브리프 제약 '사람이 정한 해석'). 질문 = 이미 나온 가정 (모델 호출 없음).
+  묻지 않는 경우는 asks_assumptions — 🔀 단계마다 확인을 켜면 따로 멈추지 않고 ① 브리프 화면에서 함께 묻는다.
+
 동작 (첨부 그림의 Multi-Agent Team 구조)
   👤 사용자 ↔ supervisor(클릭한 에이전트, 기본은 팀장)
   위 → 아래 : 관리자가 질문을 보고 필요한 하위 에이전트를 골라 업무를 나눠 준다          (plan)
@@ -633,6 +638,24 @@ def build_office_graph(
         call_monitor.log(run_id_of(config), "🔀 " + step_mode.POINTS["brief"], note)
         return {"brief": brief, "tasks": {state["root_id"]: brief.goal or state["question"]}}
 
+    def asks_assumptions(state: OfficeState) -> bool:
+        """🧭 가정 확인으로 멈출지 — 코드가 센 값(새 가정 개수)만 본다. '모호도 점수'를 모델에게 매기게 하지 않는다.
+
+        묻지 않음: 화면 없이 도는 실행(체크포인터 없음 — 평가·자율 실행), ⚡ 빠른 답(요청 정리 모델을 부르지 않음),
+        🔀 단계마다 확인(① 화면에서 함께 물음), 사람이 목표·완료 기준을 다 채움(업무 양식도 — 모델이 가정하지 않음), 새 가정 0개.
+        """
+        return bool(with_human and not state.get("quick") and not state.get("step_mode")
+                    and step_mode.new_assumptions(state["brief"], state.get("brief_input")))
+
+    def check_assumptions_node(state: OfficeState, config: RunnableConfig) -> dict:
+        if call_monitor.stopped():
+            return {}
+        pending = step_mode.new_assumptions(state["brief"], state.get("brief_input"))
+        answer = interrupt(step_mode.assumptions_payload(pending, state["root_id"]))
+        brief, note = step_mode.apply_assumptions(state["brief"], answer)
+        call_monitor.log(run_id_of(config), step_mode.POINTS["assumptions"], note)
+        return {"brief": brief} if brief is not state["brief"] else {}
+
     def lead_plan_node(state: OfficeState) -> dict:
         """팀장의 업무 분배만 먼저 (사람이 ② 에서 확인). 하위가 없으면 할 일 없음."""
         root = state["root_id"]
@@ -714,6 +737,7 @@ def build_office_graph(
     graph.add_edge(START, "brief")
     if with_human:
         # 🔀 단계마다 확인 — 켰을 때만 옆길로 간다 (끄면 brief → research → work → human_decision 그대로)
+        graph.add_node("check_assumptions", check_assumptions_node)
         graph.add_node("propose", propose_node)
         graph.add_node("check_brief", check_brief_node)
         graph.add_node("lead_plan", lead_plan_node)
@@ -721,7 +745,11 @@ def build_office_graph(
         graph.add_node("visit", visit_node)
         graph.add_node("check_drafts", check_drafts_node)
         graph.add_node("integrate", integrate_node)
-        graph.add_conditional_edges("brief", lambda s: "propose" if stepwise(s) else "research", ["propose", "research"])
+        graph.add_conditional_edges(
+            "brief", lambda s: "propose" if stepwise(s) else "check_assumptions" if asks_assumptions(s) else "research",
+            ["propose", "check_assumptions", "research"],
+        )
+        graph.add_edge("check_assumptions", "research")
         graph.add_edge("propose", "check_brief")
         graph.add_edge("check_brief", "research")
         graph.add_conditional_edges("research", lambda s: "lead_plan" if stepwise(s) else "work", ["lead_plan", "work"])
@@ -779,7 +807,7 @@ def _events(graph, inputs, config) -> Iterator[tuple[str, object]]:
                 yield "brief", update.get("brief")
                 for note in update.get("notes", []):
                     yield "note", note
-            elif node in ("check_brief", "check_drafts", "propose") and update:
+            elif node in ("check_assumptions", "check_brief", "check_drafts", "propose") and update:
                 if update.get("brief") is not None:
                     yield "brief", update["brief"]  # 사람이 고친 브리프·방향·통합 지시
                 for note in update.get("notes", []):
