@@ -2589,6 +2589,22 @@
   - 사용자 PC·Colab 에서 노래 하나를 `-na` 맞춤 노트북으로 변환해 들어 보고, 키 조절(`-t`)이 기대대로 움직이는지 확인.
   - 실제 학습 로그(9번 셀 화면 복사 · TensorBoard CSV)를 📈 에 붙여 넣어 읽은 줄 수·판정이 맞는지 확인하고, 어림 기준(5%·2%·1.5배)을 고칠지 본다.
 
+## 2026-11-17
+
+**⬆ 고정 규칙을 실행용 사본의 팀 파일 대신 knowledge 폴더에 — 사본 갱신이 깨지지 않고 다른 PC 에도 퍼지게**
+- 배경: 교훈 → 고정 규칙 올리기가 `teams/<팀>/skills/promoted_rules.md` · `team.yaml` 에 써서, 실행용 사본(`Project_run`)에서 올리면
+  (1) GitHub 에 안 올라가 다른 PC 에 퍼지지 않고 (2) 사본의 추적 파일이 바뀌어 다음 `git merge --ff-only main` 이 깨질 수 있었다.
+- 작업: 교훈 동기화가 이미 쓰는 `AGENT_OFFICE_KNOWLEDGE_DIR` 를 그대로 재사용 (새 환경 변수 없음).
+  - 변수가 있으면 두 규칙(팀 업무 지침·부서장 검토 기준) 모두 그 폴더의 `promoted_rules.yaml` 한 파일에 쓰고(`core/config.py` `shared_rules_path`),
+    `load_skills` 는 promoted_rules 절에, `load_team` 은 `verification.critic.rules` 뒤에 합친다 (같은 줄은 한 번만).
+  - 변수가 없을 때(개발·테스트)와 비공개 팀(`private: true`)은 예전처럼 `teams/<팀>/` 에 쓴다. 예전에 `teams/` 에 쓴 규칙도 계속 읽는다 (옮기기 기능은 만들지 않음).
+  - 완료 안내 문구: knowledge 폴더에 저장했으면 '팀 설정 파일은 바꾸지 않았다 · 교훈 파일과 함께 커밋해 올려 달라'.
+  - 같이 맞춘 곳: 사이드바 '📚 팀 스킬' 목록, 개념 팀 프롬프트 판(`prompt_version`) 지문에 공유 파일 포함, README 두 줄.
+- 기술: 실패하는 테스트 먼저 — 변수 지정 시 올리면 `teams/` 사본 파일이 한 글자도 안 바뀌고 knowledge 에 규칙이 생기며 다음 로드 때 스킬·비평 규칙에 들어가는지, 비공개 팀은 빠지는지.
+- 성과: `python -m pytest -q` 전체 1,425건 통과 (가짜 모델, 이 PC 36분 47초 — 새 테스트 2건 포함).
+- 확인 못 한 것: 실제 실행용 사본·배치 파일로 앱을 켜서 올려 보기, 다른 PC 에서 받아 적용되는지. 비공개 팀 규칙은 여전히 사본의 `teams/` 에 쓰여 사본 갱신을 깨뜨릴 수 있다.
+- 다음 할 일: 비공개 팀 규칙을 어디 둘지(저장소 밖 로컬 파일 등) 정하기.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
