@@ -213,9 +213,15 @@ def build_office_graph(
         if not validators:
             return answer
         log: list[str] = []
+        results: list = []
+        stuck = False
         for attempt in range(cfg.max_retries + 1):
-            results = harness.run_validators(validators, answer.content, options)
+            before, results = results, harness.run_validators(validators, answer.content, options)
             if harness.all_passed(results) or attempt == cfg.max_retries:
+                break
+            stuck = harness.same_failure(before, results)
+            if stuck:  # 🔁 다시 써도 그대로면 남은 회차도 같을 가능성이 크다 → 모델 호출 아낌
+                log.append(f"🔁 {harness.SAME_FAILURE_NOTE}")
                 break
             if call_monitor.skipped("harness") or call_monitor.stopped():
                 log.append("⛔ 사용자가 하네스 재시도를 건너뜀 → 지금 답변으로 진행")
@@ -236,7 +242,7 @@ def build_office_graph(
             answer.verification_log = [*previous.verification_log, *answer.verification_log]
         answer.harness = results
         answer.verification_log = [*answer.verification_log, *log]
-        if not harness.all_passed(results):
+        if not harness.all_passed(results) and not stuck:
             answer.verification_log.append("하네스 재시도 한도 초과 — 검증 실패 상태로 진행")
         return answer
 

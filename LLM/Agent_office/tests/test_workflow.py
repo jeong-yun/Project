@@ -160,6 +160,54 @@ def test_harness_failure_feeds_error_back_and_retries(org, ranks, team, models, 
     assert "문법 오류" in script.prompts("text")[-1]  # 에러 로그가 다시 쓰기 프롬프트에 들어감
 
 
+def _harness_draft(org, ranks, team, models, script, harness_cfg, review_answer="보완안"):
+    """am_action(검토) 아래 staff_case 가 초안을 쓰는 작은 트리에서 하네스를 돌리고 초안 단계를 돌려준다."""
+    script.outputs["ReviewResult"] = make_review(answer=review_answer)
+    harness_team = Team(**{**team.model_dump(), "harness": harness_cfg})
+    graph = build_office_graph(org, ranks, harness_team, models, SETTINGS, NO_CRITIC)
+    events = list(stream_office(graph, org, "질문", "am_action", brief=BRIEF))
+    return next(p for k, p in events if k == "step" and p.kind == "draft")
+
+
+def test_harness_stops_when_same_failure_repeats(org, ranks, team, models, use_script):
+    """같은 검증기가 같은 이유로 2번 연달아 떨어뜨리면 남은 다시 쓰기를 쓰지 않는다.
+    전: max_retries 3 이면 초안 모델 호출 4번 → 후: 2번 (처음 + 다시 쓰기 1번에서 같은 실패)."""
+    bad = "```python\ndef f(:\n```"
+    script = use_script(full_script())
+    script.outputs["text"] = [bad]  # 매번 같은 틀린 코드
+    draft = _harness_draft(org, ranks, team, models, script, {"validators": ["python_syntax"], "max_retries": 3})
+
+    assert len(script.prompts("text")) == 2
+    assert draft.attempts == 2 and not draft.harness[0].passed
+    assert any("같은 문제가 되풀이되어 자동 다시 쓰기를 멈췄습니다" in log for log in draft.verification_log)
+    assert not any("재시도 한도 초과" in log for log in draft.verification_log)
+
+
+def test_harness_keeps_retrying_when_failure_changes(org, ranks, team, models, use_script):
+    """다른 실패(다른 줄·다른 오류)면 기존대로 다시 쓴다."""
+    bad1, bad2 = "```python\ndef f(:\n```", "```python\nx = 1\ny = (\n```"
+    good = "```python\ndef f():\n    return 1\n```"
+    script = use_script(full_script())
+    script.outputs["text"] = [bad1, bad2, good]
+    draft = _harness_draft(org, ranks, team, models, script, {"validators": ["python_syntax"], "max_retries": 3})
+
+    assert len(script.prompts("text")) == 3 and draft.content == good and draft.harness[0].passed
+    assert not any("되풀이" in log for log in draft.verification_log)
+
+
+def test_harness_keeps_retrying_while_failure_shrinks(org, ranks, team, models, use_script):
+    """빠진 항목이 2개 → 1개로 줄면(진전) 계속 다시 쓰고, 그 1개가 그대로 남으면 그때 멈춘다.
+    전: max_retries 4 면 호출 5번 → 후: 3번."""
+    script = use_script(full_script())
+    script.outputs["text"] = ["내용 없음", "손절가 포함", "손절가 포함"]
+    cfg = {"validators": ["required_terms"], "options": {"required_terms": ["손절가", "예산"]}, "max_retries": 4}
+    draft = _harness_draft(org, ranks, team, models, script, cfg, review_answer="손절가 예산")
+
+    assert len(script.prompts("text")) == 3
+    assert "예산" in draft.harness[0].log and "손절가" not in draft.harness[0].log
+    assert any("되풀이" in log for log in draft.verification_log)
+
+
 # ─── 정확도 개선: 최고 시도 유지 · 통과 규칙 · 근거 자료 · 빈 초안 ─────────────
 
 CRITIC_ON = {"critic": {"enabled": True, "scope": "final", "min_score": 4, "max_self_corrections": 1}}
