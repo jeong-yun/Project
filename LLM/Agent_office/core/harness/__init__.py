@@ -7,6 +7,8 @@
 """
 
 from core.harness import learning_validators, validators  # noqa: F401 — import 하는 순간 @register 로 검증기가 등록된다
-from core.harness.base import REGISTRY, Validator, all_passed, harness_feedback, register, run_validators
+from core.harness.base import (SAME_FAILURE_NOTE, REGISTRY, Validator, all_passed, harness_feedback, register, run_validators,
+                               same_failure)
 
-__all__ = ["REGISTRY", "Validator", "all_passed", "harness_feedback", "register", "run_validators"]
+__all__ = ["REGISTRY", "SAME_FAILURE_NOTE", "Validator", "all_passed", "harness_feedback", "register", "run_validators",
+           "same_failure"]

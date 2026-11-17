@@ -56,6 +56,19 @@ def all_passed(results: list[HarnessResult]) -> bool:
     return all(r.passed for r in results)
 
 
+def same_failure(before: list[HarnessResult], after: list[HarnessResult]) -> bool:
+    """직전 회차와 이번 회차가 같은 실패인가 = 떨어진 검증기와 실패 내용(띄어쓰기만 무시)이 모두 그대로.
+    검증기 로그는 코드가 쓰므로 글자 비교로 충분하다 (수정 대화의 same_point 처럼 말이 바뀌는 것을 볼 필요 없음).
+    빠진 항목·틀린 개수가 줄면 로그 글자가 달라지므로 '진전'으로 보고 계속 다시 쓴다."""
+    def key(results: list[HarnessResult]) -> set[tuple[str, str]]:
+        return {(r.validator, " ".join(r.log.split())) for r in results if not r.passed}
+    failed = key(after)
+    return bool(failed) and failed == key(before)
+
+
+SAME_FAILURE_NOTE = "같은 문제가 되풀이되어 자동 다시 쓰기를 멈췄습니다. 지적 내용을 보고 직접 수정 요청을 해 주세요"
+
+
 def harness_feedback(results: list[HarnessResult]) -> str:
     """실패한 검증 결과를 LLM 에게 돌려줄 피드백 문장으로 만든다 (결정론적 피드백)."""
     failed = [r for r in results if not r.passed]
