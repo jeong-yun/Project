@@ -221,36 +221,32 @@ def test_trim_middle_keeps_head_and_tail():
 # ─── Gemini 시간 제한 ─────────────────────────────────────────────────
 
 
-def test_google_model_gets_request_timeout_from_settings(set_keys, models, monkeypatch, allow_model_objects):
+def test_google_model_sends_settings_timeout_with_each_request(set_keys, models, monkeypatch, allow_model_objects):
+    """settings.yaml 의 google.timeout_sec 가 실제 요청에 실리고, 라이브러리 안에서 다시 하지 않으며(처음 한 번만),
+    시간 초과는 공통 재시도가 알아보는 오류로 올라온다 (2.1 은 timeout 을 받기만 하고 요청에 넣지 않았다)."""
+    import httpx
+
     import core.config
 
     set_keys("google")
     monkeypatch.setattr(core.config, "load_settings", lambda: {"google": {"timeout_sec": 42}})
     llm = llm_factory.create_chat_model(ModelSpec(provider="google", model="gemini-3.5-flash"), models)
-    assert isinstance(llm.client, llm_factory._TimedClient) and llm.client._timeout == 42
-    monkeypatch.setattr(core.config, "load_settings", lambda: {"google": {"timeout_sec": 0}})
-    assert llm_factory.google_timeout() is None  # 0 = 제한 없음
-
-
-def test_timed_client_turns_deadline_into_transient_timeout():
-    from google.api_core.exceptions import DeadlineExceeded
-
     seen = {}
 
-    class Inner:
-        def generate_content(self, **kw):
-            seen.update(kw)
-            raise DeadlineExceeded("Deadline Exceeded")
+    def generate_content(**request):  # 실제 네트워크 대신 — 요청을 보고 시간 초과를 낸다
+        seen.update(request)
+        raise httpx.ReadTimeout("The read operation timed out")
 
-    client = llm_factory._TimedClient(Inner(), 180)
-    with pytest.raises(llm_factory.GeminiTimeoutError) as err:
-        client.generate_content(request="r")
-    assert seen["timeout"] == 180
-    assert llm_factory.is_transient(err.value) and llm_factory.is_timeout(err.value)
-    # 라이브러리 재시도 대상(GoogleAPIError)이 아니다 → 라이브러리 안에서 또 180초를 기다리지 않는다
-    from google.api_core.exceptions import GoogleAPIError
-
-    assert not isinstance(err.value, GoogleAPIError)
+    monkeypatch.setattr(llm.client.models, "generate_content", generate_content)
+    with pytest.raises(httpx.ReadTimeout) as err:
+        llm.invoke("안녕")
+    options = seen["config"].http_options
+    assert options.timeout == 42_000  # 밀리초
+    assert options.retry_options.attempts == 1  # 처음 한 번만 — 재시도는 공통 로직이
+    assert llm_factory.is_timeout(err.value) and llm_factory.is_transient(err.value)
+    assert llm_factory.failure_reason(f"gemini: {type(err.value).__name__}: {err.value}") == "시간 초과"  # 화면의 실패 이유
+    monkeypatch.setattr(core.config, "load_settings", lambda: {"google": {"timeout_sec": 0}})
+    assert llm_factory.google_timeout() is None  # 0 = 제한 없음
 
 
 def test_timeout_retries_same_model_once_then_falls_back(models, set_keys, monkeypatch):
@@ -266,7 +262,7 @@ def test_timeout_retries_same_model_once_then_falls_back(models, set_keys, monke
             def run(messages):
                 calls.append(self.spec.provider)
                 if self.spec.provider == "google":
-                    raise llm_factory.GeminiTimeoutError("Gemini 응답 시간 초과 (180초)")
+                    raise TimeoutError("The read operation timed out")
                 return {"parsed": make_review(), "raw": AIMessage(""), "parsing_error": None}
             return RunnableLambda(run)
 

@@ -2665,6 +2665,37 @@
   같은 함수로 고쳤지만 화면 테스트는 음악 팀 곡 만들기 버튼 경로만 돌렸다. 추가 질문이 후처리보다 **먼저** 끝나면 '🗺 지도 만드는 중' 같은 후처리 표시가 지워지는 반대 방향은 그대로 둠(진행 안내 문구는 탭에 남음).
 - 다음 할 일: 2-8 이 다시 실패하면 실패한 단정 줄과 그때의 run 상태부터 남긴다.
 
+**⬆ langchain·langgraph 1.x 로 올리기 (3-17) — 0.x 로는 못 고치던 보안 권고 없애기**
+- 배경: 11-13 에 남은 langchain 계열 권고 19건 가운데 대부분이 1.x 에서만 고쳐졌다. langgraph 0.6 은 '✏️ 고쳐 다시'(지난 체크포인트에서 갈래 만들기)에 예전 단계가 섞여 `<0.6` 으로 묶어 두었었다.
+- 작업:
+  - **회귀 테스트 먼저 (0.x 에서 통과 확인)**: `tests/test_run_control.py` 의 갈래 테스트 2건에 — 업무 분배부터 다시 하면 요청 정리·자료 조사가 다시 돌지 않음,
+    요청 정리부터 다시 하면 앞 단계가 새 갈래에서 한 번씩만, 통합 단계가 1개(예전 단계가 안 섞임), 예전 시도의 '결정 대기' 체크포인트가 LangGraph 기록에 그대로 남음 — 을 더했다.
+  - `requirements.txt`: langchain-core `>=1.3.3,<2` · langgraph `>=1.2.14,<2` · langgraph-checkpoint `>=4.1.1,<5`(새 줄 — 고친 버전을 보장하려고) · langgraph-checkpoint-sqlite `>=3.1.3,<4` ·
+    langchain-openai `>=1.1.14,<2` · langchain-anthropic `>=1.4.6,<2` · langchain-google-genai `>=4,<5`. 최소 버전 = OSV 에서 그 패키지의 마지막 권고가 고쳐진 버전. 각 줄 주석에 GHSA.
+  - 코드 3곳:
+    - `core/llm_factory.py` Gemini 시간 제한: langchain-google-genai 4.x 는 구글 새 SDK(`genai.Client`)를 `client.models.generate_content` 로 불러,
+      예전 래퍼(`_TimedClient` 의 `generate_content`)가 **조용히 건너뛰어졌다**(예전 테스트는 래퍼 타입만 봐서 통과). 4.x 는 `timeout` 을 요청마다 보내므로 래퍼·`TimedGemini`·`GeminiTimeoutError` 를 지우고
+      `ChatGoogleGenerativeAI(timeout=…, max_retries=1)` 로 바꿨다(`max_retries=1` = 처음 한 번만, 재시도는 공통 로직). 시간 초과는 httpx `ReadTimeout` 으로 올라와 기존 `is_timeout`·'시간 초과' 표시가 그대로 알아본다.
+      테스트는 요청에 실린 값(timeout 42초 → 42,000ms, 시도 1번)과 시간 초과 처리까지 확인하게 바꿨다 — 0.x 라이브러리에서는 실패한다.
+    - `core/claude_cli.py`: 스트리밍 마지막 조각에 `chunk_position="last"` — langchain-core 1.x 가 빈 '끝' 조각을 하나 더 붙여 `test_stream_json_yields_text_deltas` 가 실패했다(테스트는 그대로).
+    - `core/workflow.py` `OfficeState.directions: list` → `list[DirectionOption]`: langgraph 1.x 는 체크포인트에서 읽는 타입을 '허용 목록'으로 막을 수 있고(지금은 경고만, '다음 버전에서 막힘' 예고),
+      목록은 상태 타입 표시에서 만든다. 막는 모드(`LANGGRAPH_STRICT_MSGPACK=true`)로 돌리면 🔀 단계마다 확인 2건이 실패했고, 이 한 줄로 통과.
+- 기술: Python 3.11 임시 가상환경(세션 임시 폴더 — 사용자 Python 에는 설치 안 함), OSV `query`·`querybatch`, langchain-core·langgraph·google-genai 소스 읽기, 가짜 모델 테스트.
+- 성과:
+  - 설치된 버전: langchain-core 1.8.1 · langgraph 1.2.22 · langgraph-checkpoint 4.3.2 · checkpoint-sqlite 3.1.3 · langgraph-sdk 0.4.14 · langchain-openai 1.8.0(openai 3.52) ·
+    langchain-anthropic 1.7.10(anthropic 2.9) · langchain-google-genai 4.4.3(google-genai 2.34) · langsmith 0.14.17. `pip check` 이상 없음.
+  - 보안 권고(OSV, 새 환경에 설치된 128개 전부): **langchain 계열 0건** (11-13 에 남았던 langchain-core·langchain-openai·langchain-anthropic·langgraph 4종의 권고가 모두 사라짐). 남은 것은 pyarrow 19.0.1 의 1건(GHSA-rgxp-2hwp-jwgg — 같은 권고의 PYSEC 별칭 포함 2개 id, 25.0 강제 종료 때문에 일부러 유지)과
+    가상환경에 딸려 오는 setuptools 65.5.0(requirements 와 무관). 위 최소 버전 그대로 조회해도 0건.
+  - 0.x 가 쓴 SQLite 체크포인트를 1.x 가 읽기(임시 테스트, 커밋 안 함): 결정 대기 상태 · ⚡ 빠른 답 표시 · 근거 자료 읽기, ✏️ 업무 분배부터 다시(갈래), 결정 재개 → 교훈 저장 모두 통과. 막는 모드에서도 통과.
+  - 전체 `python -m pytest -q` (1.x 가상환경): 첫 회 1,433 통과 · 1 실패(위 Claude CLI 조각, 21분 25초) → 고친 뒤 **1,434 통과**, 18분 28초 (이 PC, 경고 2건은 Streamlit 표 그리기의 pandas 경고 — langchain 경고 0건).
+    main 의 1,435건에서 하나 준 것은 Gemini 시간 제한 테스트 2건을 1건으로 합쳤기 때문. 0.x(이 PC Python)에서 갈래 테스트 7건 통과.
+- 확인 못 한 것: 실제 모델(OpenAI·Anthropic·Gemini·Upstage·FreeLLM)로 부르기 — 특히 Gemini 4.x 의 실제 시간 초과 동작·구조화 출력, 새 openai 3.x 위의 Upstage·FreeLLM. 실제 화면에서 앱 켜기.
+  이 PC 의 실제 `data/` 체크포인트 파일로 읽어 보기(테스트에서 만든 0.x 파일로만 확인).
+- 다음 할 일:
+  - 이 PC 는 `LLM/AI_Agent` 와 같은 Python 을 쓰는데 AI_Agent 는 아직 `langchain-core<1.0`·`openai<2` 다 → Agent Office 를 1.x 로 설치하면 AI_Agent 범위가 깨진다.
+    Agent Office 는 README 대로 폴더의 `.venv` 에 설치하거나, AI_Agent 도 1.x 로 올린다(따로 작업).
+  - 막는 모드를 켜 두는 것(`LANGGRAPH_STRICT_MSGPACK=true`)은 검토만 — 지금은 경고만 나온다(서버 기록에 DesiredState·AgentAnswer 등 '등록 안 된 타입' 경고, 타입마다 한 번).
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

@@ -550,8 +550,9 @@ class ClaudeCLIChatModel(BaseChatModel):
             raise error_for(stderr or f"결과 없이 종료됨 (종료 코드 {code})")
         check_result(result, api_error)
         tail = "" if streamed else str(result.get("result") or "")  # 부분 메시지가 없었으면 결과 전문을 한 번에
+        # chunk_position="last": 마지막 조각이라고 알려야 langchain-core 1.x 가 빈 '끝' 조각을 하나 더 붙이지 않는다
         yield ChatGenerationChunk(message=AIMessageChunk(
-            content=tail, usage_metadata=usage_metadata(result.get("usage")),
+            content=tail, chunk_position="last", usage_metadata=usage_metadata(result.get("usage")),
             response_metadata=response_metadata(result, self.model),
         ))
 
