@@ -18,7 +18,7 @@ LangChain 과 Streamlit 으로 만든 작은 LLM 앱 실험이다. 기능은 네
 | 영어 단어장 | `pages/1_english_word_maker.py` | `english_word_maker/` | 화면이 키 없이 열리고 저장된 단어가 표에 보임. 파싱·Word·PDF 내려받기는 테스트로 확인 |
 | AI 안전성 평가 | `pages/2_ai_safety_eval.py` | `ai_safety/` | 대상을 '일반 채팅 / RAG' 가운데 고른다. 가짜 모델로 '실행 → 코드 검사 → 채점 → 방어율 → 표 → 내려받기'까지 확인. 실제 방어율은 확인 안 함 |
 | 문서 Q&A (RAG) | `pages/3_rag_docs_qa.py` | `rag/` | 검색은 모델 없이 측정함(질문 15개 중 14개가 상위 3개 안). 가짜 모델로 '질문 → 검색 → 답 → 출처 검사'까지 확인. 실제 답변 품질은 확인 안 함 |
-| 자동 테스트 | `tests/` | | 58건. 가짜 모델만 사용하고, `.env` 를 읽거나 진짜 모델을 만들면 실패하게 막아 둠. 실행: `python -m pytest -q` |
+| 자동 테스트 | `tests/` | | 61건. 가짜 모델만 사용하고, `.env` 를 읽거나 진짜 모델을 만들면 실패하게 막아 둠. 실행: `python -m pytest -q` |
 
 ## 폴더 구조
 
@@ -139,7 +139,8 @@ RAG 는 '찾아서(Retrieval) 덧붙여(Augmented) 답하기(Generation)'다. �
 ## 실행하려면
 
 1. 패키지 설치: `pip install -r requirements.txt`
-   - 버전은 범위(최소 ~ 상한)로 적었다. 최소 버전은 알려진 보안 권고가 고쳐진 버전이고(2026-11-13 확인), langchain 은 0.3 계열로 묶었다. Agent Office 와 같은 Python 에 설치해도 서로 맞는 범위다.
+   - 버전은 범위(최소 ~ 상한)로 적었다. 최소 버전은 알려진 보안 권고가 고쳐진 버전이다(2026-11-13 · langchain 계열은 2026-11-17 확인). langchain 계열은 Agent Office 와 같은 1.x 범위라 같은 Python 에 함께 설치해도 맞는다(2026-11-17 새 가상환경에 `pip install -r ../Agent_office/requirements.txt -r requirements.txt` → `pip check` 충돌 없음).
+   - Windows 에서 pip 24 가 이 파일의 한글 주석을 cp949 로 읽다 `UnicodeDecodeError` 로 멈추면, `PYTHONUTF8=1`(PowerShell: `$env:PYTHONUTF8=1`)을 켜고 다시 설치한다.
    - `langchain`(본체)·`langchainhub`·`langchain-teddynote` 는 더 이상 쓰지 않는다.
 2. 이 폴더에 `.env` 를 만들고 OpenAI 키(`OPENAI_API_KEY`)를 넣는다. LangSmith 기록을 쓰려면 그 키도 넣는다. **`.env` 는 커밋하지 않는다.**
 3. 이 폴더에서 `streamlit run app.py`. 사이드바에서 페이지를 고른다.
@@ -178,6 +179,7 @@ python -c "from dotenv import load_dotenv; load_dotenv(); from ai_safety import 
 - **gpt-5 계열의 temperature:** `common.make_llm` 은 gpt-5 계열이면 temperature 를 넘기지 않는다(0 을 주면 400 오류가 난다고 알려져 있어서). 홈·단어장·평가가 모두 이 함수를 쓴다. 실제로 오류가 나는지는 호출해 보지 않았다.
 - **PDF 내려받기는 한글 글꼴이 있어야 한다.** Windows(맑은 고딕)·macOS(AppleGothic)·나눔고딕 자리를 차례로 찾고, 못 찾으면 화면에 "글꼴을 설치하거나 Excel·Word 로 받으라"는 안내가 뜬다. Windows 밖에서는 실행해 보지 않았다.
 - **단어장 화면을 열 때마다 발음 ZIP 을 준비한다.** 아직 mp3 가 없는 단어·예문은 화면을 여는 순간 발음(TTS) 호출이 나간다(한 번 만든 것은 다시 부르지 않음). 키가 없으면 건너뛴다. 테스트의 막음 장치가 이것을 잡아내서, 단어장 화면 테스트는 가짜 발음 클라이언트를 끼워 돌린다.
+- **`load_prompt` 는 langchain-core 1.2.21 부터 '없어질 함수' 경고가 난다**(2.0 에서 빠짐). 지금 범위(<2)에서는 동작한다(테스트 통과). 2.x 로 올리기 전에 프롬프트 YAML 을 직접 읽어 `ChatPromptTemplate` 로 만드는 방식으로 바꿔야 한다.
 - **화면에서 고를 수 있는 모델 이름**(`common.MODEL_CHOICES`)이 지금 계정에서 쓸 수 있는 이름인지는 확인하지 않았다.
 
 ## 확인한 것 / 확인하지 못한 것
@@ -219,3 +221,4 @@ python -c "from dotenv import load_dotenv; load_dotenv(); from ai_safety import 
 | 2026-11-13 | 문서 Q&A (RAG) 추가: `rag/` 패키지, 화면, 검색 품질 측정 |
 | 2026-11-13 | RAG 안전성 평가 추가: RAG 범주 3개 · 7건, 심은 문서, 코드 검사(심은 문구 · 출처), 대시보드에서 대상 고르기 |
 | 2026-11-13 | 의존성 보안 권고 대응: langchain-core 0.3.85 이상 등 최소 버전 올림, `hub.pull` 을 저장소 프롬프트(`summary.yaml`)로 바꾸고 `langchain`·`langchainhub`·`langchain-teddynote` 빼기 |
+| 2026-11-17 | langchain 계열 0.3 → 1.x (Agent Office 와 같은 Python 에 함께 설치하려고): langchain-core 1.3.3 이상 · langchain-openai 1.1.14 이상 · openai 2 이상(상한 풀기) · langsmith 0.8.18 이상. 코드 고침 없음. 두 앱 requirements 를 한 가상환경에 함께 설치(langchain-core 1.8.1 · langchain-openai 1.8.0 · openai 3.52) → `pip check` 충돌 없음, 이 앱 테스트 61건 · 같은 가상환경의 Agent Office 테스트 1,434건 통과. OSV: 범위의 최소 버전에 알려진 권고 없음(0.3.85 의 GHSA-qh6h-p6c9-ff54 · 0.3.9 의 GHSA-r7w7-9xr2-qq2r 사라짐). 실제 모델·실제 화면은 확인 안 함 |
