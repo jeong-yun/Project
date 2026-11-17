@@ -949,6 +949,16 @@ def saved_evidence(graph, org: OrgNode, thread_id: str) -> tuple[list[ToolResult
     return list(values.get("tool_results") or []), values.get("web")
 
 
+def saved_quick(checkpointer, thread_id: str) -> bool:
+    """체크포인트에 남은 ⚡ 빠른 답 표시 — 앱을 다시 켜서 결정 대기 업무를 되살릴 때 (runs.db 에는 저장하지 않는다).
+    '👥 팀 전체로 다시' 뒤의 값도 체크포인트에 있다. 체크포인트가 없거나 예전 저장본(칸 없음)이면 False (팀 전체)."""
+    try:
+        saved = checkpointer.get_tuple({"configurable": {"thread_id": thread_id}})
+    except Exception:  # noqa: BLE001 — 읽지 못하면 예전처럼 팀 전체로 보인다
+        return False
+    return bool(saved and saved.checkpoint.get("channel_values", {}).get("quick"))
+
+
 def resume_with_decision(graph, org: OrgNode, decision: HumanDecision, thread_id: str) -> Iterator[tuple[str, object]]:
     """사람의 결정으로 멈춘 그래프를 재개한다.
 
