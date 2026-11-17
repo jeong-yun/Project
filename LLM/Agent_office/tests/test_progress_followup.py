@@ -285,6 +285,34 @@ def test_interrupted_followup_is_recovered(org):
     assert restored["statuses"][org.id] == ("wait", "👤 결정 대기")
 
 
+@pytest.mark.parametrize("earlier", [False, True], ids=["첫 질문", "앞 질문 뒤"])
+def test_other_tab_does_not_mark_starting_followup_interrupted(org, monkeypatch, earlier):
+    """회귀 (2-6): 추가 질문을 막 시작한 순간(상태는 바뀌었고 스레드는 아직 안 돎)에 다른 탭이 화면을 그려도 '중단됨'이 되지 않는다.
+
+    다른 탭은 화면을 그릴 때마다 app.py 맨 위에서 recover_followup 을 부른다. 그 순간을 begin_followup 바로 뒤로 끼워 넣는다.
+    """
+    run = waiting_run(org)
+    if earlier:  # 앞 질문의 끝난 스레드가 run 에 남아 있는 경우
+        live.start_followup(run, "앞 질문", lambda: "앞 답").join(20)
+    gate = threading.Event()
+    other_tab = []
+    begin = live.begin_followup
+
+    def begin_then_other_tab_draws(r, request):
+        begin(r, request)
+        other_tab.append(live.recover_followup(r))
+
+    monkeypatch.setattr(live, "begin_followup", begin_then_other_tab_draws)
+    thread = live.start_followup(run, "3번 근거?", lambda: gate.wait(20) and "답변")
+    try:
+        assert other_tab == [False]  # 시작 중인 질문을 끊긴 것으로 보지 않았다
+        assert run["status"] == live.FOLLOWUP_RUNNING and not run["followup_error"]
+    finally:
+        gate.set()
+        thread.join(20)
+    assert run["followups"][-1] == "답변" and not run["followup_error"]
+
+
 # ─── claude_cli 고정 목록 · 부장 기본 모델 ─────────────────────────────────
 
 

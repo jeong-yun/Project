@@ -265,17 +265,25 @@ def recover_followup(run: dict, why: str = FOLLOWUP_INTERRUPTED) -> bool:
     if run.get("status") != FOLLOWUP_RUNNING:
         return False
     thread = run.get("followup_thread")
-    if thread is not None and thread.is_alive():
+    # ident 없음 = start_followup 이 막 만들어 아직 시작 전 — 그 순간 다른 탭이 화면을 그려도 '중단됨'으로 되돌리지 않는다 (2026-11-17)
+    if thread is not None and (thread.is_alive() or thread.ident is None):
         return False
     end_followup(run, error=why)
     run.pop("notice", None)
     return True
 
 
+def end_activity(run: dict, label: str) -> None:
+    """후처리(지도·곡·도면)가 끝나면 팀장 표시를 지운다 — 자기가 단 표시일 때만.
+
+    그 사이 💬 추가 질문을 보냈으면 팀장 표시는 '답하는 중'으로 바뀌어 있으므로 남긴다 (2026-11-17).
+    """
+    if run["activity"].get(run["root_id"]) == label:
+        run["activity"].pop(run["root_id"], None)
+
+
 def start_followup(run: dict, request: str, work: Callable[[], object], on_finish=None, agent_id: str = "") -> threading.Thread:
     """work() (= followup.respond(...)) 를 백그라운드에서 돌린다. 호출 모니터에 실시간으로 뜨고 바꾸기·중단도 된다."""
-    begin_followup(run, request)
-
     def _target():
         turn, error = None, ""
         with usage.scope(team_id=run.get("team_id", ""), run_id=run["run_id"], agent_id=agent_id or run["root_id"],
@@ -298,7 +306,8 @@ def start_followup(run: dict, request: str, work: Callable[[], object], on_finis
                         pass
 
     thread = threading.Thread(target=_target, name=f"followup-{run['run_id'][:8]}", daemon=True)
-    run["followup_thread"] = thread
+    run["followup_thread"] = thread  # 상태를 바꾸기 전에 — 그 사이 다른 탭의 recover_followup 이 앞 질문의 끝난 스레드를 보지 않게
+    begin_followup(run, request)
     thread.start()
     return thread
 

@@ -85,8 +85,8 @@ from core.config import (
 from core.harness import REGISTRY as HARNESS_REGISTRY
 from core.llm_factory import NoAvailableModelError
 from core.live import (
-    FOLLOWUP_RUNNING, KIND_LABELS, STAGES, archive_attempt, new_run, prepare_resume, quick_hint, recover_followup, restore_run,
-    run_members, skipped_stages, stage_of, start_followup, start_run,
+    FOLLOWUP_RUNNING, KIND_LABELS, STAGES, archive_attempt, end_activity, new_run, prepare_resume, quick_hint, recover_followup,
+    restore_run, run_members, skipped_stages, stage_of, start_followup, start_run,
 )
 from core.schemas import AgentAnswer, HumanDecision, OrgNode, TaskField, TaskTemplate, ToolResult
 from core.search import WebContext
@@ -1059,7 +1059,8 @@ def start_music(run: dict, answer: str) -> None:
     run["post_busy"] = True
     run["music_started"] = time.time()
     run.pop("music_error", None)
-    run["activity"][run["root_id"]] = "🎵 곡 만드는 중 (Lyria)"
+    label = "🎵 곡 만드는 중 (Lyria)"
+    run["activity"].setdefault(run["root_id"], label)  # 💬 추가 질문에 답하는 중이면 그 표시를 덮지 않는다
 
     def work() -> None:
         try:
@@ -1068,7 +1069,7 @@ def start_music(run: dict, answer: str) -> None:
         except Exception as e:  # noqa: BLE001 — 실패해도 결과·결정은 막지 않는다
             run["music_error"] = f"{type(e).__name__}: {e}"
         finally:
-            run["activity"].pop(run["root_id"], None)
+            end_activity(run, label)  # 그 사이 💬 추가 질문이 단 '답하는 중'은 남긴다
             run["post_busy"] = False
 
     threading.Thread(target=work, name=f"music-{run['run_id'][:8]}", daemon=True).start()
@@ -2414,6 +2415,7 @@ def launch(run: dict, events_factory) -> None:
 
     def on_finish(r: dict) -> None:
         paused = r["status"] == "step_check" or r.get("restarting")  # 아직 끝이 아님 — 후처리(지도·곡·도면)는 마지막에
+        label = ""  # 후처리가 팀장 칸에 단 표시 — 끝날 때 이것만 지운다
         try:
             if r["status"] == "error":
                 discard_run(r)  # 결정할 수 없는 실패 결과는 저장하지 않는다
@@ -2424,18 +2426,18 @@ def launch(run: dict, events_factory) -> None:
             final = final_answer(r)
             if r["post_busy"] and final and design:
                 # 설계 팀: 최종 레이아웃 JSON 으로 도면(+요청 시 3D) 그리기
-                r["activity"][r["root_id"]] = "📐 도면 그리는 중"
+                label = r["activity"][r["root_id"]] = "📐 도면 그리는 중"
                 design_ui.post_process(r, final.content)
             elif r["post_busy"] and final and ROUTE_MAP in features:
                 # 여행 팀: 최종 계획서로 경로 지도 만들기 (사람은 그동안 결과를 보고 결정할 수 있다)
-                r["activity"][r["root_id"]] = "🗺 지도 만드는 중"
+                label = r["activity"][r["root_id"]] = "🗺 지도 만드는 중"
                 try:
                     r["route"] = build_route(final.content, models, cache_path=DATA_DIR / "geocode_cache.json")
                 except Exception as e:  # noqa: BLE001 — 지도 실패가 결과를 막지 않게
                     r["route_error"] = f"{type(e).__name__}: {e}"
             if r["post_busy"] and final and MUSIC_TRACK in features:
                 # 음악 팀: 최종 답변의 가사·Lyria 블록으로 곡 만들기 (유료) → 길이 확인 → 듣고 채점 → 낮으면 다시
-                r["activity"][r["root_id"]] = "🎵 곡 만드는 중 (Lyria)"
+                label = r["activity"][r["root_id"]] = "🎵 곡 만드는 중 (Lyria)"
                 try:
                     build_music(r, final.content)
                 except Exception as e:  # noqa: BLE001 — 곡 생성 실패가 결과·결정을 막지 않게
@@ -2443,7 +2445,7 @@ def launch(run: dict, events_factory) -> None:
         finally:
             if r["status"] != "error":
                 save_monitor(r)  # ⏱ 호출 기록 (멈출 때마다 덮어씀)
-            r["activity"].pop(r["root_id"], None)
+            end_activity(r, label)  # 지도·도면 만드는 중에 보낸 💬 추가 질문의 '답하는 중'은 남긴다
             if paused and r["post_busy"]:
                 r["post_busy_later"] = True
             r["post_busy"] = False  # 화면 자동 갱신을 멈춰도 된다는 신호
