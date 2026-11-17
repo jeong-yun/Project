@@ -509,3 +509,77 @@ def test_app_music_button_generates_in_background(tmp_path, monkeypatch):
         assert any("생성 1회" in c.value for c in at.caption)  # 플레이어 아래 줄: 모델·예상 비용·생성 횟수
     finally:
         st.cache_resource.clear()
+
+
+def test_app_music_post_work_keeps_followup_working_label(tmp_path, monkeypatch, use_script):
+    """회귀 (2-6): 곡을 만드는 중에 💬 추가 질문을 보내면, 곡 만들기가 끝나도 팀장의 '답하는 중' 표시가 남아 있다.
+
+    예전에는 곡 만들기(후처리)가 끝날 때 팀장 표시를 무조건 지워서, 아직 답하는 중인데 표시가 사라졌다.
+    """
+    import threading
+    import time
+
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    from core import live
+    from core.followup import FollowupResult
+    from core.schemas import AgentAnswer, ModelSpec
+    from core.storage import Storage
+    from tests.fakes import HOLD_SEC
+
+    data = tmp_path / "data"
+    storage = Storage(data / "runs.db")
+    storage.create_run("m3", "music", "lead", "퇴근길 노래 만들어줘")
+    final = AgentAnswer(node_id="lead", rank_id="team_lead", kind="integrate", content=SONG_ANSWER,
+                        model=ModelSpec(provider="openai", model="fake"))
+    storage.save_steps("m3", [final], "awaiting_human")
+    music_gate, answer_gate, answering = threading.Event(), threading.Event(), threading.Event()
+
+    def slow_track(*a, **kw):
+        music_gate.wait(HOLD_SEC)
+        raise RuntimeError("가짜 곡 만들기 실패")  # 끝나는 길만 본다 (실패해도 후처리 끝 처리는 같다)
+
+    def slow_answer(messages):
+        answering.set()
+        answer_gate.wait(HOLD_SEC)
+        return FollowupResult(analysis="질문", revised=False, reply="후렴은 두 번 반복합니다.")
+
+    monkeypatch.setattr(music, "make_track", slow_track)
+    use_script(Script(FollowupResult=slow_answer))
+    monkeypatch.setenv("AGENT_OFFICE_DATA_DIR", str(data))
+    monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path / "results"))
+    st.cache_resource.clear()
+
+    def screen(focus: bool = False):
+        at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
+        at.session_state["team_pick"] = "music"
+        at.session_state["view"] = "team"
+        if focus:
+            at.session_state["focus_music"] = "lead"  # 🔎 에이전트 보기 — 팀장 칸
+        return at.run()
+
+    try:
+        at = screen()
+        next(b for b in at.button if b.label.startswith("🎵 곡 만들기")).click().run()
+        assert not at.exception, at.exception
+        at = screen()
+        assert any("곡 만드는 중" in i.value for i in at.info)  # 후처리 중에도 추가 질문 칸은 열려 있다
+        at.text_area(key=next(t.key for t in at.text_area if t.placeholder and "3번 근거" in t.placeholder)).input("후렴은 몇 번?")
+        next(b for b in at.button if b.label == "💬 보내기").click().run()
+        assert not at.exception, at.exception
+        assert answering.wait(60)
+        music_gate.set()  # 곡 만들기 끝 — 추가 질문은 아직 답하는 중
+        deadline = time.time() + 60
+        while not any("곡을 만들지 못했습니다" in w.value for w in at.warning) and time.time() < deadline:
+            time.sleep(0.2)
+            at = screen()
+        assert any("곡을 만들지 못했습니다" in w.value for w in at.warning)
+        at = screen(focus=True)
+        assert not at.exception, at.exception
+        badges = [m.value for m in at.markdown if "ao-badge ao-b-working" in m.value]
+        assert any(live.FOLLOWUP_LABEL in b for b in badges), badges  # 팀장은 여전히 '답하는 중'
+    finally:
+        music_gate.set()
+        answer_gate.set()
+        st.cache_resource.clear()

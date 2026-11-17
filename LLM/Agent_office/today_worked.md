@@ -2589,6 +2589,32 @@
   - 사용자 PC·Colab 에서 노래 하나를 `-na` 맞춤 노트북으로 변환해 들어 보고, 키 조절(`-t`)이 기대대로 움직이는지 확인.
   - 실제 학습 로그(9번 셀 화면 복사 · TensorBoard CSV)를 📈 에 붙여 넣어 읽은 줄 수·판정이 맞는지 확인하고, 어림 기준(5%·2%·1.5배)을 고칠지 본다.
 
+## 2026-11-17
+
+**💬 추가 질문 경합 두 가지 — '중단됨'으로 되돌아감 · '답하는 중' 표시가 지워짐 (남은 할 일 2-6)**
+- 배경: 2026-11-12 화면 테스트 안정화 때 코드를 읽다가 찾았지만 실행·수정은 하지 않은 두 가지. 이번에 먼저 실패하는 테스트로 재현한 뒤 고쳤다.
+- 작업:
+  - ① **'중단됨'으로 되돌아감 — 재현됨, 고침.** `live.start_followup` 이 상태를 '답하는 중'으로 바꾼 **뒤에** 스레드를 등록·시작했다.
+    그 사이 다른 탭이 화면을 그리면 `app.py` 맨 위의 `recover_followup` 이 "스레드가 없다(또는 앞 질문의 끝난 스레드다)"로 보고
+    '💬 추가 질문이 중단됨 — 다시 보내 주세요'로 되돌렸다. 실제로는 답이 계속 만들어지는데 화면은 중단으로 보이고 다시 보낼 수 있게 되는 상태.
+    → 스레드를 먼저 `run["followup_thread"]` 에 두고 상태를 바꾼 뒤 시작하고, `recover_followup` 은 아직 시작 전인 스레드(`ident is None`)도 '살아 있음'으로 본다.
+    앱을 다시 켠 경우(스레드가 아예 없음)는 예전처럼 '중단됨'으로 되돌린다.
+  - ② **'답하는 중' 표시가 지워짐 — 재현됨, 고침.** 지도·곡·도면 후처리가 끝날 때(`launch.on_finish`, 🎵 곡 만들기 버튼 `start_music`)
+    팀장 칸의 활동 표시를 무조건 지웠다. 그 사이 보낸 추가 질문의 '💬 추가 질문 답하는 중'이 사라져 에이전트 패널의 배지·일하는 그림·커맨드 센터 줄이 꺼졌다
+    (결과·결정에는 영향 없음, 조직도 상태 문구는 남음). → `live.end_activity(run, label)`: 후처리가 **자기가 단 표시일 때만** 지운다.
+    곡 만들기 버튼은 '답하는 중'이 이미 있으면 그 표시를 덮지 않는다.
+- 기술: 실패 테스트 먼저 — ① 함수 단위(`begin_followup` 바로 뒤에 '다른 탭의 recover_followup' 을 끼워 넣어 경합 순간을 결정적으로 재현, 첫 질문·앞 질문 뒤 2가지),
+  ② Streamlit AppTest(음악 팀 결정 대기 업무 → 🎵 곡 만들기를 `threading.Event` 로 붙잡아 둔 채 💬 보내기 → 곡 만들기만 끝냄 → 🔎 팀장 칸 배지 확인). 가짜 모델·가짜 곡 만들기만 씀.
+- 성과:
+  - 새 테스트 3건 — 고치기 전 3건 모두 실패 확인 (`test_progress_followup.py::test_other_tab_does_not_mark_starting_followup_interrupted` 2건, `test_music.py::test_app_music_post_work_keeps_followup_working_label`).
+  - 전체 `python -m pytest -q`: **1,426 통과**, 29분 52초 (이 PC, 다른 세션 작업과 함께 돌던 때).
+  - 바꾼 테스트 파일 10번씩: `test_progress_followup.py` 10/10 통과(22건, 한 번 35~68초), `test_music.py` 10/10 통과(28건, 26~47초).
+  - 가끔 실패한다던 `test_progress_followup.py::test_app_shows_head_review_and_sends_extra_fixes`(2-8)는 위 10번에서 한 번도 실패하지 않았다.
+    이 테스트는 화면을 한 세션씩 차례로 그려서 ①의 '다른 탭이 동시에 그리는 순간'이 생기지 않으므로 **같은 원인은 아닌 것으로 본다(추정, 원인은 여전히 미확인)**.
+- 확인 못 한 것: 실제 브라우저 두 탭으로 ①을 일으켜 보지는 않음(순간이 아주 짧아 손으로는 거의 안 생김 — 테스트로만 확인), 여행 팀 지도·설계 팀 도면 후처리 경로는
+  같은 함수로 고쳤지만 화면 테스트는 음악 팀 곡 만들기 버튼 경로만 돌렸다. 추가 질문이 후처리보다 **먼저** 끝나면 '🗺 지도 만드는 중' 같은 후처리 표시가 지워지는 반대 방향은 그대로 둠(진행 안내 문구는 탭에 남음).
+- 다음 할 일: 2-8 이 다시 실패하면 실패한 단정 줄과 그때의 run 상태부터 남긴다.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
