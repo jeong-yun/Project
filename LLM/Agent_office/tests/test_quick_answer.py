@@ -302,3 +302,96 @@ def test_app_head_desk_hands_quick_to_the_assigned_team(tmp_path, monkeypatch, u
         assert len(agents) > 1 and len(working) == 1 and agents[working[0]]["lead"]  # 팀장만 이번 업무
     finally:
         st.cache_resource.clear()
+
+
+# ─── 앱을 다시 켠 뒤 (2-11) — 결정 대기이던 ⚡ 빠른 답은 그대로 빠른 답 ─────────────
+
+
+class _OldCheckpointer:
+    """⚡ 빠른 답이 생기기 전의 체크포인트 — 상태에 quick 칸이 없다."""
+
+    def get_tuple(self, config):
+        from types import SimpleNamespace
+        return SimpleNamespace(checkpoint={"channel_values": {"question": "옛 질문"}})
+
+
+def test_saved_quick_reads_the_checkpoint_after_reopening(tmp_path, org, ranks, team, models, use_script):
+    from core.workflow import make_checkpointer, saved_quick
+
+    use_script(full_script())
+    cp = make_checkpointer(tmp_path / "cp.db")
+    graph = build_office_graph(org, ranks, team, models, SETTINGS, CRITIC_ON, checkpointer=cp)
+    list(stream_office(graph, org, "질문", "lead", thread_id="q", quick=True))
+    list(stream_office(graph, org, "질문", "lead", thread_id="full", auto_brief=False))
+    cp.conn.close()
+
+    again = make_checkpointer(tmp_path / "cp.db")  # 앱을 다시 켠 것처럼 새로 연다
+    try:
+        assert saved_quick(again, "q") is True
+        assert saved_quick(again, "full") is False
+        assert saved_quick(again, "없는 업무") is False  # 체크포인트가 지워졌으면 팀 전체로 본다 (예전처럼)
+    finally:
+        again.conn.close()
+    assert saved_quick(_OldCheckpointer(), "old") is False  # 예전 저장본도 그대로 읽힌다
+
+
+def test_restored_quick_run_keeps_only_the_lead():
+    from core.schemas import AgentAnswer, ModelSpec
+
+    step = AgentAnswer(node_id="lead", rank_id="team_lead", kind="draft", content="답", model=ModelSpec(provider="openai", model="m"))
+    row = {"id": "r1", "team_id": "general", "root_id": "lead", "question": "질문", "steps": [step],
+           "status": "awaiting_human", "decision": None, "created_at": "2026-11-16T09:00:00"}
+    assert live.restore_run(row, quick=True)["quick"] is True
+    assert live.restore_run(row)["quick"] is False  # 기본은 팀 전체 (예전 저장본)
+
+
+def test_app_restores_a_waiting_quick_answer_as_quick(tmp_path, monkeypatch, org, ranks, team, models, use_script):
+    """결정 대기이던 ⚡ 빠른 답을 앱을 다시 켜서 되살려도 — 안내·건너뛴 단계가 그대로 보인다 (팀원은 '참여' 아님: run_members)."""
+    from pathlib import Path
+
+    import streamlit as st
+    from streamlit.testing.v1 import AppTest
+
+    from core.workflow import make_checkpointer
+
+    data = tmp_path / "data"
+    data.mkdir()
+    use_script(full_script())
+    cp = make_checkpointer(data / "checkpoints.db")
+    graph = build_office_graph(org, ranks, team, models, SETTINGS, CRITIC_ON, checkpointer=cp)
+    events = list(stream_office(graph, org, "HBF 가 뭐야?", org.id, thread_id="rq", quick=True))
+    cp.conn.close()
+    saved = Storage(data / "runs.db")  # 앱이 꺼지기 전에 남긴 실행 기록
+    saved.create_run("rq", "general", org.id, "HBF 가 뭐야?")
+    saved.save_steps("rq", [p for k, p in events if k == "step"], "awaiting_human")
+
+    monkeypatch.setenv("AGENT_OFFICE_DATA_DIR", str(data))
+    monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path / "results"))
+    st.cache_resource.clear()
+    try:
+        at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
+        at.query_params["team"] = "general"
+        at.query_params["view"] = "team"
+        at.session_state["office_view"] = "chart"
+        at.run()
+        assert not at.exception, at.exception
+        assert any("부서장 검토 없이 팀장이 바로 답했습니다" in i.value for i in at.info)
+        assert any("(건너뜀)" in m.value for m in at.markdown)  # 진행 단계 줄 — 팀장 혼자라 분배·검토·통합 건너뜀
+    finally:
+        st.cache_resource.clear()
+
+
+def test_quick_free_question_scope_check_calls(models, use_script):
+    """2-12 — 팀을 직접 고른 자유 질문을 ⚡ 빠른 답으로: 범위 확인은 낱말로 분명하면 모델 0번, 애매할 때만 부서장 1번.
+    애매한 질문은 대부분 다른 팀 질문이라 이 1번이 엉뚱한 팀이 받는 일을 막는다 → 빠른 답에서도 줄이지 않는다 (today_worked 2026-11-17)."""
+    from core import building, scope
+    from core.config import list_teams
+
+    teams = list_teams()
+    stock = next(t for t in teams if t.id == "stock")
+    script = use_script(Script(TeamPick=building.TeamPick(analysis="주식", team_id="stock", reason="주식 질문")))
+    assert scope.check("삼성전자 지금 사도 될까?", stock, teams, models)["stage"] == "keyword"
+    assert model_calls(script) == []  # 분명한 이 팀 질문 — 전체 호출은 팀장 1번
+    vague = scope.check("요즘 어떻게 생각해?", stock, teams, models)
+    assert vague["in_scope"] and vague["stage"] == "router"
+    assert model_calls(script) == ["TeamPick"]  # 애매한 질문 — 부서장 1번 + 팀장 1번 = 2번

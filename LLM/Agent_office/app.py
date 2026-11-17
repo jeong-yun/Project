@@ -94,7 +94,7 @@ from core.exporter import MIME, export_adopted, list_results
 from core.route import CATEGORIES, RouteResult, build_route, map_html
 from core.workflow import (
     WEB_SEARCH_TOOL, build_office_graph, make_checkpointer, restart_from, resume_step, resume_with_decision, saved_evidence,
-    stream_office,
+    saved_quick, stream_office,
 )
 
 load_env()
@@ -212,7 +212,8 @@ def shared_runs() -> dict:
             row = {**row, "team_id": storage.team_for(row["team_id"], row["question"])}  # 옛 팀 id → 지금 팀
             if (row["team_id"], row["root_id"]) not in runs:
                 turns, problem = saved_followups(row["id"])  # 💬 수정 대화 — 수정본이 다시 채택 후보가 된다
-                run = runs[(row["team_id"], row["root_id"])] = restore_run(row, turns)
+                quick = saved_quick(get_checkpointer(), row["id"])  # ⚡ 빠른 답이었으면 그대로 (팀장만 참여)
+                run = runs[(row["team_id"], row["root_id"])] = restore_run(row, turns, quick)
                 if problem:
                     run["followup_error"] = problem
     return runs
