@@ -61,6 +61,13 @@ def steps(events):
     return [p for k, p in events if k == "step"]
 
 
+def old_attempt_kept(graph, config, key, old_value) -> bool:
+    """갈래를 만든 뒤에도 예전 시도의 '결정 대기' 체크포인트(예전 값 · 통합 단계 1개)가 기록에 남았는가."""
+    return any(h.next == ("human_decision",) and h.values.get(key) == old_value
+               and [(x.node_id, x.kind) for x in h.values["steps"]].count(("lead", "integrate")) == 1
+               for h in graph.get_state_history(config))
+
+
 # ─── 기본(꺼짐)은 그대로 ─────────────────────────────────────────────
 
 
@@ -97,9 +104,12 @@ def test_restart_from_plan_with_edited_brief_reuses_research_and_keeps_old_attem
     assert new_prompts and all("새로 고친 목표" in p and "원래 목표" not in p for p in new_prompts)
     assert run["status"] == "awaiting_human" and run["steps"][-1].kind == "integrate"
     assert run["attempts"][0]["steps"][-1].content == old_final.content  # 예전 시도는 그대로 남아 비교 가능
-    state = graph.get_state({"configurable": {"thread_id": "t1"}})
+    assert not [k for k, _ in events if k in ("brief", "research")]  # 요청 정리·자료 조사는 다시 돌지 않음 (예전 결과 재사용)
+    config = {"configurable": {"thread_id": "t1"}}
+    state = graph.get_state(config)
     assert state.values["brief"].goal == "새로 고친 목표"
     assert [(x.node_id, x.kind) for x in state.values["steps"]].count(("lead", "integrate")) == 1  # 예전 단계가 섞이지 않음
+    assert old_attempt_kept(graph, config, "brief", BRIEF)  # 예전 갈래의 마지막 체크포인트도 LangGraph 기록에 남음
 
 
 def test_restart_from_brief_with_new_question(org, ranks, team, models, use_script):
@@ -110,7 +120,13 @@ def test_restart_from_brief_with_new_question(org, ranks, team, models, use_scri
     events = drain(restart_from(graph, org, "t2", "brief", question="고친 질문"), "t2")
     assert [v["type"] for v in interrupts(events)] == ["human_decision"]
     assert all("고친 질문" in p for p in s.prompts("text")[n:])
-    assert graph.get_state({"configurable": {"thread_id": "t2"}}).values["question"] == "고친 질문"
+    kinds = [k for k, _ in events]
+    assert kinds.count("brief") == 1 and kinds.count("research") == 1  # 앞 단계는 새 갈래에서 한 번씩만
+    config = {"configurable": {"thread_id": "t2"}}
+    state = graph.get_state(config)
+    assert state.values["question"] == "고친 질문"
+    assert [(x.node_id, x.kind) for x in state.values["steps"]].count(("lead", "integrate")) == 1  # 예전 단계가 섞이지 않음
+    assert old_attempt_kept(graph, config, "question", "처음 질문")
 
 
 # ─── 🔀 단계마다 확인 ─────────────────────────────────────────────────

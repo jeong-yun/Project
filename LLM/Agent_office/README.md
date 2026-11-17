@@ -907,7 +907,7 @@ python -m evals.run_eval evals/cases/travel.yaml    # 🌏 해외 여행팀 (오
 새 모델을 넣으면 같은 파일의 `model_tiers`(모델 강도 순서, 위가 가장 강함)의 알맞은 줄에도 넣는 것이 좋습니다.
 빠뜨려도 앱은 멈추지 않고 이름으로 강도를 추정해 넣습니다 (사이드바 ⚙️ 모델·검증 상태에 '이름으로 강도를 추정한 모델'로 표시).
 yaml 을 고치지 않고 새 모델을 쓰려면 아래 '새 모델 쓰기'를 보세요.
-- **Gemini 시간 제한**: `config/settings.yaml` 의 `google.timeout_sec`(기본 180초). 넘으면 같은 모델로 1번 더 → 그래도 안 되면 대안 모델. langchain-google-genai 2.1 은 `timeout` 값을 받아도 요청에 넘기지 않아 구글 기본값 600초까지 멈췄습니다 → `core/llm_factory.py` 가 요청마다 직접 넣습니다.
+- **Gemini 시간 제한**: `config/settings.yaml` 의 `google.timeout_sec`(기본 180초). 넘으면 같은 모델로 1번 더 → 그래도 안 되면 대안 모델. langchain-google-genai 2.1 은 `timeout` 값을 받아도 요청에 넘기지 않아 구글 기본값 600초까지 멈췄습니다. 지금 쓰는 4.x 는 요청마다 보내고, `core/llm_factory.py` 가 라이브러리 안 재시도는 끕니다(처음 한 번만).
 
 ### 새 모델 쓰기 — 자동으로 찾기 · 직접 입력 (yaml 안 고침)
 각 사가 새 모델을 자주 내놓으므로, `config/models.yaml` 에 없는 모델도 **🎛 부서별 모델 선택** 에서 고를 수 있습니다 (`core/model_catalog.py`, 화면 `models_ui.py`).

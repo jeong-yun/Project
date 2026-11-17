@@ -383,17 +383,10 @@ def claude_cli_settings() -> dict:
 
 
 # ─── Gemini 시간 제한 ─────────────────────────────────────────────────
-# langchain-google-genai 2.1 의 ChatGoogleGenerativeAI 는 timeout 값을 받아도 실제 요청에 넘기지 않는다
-# → 구글 라이브러리 기본값(600초)까지 기다렸다 (2026-11-04 실측: 비평가·재작성 호출이 약 10분 무응답).
-# 요청마다 timeout 을 직접 넣고, 시간 초과는 라이브러리 안에서 다시 하지 않게 GeminiTimeoutError 로 바꿔
-# 공통 재시도(같은 모델 1번 더) → 대안 모델 로직에 맡긴다. 값은 settings.yaml 의 google.timeout_sec.
+# langchain-google-genai 2.1 은 timeout 값을 받아도 실제 요청에 넘기지 않아 구글 기본값(600초)까지 기다렸다 (2026-11-04 실측: 약 10분 무응답).
+# 4.x 는 timeout 을 요청마다 보내고(HttpOptions), max_retries=1 은 '처음 한 번만'(라이브러리 안에서 다시 하지 않음)이다.
+# 시간 초과(httpx ReadTimeout 등)는 is_timeout → 공통 재시도(같은 모델 1번 더) → 대안 모델 로직이 맡는다. 값은 settings.yaml 의 google.timeout_sec.
 DEFAULT_GOOGLE_TIMEOUT = 180.0
-
-
-class GeminiTimeoutError(TimeoutError):
-    """Gemini 응답이 정한 시간 안에 오지 않음 (is_transient → 같은 모델 1번 더 → 대안 모델)."""
-
-    transient = True
 
 
 def google_timeout() -> float | None:
@@ -406,54 +399,6 @@ def google_timeout() -> float | None:
         value = DEFAULT_GOOGLE_TIMEOUT
     value = float(value or 0)
     return value if value > 0 else None
-
-
-class _TimedClient:
-    """구글 생성 클라이언트를 감싸 generate_content·stream_generate_content 에 timeout 을 넣는다."""
-
-    def __init__(self, inner, timeout: float):
-        self._inner, self._timeout = inner, timeout
-
-    def __getattr__(self, name):
-        return getattr(self._inner, name)
-
-    def _call(self, method, kwargs):
-        kwargs.setdefault("timeout", self._timeout)
-        try:
-            return method(**kwargs)
-        except Exception as e:  # noqa: BLE001 — grpc(DeadlineExceeded)·rest(ReadTimeout) 모두
-            if is_timeout(e):
-                raise GeminiTimeoutError(f"Gemini 응답 시간 초과 ({self._timeout:.0f}초) — {type(e).__name__}") from e
-            raise
-
-    def generate_content(self, **kwargs):
-        return self._call(self._inner.generate_content, kwargs)
-
-    def stream_generate_content(self, **kwargs):
-        return self._call(self._inner.stream_generate_content, kwargs)
-
-
-_timed_gemini = None
-
-
-def timed_gemini_class():
-    """ChatGoogleGenerativeAI + 요청 시간 제한 (클래스는 처음 쓸 때 한 번 만든다 — 무거운 import)."""
-    global _timed_gemini
-    if _timed_gemini is None:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        from pydantic import model_validator
-
-        class TimedGemini(ChatGoogleGenerativeAI):
-            request_timeout: float | None = None
-
-            @model_validator(mode="after")
-            def _wrap_client(self):
-                if self.request_timeout and self.client is not None and not isinstance(self.client, _TimedClient):
-                    self.client = _TimedClient(self.client, self.request_timeout)
-                return self
-
-        _timed_gemini = TimedGemini
-    return _timed_gemini
 
 
 def free_only(models: ModelsConfig) -> ModelsConfig:
@@ -527,10 +472,11 @@ def create_chat_model(spec: ModelSpec, models: ModelsConfig) -> BaseChatModel:
     if spec.provider == "google":
         if spec.max_tokens:
             kwargs["max_output_tokens"] = spec.max_tokens
-        # 라이브러리 자체 재시도(기본 6회, 지수 대기)는 할당량 소진 때 수 분씩 멈추게 한다 → 재시도는 위의 공통 로직이 맡는다
+        # 라이브러리 자체 재시도(기본 6회, 지수 대기)는 할당량 소진 때 수 분씩 멈추게 한다 → 1 = 처음 한 번만, 재시도는 위의 공통 로직이 맡는다
         kwargs.setdefault("max_retries", 1)
-        timeout = google_timeout()
-        return timed_gemini_class()(google_api_key=api_key, timeout=timeout, request_timeout=timeout, **kwargs)
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        return ChatGoogleGenerativeAI(google_api_key=api_key, timeout=google_timeout(), **kwargs)
 
     raise ValueError(f"지원하지 않는 provider: {spec.provider}")
 

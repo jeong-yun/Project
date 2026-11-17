@@ -1,7 +1,7 @@
 # 26-Agent-Office 전용 의존성 (Python 3.11+)
-# langchain 0.3 계열로 고정 (1.x 는 API 변경이 커서 별도 검증 후 올린다)
-# 최소 버전은 알려진 보안 권고가 고쳐진 버전이다 (2026-11-13 OSV 조회). 0.3 계열로는 못 고치는 권고와 이 앱에 해당하지 않는 이유는
-# today_worked.md 2026-11-13 '의존성 보안 권고' 항목에 있다.
+# langchain·langgraph 1.x (2026-11-17 0.x 에서 올림 — 0.x 로는 못 고치던 보안 권고를 없애려고)
+# 최소 버전은 알려진 보안 권고가 고쳐진 버전이다 (2026-11-13 · langchain 계열은 2026-11-17 OSV 조회). 남은 권고와 이 앱에 해당하지 않는 이유는
+# today_worked.md 2026-11-13 '의존성 보안 권고' · 2026-11-17 'langchain·langgraph 1.x' 항목에 있다.
 
 # UI
 streamlit>=1.54,<1.67   # 1.54 미만: Windows 에서 NTLM 자격 증명이 새는 SSRF (GHSA-7p48-42j8-8846). 1.66 에서 검증. 1.67 이상은 검증 후 올린다 — 1.66 서버 기록에 '없어질 옵션' 경고가 남아 있다:
@@ -12,14 +12,18 @@ pyarrow>=19,<20         # Streamlit 표·데이터를 그리는 라이브러리.
                         # 보안 권고 GHSA-rgxp-2hwp-jwgg(23.0.1 에서 고침)는 Arrow IPC 파일을 '미리 읽기'로 열 때만 해당 — 이 앱은 그런 파일을 열지 않아 19.x 유지
 
 # LangChain / LangGraph
-langchain-core>=0.3.85,<1.0   # 0.3.85 미만: 직렬화 주입으로 비밀 값 유출 (Critical, GHSA-c67j-w6g6-q2cm) · 안전하지 않은 역직렬화 (GHSA-pjwx-r37v-7724) 등
-langgraph>=0.5,<0.6   # 0.6 은 지난 체크포인트에서 갈래를 만들 때(✏️ 고쳐 다시 — workflow.restart_from) 예전 단계가 섞여 들어온다 (tests/test_run_control.py)
-langgraph-checkpoint-sqlite>=2.0.11,<2.1
+langchain-core>=1.3.3,<2   # 1.3.3 미만: 안전하지 않은 역직렬화 (GHSA-pjwx-r37v-7724) · load_prompt 경로 탐색 (GHSA-qh6h-p6c9-ff54, 1.2.22) ·
+                           # 직렬화 주입으로 비밀 값 유출 (Critical, GHSA-c67j-w6g6-q2cm) 등
+langgraph>=1.2.14,<2   # 1.2.14 미만: 체크포인트 msgpack 역직렬화 (GHSA-g48c-2wqr-h844, 1.0.10) · SDK 스트리밍 식별자 (GHSA-3fx2-cqw9-xr3c).
+                       # 지난 체크포인트에서 갈래 만들기(✏️ 고쳐 다시 — workflow.restart_from)는 tests/test_run_control.py 가 지킨다
+                       # (0.6 에서 예전 단계가 섞였던 문제 — 1.x 에서 같은 테스트 통과)
+langgraph-checkpoint>=4.1.1,<5   # 4.1.1 미만: 체크포인트 JSON·캐시 역직렬화 (GHSA-fjqc-hq36-qh5p · GHSA-mhr3-j7m5-c7c9 · GHSA-wwqv-p2pp-99h5)
+langgraph-checkpoint-sqlite>=3.1.3,<4   # 3.1.3 미만: SQLite 저장소 SQL 주입 (GHSA-9rwj-6rc7-p77c) · namespace 경계 (GHSA-47pj-3jcm-6whg · GHSA-6hmw-9432-67qq)
 
 # LLM providers (Upstage 는 OpenAI 호환 API → langchain-openai 로 호출)
-langchain-openai>=0.3.9,<1.0
-langchain-anthropic>=0.3.10,<1.0
-langchain-google-genai>=2.1,<3.0
+langchain-openai>=1.1.14,<2   # 1.1.14 미만: 그림 토큰 세기 SSRF (GHSA-r7w7-9xr2-qq2r)
+langchain-anthropic>=1.4.6,<2   # 1.4.6 미만: 파일 검색 미들웨어 경로 탐색 (GHSA-gr75-jv2w-4656)
+langchain-google-genai>=4,<5   # 4.x 는 구글 새 SDK(google-genai) 위에서 돌고 timeout 을 요청마다 보낸다 (core/llm_factory.py · 4.4 에서 검증)
 
 # 유틸
 python-dotenv>=1.2.2   # 1.2.2 미만: set_key 가 심볼릭 링크를 따라가 파일을 덮어씀 (GHSA-mf9w-mj56-hr94)

@@ -100,7 +100,7 @@ class OfficeState(TypedDict, total=False):
     notes: list[str]
     # 🔀 단계마다 확인 (core/step_mode.py) — 끄면(기본) 아래 값은 쓰지 않는다
     step_mode: bool
-    directions: list  # 팀장이 내놓은 진행 방향 (DirectionOption)
+    directions: list[step_mode.DirectionOption]  # 팀장이 내놓은 진행 방향 (타입을 적어야 LangGraph 가 체크포인트 읽기 허용 목록에 넣는다)
     root_plan: dict | None  # 팀장의 업무 분배 {"chosen": [(하위 id, 업무)…]} — 사람이 확인·수정한 것
     quick: bool  # ⚡ 빠른 답 — 팀장 혼자 한 번 (맨 위 설명)
 
