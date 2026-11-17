@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
+from core.feedback_sync import knowledge_dir
 from core.memo import SigCache, file_sig
 from core.schemas import ModelsConfig, OrgNode, Rank, RankModels, Team
 
@@ -105,6 +106,10 @@ def list_teams() -> list[Team]:
 def load_team(team_id: str) -> Team:
     data = load_yaml(TEAMS_DIR / team_id / "team.yaml")
     data["id"] = team_id  # 폴더 이름을 팀 id 로 사용
+    if extra := shared_rules(team_id, "critic"):  # knowledge/ 에 올린 부서장 검토 기준을 team.yaml 의 것 뒤에 붙인다
+        verification = data["verification"] = data.get("verification") or {}
+        critic = verification["critic"] = verification.get("critic") or {}
+        critic["rules"] = list(dict.fromkeys([*(critic.get("rules") or []), *extra]))
     return Team(**data)
 
 
@@ -114,9 +119,20 @@ def load_skills(team_id: str) -> str:
     스킬은 사람이 직접 쓰는 '고정 지침'이고, 교훈(lessons)은 사람의 결정에서 자동으로 쌓이는 '학습'이다.
     둘 다 모든 에이전트의 시스템 프롬프트에 들어간다. 파일을 추가·수정하면 다음 질문부터 반영된다.
     team.yaml 의 skills_from 에 적은 공용 스킬 폴더(여러 팀이 함께 쓰는 지침)도 먼저 읽는다.
+    knowledge/ 에 올린 고정 규칙은 그 팀의 promoted_rules 절에 합친다 (teams/ 쪽 파일이 없으면 절을 새로 붙인다).
     """
     files = [p for folder in skill_dirs(team_id) for p in sorted(folder.glob("*.md"))]
-    return "\n\n".join(f"## 스킬: {p.stem}\n{p.read_text(encoding='utf-8').strip()}" for p in files)
+    sections = [(p.stem, p.read_text(encoding="utf-8").strip()) for p in files]
+    if extra := shared_rules(team_id, "skill"):
+        own = promoted_skill_path(team_id)
+        at = next((i for i, p in enumerate(files) if p == own), None)
+        base = sections[at][1] if at is not None else PROMOTED_HEAD
+        merged = (PROMOTED_SKILL, "\n".join([base, *(f"- {r}" for r in extra if f"- {r}" not in base.splitlines())]))
+        if at is None:
+            sections.append(merged)
+        else:
+            sections[at] = merged
+    return "\n\n".join(f"## 스킬: {name}\n{text}" for name, text in sections)
 
 
 def _team_yaml(team_id: str) -> dict:
@@ -132,9 +148,14 @@ def skill_dirs(team_id: str) -> list[Path]:
 
 
 # ─── 되풀이된 교훈 → 고정 규칙 (core/feedback.py promote_lesson 이 사람이 확인한 뒤에만 부른다) ─────────────
-# 둘 다 저장소에 커밋되는 파일이다. 공용 스킬 폴더(skills_from)는 다른 팀도 읽으므로 그 팀의 skills/ 에만 쓴다.
+# 어디에 쓰나 — 교훈 동기화(core/feedback_sync.py)와 같은 규칙:
+#   AGENT_OFFICE_KNOWLEDGE_DIR 가 있으면(실행용 사본) 그 폴더의 promoted_rules.yaml 한 파일에 쓴다. 실행용 사본의 추적 파일
+#   (teams/)을 바꾸면 사본 갱신('git merge --ff-only main')이 깨지고 GitHub 에도 안 올라가기 때문. 읽을 때 팀 설정에 합친다.
+#   변수가 없거나(개발·테스트) 비공개 팀(private: true)이면 예전처럼 teams/<팀>/ 에 쓴다. 예전에 teams/ 에 쓴 규칙도 계속 읽는다.
+# 공용 스킬 폴더(skills_from)는 다른 팀도 읽으므로 그 팀의 skills/ 에만 쓴다.
 
 PROMOTED_SKILL = "promoted_rules"  # teams/<팀>/skills/promoted_rules.md
+PROMOTED_FILE = "promoted_rules.yaml"  # knowledge/ 안 — {팀: {skill: [규칙…], critic: [규칙…]}}
 # 첫 줄은 '[' 로 시작하지 않는다 — skill_sections(맡은 절만 받는 실무자)가 절 제목으로 보고 걸러 내지 않게 (규칙 줄도 '- ')
 PROMOTED_HEAD = "사람 피드백에서 올린 고정 규칙 — 같은 지적이 여러 번 되풀이되어 교훈에서 올렸다 (📚 교훈 관리의 '⬆ 고정 규칙으로 올리기')"
 CRITIC_RULES = ("verification", "critic", "rules")  # team.yaml 안의 부서장 검토 기준 위치
@@ -144,8 +165,35 @@ def promoted_skill_path(team_id: str) -> Path:
     return TEAMS_DIR / team_id / "skills" / f"{PROMOTED_SKILL}.md"
 
 
+def shared_rules_path(team_id: str) -> Path | None:
+    """그 팀의 고정 규칙을 둘 knowledge/ 파일 — 변수가 없거나 비공개 팀이면 None (teams/ 에 쓴다)."""
+    folder = knowledge_dir()
+    return folder / PROMOTED_FILE if folder and not _team_yaml(team_id).get("private") else None
+
+
+def shared_rules(team_id: str, kind: str) -> list[str]:
+    """knowledge/ 에 올린 그 팀의 규칙 (kind: skill·critic). 없으면 []."""
+    path = shared_rules_path(team_id)
+    if path is None or not path.exists():
+        return []
+    return list(((load_yaml(path).get(team_id) or {}).get(kind)) or [])
+
+
+def _add_shared_rule(path: Path, team_id: str, kind: str, rule: str) -> Path:
+    data = load_yaml(path) if path.exists() else {}
+    rules = data.setdefault(team_id, {}).setdefault(kind, [])
+    if rule not in rules:
+        rules.append(rule)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# 교훈에서 올린 고정 규칙 (core/config.py 가 씀) — 팀: skill(팀 업무 지침) · critic(부서장 검토 기준)\n"
+                        + yaml.safe_dump(data, allow_unicode=True, sort_keys=True, width=1000), encoding="utf-8")
+    return path
+
+
 def add_skill_rule(team_id: str, rule: str) -> Path:
     """팀 업무 지침(스킬)에 규칙 한 줄을 더한다 — 이미 같은 줄이 있으면 그대로. 바꾼(또는 확인한) 파일 경로."""
+    if shared := shared_rules_path(team_id):
+        return _add_shared_rule(shared, team_id, "skill", rule)
     path = promoted_skill_path(team_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else [PROMOTED_HEAD]
@@ -156,7 +204,10 @@ def add_skill_rule(team_id: str, rule: str) -> Path:
 
 def add_critic_rule(team_id: str, rule: str) -> Path:
     """team.yaml 의 verification.critic.rules 에 한 줄을 더한다 — 주석·순서를 그대로 두려고 글자로 끼워 넣고,
-    다시 읽어 '그 한 줄만 늘었는지' 코드로 확인한 뒤에만 저장한다 (아니면 ConfigError, 파일은 그대로). 이미 있으면 그대로."""
+    다시 읽어 '그 한 줄만 늘었는지' 코드로 확인한 뒤에만 저장한다 (아니면 ConfigError, 파일은 그대로). 이미 있으면 그대로.
+    knowledge/ 를 쓰는 경우(shared_rules_path)는 team.yaml 대신 그 파일에 더한다."""
+    if shared := shared_rules_path(team_id):
+        return _add_shared_rule(shared, team_id, "critic", rule)
     path = TEAMS_DIR / team_id / "team.yaml"
     text = path.read_text(encoding="utf-8")
     before = yaml.safe_load(text) or {}

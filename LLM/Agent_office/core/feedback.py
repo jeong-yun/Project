@@ -583,6 +583,7 @@ def lesson_origin(storage, row: dict) -> dict:
 # 각각 같은 피드백 24회로 합쳐져 있었다). 같은 지적이 여러 번 오면 '규칙'으로 올린다:
 #   skill  : 팀 업무 지침(teams/<팀>/skills/promoted_rules.md) — 모든 팀원 프롬프트에 글자 한도와 상관없이 항상 들어간다
 #   critic : 부서장 검토 기준(team.yaml verification.critic.rules) — 부서장이 꼭 보고, 어기면 지적한다
+#   (AGENT_OFFICE_KNOWLEDGE_DIR 가 있으면 둘 다 그 폴더의 promoted_rules.yaml 에 쓴다 — core/config.py shared_rules_path)
 #   code   : 코드 검사 후보 — 검증기를 만드는 것은 개발 작업이라 표시만 해 둔다 (교훈은 켠 채로)
 # 올린 교훈은 지우지 않고 끈다 (정리 제안 반영과 같은 규칙). 어디로 올렸는지는 lessons.promoted_to 에 남는다.
 
@@ -669,9 +670,12 @@ def promote_lesson(storage, team: Team, lesson_id: int, target: str, text: str =
     except ConfigError as e:
         return f"⚠️ {e}"
     storage.update_lesson(lesson_id, active=False, promoted_to=marks)
-    rel = path.relative_to(config.TEAMS_DIR.parent).as_posix()  # teams/<팀>/… (Agent_office 폴더 기준)
+    shared = path.name == config.PROMOTED_FILE  # knowledge/ 폴더 (실행용 사본) — 팀 파일은 그대로
+    rel = path.as_posix() if shared else path.relative_to(config.TEAMS_DIR.parent).as_posix()  # teams/<팀>/… (Agent_office 기준)
     return (f"교훈 #{lesson_id}을(를) {PROMOTED_LABELS[target]}에 넣었습니다 (`{rel}`). 다음 업무부터 "
             + ("모든 팀원 프롬프트에 글자 한도와 상관없이 항상 들어갑니다. " if target == "skill" else "부서장이 이 점을 꼭 확인합니다. ")
             + "원래 교훈은 지우지 않고 꺼 두었습니다 (📚 교훈 관리에서 다시 켤 수 있음). "
-            "이 파일은 저장소에 올라가는 파일이라, 다른 PC·GitHub 에도 반영하려면 커밋해 올려 주세요 "
-            f"(예: `git add {rel}` → `git commit` → `git push`).")
+            + ("교훈 파일과 같은 knowledge 폴더에 저장해 팀 설정 파일은 바꾸지 않았습니다. 다른 PC·GitHub 에도 반영하려면 "
+               "교훈 파일과 함께 커밋해 올려 주세요." if shared else
+               "이 파일은 저장소에 올라가는 파일이라, 다른 PC·GitHub 에도 반영하려면 커밋해 올려 주세요 "
+               f"(예: `git add {rel}` → `git commit` → `git push`)."))

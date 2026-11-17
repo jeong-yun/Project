@@ -24,7 +24,7 @@ from pathlib import Path
 
 from core.brief import DesiredState
 from core.catalog import CATEGORY_FILES, LEGACY_FILES, TAGS, Catalog, Entry, is_header, today_label, with_updated_date
-from core.config import TEAMS_DIR, load_skills
+from core.config import TEAMS_DIR, load_skills, shared_rules_path
 from core.harness.base import extract_code_blocks
 from core.search import neutralize
 
@@ -625,6 +625,9 @@ def prompt_version() -> dict:
     """
     skills_dir = TEAMS_DIR / TEAM_ID / "skills"
     sig = tuple((p.name, p.stat().st_mtime) for p in sorted(skills_dir.glob("*.md")))
+    shared = shared_rules_path(TEAM_ID)  # knowledge/ 에 올린 고정 규칙도 프롬프트에 들어간다
+    if shared and shared.exists():
+        sig += ((shared.name, shared.stat().st_mtime),)
     return _version(str(skills_dir), sig)
 
 

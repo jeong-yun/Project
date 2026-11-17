@@ -15,8 +15,8 @@ import pytest
 import yaml
 from streamlit.testing.v1 import AppTest
 
-from core import config
-from core.config import load_models, load_ranks, load_team
+from core import config, feedback_sync
+from core.config import load_models, load_ranks, load_skills, load_team
 from core.feedback import (
     PROMOTE_HITS, polish_rule, promote_lesson, promotion_candidates, team_lessons, team_prompts,
 )
@@ -31,10 +31,11 @@ SECRET = "홍길동 회사 메모"  # 사람 코멘트 원문 — 공개 파일�
 
 @pytest.fixture
 def teams(tmp_path, monkeypatch):
-    """teams/ 사본 — 저장소의 팀 파일은 건드리지 않는다 (아바타 그림은 빼고 복사)."""
+    """teams/ 사본 — 저장소의 팀 파일은 건드리지 않는다 (아바타 그림은 빼고 복사). 공유 폴더 변수는 끈다 (셸에 있어도)."""
     copy = tmp_path / "teams"
     shutil.copytree(config.TEAMS_DIR, copy, ignore=shutil.ignore_patterns("avatars"))
     monkeypatch.setattr(config, "TEAMS_DIR", copy)
+    monkeypatch.delenv(feedback_sync.ENV, raising=False)
     return copy
 
 
@@ -121,6 +122,52 @@ def test_private_team_needs_confirm_before_public_file(teams, storage):
     assert not msg.startswith("⚠️")
     skill = (teams / "career" / "skills" / "promoted_rules.md").read_text(encoding="utf-8")
     assert "경력 숫자는 문서에 있는 것만 쓴다" in skill and SECRET not in skill  # 개인 정보 거르기(knowledge/ 와 같은 방식)
+
+
+def test_shared_folder_keeps_team_files_unchanged(teams, storage, tmp_path, monkeypatch):
+    """실행용 사본(AGENT_OFFICE_KNOWLEDGE_DIR 지정)에서 올리면 teams/ 의 추적 파일은 그대로, 규칙은 knowledge 폴더에 쌓인다
+    → 사본의 'git merge --ff-only main' 이 깨지지 않고, 교훈처럼 커밋해 다른 PC 에 퍼진다. 다음 로드 때 합쳐서 쓴다."""
+    knowledge = tmp_path / "knowledge"
+    monkeypatch.setenv(feedback_sync.ENV, str(knowledge))
+    (teams / "concept" / "skills" / "promoted_rules.md").write_text(f"{config.PROMOTED_HEAD}\n- 예전에 올린 규칙\n", encoding="utf-8")
+    old_critic = load_team("concept").verification["critic"]["rules"]
+    before = files(teams)
+
+    skill_id = add(storage, "concept", "am_fact", RULE, hits=5)
+    critic_id = add(storage, "concept", "lead", "판정 근거", hits=5)
+    msg = promote_lesson(storage, load_team("concept"), skill_id, "skill", f"{RULE} (사람 코멘트: {SECRET})")
+    assert not msg.startswith("⚠️") and "knowledge" in msg
+    assert not promote_lesson(storage, load_team("concept"), critic_id, "critic", '근거 없는 "판정"은 위반이다').startswith("⚠️")
+    assert files(teams) == before  # 팀 파일(team.yaml·skills/)은 한 글자도 안 바뀐다
+
+    saved = yaml.safe_load((knowledge / config.PROMOTED_FILE).read_text(encoding="utf-8"))
+    assert saved == {"concept": {"skill": [RULE], "critic": ['근거 없는 "판정"은 위반이다']}}  # 사람 코멘트 원문은 뗐다
+
+    skills = load_skills("concept")
+    assert f"- {RULE}" in skills and "- 예전에 올린 규칙" in skills  # 예전 teams/ 규칙도 계속 읽는다
+    assert skills.count(f"## 스킬: {config.PROMOTED_SKILL}") == 1  # 두 곳을 한 절로 합친다
+    prompts = team_prompts(load_team("concept"), load_ranks(), load_models(), storage, 10)
+    assert all(f"- {RULE}" in p.prompt for p in prompts)  # 맡은 절만 받는 실무자까지 모두
+    assert load_team("concept").verification["critic"]["rules"] == [*old_critic, '근거 없는 "판정"은 위반이다']
+
+    # 같은 규칙을 다시 올려도 한 번만
+    again = add(storage, "concept", "am_fact", RULE, hits=5)
+    promote_lesson(storage, load_team("concept"), again, "skill", RULE)
+    assert yaml.safe_load((knowledge / config.PROMOTED_FILE).read_text(encoding="utf-8"))["concept"]["skill"] == [RULE]
+
+
+def test_shared_folder_skips_private_teams(teams, storage, tmp_path, monkeypatch):
+    """비공개 팀은 교훈 동기화와 같이 공유 파일에 쓰지도 읽지도 않는다 (지금처럼 그 팀 폴더에만)."""
+    knowledge = tmp_path / "knowledge"
+    knowledge.mkdir()
+    (knowledge / config.PROMOTED_FILE).write_text(yaml.safe_dump({"career": {"skill": ["손으로 넣은 줄"]}}, allow_unicode=True),
+                                                  encoding="utf-8")
+    monkeypatch.setenv(feedback_sync.ENV, str(knowledge))
+    lid = add(storage, "career", "lead", "경력 숫자는 문서에 있는 것만 쓴다", hits=4)
+    assert not promote_lesson(storage, load_team("career"), lid, "skill", "경력 숫자는 문서에 있는 것만 쓴다", private_ok=True).startswith("⚠️")
+    assert yaml.safe_load((knowledge / config.PROMOTED_FILE).read_text(encoding="utf-8")) == {"career": {"skill": ["손으로 넣은 줄"]}}
+    assert "경력 숫자는 문서에 있는 것만 쓴다" in (teams / "career" / "skills" / "promoted_rules.md").read_text(encoding="utf-8")
+    assert "손으로 넣은 줄" not in load_skills("career")
 
 
 def test_code_candidate_only_marks(teams, storage):

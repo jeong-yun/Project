@@ -6,6 +6,7 @@ data/runs.db 는 .gitignore 라 GitHub 에 올라가지 않는다. 그중 '다�
   lessons.jsonl   : 에이전트별 교훈 (팀·에이전트·칭찬/개선·문장·켜짐 여부·작성 시각)
   decisions.jsonl : 결정 요약 (팀·문의 대상·채택/반려·채택한 에이전트·직접 수정 여부·만족도·시각)
   교훈.md          : 사람이 GitHub 에서 읽기 좋게 팀·에이전트별로 묶은 교훈
+  promoted_rules.yaml : 교훈에서 올린 고정 규칙 — 이 모듈이 아니라 core/config.py(add_skill_rule·add_critic_rule)가 쓴다
 올리지 않는 것 (공개 저장소)
   질문·최종 답변·코멘트 원문 (보유 종목·매수가·여행 일정 같은 개인 정보 — 교훈 끝에 붙은 '사람 코멘트'도 뗀다),
   사용량·API 키 정보,

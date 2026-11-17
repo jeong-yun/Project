@@ -65,6 +65,7 @@ from core import scope as team_scope
 from core.brief import DesiredState
 from core.config import (
     BASE_DIR,
+    PROMOTED_SKILL,
     ConfigError,
     list_teams,
     load_env,
@@ -75,6 +76,7 @@ from core.config import (
     load_verification,
     parent_map,
     resolve_avatar,
+    shared_rules,
     skill_dirs,
     subtree,
     team_org,
@@ -478,6 +480,8 @@ with st.sidebar:
             "🧪 하네스: " + (", ".join(f"{v}({HARNESS_REGISTRY[v].description})" for v in validators) if validators else "없음")
         )
         skill_files = sorted(p.stem for d in skill_dirs(team_id) for p in d.glob("*.md"))
+        if shared_rules(team_id, "skill") and PROMOTED_SKILL not in skill_files:  # knowledge/ 에 올린 고정 규칙
+            skill_files.append(PROMOTED_SKILL)
         st.caption("📚 팀 스킬: " + (", ".join(skill_files) if skill_files else "없음"))
         if catalog.yaml_missing:
             st.caption("📐 model_tiers 에 없어 이름으로 강도를 추정한 모델: " + ", ".join(catalog.yaml_missing)
