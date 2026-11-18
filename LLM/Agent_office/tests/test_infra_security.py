@@ -392,6 +392,26 @@ def test_infra_team_is_visible_and_valid(ranks, models):
     assert '"framework": "ISO/IEC 27001:2022"' in req.brief.context
 
 
+def test_minimal_change_skill_goes_to_diff_writers_only(ranks, models):
+    """'가장 작은 변경' 스킬 — diff 를 쓰고 고치는 사람(대리·부장·팀장)만 전문, 설명만 하는 사원은 '고치는 방향' 절만."""
+    from core.agent import OrgAgent
+    from core.config import load_skills, team_org
+
+    team, full = load_team("infra_security"), load_skills("infra_security")
+    by_rank = {r.id: r for r in ranks}
+    agents = {n.id: OrgAgent(n, by_rank[n.rank], team, models, skills=full) for n in team_org(team, ranks).walk()}
+    for writer in ("am_fixer", "gm_review", "lead"):
+        assert agents[writer].skills == full
+    staff = agents["staff_analyst"].skills
+    assert "[고치는 방향" in staff and "[가장 작은 변경" not in staff
+    assert "번호는 원문 확인 필요" in staff  # 공용 보안 스킬(_shared/security)은 그대로 받는다
+    for head in agents["staff_analyst"].node.skill_sections:  # 절 제목이 바뀌어 아무것도 안 걸리는 일이 없게
+        assert any(line.startswith(head) for line in full.splitlines()), head
+    # 줄이라는 지침이 보안 통제·로그·검증까지 덜어 내라는 뜻으로 읽히지 않게 — 선이 글로 박혀 있어야 한다
+    rule = full.split("[가장 작은 변경", 1)[1]
+    assert all(w in rule for w in ("로그", "검증", "암호화", "지우거나 약하게 하지 않는다"))
+
+
 def test_screen_report_only_when_diffs_present(files):
     assert iac_patch.verification_report("보고서만", {"iac_files": files}) == ""
     assert iac_patch.verification_report(DB_FIX, {}) == ""
