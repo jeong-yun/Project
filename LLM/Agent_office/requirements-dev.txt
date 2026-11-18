@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-   (Windows 한국어 PC 의 pip 가 한글 주석을 cp949 로 잘못 읽지 않게 — 지우지 마세요)
 # 개발/테스트용 (python -m pytest)
 -r requirements.txt
 pytest>=9.0.3   # 9.0.3 미만: 임시 폴더 처리 취약점 (GHSA-6w46-j5rx-g56g)
