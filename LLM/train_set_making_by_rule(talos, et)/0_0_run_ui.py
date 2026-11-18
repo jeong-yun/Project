@@ -7,6 +7,7 @@
   1. 진행 현황 (첫 화면)  생성 대상 룰 중 완료 %, 현재 룰 중 학습데이터 보유 %, 상태 플래그별 수, 어디까지(배치),
                           출처·공격 유형별 %, 남은 요청·예상 시간·토큰 (3_5_progress.py 계산)
   2. 생성·수집            학습데이터 생성(건수 확인·파일럿·시작·중지·강제 중지, 3_0_run_generation.py)
+                          대상: 변경분·전체·지정 룰 (CVE·룰 id·이름으로 찾아 고름 → --set pick --rules @.run/pick_rules_*.txt)
                           수집 에이전트 시작·중지(매일 정해진 시각), 지금 1회 수집 (1_0_run_daily.py)
   3. 룰별 상태            상태 플래그·출처·검색으로 찾기, '제외' 룰의 제외 사유, CSV 내려받기 (07_llm_output/_progress/rule_status.csv)
   4. 신규 학습 데이터     08_dataset 의 IPS·WAF 신규 학습데이터를 날짜·장비별 표(데이터 프레임)로 보기, CSV 내려받기
@@ -318,6 +319,14 @@ def parallel():
             run.get("생성·검토 동시 진행", "예").strip().lower() in ("예", "yes", "y", "true", "1", "on"))
 
 
+def rules_per_request():
+    """요청 하나에 넣는 룰 수 (LLM_설정.md '호출당 룰 수', 3_1 과 같은 기본 3)."""
+    try:
+        return max(1, int(run_settings().get("호출당 룰 수", 3)))
+    except ValueError:
+        return 3
+
+
 def _llm_counts(name, since, until, ok_re):
     """3_2·3_3 로그 → 이번 실행(since~until)의 대상 수, 성공·실패 수, 최근 경고(재시도 등), 토큰."""
     s = {"header": False, "target": None, "follow": False, "wait": 0, "cap": 0, "workers": None, "now": None, "auto": False, "redo": False, "chk_ok": 0, "chk_fail": 0, "fixed": 0, "dropped": 0, "ok": 0,
@@ -390,6 +399,7 @@ def run_progress():
     overlap = (lock or {}).get("step") == "3.2+3.3"
     asked = int((lock or {}).get("max_requests") or 0)  # 요청한 수 (0 = 남은 전부)
     cfirst = bool((lock or {}).get("custom_first"))     # 생성 순서: 사용자 룰 먼저
+    pset = (lock or {}).get("set")                      # 세트 (all·delta·pick)
     if by == "3_0":
         for ts, lv, msg in _log_since("3_0_run_generation.log", since):
             if msg.startswith("입력 날짜"):
@@ -398,6 +408,8 @@ def run_progress():
                     break
                 dry = dry or "(dry-run)" in msg
                 cfirst = cfirst or "사용자 룰 먼저" in msg
+                if not pset and (m := re.search(r"세트 (\w+)", msg)):
+                    pset = m.group(1)
                 if lock is None and (m := re.search(r"요청 (\d+)개", msg)):
                     asked = int(m.group(1))
             m = re.match(r"[▶■] \[(\S+)\] \S+ (시작|종료)(?: \(코드 (-?\d+))?", msg)
@@ -531,7 +543,7 @@ def run_progress():
     detail = {"3.2": f"{gen_done}/{n_gen}" if g["header"] and not dry else "",
               "3.3": f"{rev_done}/{n_rev}" if (r["header"] or st("3.2") != "wait") and not dry else ""}
     return {"state": state, "running": not finished, "by": by, "dry_run": dry, "started_at": since, "asked": asked,
-            "custom_first": cfirst, "elapsed_s": elapsed, "pct": pct, "remaining_s": remaining if not finished else None,
+            "custom_first": cfirst, "set": pset, "pick_n": _pick_n(since) if pset == "pick" else None, "elapsed_s": elapsed, "pct": pct, "remaining_s": remaining if not finished else None,
             "parallel": {"generate": cg, "review": cr, "overlap": overlap, "generate_now": ng, "review_now": nr},
             "steps": [{"key": k, "name": n, "status": status(k), "detail": detail.get(k, "")} for k, n in STEPS
                       if by == "3_0" or k in steps],
@@ -769,10 +781,7 @@ def _custom_retry(base, gen, ids_of):
         retry |= set(miss)
     _creq["metas"] = metas
     redo = retry - assigned
-    try:
-        per = max(1, int(run_settings().get("호출당 룰 수", 3)))
-    except ValueError:
-        per = 3
+    per = rules_per_request()
     n_req = 0
     for b in sorted(cb):                                # 배치 파일 순서대로 다시 넣을 룰을 per 개씩 (3_1 과 같은 묶음)
         try:
@@ -836,6 +845,131 @@ def rule_status_csv():
     out = io.StringIO()
     csv.writer(out).writerows(rows)
     return out.getvalue().encode("utf-8-sig")
+
+
+# ── 2. 지정 룰 생성 (2026-11-18~): 찾아 고른 룰만 3_0 --set pick --rules @.run/pick_rules_<시각>.txt ──────────
+# 3_1 은 고른 룰을 완료 상태여도 새 요청(pick_…)으로 만든다 → 이미 생성한 룰(PICK_DONE)은 화면에서 처음에 고르지 않는다.
+PICK_ID_RE = re.compile(r"(talos|et|custom):[0-9]+:[0-9]+")     # fullmatch 로만 쓴다 (\d 는 다른 숫자 글자도 받음)
+PICK_MAX = 500
+PICK_DONE = ("DONE", "REVIEWED", "GENERATED")
+_pick_cache = {"key": None, "rules": {}, "delta": set()}
+
+
+def _pick_date(date):
+    """고른 입력 날짜 (비우면 가장 최근)."""
+    dates = input_dates()
+    if date and date not in dates:
+        raise ValueError("date")
+    if not dates:
+        raise ValueError("05_llm_input 에 입력 날짜가 없습니다")
+    return date or dates[-1]
+
+
+def _pick_rules(date):
+    """입력 날짜의 rules_all → {id: 찾기·표에 쓰는 칸만}, rules_delta 의 id. 파일이 바뀔 때만 다시 읽는다 (3만 줄에 1~2초)."""
+    d = BASE / "05_llm_input" / date
+    key = (date, (d / "rules_all.jsonl").stat().st_mtime_ns)
+    if _pick_cache["key"] != key:
+        rules = {}
+        with open(d / "rules_all.jsonl", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    r = json.loads(line)
+                    rules[r["id"]] = {"id": r["id"], "sid": r.get("sid"), "rule_name": r.get("rule_name") or "",
+                                      "cve": r.get("cve") or [], "attack_type": r.get("attack_type") or "",
+                                      "side": r.get("side", "request"), "enabled": r.get("enabled")}   # side 기본값은 3_1 과 같게
+        try:
+            with open(d / "rules_delta.jsonl", encoding="utf-8") as f:
+                delta = {_rule_id(x) for x in f if x.strip()}
+        except OSError:
+            delta = set()
+        _pick_cache.update(key=key, rules=rules, delta=delta)
+    return _pick_cache["rules"], _pick_cache["delta"]
+
+
+def _status_by_id():
+    """3.5 룰별 상태 {id: 줄} (rule_status.jsonl 이 바뀔 때만 다시 만듦)."""
+    rows = _rule_rows()
+    if _rules_cache.get("by_id_of") is not rows:
+        _rules_cache.update(by_id={r["id"]: r for r in rows}, by_id_of=rows)
+    return _rules_cache["by_id"]
+
+
+def pick_find(q):
+    """화면 2 '지정 룰' 찾기 (읽기만): 룰 id (여럿이면 쉼표·공백·줄바꿈) · sid · CVE (번호만 써도 됨) · 룰 이름 일부.
+    → {date, kind (ids·cve·sid·name), total, rows (최대 200, id 목록은 500), missing (없는 id), status_of (3.5 상태의 입력 날짜)}.
+    rows 의 skip = 3.1 이 건너뛸 까닭: 3.5 상태가 '제외'·'기존 충분' 이면 그 사유, 3.5 가 아직 못 본 룰이면 지금 설정의 유형·방향만."""
+    date, text = _pick_date(_q(q, "date")), _q(q, "q").strip()
+    if not text:
+        raise ValueError("검색어를 넣으세요 (CVE · 룰 id · sid · 룰 이름 일부)")
+    rules, delta = _pick_rules(date)
+    toks = [x for x in re.split(r"[,\s]+", text) if x]
+    missing = []
+    if all(PICK_ID_RE.fullmatch(x) for x in toks):
+        kind, ids = "ids", list(dict.fromkeys(toks))
+        hits, missing = [rules[i] for i in ids if i in rules], [i for i in ids if i not in rules]
+    else:
+        low = text.lower()
+        num = re.sub(r"^cve-", "", low)
+        if re.fullmatch(r"[0-9]{4}-[0-9]{4,}", num):
+            kind = "cve"
+            hit = lambda r: f"cve-{num}" in (str(c).lower() for c in r["cve"]) or low in r["rule_name"].lower()  # noqa: E731
+        elif low.isdigit():
+            kind, hit = "sid", lambda r: str(r["sid"]) == low                                                    # noqa: E731
+        else:
+            kind = "name"
+            hit = lambda r: low in r["rule_name"].lower() or low in r["id"] or any(low in str(c).lower() for c in r["cve"])  # noqa: E731
+        hits = sorted((r for r in rules.values() if hit(r)), key=lambda r: r["id"] not in delta)   # 변경분 먼저
+    run, st = run_settings(), _status_by_id()
+    skip_t = {t.strip() for t in run.get("생성 제외 attack_type", "").split(",") if t.strip() not in ("", "-")}
+    sides = {s.strip() for s in run.get("생성 대상 side", "request").split(",") if s.strip()}
+    rows = []
+    for r in hits[:PICK_MAX if kind == "ids" else 200]:
+        s = st.get(r["id"])
+        if s:
+            skip = (s.get("reason") or "제외") if s["flag"] == "EXCLUDED" else \
+                f"기존 충분 (기존 {s.get('existing', 0):,}건)" if s["flag"] == "EXISTING" else ""
+        else:
+            skip = (f"생성 제외 유형 ({r['attack_type']})" if r["attack_type"] in skip_t else
+                    f"생성 대상 방향 아님 ({r['side'] or '?'})" if r["side"] not in sides else "")
+        rows.append(dict(r, in_delta=r["id"] in delta, flag=(s or {}).get("flag", ""), skip=skip,
+                         existing=(s or {}).get("existing"), anomalies=(s or {}).get("anomalies"), normal=(s or {}).get("normal")))
+    try:                        # 3.5 상태가 어느 입력 날짜로 센 것인지 (고른 날짜와 다르면 화면에 알림)
+        status_of = json.loads(PROGRESS_FILE.read_text(encoding="utf-8")).get("input_date")
+    except (OSError, ValueError, AttributeError):
+        status_of = None
+    return {"date": date, "kind": kind, "total": len(hits), "rows": rows, "missing": missing[:50],
+            "missing_n": len(missing), "status_of": status_of}
+
+
+def pick_ids(ids, date):
+    """지정 룰 시작 전 확인: 룰 id 형식 · 중복 제거 · 1 ~ PICK_MAX 개 · 그 입력 날짜의 rules_all 에 있는지 → 깨끗한 id 목록."""
+    if not isinstance(ids, list) or not all(isinstance(x, str) for x in ids):
+        raise ValueError("rules (룰 id 목록)")
+    ids = list(dict.fromkeys(x.strip() for x in ids if x.strip()))
+    bad = [x[:40] for x in ids if not PICK_ID_RE.fullmatch(x)]
+    if bad:
+        raise ValueError(f"룰 id 형식이 아님 ({len(bad)}개): {', '.join(bad[:10])}")
+    if not 1 <= len(ids) <= PICK_MAX:
+        raise ValueError(f"지정 룰은 1 ~ {PICK_MAX}개 (지금 {len(ids)}개)")
+    rules, _ = _pick_rules(date)
+    lost = [x for x in ids if x not in rules]
+    if lost:
+        raise ValueError(f"입력 {date} 의 rules_all 에 없는 룰 {len(lost)}개: {', '.join(lost[:10])}")
+    return ids
+
+
+def _pick_n(since):
+    """지정 룰 실행의 룰 수 = 화면에서 시작한 그 실행의 목록 파일 줄 수 (명령줄에서 시작했거나 목록이 없으면 None)."""
+    rec = _ui_record("generation")
+    args = rec.get("args") or []
+    try:
+        if abs(_secs(str(rec.get("started_at", "")).replace("T", " "), since)) > 300:   # 화면 기록이 다른 실행
+            return None
+        f = Path(args[args.index("--rules") + 1][1:])
+        return sum(1 for x in f.read_text(encoding="utf-8").split("\n") if x.strip())
+    except (ValueError, IndexError, OSError):
+        return None
 
 
 # ── 학습데이터 (08_dataset) ──────────────────────────────────────────────
@@ -4373,7 +4507,8 @@ def state():
     return {"now": RT.now_iso(), "generation": dict(job_state("generation"), run=run), "collect": job_state("collect"),
             "agent": dict(job_state("agent"), status=RT.read_status("agent")),
             "last_collect": RT.read_status("collect"), "input_dates": input_dates(),
-            "models": settings_summary(), "settings": dict(zip(("generate", "review", "overlap"), parallel())),
+            "models": settings_summary(),
+            "settings": dict(zip(("generate", "review", "overlap"), parallel()), per_request=rules_per_request()),
             "step_seconds": step_summary(), "supervised": sup, "redo": job_state("redo"),
             "custom_requests": custom_requests()}
 
@@ -4509,6 +4644,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, read_progress())
             if u.path == "/api/rules":
                 return self._send(200, rules_page(q))
+            if u.path == "/api/generation/find":            # 2. 지정 룰 찾기 (읽기만)
+                return self._send(200, pick_find(q))
             if u.path == "/api/log":
                 job = _q(q, "job", "generation")
                 if job not in JOBS:
@@ -4724,11 +4861,17 @@ class Handler(BaseHTTPRequestHandler):
             if job_state("generation")["running"] or job_state("redo")["running"]:
                 return 409, {"error": "학습데이터 생성(또는 다시 만들기)이 이미 실행 중입니다"}
             args = ["--set", b.get("set", "all")]
-            if args[1] not in ("all", "delta"):
+            if args[1] not in ("all", "delta", "pick"):
                 raise ValueError("set")
-            n = int(b.get("max_requests", 5))
+            pick = args[1] == "pick"
+            n = int(b.get("max_requests", 0 if pick else 5))     # 지정 룰은 기본 0 = 고른 룰 전부
             if not 0 <= n <= 100000:
                 raise ValueError("max_requests")
+            if pick:        # 지정 룰: id 를 확인한 입력 날짜로 고정 (--date), 생성 순서는 없음
+                if b.get("order"):
+                    raise ValueError("order (지정 룰에는 생성 순서가 없음)")
+                b = dict(b, date=_pick_date(b.get("date") or ""))
+                ids = pick_ids(b.get("rules"), b["date"])
             args += ["--max-requests", str(n)]
             if b.get("date"):
                 if b["date"] not in input_dates():
@@ -4745,6 +4888,11 @@ class Handler(BaseHTTPRequestHandler):
                 args.append("--custom-first")
             if b.get("dry_run"):
                 args.append("--dry-run")
+            if pick:        # 한 줄에 id 하나 (3_1 이 '@파일' 로 읽음). 지난 목록도 남겨 둔다 (무엇을 돌렸는지 기록)
+                RT.RUN_DIR.mkdir(exist_ok=True)
+                rules_file = RT.RUN_DIR / f"pick_rules_{time.strftime('%Y%m%d-%H%M%S')}.txt"
+                rules_file.write_text("\n".join(ids) + "\n", encoding="utf-8")
+                args += ["--rules", f"@{rules_file}"]
             RT.clear_stop("generation")
             return 200, {"pid": spawn("generation", args), "args": args}
         if path == "/api/generation/stop":
@@ -4820,7 +4968,8 @@ details summary{cursor:pointer;color:var(--muted);font-size:13px;margin-top:8px}
 .chk{font-size:12px;line-height:1.5;min-width:220px}td.method{min-width:130px}.chk .ok{color:var(--ok)}.chk .warn{color:var(--warn)}.chk .bad{color:var(--bad);font-weight:600}
 tr.lv-bad td{background:rgba(214,69,69,.06)}.reason{font-size:12.5px;min-width:240px}
 .pager{display:flex;gap:8px;align-items:center;margin-top:10px}
-.est{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:13px;line-height:1.6}.est b{font-weight:600}#gOrderInfo .warn,.est .warn{color:var(--warn);font-weight:600}
+.est{margin-top:10px;padding:8px 10px;border-radius:8px;background:var(--bg);font-size:13px;line-height:1.6}.est b{font-weight:600}#gOrderInfo .warn,.est .warn,#gPick .warn{color:var(--warn);font-weight:600}
+#gPick textarea{width:100%;font:12px/1.45 Consolas,monospace;padding:5px 8px;border-radius:7px;border:1px solid var(--line);background:var(--card);color:var(--fg)}#gpBody{margin-top:6px;max-height:340px;overflow:auto}#gpBody td,#gpBody th{white-space:nowrap}#gpBody td.nm{white-space:normal;min-width:260px}#gpBody td.nt{white-space:normal;min-width:180px;font-size:12px}
 .c-OK{background:#d7f3e3;color:#13633a}.c-RULE{background:#dde8fb;color:#1f4fa3}.c-CHECK{background:#fff0d1;color:#8a5a00}.c-BAD{background:#fde0e0;color:#a32424}.c-VOTED{background:#ece0fb;color:#5b2a9a}
 .vsum{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px;font-size:13px}.vwarn{flex-basis:100%;color:var(--warn);font-size:13px;line-height:1.6}
 .xg{margin-top:6px}.xh{margin-top:6px}.xhr{display:flex;gap:6px;align-items:center;font-size:12px;line-height:1.6}.xhl{width:64px;text-align:right}
@@ -4861,10 +5010,21 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
  <div class="status"><span class="dot" id="genDot"></span><span id="genStatus"></span></div>
  <div id="genRun" style="margin-bottom:14px"></div>
  <div class="row">
-  <label>세트<select id="gSet"><option value="all">전체 (all)</option><option value="delta">변경분 (delta)</option></select></label>
+  <label>대상<select id="gSet"><option value="all">전체 (all)</option><option value="delta">변경분 (delta)</option><option value="pick">지정 룰 (pick)</option></select></label>
   <label>요청 수 (0 = 남은 전부)<input id="gN" type="number" min="0" value="200" style="width:110px"></label>
   <label>입력 날짜<select id="gDate"><option value="">가장 최근</option></select></label>
   <label>생성 순서<select id="gOrder"><option value="">기본 (ET → Talos → 사용자 룰)</option><option value="custom">사용자 룰 먼저</option></select></label>
+ </div>
+ <div id="gPick" hidden style="margin-top:10px">
+  <div class="muted" style="font-size:12.5px">고른 룰만 새 요청으로 생성 → 검토 → 증강 → 학습 로그 (<code>3_0 --set pick --rules</code>). <b>이미 생성한 룰도 고르면 새 유료 요청으로 다시 만든다</b> - 그래서 완료·증강 대기·검토 대기 룰은 처음에 체크하지 않는다. 생성 제외 유형·방향, 기존 데이터 충분 룰은 준비 단계(3.1)가 건너뛴다. 요청 수·생성 순서는 쓰지 않는다 (고른 룰 전부).</div>
+  <div class="row" style="margin-top:6px">
+   <label>찾기 (CVE · 룰 id · sid · 룰 이름 일부)<input id="gpQ" style="width:300px" placeholder="예: CVE-2026-111497 · et:1:2072656"></label>
+   <button id="gpFind">찾기</button><span class="muted" id="gpInfo" style="font-size:12.5px;align-self:center"></span></div>
+  <div id="gpBody"></div>
+  <div class="row" style="margin-top:6px">
+   <label style="flex:1;min-width:260px">룰 id 직접 넣기 (쉼표 · 공백 · 줄바꿈으로 나눔)<textarea id="gpIds" rows="2" placeholder="talos:1:67178, et:1:2072656"></textarea></label>
+   <button id="gpAdd">넣기</button></div>
+  <div class="msg" id="gpSel"></div>
  </div>
  <div class="muted" id="gOrderInfo" style="font-size:12.5px;margin-top:6px"></div>
  <div class="est" id="genEst"></div>
@@ -5056,13 +5216,14 @@ async function loadState(){S=await get("/api/state");const g=S.generation,c=S.co
  $("navRun").hidden=!(g.running||c.running||(a.running&&(a.status||{}).state==="수집 중"));$("navPct").textContent=pct;   // 대기 중인 에이전트는 표시 안 함
  document.title=(pct?`(${pct}) `:"")+"Snort 룰 학습데이터";const sv=S.supervised||{};$("navSup").hidden=!sv.running;$("navSupPct").textContent=sv.running&&sv.pct!=null?Math.floor(sv.pct)+"%":"";
  if(page==="progress"){const show=g.running||(run&&!run.error);$("runCard").hidden=!show;
-  if(show){$("runTitle").textContent=(g.running?"지금 실행 중인 학습데이터 생성":"마지막 학습데이터 생성")+(run&&run.gen&&!run.dry_run?` (이번 실행: ${run.asked?`요청 ${fmt(run.asked)}개`:"남은 요청 전부"})`:"");$("runBody").innerHTML=runHtml(g)}}
+  if(show){$("runTitle").textContent=(g.running?"지금 실행 중인 학습데이터 생성":"마지막 학습데이터 생성")+(run&&run.gen&&!run.dry_run?` (이번 실행: ${run.set==="pick"?pickLabel(run):run.asked?`요청 ${fmt(run.asked)}개`:"남은 요청 전부"})`:"");$("runBody").innerHTML=runHtml(g)}}
  if(page!=="run")return;
  $("genRun").innerHTML=runHtml(g);
  const sel=$("gDate");if(sel.options.length-1!==S.input_dates.length){sel.innerHTML='<option value="">가장 최근</option>'+S.input_dates.slice().reverse().map(d=>`<option>${d}</option>`).join("")}
  $("genDot").className="dot"+(g.running||rdo.starting?" on":"");
- $("genStatus").textContent=rdo.starting&&!g.running?"다시 만들기 시작하는 중… (다시 검토할 요청을 찾는 중, 1분쯤)":g.running&&redo?`다시 만들기 실행 중 (검토에서 뺀 샘플 다시 검토) · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작 · 멈추려면 '강제 중지'`:g.running?(g.starting?"시작하는 중…":`실행 중 · 단계 ${g.lock.step||"-"} · 입력 ${g.lock.input_date||"-"}${g.lock.custom_first?" · 사용자 룰 먼저":""} · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작`+(g.stop_requested?" · 중지 요청됨":"")):(c.running||(a.running&&(a.status||{}).state==="수집 중")?"대기 · 지금 수집 중이지만 생성을 함께 시작할 수 있습니다 (시작할 때의 입력 날짜를 끝까지 씀)":"대기");
+ $("genStatus").textContent=rdo.starting&&!g.running?"다시 만들기 시작하는 중… (다시 검토할 요청을 찾는 중, 1분쯤)":g.running&&redo?`다시 만들기 실행 중 (검토에서 뺀 샘플 다시 검토) · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작 · 멈추려면 '강제 중지'`:g.running?(g.starting?"시작하는 중…":`실행 중 · 단계 ${g.lock.step||"-"} · 입력 ${g.lock.input_date||"-"}${g.lock.custom_first?" · 사용자 룰 먼저":""}${g.lock.set==="pick"?" · "+pickLabel(run):""} · PID ${g.lock.pid} · ${String(g.lock.started_at||"").replace("T"," ")} 시작`+(g.stop_requested?" · 중지 요청됨":"")):(c.running||(a.running&&(a.status||{}).state==="수집 중")?"대기 · 지금 수집 중이지만 생성을 함께 시작할 수 있습니다 (시작할 때의 입력 날짜를 끝까지 씀)":"대기");
  for(const id of["bDry","bPilot","bGen"])$(id).disabled=g.running||rdo.starting;$("bStop").disabled=!g.running||redo;$("bKill").disabled=!g.running;
+ if($("gSet").value==="pick")$("bPilot").disabled=true;   // 지정 룰은 고른 룰 전부 (파일럿 없음)
  {const r=g.run,G=(r&&r.gen)||{},R=(r&&r.rev)||{};   // 강제 중지 옆 진행률 (서버가 로그로 계산한 run, 실행 중일 때만)
   progSet("genProg",g.running&&r&&r.state==="running"&&!r.error?`진행 ${r.pct}%`+(r.dry_run?"":` · 생성 ${fmt((G.ok||0)+(G.fail||0))}/${fmt(G.target||0)}${G.fail?` (실패 ${fmt(G.fail)})`:""}`
    +(R.target?` · 검토 ${fmt((R.ok||0)+(R.fail||0))}/${fmt(R.target)}${R.fail?` (실패 ${fmt(R.fail)})`:""}`:""))+(r.remaining_s!=null?` · 남은 약 ${mins(r.remaining_s)}`:""):"")}
@@ -5092,7 +5253,7 @@ function runHtml(g){const r=g.run;
  const head=live?`남은 시간 <b>약 ${hms(r.remaining_s)}</b> · <b>${clock(r.remaining_s)}</b> 쯤 끝날 예상 · 경과 ${hms(r.elapsed_s)}`:`<b>${r.state==="done"?"끝남":"중단됨 (끝까지 못 감)"}</b> · 걸린 시간 ${hms(r.elapsed_s)}`;
  return `<div class="row" style="align-items:center;gap:16px;flex-wrap:nowrap"><div class="pct">${r.pct}%</div><div style="flex:1;min-width:0">
   <div class="bar${live?" live":""}" style="margin:4px 0 6px"><i style="width:${r.pct}%"></i></div>
-  <div style="font-size:13px">${head}</div><div class="muted" style="font-size:12.5px">${esc(r.started_at)} 시작${r.dry_run?" · 건수 확인 (dry-run, 호출 없음)":""}${r.custom_first?" · <b>사용자 룰 먼저</b>":""}${r.by!=="3_0"?(r.by.includes("redo")?" · 다시 만들기 (검토에서 뺀 샘플 다시 검토)":` · ${esc(r.by)} 단독 실행`):""}${r.stop_requested?" · <b>중지 요청됨</b> (지금 요청까지 하고 멈춤)":""}</div></div></div>
+  <div style="font-size:13px">${head}</div><div class="muted" style="font-size:12.5px">${esc(r.started_at)} 시작${r.dry_run?" · 건수 확인 (dry-run, 호출 없음)":""}${r.custom_first?" · <b>사용자 룰 먼저</b>":""}${r.set==="pick"?` · <b>${pickLabel(r)}</b>`:""}${r.by!=="3_0"?(r.by.includes("redo")?" · 다시 만들기 (검토에서 뺀 샘플 다시 검토)":` · ${esc(r.by)} 단독 실행`):""}${r.stop_requested?" · <b>중지 요청됨</b> (지금 요청까지 하고 멈춤)":""}</div></div></div>
   <div class="steps">${r.steps.map(s=>`<span class="step ${s.status}" title="${word[s.status]}">${icon[s.status]} ${s.key} ${esc(s.name)}${s.detail?` <b>${s.detail}</b>`:""}</span>`).join("")}</div>
   ${live&&r.current?`<div class="runnow">지금: <b>${esc(r.current)}</b></div>`:""}
   ${r.dry_run?"":`<div class="kv" style="margin-top:6px"><b>생성</b><span>${fmt(G.ok)}개 성공 · ${fmt(G.fail)}개 실패 / 이번 ${fmt(G.target)}개${G.ok+G.fail?` · 약 ${hms(G.sec_per_req)}마다 1개 완료 · 토큰 ${fmt(G.tokens_in+G.tokens_out)} (입력 ${fmt(G.tokens_in)} / 출력 ${fmt(G.tokens_out)})`:""}</span>
@@ -5100,9 +5261,62 @@ function runHtml(g){const r=g.run;
   ${G.check_ok+G.check_fail?`<b>생성 품질</b><span>코드 검사 통과 <b>${(100*G.check_ok/(G.check_ok+G.check_fail)).toFixed(1)}%</b> (샘플 ${fmt(G.check_ok)} / ${fmt(G.check_ok+G.check_fail)})${R.ok?` · 검토가 고친 샘플 요청당 <b>${(R.fixed/R.ok).toFixed(1)}개</b>, 뺀 샘플 ${(R.dropped/R.ok).toFixed(1)}개`:""} <span class="muted">(정규식 예시·요청 줄 자동 수정 전 100개 실행: 통과 69.5% · 고친 샘플 요청당 11.6개)</span></span>`:""}
   ${r.parallel?`<b>동시 처리</b><span>생성 ${live?`지금 ${r.parallel.generate_now}개 (최대 ${r.parallel.generate})`:`최대 ${r.parallel.generate}개`} · 검토 ${live?`지금 ${r.parallel.review_now}개 (최대 ${r.parallel.review})`:`최대 ${r.parallel.review}개`}${r.parallel.overlap?" · 생성된 요청부터 바로 검토":""}${live?" · 속도 제한에 맞춰 자동 조절":""}</span>`:""}</div>
   <div class="muted" style="font-size:12px;margin-top:4px">%·남은 시간은 이번 실행에서 실제로 요청이 끝나는 간격(동시 처리 반영)과 지난 실행의 준비·마무리 단계 시간으로 계산합니다 (응답 해석 실패·재시도가 많으면 늘어남). 토큰은 성공한 요청 기준.</div>`}`}
-function genBody(extra){return Object.assign({set:$("gSet").value,max_requests:+$("gN").value,date:$("gDate").value,order:$("gOrder").value,generator:$("gGen").value.trim(),reviewer:$("gRev").value.trim()},extra)}
+function genBody(extra){const b=Object.assign({set:$("gSet").value,max_requests:+$("gN").value,date:$("gDate").value,order:$("gOrder").value,generator:$("gGen").value.trim(),reviewer:$("gRev").value.trim()},extra);
+ if(b.set==="pick")Object.assign(b,{rules:[...PK.sel],max_requests:0,order:""});   // 지정 룰: 고른 룰 전부, 생성 순서 없음
+ return b}
+/* ── 2. 지정 룰 (2026-11-18~): 찾아 고른 룰만 생성 (3_0 --set pick --rules). 이미 생성한 룰(PK_DONE)·3.1 이 건너뛸 룰은 처음에 고르지 않는다 ── */
+const PK={sel:new Set(),info:new Map(),rows:[],q:""},PK_DONE=["DONE","REVIEWED","GENERATED"],PK_ID=/^(talos|et|custom):[0-9]+:[0-9]+$/;
+function pickLabel(r){return "지정 룰"+(r&&r.pick_n?` ${fmt(r.pick_n)}개`:"")}
+const pkAuto=x=>!PK_DONE.includes(x.flag)&&!x.skip;
+function pickCounts(){const c={n:PK.sel.size,done:0,skip:0,queued:0};
+ for(const id of PK.sel){const x=PK.info.get(id)||{};if(PK_DONE.includes(x.flag))c.done++;if(x.skip)c.skip++;if(x.flag==="QUEUED")c.queued++}
+ c.req=Math.ceil((c.n-c.skip)/((S&&S.settings&&S.settings.per_request)||3));return c}
+function pickUi(){const on=$("gSet").value==="pick";$("gPick").hidden=!on;$("gN").disabled=$("gOrder").disabled=on;
+ if(on)$("bPilot").disabled=true;else if(S)$("bPilot").disabled=S.generation.running||!!(S.redo||{}).starting}
+async function pickFind(q){q=q.trim();if(!q)return;$("gpInfo").textContent="찾는 중…";let r;
+ try{r=await get("/api/generation/find?"+new URLSearchParams({q,date:$("gDate").value}))}catch(e){$("gpInfo").textContent="실패: "+e.message;return}
+ const auto=r.kind!=="name"&&q!==PK.q;PK.q=q;PK.rows=r.rows;   // CVE·id·sid 로 찾으면 고를 만한 룰을 체크 (이름 검색·같은 검색 다시는 그대로)
+ for(const x of r.rows){PK.info.set(x.id,x);if(auto&&pkAuto(x))PK.sel.add(x.id)}
+ $("gpInfo").innerHTML=`입력 ${esc(r.date)} · <b>${fmt(r.total)}개</b> 찾음${r.total>r.rows.length?` (앞 ${fmt(r.rows.length)}개만 - 검색어를 좁히세요)`:""}${r.kind==="name"?" · 이름 검색은 직접 체크":""}`
+  +(r.missing_n?` · <span class="warn">rules_all 에 없는 id ${fmt(r.missing_n)}개: ${esc(r.missing.join(", "))}</span>`:"")+(r.status_of&&r.status_of!==r.date?` · 상태는 입력 ${esc(r.status_of)} 기준 (3.5)`:"");
+ pickRender();pickSel()}
+function pickRender(){const rows=PK.rows;if(!rows.length){$("gpBody").innerHTML='<div class="muted" style="font-size:12.5px">찾은 룰이 없습니다.</div>';return}
+ $("gpBody").innerHTML=`<table class="mini"><thead><tr><th><input type="checkbox" id="gpAll" title="고를 만한 룰 모두 체크 (이미 생성·건너뛸 룰 빼고) / 모두 풀기"></th><th>룰 id</th><th>상태</th><th>공격 유형</th><th>CVE</th><th>변경분</th><th class="n" title="3.5 기준 생성한 샘플 수">생성 공격/정상</th><th class="n" title="기존 학습 로그의 샘플 수 (3.1a)">기존</th><th>룰 이름</th><th>비고</th></tr></thead><tbody>${rows.map(x=>{const done=PK_DONE.includes(x.flag),on=PK.sel.has(x.id);
+  return `<tr${on?' class="hl"':""}><td><input type="checkbox" data-pk="${esc(x.id)}"${on?" checked":""}></td><td>${esc(x.id)}</td><td>${x.flag?chip(x.flag):'<span class="muted" title="3.5 가 아직 이 룰을 세지 않음 (진행 현황 다시 계산)">-</span>'}</td><td>${esc(x.attack_type)}</td><td>${esc((x.cve||[]).join(", "))}</td><td>${x.in_delta?"예":""}</td>
+  <td class="n">${x.flag?`${fmt(x.anomalies)}/${fmt(x.normal)}`:""}</td><td class="n">${x.existing!=null?fmt(x.existing):""}</td><td class="nm">${esc(x.rule_name)}</td>
+  <td class="nt">${[done?'<span class="warn">이미 생성 - 고르면 새 유료 요청으로 다시 생성</span>':"",x.skip?`<span class="muted">3.1 이 건너뜀: ${esc(x.skip)}</span>`:"",x.flag==="QUEUED"?'<span class="muted">이미 대기 요청에 있음</span>':"",x.enabled===false?'<span class="muted">룰 꺼짐</span>':""].filter(Boolean).join("<br>")}</td></tr>`}).join("")}</tbody></table>`}
+function pickSel(){const c=pickCounts(),ids=[...PK.sel];
+ for(const x of $("gpBody").querySelectorAll("input[data-pk]")){x.checked=PK.sel.has(x.dataset.pk);x.closest("tr").classList.toggle("hl",x.checked)}
+ $("gpSel").innerHTML=!c.n?'<span class="muted">고른 룰 없음 - 찾아서 체크하거나 id 를 넣으세요</span>':
+  `고른 룰 <b>${fmt(c.n)}개</b>${c.n>500?' <span class="warn">(한 번에 500개까지)</span>':""} → 요청 약 ${fmt(c.req)}개 <button class="sm" id="gpClear">모두 풀기</button><br>`
+  +ids.slice(0,40).map(id=>`<span class="chip" style="margin:0 4px 3px 0">${esc(id)} <a data-pkx="${esc(id)}" style="cursor:pointer" title="빼기">×</a></span>`).join("")+(ids.length>40?` <span class="muted">외 ${fmt(ids.length-40)}개</span>`:"")
+  +(c.done?`<div class="warn">이미 생성한 룰 ${fmt(c.done)}개를 골랐습니다 - 새 유료 요청으로 다시 생성합니다 (예전 결과도 학습 로그에 그대로 남음)</div>`:"")
+  +(c.skip?`<div class="muted">${fmt(c.skip)}개는 생성 제외·기존 충분이라 준비 단계(3.1)가 건너뜁니다</div>`:"")
+  +(c.queued?`<div class="muted">${fmt(c.queued)}개는 이미 다른 대기 요청에 있어, 그 요청을 나중에 생성하면 한 번 더 만들어집니다</div>`:"");
+ const all=$("gpAll");if(all)all.checked=PK.rows.some(x=>PK.sel.has(x.id));
+ estimate()}
+$("gpFind").onclick=()=>pickFind($("gpQ").value);
+$("gpQ").addEventListener("keydown",e=>{if(e.key==="Enter")pickFind($("gpQ").value)});
+$("gpAdd").onclick=async()=>{const t=$("gpIds").value.split(/[,\s]+/).filter(Boolean),bad=t.filter(x=>!PK_ID.test(x)),ok=[...new Set(t.filter(x=>PK_ID.test(x)))];
+ if(ok.length)await pickFind(ok.join(" "));   // 넣은 id 를 표로 보여 주고, 이미 생성한 룰·건너뛸 룰 빼고 체크
+ const w=bad.length?`<span class="warn">룰 id 형식이 아님 (${fmt(bad.length)}개): ${esc(bad.slice(0,10).join(", "))}</span> - 예: et:1:2072656`:"";
+ if(!ok.length)$("gpInfo").innerHTML=w;else if(w)$("gpInfo").insertAdjacentHTML("beforeend"," · "+w);else $("gpIds").value=""};
+$("gPick").addEventListener("change",e=>{const c=e.target;
+ if(c.id==="gpAll"){for(const x of PK.rows)if(!c.checked)PK.sel.delete(x.id);else if(pkAuto(x))PK.sel.add(x.id)}
+ else if(c.dataset&&c.dataset.pk){if(c.checked)PK.sel.add(c.dataset.pk);else PK.sel.delete(c.dataset.pk)}
+ else return;
+ pickSel()});
+$("gPick").addEventListener("click",e=>{const x=e.target.closest("[data-pkx]");if(x){PK.sel.delete(x.dataset.pkx);pickSel();return}
+ if(e.target.id==="gpClear"){PK.sel.clear();pickSel()}});
+$("gSet").addEventListener("change",pickUi);pickUi();     // 새로 고침 뒤 브라우저가 고른 값을 되살려도 맞게
+$("gDate").addEventListener("change",()=>{if($("gSet").value==="pick"&&PK.q)pickFind(PK.q)});   // 입력 날짜를 바꾸면 그 날짜 기준으로 다시 찾음 (고른 것은 그대로)
+function pickStart(){const c=pickCounts(),day=$("gDate").value||((S&&S.input_dates)||[]).slice(-1)[0]||"-";
+ if(!c.n){$("genMsg").textContent="지정 룰을 먼저 고르세요 (찾아서 체크하거나 id 넣기)";return}
+ if(!confirm(`지정 룰 ${c.n}개를 생성합니다 - 유료 LLM 호출 (API 비용 발생).\n입력 ${day} · 요청 약 ${c.req}개${c.done?`\n\n※ 그중 이미 생성한 룰 ${c.done}개는 새 요청으로 다시 만듭니다 (추가 비용).`:""}${c.skip?`\n※ ${c.skip}개는 생성 제외·기존 충분이라 준비 단계(3.1)가 건너뜁니다.`:""}\n\n먼저 '건수 확인'으로 요청 수를 보는 것을 권합니다. 진행할까요?`))return;
+ act("genMsg",()=>post("/api/generation/start",genBody()))}
 /* 생성 순서: 사용자 룰(custom)이 든 대기 요청 (서버가 가장 최근 입력의 요청 파일에서 셈). llm(k) = 요청 k개 생성·검토 시간(초), 기록이 없으면 null */
 function orderHint(llm){const el=$("gOrderInfo"),cr=S&&S.custom_requests,first=$("gOrder").value==="custom";
+ if($("gSet").value==="pick"){el.textContent="";return}           // 지정 룰에는 생성 순서가 없음
  if(cr&&cr.error){el.textContent="사용자 룰 요청을 세지 못했습니다: "+cr.error;return}
  if(!cr||!cr.date){el.textContent=S&&cr===null?"사용자 룰 요청 세는 중…":"";return}     // 입력 날짜가 없으면 {}
  const set=$("gSet").value,c=cr.by_set[set],day=$("gDate").value,other=day&&day!==cr.date?` <span class="warn">(가장 최근 입력 ${esc(cr.date)} 기준이라 고른 입력 날짜와 다를 수 있음)</span>`:"";
@@ -5128,9 +5342,10 @@ function goRules(flag){$("rSrc").value="custom";const f=$("rFlag");if(![...f.opt
 $("gOrderInfo").addEventListener("click",e=>{const a=e.target.closest("a[data-r3]");if(!a)return;e.preventDefault();goRules(a.dataset.r3)});
 function dur(sec){if(sec<3600)return `약 ${Math.max(1,Math.round(sec/60))}분`;const h=sec/3600;return h<48?`약 ${h.toFixed(1)}시간`:`약 ${(h/24).toFixed(1)}일 (${fmt(Math.round(h))}시간)`}
 function estimate(){const el=$("genEst");if(!P){el.textContent="예상: 진행 현황을 불러오는 중…";orderHint(null);return}
- const av=P.average_per_request||{},rq=P.requests||{},set=$("gSet").value;let left=((rq.pending_by_set||{})[set])??rq.pending??0;
+ const av=P.average_per_request||{},rq=P.requests||{},set=$("gSet").value,pk=set==="pick",pc=pk?pickCounts():null;let left=((rq.pending_by_set||{})[set])??rq.pending??0;
  if(!left&&set==="all")left=(P.estimate_remaining||{}).requests||0;   // 새 입력 날짜라 요청 파일이 아직 없으면 (다음 실행의 3.1 이 만듦) 남은 룰 수로 추정
- const asked=+$("gN").value||0,all=asked===0,n=all?left:Math.min(asked,left);
+ if(pk){if(!pc.n){el.innerHTML="<b>예상</b> 지정 룰을 찾아 고르면 요청 수·시간·토큰을 계산합니다";orderHint(null);return}left=pc.req}   // 지정 룰: 고른 룰(3.1 이 건너뛸 것 빼고) ÷ 호출당 룰 수
+ const asked=pk?0:+$("gN").value||0,all=asked===0,n=all?left:Math.min(asked,left);
  if(!av.generate_seconds){el.innerHTML="<b>예상</b> 생성 기록이 아직 없어 계산할 수 없습니다 — '파일럿 5개'를 먼저 돌리면 실제 평균으로 계산합니다.";orderHint(null);return}
  // 동시 처리: 생성은 pg 개씩, 검토는 pr 개씩. 함께 진행하면 생성된 요청부터 바로 검토 → 늦게 끝나는 쪽 기준
  // 모델: '이번 실행만' 입력 > 저장된 설정. 그 모델의 지난 기록(5건 이상)이 있으면 그 평균, 없으면 전체 평균(다른 모델 포함)
@@ -5147,12 +5362,12 @@ function estimate(){const el=$("genEst");if(!P){el.textContent="예상: 진행 �
  const ss=(S&&S.step_seconds)||{},day=$("gDate").value||((S&&S.input_dates)||[]).slice(-1)[0],first=(ss.first_dates||[]).includes(day);
  const prep=!n?0:first?(ss.prep_first??1240):(ss.prep??60),fin=!n?0:(ss.augment_per_request??0.6)*n+(ss.post??40);
  const gi=Math.round(n*(hg?hg.tin/hg.n:av.generator_input_tokens||0)),go=Math.round(n*(hg?hg.tout/hg.n:av.generator_output_tokens||0)),ri=noRev?0:Math.round(n*(hr?hr.tin/hr.n:av.reviewer_input_tokens||0)),ro=noRev?0:Math.round(n*(hr?hr.tout/hr.n:av.reviewer_output_tokens||0));
- el.innerHTML=`<b>예상</b>${ov.g||ov.r?' <span class="warn">(이번 실행만 바꾼 모델)</span>':""} 요청 ${fmt(n)}개${all?" (남은 전부)":""} → 시간 <b>${dur(sec+prep+fin)}</b> <span class="muted">(생성·검토 ${dur(sec)} + 준비 ${dur(prep)}${first?" (이 입력 날짜의 첫 실행 - 기존 데이터 대조·요청 파일 만들기)":""} + 마무리 ${dur(fin)} · 동시 최대 생성 ${par.generate}개·검토 ${par.review}개${par.overlap?" · 생성·검토 함께":""}, 하나씩이면 ${dur(n*(g1+r1))} · API 속도 제한에 걸리면 더 걸림)</span><br>토큰 합계 <b>${fmt(gi+go+ri+ro)}</b> = 생성 ${esc(gm)} <b>${fmt(gi+go)}</b> (입력 ${fmt(gi)} / 출력 ${fmt(go)}) + 검토 ${esc(rm)} <b>${fmt(ri+ro)}</b> (입력 ${fmt(ri)} / 출력 ${fmt(ro)})<div class="muted">기준: 생성 ${hg?`${esc(gm)} ${fmt(hg.n)}건`:`전체 ${av.generated_requests}건`} · 검토 ${noRev?"생략":hr?`${esc(rm)} ${fmt(hr.n)}건`:`전체 ${av.reviewed_requests}건`}의 실제 평균 (재시도 포함, 요청 1개 생성 ${Math.round(g1)}초·검토 ${Math.round(r1)}초) · 이 세트의 남은 요청 ${fmt(left)}개${!all&&asked>left?" (입력한 수가 남은 요청보다 많아 남은 수로 계산)":""}</div>${warn.length?`<div class="warn">${warn.join("<br>")}</div>`:""}`}
+ el.innerHTML=`<b>예상</b>${ov.g||ov.r?' <span class="warn">(이번 실행만 바꾼 모델)</span>':""} 요청 ${pk?"약 ":""}${fmt(n)}개${all&&!pk?" (남은 전부)":""} → 시간 <b>${dur(sec+prep+fin)}</b> <span class="muted">(생성·검토 ${dur(sec)} + 준비 ${dur(prep)}${first?" (이 입력 날짜의 첫 실행 - 기존 데이터 대조·요청 파일 만들기)":""} + 마무리 ${dur(fin)} · 동시 최대 생성 ${par.generate}개·검토 ${par.review}개${par.overlap?" · 생성·검토 함께":""}, 하나씩이면 ${dur(n*(g1+r1))} · API 속도 제한에 걸리면 더 걸림)</span><br>토큰 합계 <b>${fmt(gi+go+ri+ro)}</b> = 생성 ${esc(gm)} <b>${fmt(gi+go)}</b> (입력 ${fmt(gi)} / 출력 ${fmt(go)}) + 검토 ${esc(rm)} <b>${fmt(ri+ro)}</b> (입력 ${fmt(ri)} / 출력 ${fmt(ro)})<div class="muted">기준: 생성 ${hg?`${esc(gm)} ${fmt(hg.n)}건`:`전체 ${av.generated_requests}건`} · 검토 ${noRev?"생략":hr?`${esc(rm)} ${fmt(hr.n)}건`:`전체 ${av.reviewed_requests}건`}의 실제 평균 (재시도 포함, 요청 1개 생성 ${Math.round(g1)}초·검토 ${Math.round(r1)}초) · ${pk?`지정 룰 ${fmt(pc.n-pc.skip)}개 ÷ 호출당 룰 ${(S&&S.settings&&S.settings.per_request)||3}개 (정확한 요청 수는 '건수 확인')`:`이 세트의 남은 요청 ${fmt(left)}개`}${!all&&asked>left?" (입력한 수가 남은 요청보다 많아 남은 수로 계산)":""}</div>${warn.length?`<div class="warn">${warn.join("<br>")}</div>`:""}`}
 $("gN").oninput=estimate;$("gSet").onchange=$("gOrder").onchange=$("gDate").onchange=estimate;$("gGen").oninput=$("gRev").oninput=estimate;
 async function act(msgId,fn){try{const r=await fn();$(msgId).textContent="요청함 "+(r.pid?`(PID ${r.pid})`:"");setTimeout(loadState,800)}catch(e){$(msgId).textContent="실패: "+e.message}}
 $("bDry").onclick=()=>act("genMsg",()=>post("/api/generation/start",genBody({dry_run:true})));
 $("bPilot").onclick=()=>act("genMsg",()=>post("/api/generation/start",genBody({max_requests:5})));
-$("bGen").onclick=()=>{const n=+$("gN").value,o=$("gOrder").value==="custom"?" (사용자 룰 먼저)":"";if(!confirm(n===0?`남은 요청 전부를 생성합니다${o} (API 비용·수일 소요). 진행할까요?`:`요청 ${n}개를 생성합니다${o} (API 비용 발생). 진행할까요?`))return;act("genMsg",()=>post("/api/generation/start",genBody()))};
+$("bGen").onclick=()=>{if($("gSet").value==="pick")return pickStart();const n=+$("gN").value,o=$("gOrder").value==="custom"?" (사용자 룰 먼저)":"";if(!confirm(n===0?`남은 요청 전부를 생성합니다${o} (API 비용·수일 소요). 진행할까요?`:`요청 ${n}개를 생성합니다${o} (API 비용 발생). 진행할까요?`))return;act("genMsg",()=>post("/api/generation/start",genBody()))};
 $("bStop").onclick=()=>act("genMsg",()=>post("/api/generation/stop",{}));
 $("bKill").onclick=()=>{if(confirm("지금 하던 요청을 버리고 바로 멈춥니다. 진행할까요?"))act("genMsg",()=>post("/api/generation/stop",{force:true}))};
 $("bAgStart").onclick=()=>act("agMsg",()=>post("/api/agent/start",{at:$("agAt").value.trim()}));
