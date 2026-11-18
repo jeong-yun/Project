@@ -2715,6 +2715,28 @@
 - 확인 못 한 것: 실제 모델 호출과 실제 화면(Streamlit 1.66.1 로 처음 켬). 같은 Python 을 쓰는 저장소 밖 작업은 코드에서 바뀐 패키지를 직접 import 하지 않는 것만 읽어서 확인.
 - 다음 할 일: 실행용 사본 갱신 뒤 앱을 켜서 첫 화면·업무 하나 확인(`results/review_1110/화면_확인_목록.md`).
 
+**🧰 남의 AI 코딩 스킬 다섯 가지(humanizer · Scrapling · ponytail · caveman · superpowers)를 이 앱에 맞게 가져오기 — 측정해서 넣을 곳만**
+- 배경: 다섯 가지 모두 코딩 AI(Claude Code 등)용이라 그대로 깔면 이 앱의 팀 에이전트에는 들어가지 않는다. 생각만 가져와 팀 스킬(`teams/…/skills`)·코드·`AGENTS.md` 에 우리 말로 새로 썼다(영어 문장은 옮기지 않음, 라이선스 MIT · BSD-3 · Apache-2.0).
+- 작업:
+  - **문체(humanizer 한국어판)**: 공용 스킬 `teams/_shared/style/plain_style.md` — 인사·예고 없이 본론부터, 꾸밈말 대신 숫자·이름, 셋씩 나열·과장·출처 없는 '전문가들은' 피하기, 피할 표현 6묶음 46개.
+    general · edu_career · edu_hobby · travel_abroad · travel_domestic 에 붙이고, 최종 답·통합을 쓰는 팀원만 받게 `skill_sections` 에 '빼기'(`"-[문체"`)를 새로 넣었다.
+    검사기 `plain_style` 은 커리어부 세기 함수(`career.check_style`)를 목록만 바꿔 재사용 — 최종 답에만, 기록·경고만 하고 다시 쓰게 하지 않는다(이 팀들 기준을 아직 재지 않아서).
+    security_governance(표 + JSON + 원문 인용)와 career(자체 `natural_style.md`)는 붙이지 않았다.
+  - **주소 읽기(Scrapling 시험 → 표준 라이브러리로)**: 커리어부 `core/career_search.py` `page_text` 가 메뉴·옆 영역·본문 밖 머리글/바닥글·role 표시·class 이름(gnb·menu·cookie·ad·share…) 영역을 건너뛴다(3-12 일부). 거른 뒤 200자 미만이면 거르지 않은 글로 돌아간다.
+  - **최소 변경(ponytail)**: 인프라 보안 팀 `skills/minimal_change.md` — 필요한가 → 원본 재사용 → 제품 기본 기능 → 새 블록 순서, 고칠 줄만, 접근 통제·암호화·로그·검증은 'diff 를 작게'를 이유로 지우지 않음. 분석만 하는 사원은 '고치는 방향' 절만.
+    저장소 과잉 설계 점검(읽기만)은 `results/review_1110/과잉설계_점검.md` 에 15개 후보로 남겼다 — 고치지 않음.
+  - **superpowers**: 루트 `AGENTS.md` 와 겹치지 않는 둘만 더함 — 원인을 찾고 고치기(세 번 실패하면 설계부터), '됐다' 전에 직접 돌려 보기.
+  - **caveman**: 측정부터 하는 하단 세션을 카드로 올려 둠(아직 시작 안 함 — 아래 '다음 할 일').
+  - 세 갈래를 하단 세션 셋이 동시에 진행하다 PC 가 느려져 한 번 멈춤 → 하단에서는 바꾼 부분 테스트만, 전체 테스트는 합친 뒤 한 번으로 바꿔 이어 감.
+- 기술: 팀 스킬 절 고르기에 '빼기' 표시, 하네스 `validators` 와 `final_only` 를 함께 적어야 최종 답에서만 도는 점(가짜 모델 테스트가 잡음), HTML 파서의 열린 태그 쌓기로 닫는 태그 빠진 페이지 견디기.
+- 성과 (실제 모델 없이 잰 값):
+  - 주소 읽기 — 직접 만든 공고 표본 5개(본문 50줄 · 잡음 48개): 지금 파서 본문 50/50 · 잡음 47 → **새 파서 50/50 · 잡음 0**. Scrapling 0.5.1 은 기본 24/50 · 잡음 33, 같은 거르기 규칙을 더해도 28/50(목록 '- ' 표시를 없애고 굵은 글씨에서 줄을 쪼갬) + 패키지 약 14MB → 넣지 않음. 새 파서는 160KB 페이지에 77~194ms(지금 49~157ms, 다른 세션 때문에 CPU 35~100% 로 흔들림).
+  - 문체 — 프롬프트 최종 답·통합 팀원 +1,591자, 실무자 +19자. 지난 실제 결과(`results/prompt_ab`)로 잰 기준값: general 6건 상투 표현 0~1개(1,000자당 0~0.2), travel_domestic 6건 0개 — 목록 표현은 거의 안 나오고 AI 티는 굵은 글씨·줄표(8~87곳)에서 크다.
+  - 최소 변경 — 수정안 쓰는 팀원 +640자, 사원 +174자.
+  - 합친 뒤 Agent Office 전체 **1,455 통과**(18분 52초, 1,434 → 새 테스트 21건).
+- 확인 못 한 것: 실제 모델로 글이 자연스러워지는지·수정안이 작아지는지, 실제 채용 사이트에서 본문 상자 이름에 related·ad 같은 낱말이 있어 본문이 빠지는 경우.
+- 다음 할 일: caveman 카드(호출 기록으로 출력 토큰 몫부터 재기) 시작 여부, 굵은 글씨·줄표 경고 기준 정하기, 과잉 설계 후보 중 쉬운 것(부르는 곳 0곳 함수 5개 등) 정리 여부.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
