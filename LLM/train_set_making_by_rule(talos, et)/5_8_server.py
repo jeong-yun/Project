@@ -1060,9 +1060,9 @@ def _ver_ns(L, v, dev, fver):
         miss = sorted(set(std_names) - set(vn))
         if miss:
             raise ValueError(f"{dev.upper()} 피처 정의 판 '{fver}' 에 표준 피처 {len(miss)}개가 없습니다 (예: {miss[0]})")
-        odd = [x for x in vn if x not in std_names and not re.fullmatch(rf"{dev}_payload_[a-z0-9]+_\d+_comb", x)]
-        if odd:                                         # 늘어난 피처는 <장비>_payload_<공격>_<번호>_comb 꼴만 (FEAT4 2절)
-            raise ValueError(f"{dev.upper()} 피처 정의 판 '{fver}' 의 새 피처 이름이 '{dev}_payload_<공격>_<번호>_comb' 꼴이 아닙니다: {odd[:3]}")
+        odd = [x for x in vn if x not in std_names and not re.fullmatch(rf"{dev}_payload_[a-z0-9]+(?:_\d+)?_comb", x)]
+        if odd:                                         # 늘어난 피처는 <장비>_payload_<공격>[_<번호>]_comb 꼴만 (FEAT4 2절, 번호 없는 꼴 11-13~)
+            raise ValueError(f"{dev.upper()} 피처 정의 판 '{fver}' 의 새 피처 이름이 '{dev}_payload_<공격>[_<번호>]_comb' 꼴이 아닙니다: {odd[:3]}")
     return code, ns, F.legacy_names(ns), defs, std_names
 
 

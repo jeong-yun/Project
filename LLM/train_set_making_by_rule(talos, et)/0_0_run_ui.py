@@ -4378,6 +4378,82 @@ def state():
             "custom_requests": custom_requests()}
 
 
+# ── 추가 화면 (2026-11-17~): ui_ext/p*.py - 로컬 전용 폴더. 없으면 아무 일도 없다 (공개본은 화면 1~6 만) ──────────
+# 화면 파일 하나 = 탭 하나 (KEY · TITLE · HTML · JS · GET · POST · JOBS, 설명은 ui_ext/ui_ext_common.py 머리말).
+EXT_PAGES, EXT_GET, EXT_POST, EXT_ERRORS = [], {}, {}, []
+
+
+def load_ext():
+    d = BASE / "ui_ext"
+    if not d.is_dir() or EXT_PAGES:
+        return
+    if str(d) not in sys.path:
+        sys.path.insert(0, str(d))
+    try:
+        import ui_ext_common as XC
+        XC.UI = sys.modules[__name__]
+        EXT_GET.update(XC.GET)
+        EXT_POST.update(XC.POST)
+    except Exception as e:                              # 공통 도구가 없으면 추가 화면 없이 뜬다
+        EXT_ERRORS.append(f"ui_ext_common: {type(e).__name__}: {e}")
+        return
+    for f in sorted(d.glob("p[0-9]*.py")):
+        try:                                            # 화면 하나가 깨져도 나머지는 뜬다
+            m = _load(f"ui_ext_{f.stem}", f"ui_ext/{f.name}")
+            key, get, post = m.KEY, dict(getattr(m, "GET", {})), dict(getattr(m, "POST", {}))
+            if not re.fullmatch(r"[a-z][a-z0-9]{1,11}", key) or key in {p["key"] for p in EXT_PAGES}:
+                raise ValueError(f"KEY '{key}' 가 맞지 않거나 겹침")
+            if any(not p.startswith(f"/api/x/{key}/") for p in [*get, *post]):
+                raise ValueError(f"요청 경로는 /api/x/{key}/ 로 시작해야 함")
+            EXT_GET.update(get)
+            EXT_POST.update(post)
+            JOBS.update(getattr(m, "JOBS", {}))
+            EXT_PAGES.append({"key": key, "title": str(m.TITLE), "html": str(m.HTML), "js": str(m.JS)})
+        except Exception as e:
+            EXT_ERRORS.append(f"{f.name}: {type(e).__name__}: {e}")
+    for msg in EXT_ERRORS:
+        print(f"추가 화면을 읽지 못함 - {msg}", flush=True)
+
+
+EXT_JS = r"""/* 추가 화면이 함께 쓰는 것 (화면 코드는 $ · get · post · esc · fmt · page 와 이 X 를 쓴다) */
+const X={
+ q:o=>Object.entries(o||{}).filter(([,v])=>v!=null&&v!=="").map(([k,v])=>encodeURIComponent(k)+"="+encodeURIComponent(v)).join("&"),
+ pct:x=>x==null?"-":(100*x).toFixed(2)+"%",
+ mb:n=>n==null?"-":n>=1073741824?(n/1073741824).toFixed(2)+"GB":(n/1048576).toFixed(1)+"MB",
+ table(cols,rows,empty){   /* cols: [["열 이름", 행 => 글(이미 esc 한 HTML), "n"(오른쪽 맞춤, 선택)]] */
+  if(!rows||!rows.length)return `<div class="muted">${esc(empty||"없음")}</div>`;
+  return `<table class="mini"><thead><tr>${cols.map(c=>`<th${c[2]?' class="n"':""}>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td${c[2]?' class="n"':""}>${c[1](r)??""}</td>`).join("")}</tr>`).join("")}</tbody></table>`},
+ job:(name,lines)=>get("/api/x/_/job?"+X.q({name,lines:lines==null?60:lines})),
+ jobStop:(name,force)=>post("/api/x/_/job/stop",{name,force:!!force}),
+ jobHtml(j){   /* 작업 상태 한 덩어리: 도는 중 · 진행률 · 지금 단계 · 마지막 결과 · 출력 */
+  const st={done:"끝남",stopped:"중지됨",error:"실패",running:"도는 중",starting:"시작하는 중"}[j.status]||"";
+  let h=j.running?`<div><b>도는 중</b> ${j.pct!=null?Math.round(j.pct)+"% · ":""}${esc(j.step_text||"")}${j.stop_requested?' <span class="muted">(중지 요청함)</span>':""} <button class="sm danger" data-xstop="${esc(j.name)}">중지</button></div>`
+   :st?`<div class="muted">지난 실행: ${esc(st)}${j.finished_at?" · "+esc(String(j.finished_at).replace("T"," ")):""}${j.error?` · <span style="color:var(--bad)">${esc(j.error)}</span>`:""}</div>`:"";
+  if(j.log)h+=`<details${j.running||j.status==="error"?" open":""}><summary>출력</summary><pre style="max-height:260px;overflow:auto;font-size:12px;white-space:pre-wrap">${esc(j.log)}</pre></details>`;
+  return h},
+ timers:{},
+ watch(key,fn,ms){   /* 그 화면이 보이는 동안만 ms 마다 fn 을 부른다 */
+  clearInterval(X.timers[key]);X.timers[key]=setInterval(()=>{if(page===key)fn();else clearInterval(X.timers[key])},ms||3000)},
+ env:()=>get("/api/x/_/env"),
+};
+document.addEventListener("click",async e=>{const b=e.target.closest&&e.target.closest("[data-xstop]");if(!b)return;
+ if(!confirm("이 작업을 중지할까요?"))return;try{await X.jobStop(b.dataset.xstop)}catch(err){alert("실패: "+err.message)}});
+"""
+
+
+def page_html():
+    """화면 1~6 (PAGE) 에 추가 화면의 탭 · 내용 · 코드를 끼워 넣는다. 화면마다 <script> 를 따로 둬 하나가 깨져도 나머지는 돈다."""
+    if not EXT_PAGES:
+        return PAGE
+    e = lambda s: s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")      # noqa: E731
+    nav = "".join(f'<a href="#/{p["key"]}" data-p="{p["key"]}">{e(p["title"])}</a>' for p in EXT_PAGES)
+    sec = "".join(f'\n<section class="page" id="p-{p["key"]}">{p["html"]}</section>' for p in EXT_PAGES)
+    js = f"<script>{EXT_JS}</script>" + "".join(f'\n<script>/* 추가 화면 {p["key"]} */\n{p["js"]}\n</script>' for p in EXT_PAGES)
+    out = PAGE.replace("</nav></header>", nav + "</nav></header>", 1).replace("\n</main>", sec + "\n</main>", 1)
+    out = out.replace("</style></head>", "nav{flex-wrap:wrap;row-gap:2px}</style></head>", 1)      # 탭이 12개라 좁은 창에서는 두 줄로
+    return out.replace("</body></html>", js + "\n<script>route()</script></body></html>", 1)
+
+
 # ── 요청 처리 ────────────────────────────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
@@ -4423,7 +4499,10 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(u.query)
         try:
             if u.path == "/":
-                return self._send(200, PAGE.encode("utf-8"), "text/html; charset=utf-8")
+                return self._send(200, page_html().encode("utf-8"), "text/html; charset=utf-8")
+            if u.path in EXT_GET:                       # 추가 화면 (ui_ext) 의 읽기 요청: dict → JSON, (bytes, 종류, 헤더) → 내려받기
+                r = EXT_GET[u.path](q)
+                return self._send(200, *r) if isinstance(r, tuple) else self._send(200, r)
             if u.path == "/api/state":
                 return self._send(200, state())
             if u.path == "/api/progress":
@@ -4530,6 +4609,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": str(e)})
 
     def route(self, path, b):
+        if path in EXT_POST:                            # 추가 화면 (ui_ext) 의 쓰기 요청
+            return 200, EXT_POST[path](b)
         if path == "/api/progress/refresh":
             return 200, {"started": refresh_progress()}
         if path == "/api/data/edit":
@@ -4953,6 +5034,7 @@ label.inl{flex-direction:row;align-items:center;gap:5px;font-size:13px;color:var
 </main>
 <script>
 const H={"Content-Type":"application/json","X-RuleData-UI":"1"};
+const EXT={};   /* 추가 화면 (ui_ext/p*.py): 화면마다 EXT[key]={load(parts){...}} 를 등록한다 */
 const $=id=>document.getElementById(id), fmt=n=>(n??0).toLocaleString("ko-KR");
 async function post(u,b){const r=await fetch(u,{method:"POST",headers:H,body:JSON.stringify(b||{})});const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
 async function get(u){const r=await fetch(u);const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.status);return j}
@@ -4960,11 +5042,12 @@ let S=null,P=null,M=null,flagNames={},rOff=0,page="progress";
 function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]))}
 function chip(f){return `<span class="chip f-${f}">${esc(flagNames[f]||f)}</span>`}
 /* ── 페이지 전환 ── */
-function route(){const parts=location.hash.replace(/^#\/?/,"").split("/"),h=parts[0];page={"":"progress",run:"run",rules:"rules",data:"data",features:"features",sup:"sup"}[h]||"progress";
+function route(){const parts=location.hash.replace(/^#\/?/,"").split("/"),h=parts[0];page={"":"progress",run:"run",rules:"rules",data:"data",features:"features",sup:"sup"}[h]||(EXT[h]?h:"progress");
  document.querySelectorAll(".page").forEach(s=>s.classList.toggle("on",s.id==="p-"+page));
  document.querySelectorAll("nav a").forEach(a=>a.classList.toggle("on",a.dataset.p===page));
  if(page==="rules")loadRules();if(page==="data")initData();if(page==="run"||page==="progress")loadState();if(page==="run"){loadExcluded();loadModels()}if(page==="progress")loadProgress();
- if(page==="features")loadFeatures(parts[1]?decodeURIComponent(parts[1]):"");if(page==="sup")loadSup()}
+ if(page==="features")loadFeatures(parts[1]?decodeURIComponent(parts[1]):"");if(page==="sup")loadSup();
+ if(EXT[page]&&EXT[page].load)EXT[page].load(parts)}
 window.addEventListener("hashchange",route);
 /* ── 2. 생성·수집 ── */
 async function loadState(){S=await get("/api/state");const g=S.generation,c=S.collect,a=S.agent,run=g.run,rdo=S.redo||{},redo=String((g.lock||{}).by||"").includes("redo");
@@ -6085,7 +6168,7 @@ async function tick(){try{await loadState();const running=S.generation.running;
 
 class Server(ThreadingHTTPServer):
     """다른 프로그램이 같은 포트를 쓰고 있으면 확실히 실패하게 (Windows 는 0.0.0.0 과 127.0.0.1 을 겹쳐 열 수 있음)."""
-    allow_reuse_address = False
+    allow_reuse_address = os.name != "nt"   # 리눅스: 방금 끈 화면의 연결 (TIME_WAIT) 때문에 같은 포트를 못 열고 다음 포트로 넘어가는 것을 막음 (리눅스의 SO_REUSEADDR 는 다른 프로그램이 듣는 포트를 겹쳐 열지 않는다)
 
     def server_bind(self):
         if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
@@ -6109,6 +6192,7 @@ def main():
     args = ap.parse_args()
     if sys.stdout is not None:          # 윈도우 콘솔(cp949)에서 못 쓰는 글자가 있어도 멈추지 않게
         sys.stdout.reconfigure(errors="replace")
+    load_ext()                          # 추가 화면 (ui_ext 폴더가 있을 때만)
     server = None
     for port in range(args.port, args.port + 20):
         if port_busy(port):

@@ -11,7 +11,7 @@
 | 역할 | provider | model | temperature | max_tokens | 설명 |
 | --- | --- | --- | --- | --- | --- |
 | 생성 | upstage | solar-pro4 | 0.9 | 12000 | 룰 → 씨앗 샘플 생성 (`LLM_프롬프트.md`). 다양성을 위해 temperature 를 조금 높게 |
-| 검토 | claude_cli | claude-opus-5-5 | | 32000 | 생성 결과 검토·수정 (`LLM_검토_프롬프트.md`). provider 를 `none` 으로 하면 검토 생략. `claude_cli` 는 max_tokens·temperature 를 쓰지 않음 (CLI 기본값). 추론 강도는 '실행' 표의 '검토 추론 강도' |
+| 검토 | openai | gpt-6-luna | | 32000 | 생성 결과 검토·수정 (`LLM_검토_프롬프트.md`). provider 를 `none` 으로 하면 검토 생략. `claude_cli` 는 max_tokens·temperature 를 쓰지 않음 (CLI 기본값). 추론 강도는 '실행' 표의 '검토 추론 강도' |
 
 - `temperature`를 비워 두면 보내지 않는다 (추론 모델은 temperature 를 지원하지 않음).
 - 검토 모델은 2026-10-22 에 `gpt-5` → `gpt-6-luna` 로 바꿨다. 같은 20건 비교에서 검토 비용 1/20 (요청당 $0.0048 vs $0.0988), 남은 샘플 97.0% vs 96.0%, 코드 검사 실패 샘플을 고쳐 살린 비율 88.9% vs 84.6% (지시문 보강 뒤, `docs/보고용/검토모델_비교_2026-10-22.md`). 더 정밀하게 보려면 `gpt-6.1-sol`(요청당 약 $0.08) 이나 `gpt-5` 로 바꾼다.
