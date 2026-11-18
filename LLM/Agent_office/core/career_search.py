@@ -403,42 +403,86 @@ def _send(url: str, check, timeout: float) -> tuple[bytes, str]:
 
 
 class _PageText(HTMLParser):
-    """HTML → 글자 (표준 라이브러리). 스크립트·스타일은 빼고, 목록은 '- ' 줄로 (JD 요구사항을 코드가 뽑을 수 있게)."""
+    """HTML → 글자 (표준 라이브러리). 스크립트·스타일은 빼고, 목록은 '- ' 줄로 (JD 요구사항을 코드가 뽑을 수 있게).
+    drop_noise 면 메뉴·머리글·바닥글·곁상자·광고·쿠키 안내 상자를 통째로 건너뛴다 — 그 줄이 요구사항으로 뽑히지 않게."""
 
     SKIP = {"script", "style", "noscript", "template", "svg", "iframe"}
     BLOCK = {"p", "div", "br", "tr", "h1", "h2", "h3", "h4", "h5", "h6", "section", "article", "header", "footer", "ul", "ol",
-             "table", "title", "dt", "dd", "blockquote", "pre", "main", "nav"}
+             "table", "title", "dt", "dd", "blockquote", "pre", "main", "nav", "aside", "address"}
+    VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+    NOISE_TAGS = {"nav", "aside"}
+    EDGE = {"header", "footer"}  # 본문(main·article) 밖일 때만 잡음 — 공고 안의 header 에는 제목, footer 에는 마감일이 있다
+    NOISE_ROLES = {"navigation", "banner", "contentinfo", "complementary", "search"}
+    NOISE_WORDS = {"nav", "navbar", "navigation", "gnb", "lnb", "snb", "menu", "breadcrumb", "breadcrumbs", "sidebar", "cookie",
+                   "cookies", "consent", "ad", "ads", "advert", "advertisement", "share", "social", "related", "recommend"}
 
-    def __init__(self):
+    def __init__(self, drop_noise: bool = True):
         super().__init__(convert_charrefs=True)
         self.out: list[str] = []
         self.skip = 0
+        self.drop_noise = drop_noise
+        self.stack: list[tuple[str, str]] = []  # 열린 태그 (이름, "main"|"noise"|"") — 닫는 태그가 빠진 HTML 도 견딘다
+        self.open: dict[str, int] = {}  # 태그 이름별·종류별 열린 수 — 글 조각마다 stack 을 훑지 않게
+        self.kinds = {"main": 0, "noise": 0, "": 0}
+
+    def _kind(self, tag: str, attrs) -> str:
+        a = dict(attrs)
+        role = (a.get("role") or "").lower()
+        if tag in ("main", "article") or role == "main":
+            return "main"
+        if tag in ("html", "body"):
+            return ""
+        names = f"{a.get('class') or ''} {a.get('id') or ''}".strip()
+        words = set(re.split(r"[^a-z0-9]+", names.lower())) if names else set()  # site-header → site, header
+        edge = (tag in self.EDGE or words & self.EDGE) and not self.kinds["main"]
+        return "noise" if tag in self.NOISE_TAGS or role in self.NOISE_ROLES or words & self.NOISE_WORDS or edge else ""
+
+    def _quiet(self) -> bool:
+        return bool(self.skip or self.kinds["noise"])
 
     def handle_starttag(self, tag, attrs):
         if tag in self.SKIP:
             self.skip += 1
-        elif tag == "li":
-            self.out.append("\n- ")
-        elif tag in self.BLOCK:
-            self.out.append("\n")
+            return
+        quiet = self._quiet()
+        if self.drop_noise and tag not in self.VOID:
+            kind = self._kind(tag, attrs)
+            self.stack.append((tag, kind))
+            self.open[tag] = self.open.get(tag, 0) + 1
+            self.kinds[kind] += 1
+        if not quiet and (tag == "li" or tag in self.BLOCK):
+            self.out.append("\n- " if tag == "li" else "\n")
 
     def handle_endtag(self, tag):
         if tag in self.SKIP:
             self.skip = max(0, self.skip - 1)
-        elif tag in self.BLOCK or tag == "li":
+            return
+        while self.open.get(tag):  # 안쪽에 안 닫힌 태그(li·p 등)가 있으면 함께 닫는다
+            name, kind = self.stack.pop()
+            self.open[name] -= 1
+            self.kinds[kind] -= 1
+            if name == tag:
+                break
+        if not self._quiet() and (tag in self.BLOCK or tag == "li"):
             self.out.append("\n")
 
     def handle_data(self, data):
-        if not self.skip:
+        if not self._quiet():
             self.out.append(data)
 
 
-def page_text(html: str) -> str:
-    parser = _PageText()
+def _page_text(html: str, drop_noise: bool) -> str:
+    parser = _PageText(drop_noise)
     parser.feed(html)
     parser.close()
     lines = (re.sub(r"[ \t\xa0]+", " ", line).strip() for line in "".join(parser.out).splitlines())
     return "\n".join(line for line in lines if line and line != "-")
+
+
+def page_text(html: str) -> str:
+    """웹 페이지의 본문 글. 메뉴 등을 거르고 남은 글이 MIN_PAGE_CHARS 보다 적으면 거르지 않은 글 (못 읽는 것보다 잡음 섞인 편이 낫다)."""
+    text = _page_text(html, drop_noise=True)
+    return text if len(re.sub(r"\s", "", text)) >= MIN_PAGE_CHARS else _page_text(html, drop_noise=False)
 
 
 def _decode(data: bytes, content_type: str) -> str:
