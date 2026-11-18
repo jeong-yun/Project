@@ -257,7 +257,7 @@ def test_tool_results_reach_prompts_and_harness(ranks, models, travel, use_scrip
     assert "| 3일차 | 2026-11-22 | 일 | 귀가일 · 주말 |" in script.prompts("text")[0]  # 달력이 실무자 근거 자료로
     assert "오늘 날짜: 2026-10-19 (월)" in script.prompts("text")[0]  # 현 시점 기준
     draft = next(p for k, p in events if k == "step")
-    assert {h.validator for h in draft.harness} == {"itinerary_days", "required_terms", "budget_total"}
+    assert {h.validator for h in draft.harness} == {"itinerary_days", "required_terms", "budget_total", "plain_style"}
     assert all(h.passed for h in draft.harness)
 
 
@@ -279,6 +279,6 @@ def test_travel_final_checks_skip_member_drafts(team_id, ranks, models, use_scri
     assert len(drafts) == 2 and all(not d.harness and d.attempts == 1 for d in drafts)  # 범위 밖 내용을 쓰라고 다시 시키지 않는다
     root = steps[-1]
     assert root.node_id == "gm_itinerary"
-    assert {h.validator for h in root.harness} == {"itinerary_days", "required_terms", "budget_total"}
+    assert {h.validator for h in root.harness} == {"itinerary_days", "required_terms", "budget_total", "plain_style"}  # plain_style: 문체 기록만
     assert all(h.passed for h in root.harness)
     assert "75만 원" in next(h.log for h in root.harness if h.validator == "budget_total")  # 예산 합계 검사는 최종 답변에만 돈다

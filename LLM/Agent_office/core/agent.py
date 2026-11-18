@@ -48,16 +48,19 @@ SECTION_HEAD = re.compile(r"^\[[^\]\n]+\]")  # 스킬의 절 제목 줄 — 줄 
 def skill_sections(skills: str, heads: list[str]) -> str:
     """스킬에서 heads 로 시작하는 절만 남긴다 (heads 가 비면 전문). 코드 블록(```) 안의 '[태그]…' 줄은 절 제목이 아니다.
 
+    '-' 를 붙인 head('-[문체')는 그 절만 뺀다 — 빼는 것만 적으면 나머지는 전문 (예: 실무자에게 최종 답 문체 절을 주지 않기).
     절 = 제목 줄부터 다음 절 제목 줄 앞까지. 첫 절 제목 앞의 머리말('## 스킬: 이름')은 남긴다.
     """
     if not heads:
         return skills
+    drop = tuple(h[1:] for h in heads if h.startswith("-"))
+    only = tuple(h for h in heads if not h.startswith("-"))
     kept, keep, fenced = [], True, False
     for line in skills.split("\n"):
         if line.lstrip().startswith("```"):
             fenced = not fenced
         elif not fenced and SECTION_HEAD.match(line):
-            keep = line.startswith(tuple(heads))
+            keep = (not only or line.startswith(only)) and not line.startswith(drop)
         elif not fenced and line.startswith("## 스킬:"):
             keep = True  # 다음 스킬 파일의 머리말
         if keep:

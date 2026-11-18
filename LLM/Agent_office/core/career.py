@@ -1019,6 +1019,7 @@ def check_changes(answer: str, old: str, source: str, urls: list[str], web_count
 # 경계 예시 2개(6.0~6.6개/1,000자) · AI 티 글 11~25개(30~49개/1,000자). 기준은 그 사이에서 사람 쪽 가까이 두고, 짧은 글은 개수 하한으로 지킨다.
 # 문장 길이의 고름(변동계수)과 '문단 끝 다짐' 비율도 쟀지만 두 무리가 겹쳐(사람 0.44~0.48 · AI 0.27~0.44) 기준에 넣지 않았다.
 STYLE_SKILL = TEAMS_DIR / "career" / "skills" / "natural_style.md"
+PLAIN_STYLE_SKILL = TEAMS_DIR / "_shared" / "style" / "plain_style.md"  # 다른 팀 공용 목록 — 같은 방식으로 세되 기록만 (검증기 plain_style)
 STYLE_LIST_HEAD = "[문체 — 피할 표현"
 STYLE_MIN_HITS = 5  # 상투 표현이 이만큼은 있어야 '쌓였다'고 본다 (짧은 글이 한두 개로 실패하지 않게)
 STYLE_PER_1000 = 8.0  # 1,000자당 상투 표현 수 — 이 이상이면 다시 쓴다
@@ -1088,9 +1089,12 @@ class StyleCheck:
         return sorted(seen.items(), key=lambda kv: -kv[1])
 
 
-def check_style(answer: str, source: str = "", questions: list[int] | None = None) -> StyleCheck:
-    """AI 가 쓴 글 티 세기 — source(내 문서)에 글자 그대로 있는 문장은 내 글이므로 세지 않는다."""
-    phrases, mine, result = avoid_phrases(), _flat(source), StyleCheck()
+def check_style(answer: str, source: str = "", questions: list[int] | None = None,
+                phrases: list[AvoidPhrase] | None = None) -> StyleCheck:
+    """AI 가 쓴 글 티 세기 — source(내 문서)에 글자 그대로 있는 문장은 내 글이므로 세지 않는다.
+
+    phrases 를 주면 그 목록으로 센다 (공용 문체 스킬 _shared/style 의 목록 — 검증기 plain_style). 없으면 커리어부 목록."""
+    phrases, mine, result = avoid_phrases() if phrases is None else phrases, _flat(source), StyleCheck()
     for sent in _sentences(style_text(answer, questions)):
         sent = sent.strip()
         if len(_flat(sent)) >= 10 and _flat(sent) in mine:

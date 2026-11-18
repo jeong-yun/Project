@@ -54,7 +54,8 @@ free_examples:
     constraints: [금요일 저녁 출발 기준]
     output_format: 비교 표 → 추천
 
-skills_from: [_shared/travel]
+# 공용 문체 스킬 — AI 가 쓴 티가 나는 글버릇 피하기 (최종 답·통합을 쓰는 팀원만, 실무자는 skill_sections "-[문체" 로 뺌)
+skills_from: [_shared/travel, _shared/style]
 legacy: {team: travel, match: 국내 여행}
 
 personas:
@@ -80,10 +81,12 @@ org:
           rank: assistant_manager
           name: 대리·명소체험
           specialty: 명소·체험·운영시간·예약 정보 (지역 축제·휴무일)
+          skill_sections: ["-[문체"]
         - id: staff_food
           rank: staff
           name: 사원·맛집
           specialty: 지역 맛집·카페·식사 동선
+          skill_sections: ["-[문체"]
     - id: gm_logistics
       rank: gm
       name: 부장·교통숙박
@@ -93,10 +96,12 @@ org:
           rank: assistant_manager
           name: 대리·교통숙소
           specialty: KTX·SRT·고속버스·렌터카·주차, 국내 숙소(호텔·펜션·한옥) 위치·가격대
+          skill_sections: ["-[문체"]
         - id: staff_prep
           rank: staff
           name: 사원·준비물
           specialty: 그 시기 날씨·준비물·주의사항 (명절·연휴 교통 혼잡, 예매 시점)
+          skill_sections: ["-[문체"]
 
 review_criteria:
   - 여행 기간의 모든 날(날짜·요일)에 일정이 있는가 (여행 달력과 일치)
@@ -117,8 +122,8 @@ search:
   max_total_results: 12
 
 harness:
-  validators: [itinerary_days, required_terms]
-  final_only: [itinerary_days, required_terms, budget_total]   # 팀원(맛집·준비물 등)은 일부만 쓰므로 계획서 전체 검사는 최종 답변에만
+  validators: [itinerary_days, required_terms, plain_style]
+  final_only: [itinerary_days, required_terms, budget_total, plain_style]   # 팀원(맛집·준비물 등)은 일부만 쓰므로 계획서 전체 검사는 최종 답변에만
   max_retries: 2
 
 tasks:
