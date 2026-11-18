@@ -2696,6 +2696,25 @@
     Agent Office 는 README 대로 폴더의 `.venv` 에 설치하거나, AI_Agent 도 1.x 로 올린다(따로 작업).
   - 막는 모드를 켜 두는 것(`LANGGRAPH_STRICT_MSGPACK=true`)은 검토만 — 지금은 경고만 나온다(서버 기록에 DesiredState·AgentAnswer 등 '등록 안 된 타입' 경고, 타입마다 한 번).
 
+## 2026-11-18
+
+**📦 이 PC Python 에 두 앱(Agent Office · AI_Agent) 1.x 패키지 설치 · requirements 를 한국어 Windows pip 가 그대로 읽게**
+- 배경: main 이 langchain·langgraph 1.x 로 바뀌었는데 이 PC 의 pyenv Python 3.11.9(앱 실행·올리기 전 검사가 쓰는 것)는 0.x 그대로였다. 설치 명령을 미리 돌려 보니(`--dry-run`) pip 24.0 이
+  `requirements.txt` 의 한글 주석을 시스템 인코딩(cp949)으로 읽다가 `UnicodeDecodeError` 로 멈췄다 — README·검사 안내의 `pip install -r` 명령이 이 PC 에서는 그대로 실패하던 것.
+- 작업:
+  - 같은 Python 을 쓰는 다른 작업이 멈춘 것을 확인한 뒤, 설치 전 버전 목록을 저장소 밖에 남기고(`pip freeze`, 243줄) 두 목록을 한 번에 설치:
+    `pip install -r LLM/Agent_office/requirements-dev.txt -r LLM/AI_Agent/requirements.txt` → 27개 바뀜 (langchain-core 0.3.46 → 1.8.2, langgraph 0.5.4 → 1.2.22, openai 1.67 → 3.54, streamlit 1.43.2 → 1.66.1, pillow 11.3 → 13.0 등).
+  - requirements 세 파일(`Agent_office/requirements.txt` · `requirements-dev.txt` · `AI_Agent/requirements.txt`) 첫 줄에 `# -*- coding: utf-8 -*-` — pip 는 첫 두 줄의 인코딩 표시를 보고 그 인코딩으로 읽는다.
+    `PYTHONUTF8=1` 같은 환경 변수를 문서마다 적는 대신 파일 한 줄로 고쳐, 이미 흩어져 있는 설치 안내(README · `docs/올리기_전_검사.md` · `tools/prepush/first_setup.py`)를 그대로 둘 수 있다.
+  - README '최신 코드로 업데이트'에 1.x 전환 안내: 그 전에 설치한 PC 는 다시 설치, AI_Agent 와 같은 Python 이면 두 목록을 한 번에.
+- 기술: pip `--dry-run` 으로 바뀔 패키지를 먼저 보기, 설치된 모든 패키지의 의존 범위를 새 버전과 대조하는 읽기 전용 스크립트, pip 의 PEP 263 식 인코딩 표시 읽기.
+- 성과:
+  - 고치기 전 같은 명령(UTF-8 모드 없이) `UnicodeDecodeError` → 고친 뒤 오류 없이 읽음(모두 '이미 설치됨').
+  - 설치 뒤 이 PC Python 으로 AI_Agent **61 통과**(29초), Agent Office 전체 **1,434 통과**(19분 54초) — 이제 올리기 전 검사도 1.x 로 돈다.
+  - `pip check` 경고 5줄은 저장소 밖에서 깔아 둔 0.3 계열 `langchain` · `langchain-community` · `langchain-text-splitters` 뿐(저장소 코드는 import 하지 않음 — 미리 대조한 그대로).
+- 확인 못 한 것: 실제 모델 호출과 실제 화면(Streamlit 1.66.1 로 처음 켬). 같은 Python 을 쓰는 저장소 밖 작업은 코드에서 바뀐 패키지를 직접 import 하지 않는 것만 읽어서 확인.
+- 다음 할 일: 실행용 사본 갱신 뒤 앱을 켜서 첫 화면·업무 하나 확인(`results/review_1110/화면_확인_목록.md`).
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

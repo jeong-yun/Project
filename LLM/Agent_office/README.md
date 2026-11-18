@@ -279,6 +279,10 @@ pip install -r requirements.txt   # 새 패키지가 추가됐을 수 있으므�
 streamlit run app.py
 ```
 
+> **2026-11-17 부터 langchain·langgraph 1.x** 입니다(0.x 에서 올림). 그 전에 설치한 PC 는 위 `pip install -r requirements.txt` 를 꼭 다시 실행하세요.
+> 같은 Python 에 `LLM/AI_Agent` 도 쓰면 두 목록을 한 번에 설치합니다: `pip install -r requirements.txt -r ../AI_Agent/requirements.txt` (두 앱의 범위가 맞춰져 있어 충돌 없음).
+> 예전에 따로 깔아 둔 0.3 계열 `langchain`·`langchain-community`·`langchain-text-splitters` 가 남아 있으면 `pip check` 에 짝이 안 맞는다는 경고가 나오는데, 이 앱은 그 패키지들을 쓰지 않습니다.
+
 > 두 PC 에서 번갈아 작업할 때는 **작업 시작 전 `git pull`, 끝나면 `git add` → `git commit` → `git push`** 순서를 지키면 충돌이 생기지 않습니다.
 > 자세한 Git 사용법은 [GIT_GUIDE.md](GIT_GUIDE.md) 참고.
 
