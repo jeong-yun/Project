@@ -340,10 +340,10 @@ def test_education_department_and_team_config(teams):
         assert [x.id for x in t.tasks][:3] == ["create_tutor", "quiz", "ask"]  # 공용 업무 3개가 맨 앞 (2·3단계는 뒤에 추가)
         assert 3 <= len(t.org.walk()) <= 6 and t.org.name.startswith("선생님")
         assert "선생님 프로필" in t.personas["team_lead"]
-        assert t.harness.validators == ["level_fit"] and {"quiz_format", "json_keys"} <= set(t.harness.final_only)
+        assert t.harness.validators == ["level_fit", "plain_style"] and {"quiz_format", "json_keys"} <= set(t.harness.final_only)
         assert all(any(f.key == "course_id" for f in x.fields) for x in t.tasks[1:3])
         assert {x.fixed.get("edu_kind") for x in t.tasks} == {learning.KIND_OF_TEAM[tid]}  # 모든 업무가 팀 목적을 fixed 로
-        assert t.skills_from == ["_shared/education"] and len(t.free_examples) >= 2
+        assert t.skills_from == ["_shared/education", "_shared/style"] and len(t.free_examples) >= 2
 
 
 def test_education_data_is_git_ignored():

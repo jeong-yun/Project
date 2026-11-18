@@ -78,10 +78,12 @@ org:
               rank: assistant_manager
               name: 대리·팩트체크
               specialty: 출처·수치·용어 검증
+              skill_sections: ["-[문체"]
             - id: staff_draft
               rank: staff
               name: 사원·초안
               specialty: 기본 개념 초안 작성
+              skill_sections: ["-[문체"]
     - id: gm_action
       rank: gm
       name: 부장·실행
@@ -96,6 +98,7 @@ org:
               rank: staff
               name: 사원·사례
               specialty: 사례·예시 조사
+              skill_sections: ["-[문체"]
 
 # 검토자가 공통으로 확인할 체크리스트
 review_criteria:
@@ -106,13 +109,17 @@ review_criteria:
 
 output_format: markdown
 
+# 공용 문체 스킬 — AI 가 쓴 티가 나는 글버릇 피하기 (최종 답·통합을 쓰는 팀원만, 실무자는 skill_sections "-[문체" 로 뺌)
+skills_from: [_shared/style]
+
 # 이 팀에서 사용할 툴. web_search: 답변 전에 웹 검색으로 최신 자료·용어를 확인
 tools: [web_search]
 
 # 결정론적 검증 하네스 (core/harness). 예: [python_syntax, sql_sandbox, json_keys]
 # 범용 팀은 코드가 없는 답변이 대부분이라 기본으로는 파이썬 코드 블록 문법 검사만 켠다 (코드가 없으면 통과).
 harness:
-  validators: [python_syntax]
+  validators: [python_syntax, plain_style]
+  final_only: [plain_style]   # 문체 기록 — 최종 답에만, 경고만 남기고 다시 쓰게 하지 않는다
   max_retries: 2
 
 # 팀별로 직급 모델을 바꾸고 싶을 때 (형식은 config/models.yaml 의 ranks 와 동일)

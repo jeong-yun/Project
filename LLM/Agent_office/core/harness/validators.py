@@ -17,6 +17,7 @@
   career_facts  : 자소서·포트폴리오의 인용이 올린 문서에 글자 그대로 있는지 + 본문 숫자가 문서·JD·문항에 있는지 (core/career.py)
   char_limits   : 자소서 문항마다 답변이 있고 글자 수 제한(공백 포함/제외)을 지키는지 (코드가 센다)
   career_style  : 자소서·포트폴리오가 AI 가 쓴 글처럼 읽히는지 — 상투 표현 쌓임·되풀이, 자소서 줄글 속 굵은 글씨·긴 줄표 (코드가 센다)
+  plain_style   : 다른 팀 최종 답의 글버릇 — career_style 과 같은 세기로 공용 목록(_shared/style)을 세어 기록·경고만 (항상 통과)
   jd_coverage   : JD 요구사항(R1…)을 하나도 빼지 않고 근거 있음/부분/공백으로 판정했는지
   portfolio_format: 포트폴리오 절(요약·역량 표·프로젝트)과 프로젝트 카드 다섯 항목 — 형식 지정이 있으면 원본 절 제목·표 머리글,
                   원본 그림이 있으면 [그림 N] 표시
@@ -493,6 +494,27 @@ class CareerStyleValidator(Validator):
             return self.ok("문체 — 검사할 글 없음")
         return self.ok(f"문체 통과 — 상투 표현 {len(result.hits)}개 (1,000자당 {result.per_1000:.1f}개, 기준은 "
                        f"{career.STYLE_MIN_HITS}개 이상이면서 1,000자당 {career.STYLE_PER_1000:g}개)")
+
+
+@register
+class PlainStyleValidator(Validator):
+    name = "plain_style"
+    description = ("문체 기록 — 공용 스킬 _shared/style/plain_style.md 의 피할 표현을 세어 기록하고, 커리어부와 같은 기준을 넘으면 경고만 "
+                   "남긴다 (다시 쓰게 하지 않음 — 커리어부 외 팀은 기준을 실제 결과로 재 보지 않았다). 굵은 글씨·긴 줄표는 수만 적는다")
+
+    def check(self, answer: str, options: dict):
+        from core import career
+
+        skill = career.PLAIN_STYLE_SKILL.read_text(encoding="utf-8") if career.PLAIN_STYLE_SKILL.exists() else ""
+        result = career.check_style(answer, phrases=career.avoid_phrases(skill))
+        if not result.chars:
+            return self.ok("문체 기록 — 검사할 글 없음")
+        marks = len(career.STYLE_MARK.findall(career.CODE_BLOCK.sub("", answer)))
+        found = ", ".join(f"'{text}' {n}번" for text, n in result.counts()[:8])
+        problems = career.style_problems(result)
+        return self.ok(f"문체 기록 — 상투 표현 {len(result.hits)}개 (1,000자당 {result.per_1000:.1f}개)"
+                       + (f": {found}" if found else "") + f" · 굵은 글씨·긴 줄표 {marks}곳"
+                       + (" · ⚠ 경고(다시 쓰지 않음): " + " / ".join(problems) if problems else ""))
 
 
 @register

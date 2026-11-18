@@ -40,7 +40,8 @@ free_examples:
     output_format: 시대 표 → 한 줄 요약
 private: true
 features: [edu_course]
-skills_from: [_shared/education]
+# 공용 문체 스킬 — AI 가 쓴 티가 나는 글버릇 피하기 (최종 답·통합을 쓰는 팀원만, 실무자는 skill_sections 로 뺌)
+skills_from: [_shared/education, _shared/style]
 
 personas:
   team_lead: >-
@@ -61,6 +62,7 @@ org:
       rank: gm
       name: 부장·커리큘럼 설계
       specialty: 쓰려는 상황(여행·일상·교양)에서 거꾸로 짠 단원 순서·분량·주차, 수준이 바뀌면 남은 단원 다시 짜기
+      skill_sections: ["-[문체"]
     - id: am_assess
       rank: assistant_manager
       name: 대리·평가(퀴즈)
@@ -85,8 +87,8 @@ search:
   hint: "과목 분야(언어·역사·문화)에 '기초 표현', '여행 회화', '입문', '연표' 같은 말을 붙인 검색어를 만든다. 과목 id·사람 이름 같은 개인 정보는 넣지 않는다."
 
 harness:
-  validators: [level_fit]
-  final_only: [level_fit, quiz_format, json_keys, hobby_curriculum, vocab_list, phrase_list, topic_list, review_quiz]  # 3단계 업무 검증기도 최종 답변에만
+  validators: [level_fit, plain_style]
+  final_only: [level_fit, quiz_format, json_keys, hobby_curriculum, vocab_list, phrase_list, topic_list, review_quiz, plain_style]  # 3단계 업무 검증기도 최종 답변에만
   max_retries: 2
 
 verification:

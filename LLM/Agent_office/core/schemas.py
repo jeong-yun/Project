@@ -88,6 +88,7 @@ class OrgNode(BaseModel):
     persona: str = ""  # 비우면 team.personas[rank] → ranks.yaml 의 role 순서로 대체
     avatar: str | None = None  # 이 에이전트 전용 이미지 경로 (선택)
     # 팀 스킬 중 이 에이전트에게 넣을 절 — 절 제목 줄('[1단계·…')의 앞부분 목록. 비우면 스킬 전문 (OrgAgent)
+    #   '-[문체' 처럼 '-' 를 붙이면 그 절만 뺀다 (공용 문체 스킬을 최종 답·통합을 쓰는 팀원에게만 줄 때)
     #   실무자에게 맡은 일에 필요한 절만 주면 프롬프트가 짧아지고, 최종본 형식 같은 남의 일까지 쓰지 않는다
     skill_sections: list[str] = Field(default_factory=list)
     # 실무자 초안의 산출물 범위 — 있으면 브리프의 완료 기준(팀 전체 최종 답변 기준) 대신 이 범위만 쓴다

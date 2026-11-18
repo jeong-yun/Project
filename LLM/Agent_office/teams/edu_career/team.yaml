@@ -51,7 +51,8 @@ free_examples:
     output_format: 표 → 순서
 private: true
 features: [edu_course]
-skills_from: [_shared/education]
+# 공용 문체 스킬 — AI 가 쓴 티가 나는 글버릇 피하기 (최종 답·통합을 쓰는 팀원만, 실무자는 skill_sections 로 뺌)
+skills_from: [_shared/education, _shared/style]
 
 personas:
   team_lead: >-
@@ -72,6 +73,7 @@ org:
       rank: gm
       name: 부장·커리큘럼 설계
       specialty: 목표 직무에서 거꾸로 짠 단원 순서·분량·주차, 수준이 바뀌면 남은 단원 다시 짜기
+      skill_sections: ["-[문체"]
     - id: am_assess
       rank: assistant_manager
       name: 대리·평가(퀴즈)
@@ -96,8 +98,8 @@ search:
   hint: "과목 분야·목표 직무 이름에 '직무 요건', '학습 로드맵', '공식 문서', '입문' 같은 말을 붙인 검색어를 만든다. 과목 id·사람 이름·회사 이름 같은 개인 정보는 넣지 않는다."
 
 harness:
-  validators: [level_fit]
-  final_only: [level_fit, quiz_format, json_keys, roadmap_plan, project_plan, milestone_order, progress_check, jd_advice]
+  validators: [level_fit, plain_style]
+  final_only: [level_fit, quiz_format, json_keys, roadmap_plan, project_plan, milestone_order, progress_check, jd_advice, plain_style]
   max_retries: 2
 
 verification:
