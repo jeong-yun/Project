@@ -74,6 +74,8 @@ org:
           rank: staff
           name: 사원·IaC 분석
           specialty: 발견(F01…)마다 위험 설명 — 어떤 설정이 왜 위험한지, 통제 대응
+          # diff 를 쓰지 않으므로 skills/minimal_change.md 중 '고치는 방향' 절만 (대리·부장·팀장은 diff 를 쓰거나 고치므로 전문)
+          skill_sections: ["[고치는 방향"]
         - id: am_fixer
           rank: assistant_manager
           name: 대리·수정안
