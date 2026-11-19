@@ -172,17 +172,21 @@ def build_office_graph(
         pick = team_lessons(storage, team.id, lesson_chars, question).get(node_id) if storage else None
         return pick.texts if pick else None
 
-    def evidence_parts(state: OfficeState) -> list[str]:
-        """근거 자료 묶음 = 데이터 툴 결과(사실 수치)마다 1개 + 웹 검색 결과 1개."""
+    source_readers = set((team.search.get("source_pages") or {}).get("for") or [])  # 읽은 원문을 받는 팀원 (core/search.read_sources)
+
+    def evidence_parts(state: OfficeState, node_id: str | None = None) -> list[str]:
+        """근거 자료 묶음 = 데이터 툴 결과(사실 수치)마다 1개 + 웹 검색 결과 1개 (+ source_readers 팀원에게는 읽은 원문 1개)."""
         parts = [f"## {t.title}\n{t.content}" for t in state.get("tool_results") or [] if t.content]
         web = state.get("web")
         if web and web.results:
             parts.append("## 🌐 웹 검색 결과\n" + web.as_prompt())
+            if node_id in source_readers and web.pages_prompt():
+                parts.append("## 📄 원문 발췌 (검색 결과 번호 그대로 인용)\n" + web.pages_prompt())
         return parts
 
-    def web_text(state: OfficeState) -> str:
-        """에이전트에게 줄 근거 자료 = 데이터 툴 결과(사실 수치) + 웹 검색 결과."""
-        return "\n\n".join(evidence_parts(state))
+    def web_text(state: OfficeState, node_id: str | None = None) -> str:
+        """에이전트에게 줄 근거 자료 = 데이터 툴 결과(사실 수치) + 웹 검색 결과 (+ 읽은 원문 — source_readers 만)."""
+        return "\n\n".join(evidence_parts(state, node_id))
 
     def emit(event: dict) -> None:
         """화면에 '누가 지금 무엇을 하는지' 알린다 (stream_mode='custom' 이벤트)."""
@@ -336,7 +340,7 @@ def build_office_graph(
             # 하위가 한 명이면 LLM 을 부르지 않고 업무를 그대로 넘긴다 (비용 절약)
             return [(node.children[0].id, task)], None
         emit({"type": "start", "node": node_id, "kind": "plan"})
-        plan = agent.plan(state["brief"].as_prompt(state["question"]), task, web_text(state), lessons)
+        plan = agent.plan(state["brief"].as_prompt(state["question"]), task, web_text(state, node_id), lessons)
         valid = {c.id for c in node.children}
         chosen, seen = [], set()
         for a in plan.delegation.assignments:
@@ -353,7 +357,7 @@ def build_office_graph(
         emit({"type": "start", "node": node_id, "kind": "draft"})
         # 맡은 업무가 최종 답변자의 업무(= 최종 목표)와 다르면 상사가 나눠 준 것 — '[완료 기준]은 팀 전체 기준'이라고 알린다
         split = not quick and task != state["tasks"].get(state["root_id"])
-        messages = agent.draft_messages(state["brief"].as_prompt(state["question"]), task, web_text(state), lessons, split)
+        messages = agent.draft_messages(state["brief"].as_prompt(state["question"]), task, web_text(state, node_id), lessons, split)
         if quick:
             messages = [*messages[:-1], HumanMessage(f"{messages[-1].content}\n\n{QUICK_NOTE}")]
         tag = DRAFT_TAG + node_id
@@ -387,7 +391,7 @@ def build_office_graph(
         """아래 → 위: 검토(1명) / 통합(여러 명) (+ 비평가·자가 교정 + 하네스)."""
         agent = agents[node_id]
         brief: DesiredState = state["brief"]
-        question, web = brief.as_prompt(state["question"]), web_text(state)
+        question, web = brief.as_prompt(state["question"]), web_text(state, node_id)
         kind = "integrate" if len(children) > 1 else "review"
         emit({"type": "start", "node": node_id, "kind": kind})
         messages = agent.review_messages(question, task, children, web, lessons)
