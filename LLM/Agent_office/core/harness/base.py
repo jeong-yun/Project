@@ -11,6 +11,7 @@
   3) team.yaml 의 harness.validators 에 name 을 적는다.
 """
 
+import json
 import re
 from abc import ABC, abstractmethod
 
@@ -45,6 +46,24 @@ def extract_code_blocks(text: str, *langs: str) -> list[str]:
     """마크다운 코드 블록(```lang ... ```) 중 지정한 언어의 내용만 뽑는다."""
     pattern = r"```[ \t]*(" + "|".join(map(re.escape, langs)) + r")[ \t]*\n(.*?)```"
     return [m.group(2) for m in re.finditer(pattern, text, flags=re.DOTALL | re.IGNORECASE)]
+
+
+def json_blocks(text: str, on_error=None):
+    """답변 속 ```json 블록을 차례로 읽어 내준다. 깨진 블록은 건너뛰고, on_error 가 있으면 (블록 글, 오류) 로 알린다."""
+    for src in extract_code_blocks(text or "", "json"):
+        try:
+            data = json.loads(src)
+        except json.JSONDecodeError as e:
+            if on_error:
+                on_error(src, e)
+            continue
+        yield data
+
+
+def find_json(text: str, key: str | None = None, on_error=None) -> dict | None:
+    """key 를 가진(None 이면 아무) 마지막 dict ```json 블록 — 없으면 None. 요약 블록은 답변 맨 끝에 쓰므로 마지막 것이 최종."""
+    blocks = list(json_blocks(text, on_error))
+    return next((b for b in reversed(blocks) if isinstance(b, dict) and (key is None or key in b)), None)
 
 
 def run_validators(names: list[str], answer: str, options: dict) -> list[HarnessResult]:

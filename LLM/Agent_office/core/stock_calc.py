@@ -17,10 +17,9 @@
                                     "take_profit_half", "take_profit_full", "stop_loss"}}
 """
 
-import json
 from dataclasses import dataclass, field
 
-from core.harness.base import extract_code_blocks
+from core.harness.base import find_json
 
 # ─── 판단(7개 항목 루브릭) ──────────────────────────────────────────
 
@@ -57,25 +56,6 @@ class CheckResult:
     problems: list[str] = field(default_factory=list)  # 틀린 곳 (하네스가 다시 쓰게 함)
     computed: dict = field(default_factory=dict)  # 코드가 계산한 값 (화면 검산표)
     warnings: list[str] = field(default_factory=list)  # 틀린 건 아니지만 사람이 볼 점
-
-
-# ─── JSON 블록 찾기 ─────────────────────────────────────────────────
-
-
-def json_blocks(answer: str) -> list:
-    """답변 속 ```json 블록을 파싱한다 (파싱 안 되는 블록은 건너뜀)."""
-    out = []
-    for src in extract_code_blocks(answer, "json"):
-        try:
-            out.append(json.loads(src))
-        except json.JSONDecodeError:
-            continue
-    return out
-
-
-def find_block(answer: str, key: str) -> dict | None:
-    """key 를 가진 마지막 JSON 객체 — 요약 블록은 '답변 맨 끝'에 쓰게 되어 있어, 통합본에 하위 결과의 블록이 섞여도 맨 끝 것을 검산한다."""
-    return next((b for b in reversed(json_blocks(answer)) if isinstance(b, dict) and key in b), None)
 
 
 def _num(x) -> float | None:
@@ -144,7 +124,7 @@ def stop_band_pct(horizon: str) -> tuple[float, float] | None:
 
 def check_recommend(answer: str, options: dict) -> CheckResult:
     res = CheckResult("recommend")
-    data = find_block(answer, "candidates")
+    data = find_json(answer, "candidates")
     if data is None:
         res.problems.append('"candidates" 목록을 가진 ```json 블록이 없다 (업무 지침의 [JSON 요약] 형식으로 종목별 평가를 답변 맨 끝에 쓴다)')
         return res
@@ -179,7 +159,7 @@ def check_recommend(answer: str, options: dict) -> CheckResult:
 
 def check_scorecard(answer: str, options: dict) -> CheckResult:
     res = CheckResult("scorecard")
-    data = find_block(answer, "scorecard")
+    data = find_json(answer, "scorecard")
     if data is None:
         res.problems.append('"scorecard" 를 가진 ```json 블록이 없다 (7개 항목 점수·composite·verdict 를 출력하라)')
         return res
@@ -224,7 +204,7 @@ def check_scorecard(answer: str, options: dict) -> CheckResult:
 
 def check_trade_plan(answer: str, options: dict) -> CheckResult:
     res = CheckResult("trade_plan")
-    data = find_block(answer, "trade_plan")
+    data = find_json(answer, "trade_plan")
     if data is None:
         res.problems.append('"trade_plan" 을 가진 ```json 블록이 없다 (분할 매수·목표가·손절가·손익비를 출력하라)')
         return res
@@ -289,7 +269,7 @@ def check_trade_plan(answer: str, options: dict) -> CheckResult:
 
 def check_position_plan(answer: str, options: dict) -> CheckResult:
     res = CheckResult("position_plan")
-    data = find_block(answer, "position_plan")
+    data = find_json(answer, "position_plan")
     if data is None:
         res.problems.append('"position_plan" 을 가진 ```json 블록이 없다 (행동·추가 매수·익절가·손절가를 출력하라)')
         return res

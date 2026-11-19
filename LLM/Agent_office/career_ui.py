@@ -25,6 +25,7 @@ import streamlit as st
 from core import career, career_search, followup, llm_factory, search, usage, vision
 from core.config import load_settings
 from core.doc_export import to_docx, to_hwpx
+from core.harness.base import find_json
 from core.schemas import HumanDecision, ModelsConfig, ModelSpec, RankModels, ToolResult
 from core.tools import career_docs
 
@@ -563,7 +564,7 @@ def _kind(inputs: dict, text: str) -> str:
     """업무 종류 — 입력값이 없으면(되살린 업무) 답변 모양으로."""
     if inputs.get("career_kind"):
         return str(inputs["career_kind"])
-    data = career.answer_json(text) or {}
+    data = find_json(text) or {}
     if "jd_fit" in data:
         return "jd_recommend"
     if "changes" in data or "no_changes" in data:
@@ -625,7 +626,7 @@ def build(run: dict, text: str) -> dict:
            "split": word != markdown, "template": bool(fmt_opts.get("template")),
            "missing_figures": career.missing_figures(text, len(figures)) if figures else [],
            "ranking": career.ranked(career.score_jds(text, jds, source)) if kind == "jd_recommend" and jds else [],
-           "changes": career._items(career.answer_json(text), "changes") if kind == "portfolio_update" else [],
+           "changes": career._items(find_json(text), "changes") if kind == "portfolio_update" else [],
            "change_problems": career.check_changes(text, str(opts["career_old_portfolio"]), source or "",
                                                    list(opts.get("career_web_urls") or []), int(opts.get("career_web_count") or 0),
                                                    str(opts.get("career_reference") or ""))

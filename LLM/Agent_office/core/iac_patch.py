@@ -13,14 +13,13 @@
 """
 
 import difflib
-import json
 import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from core import iac
-from core.harness.base import extract_code_blocks
+from core.harness.base import extract_code_blocks, find_json
 
 STATUS_LABEL = {"fixed": "✅ 고침", "not_fixed": "❌ 못 고침", "not_attempted": "· 시도 안 함"}
 
@@ -140,17 +139,6 @@ def _resolve(path: str, files: dict[str, str]) -> str | None:
 # ─── 답변 JSON ──────────────────────────────────────────────────────────
 
 
-def answer_json(answer: str) -> dict:
-    for src in reversed(extract_code_blocks(answer, "json")):
-        try:
-            data = json.loads(src)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            return data
-    return {}
-
-
 def norm_id(raw) -> str:
     m = re.fullmatch(r"\s*[Ff]0*(\d+)\s*", str(raw))
     return f"F{int(m.group(1)):02d}" if m else str(raw).strip()
@@ -209,7 +197,7 @@ def verify(files: dict[str, str], answer: str, require_fix: bool = False, cover_
     """답변의 수정안을 사본에 적용해 재검사한다. 원본 files 는 바꾸지 않는다."""
     before = iac.scan_files(files)
     by_id = before.by_id()
-    data = answer_json(answer)
+    data = find_json(answer) or {}
     problems: list[str] = []
 
     listed = _ids(data.get("findings")) + _ids(data.get("fixes"), "findings") + _ids(data.get("not_attempted"))

@@ -13,7 +13,6 @@ LLM 이 통제 점검 보고서를 쓰면 가장 위험한 실수는 두 가지�
 """
 
 import difflib
-import json
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -23,7 +22,7 @@ from pathlib import Path
 import yaml
 
 from core.config import BASE_DIR, CONFIG_DIR
-from core.harness.base import extract_code_blocks
+from core.harness.base import find_json
 
 CONTROLS_DIR = CONFIG_DIR / "controls"
 FRAMEWORK_FILES = {"ISMS-P": "isms_p.yaml", "ISO/IEC 27001:2022": "iso27001_2022.yaml", "NIST CSF 2.0": "nist_csf_2.yaml"}
@@ -98,18 +97,6 @@ _STRONG_ID = {
 }
 
 
-def answer_json(answer: str) -> dict | None:
-    """답변 맨 끝 ```json 블록 (없거나 깨졌으면 None — 형식은 json_keys 검증기가 본다)."""
-    for src in reversed(extract_code_blocks(answer, "json")):
-        try:
-            data = json.loads(src)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
-
-
 def json_controls(data: dict | None) -> list[dict]:
     items = (data or {}).get("controls")
     return [c for c in items if isinstance(c, dict)] if isinstance(items, list) else []
@@ -126,7 +113,7 @@ def _canon(fw: Framework, raw: str) -> str:
 def cited_ids(answer: str, fw: Framework) -> list[tuple[str, str]]:
     """답변이 통제 번호로 쓴 것 [(번호, 어디서)] — JSON control_id · 표 첫 칸 · 본문의 분명한 번호 모양."""
     found: list[tuple[str, str]] = []
-    for c in json_controls(answer_json(answer)):
+    for c in json_controls(find_json(answer)):
         cid = str(c.get("control_id") or "").strip()
         if cid:  # 'ISMS-P 2.5.6' 처럼 앞에 이름을 붙여도 번호만 본다. 번호 모양이 없으면 통째로 검사
             found += [(m, "JSON") for m in _ID_TOKEN.findall(cid)] or [(cid, "JSON")]
@@ -166,7 +153,7 @@ def check_control_ids(answer: str, framework: str) -> IdCheck:
         elif fw.name.startswith("ISO") and cid.count(".") == 2:
             out.hints.append(f"{cid} 은 2013판 모양(세 단계) 번호다 — 2022판은 5.1~8.34 두 단계")
     if fw.name == "ISMS-P":  # 이름이 한국어로 고정돼 있어 번호-이름 짝도 확인할 수 있다 (ISO·CSF 는 번역해 쓰므로 번호만)
-        for c in json_controls(answer_json(answer)):
+        for c in json_controls(find_json(answer)):
             cid, title = str(c.get("control_id") or "").strip(), str(c.get("title") or "").strip()
             if cid in fw.controls and title and not _names_match(title, fw.controls[cid]):
                 out.name_mismatch.append(f"{cid} 는 '{fw.controls[cid]}' (답변: '{title}')")
@@ -210,7 +197,7 @@ class QuoteCheck:
 def check_quotes(answer: str, evidence_text: str) -> QuoteCheck:
     source = normalize_text(evidence_text)
     out = QuoteCheck(0)
-    for c in json_controls(answer_json(answer)):
+    for c in json_controls(find_json(answer)):
         cid = str(c.get("control_id") or c.get("title") or "?")
         snippets = quote_snippets(c.get("evidence"))
         status = str(c.get("status") or "").strip()
@@ -278,7 +265,7 @@ def drift_lines(drift: str) -> tuple[int, int]:
 
 def answer_metrics(answer: str, options: dict) -> dict:
     """보고서 한 건의 측정값 — 설계 문서 9장 '지어낸 통제 번호 수, 인용 불일치 수' (자율 실행 감사 로그·실측 기록용)."""
-    out: dict = {"controls": len(json_controls(answer_json(answer)))}
+    out: dict = {"controls": len(json_controls(find_json(answer)))}
     framework = options.get("control_framework")
     if framework:
         ids = check_control_ids(answer, framework)

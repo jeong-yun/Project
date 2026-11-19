@@ -25,7 +25,7 @@ from pathlib import Path
 from core.brief import DesiredState
 from core.catalog import CATEGORY_FILES, LEGACY_FILES, TAGS, Catalog, Entry, is_header, today_label, with_updated_date
 from core.config import TEAMS_DIR, load_skills, shared_rules_path
-from core.harness.base import extract_code_blocks
+from core.harness.base import json_blocks
 from core.search import neutralize
 
 ACTIONS = {"add": "추가", "update": "수정", "delete": "삭제"}
@@ -242,12 +242,7 @@ def parse_result(answer: str, options: dict | None = None, adopted: bool = False
     res = ConceptResult(thought=log, final_entry=entry, change_notes=notes, outside=outside_text(answer))
     after = re.split(r"</final>", answer, flags=re.IGNORECASE)[-1] if "</final>" in answer.lower() else answer
     res.summary_md = re.sub(r"```json.*?```", "", after, flags=re.DOTALL).strip()
-    for src in extract_code_blocks(answer, "json"):
-        try:
-            data = json.loads(src)
-        except json.JSONDecodeError as e:
-            res.problems.append(f"적용 계획 JSON 파싱 오류: {e.msg}")
-            continue
+    for data in json_blocks(answer, lambda _src, e: res.problems.append(f"적용 계획 JSON 파싱 오류: {e.msg}")):
         if isinstance(data, dict) and "concept_plan" in data:
             res.plan, fixes = normalize_plan(data["concept_plan"])
             res.problems += fixes
