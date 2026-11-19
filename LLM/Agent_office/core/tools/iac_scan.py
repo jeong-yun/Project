@@ -10,7 +10,6 @@
 하네스에 넘기는 값: iac_files(수정안 재검사 검증기 iac_fix — 원본 전부) · control_framework(통제 번호 검증기) · iac_source
 """
 
-import os
 import re
 
 from core import iac
@@ -86,7 +85,7 @@ def run(question: str, inputs: dict, models: ModelsConfig) -> ToolResult | None:
     parts += [p for p in (iac.fix_guide(scan), warning) if p]
     if scan.errors:
         parts.append("### 구문 오류 (이 파일은 규칙 검사를 못 했다)\n" + "\n".join(f"- {f}: {e}" for f, e in scan.errors.items()))
-    use_external = inputs.get("external", True) is not False and os.getenv("AGENT_OFFICE_IAC_EXTERNAL", "1") != "0"
+    use_external = inputs.get("external", True) is not False
     tools = iac.available_scanners() if use_external else []
     if tools:
         ext, ext_notes = iac.run_external(files, tools)

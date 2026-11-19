@@ -407,10 +407,9 @@ def resolve_avatar(team_id: str, rank: Rank, working: bool = False, node: OrgNod
     """아바타 이미지 경로를 찾는다. 없으면 None (화면에서 emoji 로 대체).
 
     찾는 순서 (먼저 찾은 것을 사용):
-      1) node.avatar 로 지정한 파일
-      2) teams/<팀>/avatars/<에이전트id>.png   ← 에이전트 한 명만 바꾸고 싶을 때
-      3) teams/<팀>/avatars/<직급id>.png       ← 팀 전체에서 직급 이미지를 바꿀 때
-      4) assets/avatars/<직급id>.png           ← 공용 기본 이미지
+      1) teams/<팀>/avatars/<에이전트id>.png   ← 에이전트 한 명만 바꾸고 싶을 때
+      2) teams/<팀>/avatars/<직급id>.png       ← 팀 전체에서 직급 이미지를 바꿀 때
+      3) assets/avatars/<직급id>.png           ← 공용 기본 이미지
     working=True 면 각 단계에서 '<이름>_working.png'(답변·검토 중 이미지)를 먼저 찾는다.
     """
     team_dirs = [TEAMS_DIR / team_id / "avatars"]
@@ -420,9 +419,6 @@ def resolve_avatar(team_id: str, rank: Rank, working: bool = False, node: OrgNod
     common = BASE_DIR / rank.avatar if rank.avatar else None
 
     candidates: list[tuple[Path, str]] = []  # (폴더, 파일 이름에서 확장자 뺀 부분)
-    if node and node.avatar:
-        custom = BASE_DIR / node.avatar
-        candidates.append((custom.parent, custom.stem))
     for team_dir in team_dirs:
         if node:
             candidates.append((team_dir, node.id))

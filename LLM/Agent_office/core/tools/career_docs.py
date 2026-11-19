@@ -458,12 +458,6 @@ def read_portfolios(inputs: dict) -> tuple[list[DocText], list[str]]:
     return olds, notes
 
 
-def read_portfolio(inputs: dict) -> tuple[DocText | None, list[str]]:
-    """첫 번째 지금 포트폴리오 (예전 호출과 같은 모양)."""
-    olds, notes = read_portfolios(inputs)
-    return (olds[0] if olds else None), notes
-
-
 def read_jd(inputs: dict) -> tuple[str, list[str]]:
     parts, notes = [_pasted_jd(inputs)], []
     paths = _paths(inputs.get("jd_file"))

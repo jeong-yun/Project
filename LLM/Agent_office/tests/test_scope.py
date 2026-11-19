@@ -3,6 +3,7 @@
 실제 모델 호출 없음: 부서장 배정은 가짜 함수 또는 Script, 키 없음이면 낱말 비교로 떨어진다.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,11 @@ from core.agent import OrgAgent
 from core.config import list_teams, load_models, load_ranks, load_team, team_org, validate_config
 from core.followup import FollowupResult
 from tests.fakes import Script
+
+
+def read_log(path: Path) -> list[dict]:
+    """앱이 쓴 범위 판단 기록 data/scope_log.jsonl 의 줄들."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 APP = str(Path(__file__).resolve().parent.parent / "app.py")
 TRAVEL_Q = "다음 달 오사카 3박 4일 가족 여행 계획 세워줘"
@@ -134,7 +140,7 @@ def test_decisions_are_logged(tmp_path, teams):
     stock = by_id(teams, "stock")
     scope.log_decision(log, stock, TRAVEL_Q, {"in_scope": False, "team_id": "travel_abroad", "stage": "router",
                                               "reason": "r", "model": "", "note": ""})
-    rows = scope.read_log(log)
+    rows = read_log(log)
     assert rows[0]["team"] == "stock" and rows[0]["team_id"] == "travel_abroad" and rows[0]["in_scope"] is False
 
 
@@ -205,7 +211,7 @@ def test_off_topic_question_is_blocked_and_button_goes_to_right_team(app_env):
     assert not at.exception, at.exception
     assert app_env["started"] == []  # 실행하지 않았다
     assert "주식 팀** 범위가 아닙니다 — **🌏 해외 여행팀**(여행부)이 맞습니다" in at.error[0].value
-    row = scope.read_log(app_env["data"] / "scope_log.jsonl")[-1]
+    row = read_log(app_env["data"] / "scope_log.jsonl")[-1]
     assert (row["team_id"], row["stage"], row["model"]) == ("travel_abroad", "router_keyword", "")  # 키 없음 → 모델 없이 낱말 비교
     assert not any(b.label.startswith("그래도") for b in at.button)  # '그래도 실행'은 없다
     at = at.button(key="scope_go_stock").click().run()
@@ -217,7 +223,7 @@ def test_off_topic_question_is_blocked_and_button_goes_to_right_team(app_env):
 
 def test_edit_button_clears_block_and_keeps_question(app_env):
     at = submit(open_team("stock"), TRAVEL_Q)  # 키 없음 → 낱말 비교로 막힌다
-    assert scope.read_log(app_env["data"] / "scope_log.jsonl")[-1]["stage"] == "router_keyword"
+    assert read_log(app_env["data"] / "scope_log.jsonl")[-1]["stage"] == "router_keyword"
     at = at.button(key="scope_edit_stock").click().run()
     assert not at.exception and not at.error
     assert at.text_area(key="q_text").value == TRAVEL_Q
@@ -227,7 +233,7 @@ def test_in_scope_question_runs(app_env):
     at = submit(open_team("stock"), "삼성전자 지금 사도 될까?")
     assert not at.exception, at.exception
     assert app_env["started"] == ["삼성전자 지금 사도 될까?"]
-    assert scope.read_log(app_env["data"] / "scope_log.jsonl")[-1]["in_scope"] is True
+    assert read_log(app_env["data"] / "scope_log.jsonl")[-1]["in_scope"] is True
 
 
 def test_structured_task_form_is_not_scope_checked(app_env):

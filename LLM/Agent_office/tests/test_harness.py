@@ -99,7 +99,6 @@ def test_critic_passed_ignores_minor_violations_by_default():
 
     minor = make_critic(4, violations=["표현"], severity="minor")
     assert critic_passed(minor, 4)
-    assert not critic_passed(minor, 4, fail_on="any")  # 이전 동작
     assert not critic_passed(make_critic(5, violations=["숫자 오류"], severity="severe"), 4)
     assert not critic_passed(make_critic(3), 4)
     assert critic_passed(None, 4)

@@ -13,7 +13,6 @@ core/floorplan.py 의 resolve 가 부른다. 시간 안에 답을 못 찾으면 
 
 import json
 import math
-import os
 from bisect import bisect_left
 from dataclasses import dataclass, field
 
@@ -54,8 +53,7 @@ FRONT_DOOR_LEN = 1.2  # 현관 바깥문 자리
 STAIR_SIZE = (2.4, 3.0)  # 꺾인 계단 (m)
 TIME_LIMIT = 10.0  # 후보 하나(층 하나)의 최대 풀이 시간 (초) — 방이 적으면 줄인다 (auto_time_limit)
 WORKERS = 8
-# CPU 부하에 강하게: 작업량(결정적 시간)이 모자라면 이어서 푼다 (solve_model). 환경 변수 FLOORPLAN_STOP=wall 이면 예전 방식
-STOP_MODE = os.environ.get("FLOORPLAN_STOP", "det")
+# CPU 부하에 강하게: 작업량(결정적 시간)이 모자라면 이어서 푼다 (solve_model)
 DET_PER_SEC = 0.3  # 이 PC(i5-1135G7 4코어/8스레드) 측정: 한가할 때 벽시계 1초에 결정적 시간 0.22~0.66(중앙 약 0.5), 바쁠 때 0.15~0.4 → 한가할 땐 대개 첫 풀이로 끝나게 낮게
 WALL_CAP = 2.5  # 이어 풀어도 벽시계는 time_limit × 2.5 까지만
 LAST_STATS: dict = {}  # 마지막 풀이의 벽시계·결정적 시간·목표값 (측정용)
@@ -911,12 +909,12 @@ def work_budget(time_limit: float) -> float:
 def solve_model(m: cp_model.CpModel, time_limit: float, seed: int = 0) -> tuple[int, list[int]]:
     """풀이 + 바쁜 PC 보정 → (상태, 변수 값 목록[변수 번호]).
 
-    STOP_MODE 'det'(기본): 벽시계 time_limit 초 동안 쌓인 작업량(결정적 시간)이 work_budget 에 못 미치고 최적도 아니면
+    벽시계 time_limit 초 동안 쌓인 작업량(결정적 시간)이 work_budget 에 못 미치고 최적도 아니면
     (다른 실험이 CPU 를 쓰는 중), 지금까지의 최선 답을 출발점(hint)으로 이어서 푼다 — 벽시계는 time_limit × WALL_CAP 까지.
     한가한 PC 에서는 첫 풀이로 끝나 예전과 같은 시간이 든다. CP-SAT 의 max_deterministic_time 은 병렬(비 interleave) 풀이에서
-    지켜지지 않아(측정: README 7-5) 직접 잰다. 'wall': 예전처럼 한 번만.
+    지켜지지 않아(측정: README 7-5) 직접 잰다.
     """
-    budget, cap = work_budget(time_limit), time_limit * (WALL_CAP if STOP_MODE == "det" else 1.0)
+    budget, cap = work_budget(time_limit), time_limit * WALL_CAP
     best: tuple[float, int, list[int]] | None = None
     status, wall, det, rounds, chunk = cp_model.UNKNOWN, 0.0, 0.0, 0, time_limit
     while True:
@@ -930,7 +928,7 @@ def solve_model(m: cp_model.CpModel, time_limit: float, seed: int = 0) -> tuple[
             best = (solver.ObjectiveValue(), status, list(solver.ResponseProto().solution))
         done = status in (cp_model.OPTIMAL, cp_model.INFEASIBLE, cp_model.MODEL_INVALID)
         enough = det >= budget and best is not None  # 답이 아직 없으면 작업량과 상관없이 벽시계 한도까지 찾는다
-        if done or STOP_MODE != "det" or enough or wall >= cap - 0.5:
+        if done or enough or wall >= cap - 0.5:
             break
         chunk = max(1.0, min(time_limit, cap - wall))
         if best is not None:  # 최선 답에서 이어서

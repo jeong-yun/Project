@@ -146,11 +146,6 @@ def blocked_message(decision: dict, team: Team, teams: list[Team], cfg: dict | N
     return f"이 질문은 **{team.name}** 범위가 아닙니다 — **{other.name}**" + (f"({dept})" if dept else "") + "이 맞습니다."
 
 
-def summary_line(team: Team) -> str:
-    """'이 팀이 다루는 질문: …' 한 줄 (scope 없으면 빈 글)."""
-    return team.scope.summary if team.scope else ""
-
-
 def log_decision(path: Path, team: Team, question: str, decision: dict) -> None:
     """범위 판단 한 줄 기록 (data/scope_log.jsonl) — 실패해도 업무를 막지 않는다."""
     row = {"ts": round(time.time(), 1), "team": team.id, "question": question[:300], **decision}
@@ -160,10 +155,3 @@ def log_decision(path: Path, team: Team, question: str, decision: dict) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except OSError:
         pass
-
-
-def read_log(path: Path, limit: int = 200) -> list[dict]:
-    if not Path(path).exists():
-        return []
-    rows = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
-    return rows[-limit:]

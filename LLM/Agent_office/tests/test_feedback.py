@@ -11,7 +11,7 @@ from core.feedback import generate_lessons, rule_based_lessons
 from core.schemas import AgentAnswer, HumanDecision, Lesson, LessonSet, ModelSpec
 from core.storage import Storage
 from core.workflow import build_office_graph, make_checkpointer, resume_with_decision, stream_office
-from tests.fakes import Script, make_review
+from tests.fakes import Script, make_review, prompt_lessons
 from tests.test_workflow import BRIEF, NO_CRITIC, SETTINGS
 
 SPEC = ModelSpec(provider="openai", model="x")
@@ -75,12 +75,12 @@ def test_generate_lessons_falls_back_when_model_fails(org, models, team, use_scr
 # ─── 저장소: 결정한 것만 보관, 미결정은 삭제 ───────────────────────────
 
 
-def test_storage_recent_lessons_respects_limit_and_active(storage):
+def test_prompt_lessons_respect_limit_and_active(storage):
     storage.add_lessons("general", "r1", [Lesson(agent_id="lead", kind="improve", lesson=f"교훈{i}") for i in range(3)])
-    assert storage.recent_lessons("general", "lead", 2) == ["교훈1", "교훈2"]
+    assert prompt_lessons(storage, "general", "lead", 2) == ["교훈1", "교훈2"]
     newest = storage.list_lessons("general", "lead")[0]
     storage.update_lesson(newest["id"], active=False)
-    assert storage.recent_lessons("general", "lead", 2) == ["교훈0", "교훈1"]
+    assert prompt_lessons(storage, "general", "lead", 2) == ["교훈0", "교훈1"]
     assert storage.lesson_counts("general") == {"lead": 2}
 
 
@@ -111,7 +111,7 @@ def test_migrates_old_rank_based_db(tmp_path):
     conn.commit()
     conn.close()
     storage = Storage(path)
-    assert storage.recent_lessons("general", "staff", 5) == ["옛 교훈"]  # 교훈 보존
+    assert prompt_lessons(storage, "general", "staff", 5) == ["옛 교훈"]  # 교훈 보존
     storage.create_run("new", "general", "lead", "질문")  # 새 runs 테이블 동작
 
 
@@ -134,7 +134,7 @@ def test_human_decision_resume_saves_and_injects_lessons(org, ranks, team, model
     decision = HumanDecision(action="adopt", adopted_node_id="am_action", final_answer="보완안", score=4)
     lessons = next(p for k, p in resume_with_decision(graph, org, decision, "run-1") if k == "lessons")
     assert [l.lesson for l in lessons] == ["사원 교훈", "대리 교훈"]
-    assert storage.recent_lessons(team.id, "staff_case", 5) == ["사원 교훈"]
+    assert prompt_lessons(storage, team.id, "staff_case", 5) == ["사원 교훈"]
 
     # 다음 실행: 저장된 교훈이 해당 에이전트의 프롬프트에 주입된다
     script.calls.clear()

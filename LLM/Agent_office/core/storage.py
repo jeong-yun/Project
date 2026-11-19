@@ -325,15 +325,6 @@ class Storage:
                   i["created_at"], int(i.get("hits", 1)), i.get("active_at")) for i in items],
             )
 
-    def recent_lessons(self, team_id: str, agent_id: str, limit: int) -> list[str]:
-        """프롬프트에 주입할 최근 활성 교훈 (오래된 것 → 최신 순). 나뉜 팀은 옛 팀 교훈도 함께 물려받는다."""
-        ids = self._team_ids(team_id)
-        rows = self._execute(
-            f"SELECT lesson FROM lessons WHERE {self._in(ids)} AND agent_id=? AND active=1 ORDER BY id DESC LIMIT ?",
-            (*ids, agent_id, limit),
-        )
-        return [r["lesson"] for r in reversed(rows)]
-
     def list_lessons(self, team_id: str, agent_id: str | None = None) -> list[dict]:
         ids = self._team_ids(team_id)
         if agent_id:

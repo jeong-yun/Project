@@ -595,12 +595,6 @@ def vocab_csv(items: list[dict]) -> str:
     return buf.getvalue()
 
 
-def parse_vocab_csv(text: str) -> list[dict]:
-    """vocab_csv 글을 다시 읽는다 (테스트·되가져오기용) — '#' 머리말은 건너뛴다."""
-    rows = [r for r in csv.reader(io.StringIO(text.lstrip("﻿"))) if r and not r[0].startswith("#")]
-    return [dict(zip(CSV_COLUMNS, r)) for r in rows]
-
-
 def _md(text: object) -> str:
     return _s(text).replace("|", "\\|")
 

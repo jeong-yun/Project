@@ -28,7 +28,7 @@ def test_only_career_team_asks_first_and_only_on_portfolio_tasks():
     teams = {t.id: t for t in list_teams()}
     assert [tid for tid, t in teams.items() if t.ask_first is not None] == ["career"]  # 다른 팀은 지금처럼 바로 시작
     career = teams["career"]
-    assert career.ask_first.tasks == ["portfolio", "portfolio_update"] and career.ask_first.max_questions == 3
+    assert career.ask_first.tasks == ["portfolio", "portfolio_update"]
     assert not ask_first.enabled(career, "cover_letter") and not ask_first.enabled(career, "jd_recommend")
     for tid, team in teams.items():
         if tid != "career":

@@ -174,11 +174,6 @@ def read_docx_full(data: bytes) -> DocxRead:
     return out
 
 
-def read_docx(data: bytes) -> tuple[str, str]:
-    doc = read_docx_full(data)
-    return doc.text, doc.units
-
-
 MD_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", re.M)
 MD_TABLE_HEAD = re.compile(r"^\s*\|(.+)\|\s*\n\s*\|?\s*:?-{3,}", re.M)
 

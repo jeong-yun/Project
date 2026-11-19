@@ -868,9 +868,9 @@ def render_verification(step: AgentAnswer) -> None:
         return
     marks = []
     if step.critic:
-        # 워크플로우와 같은 합격 기준 (점수 + 심각한 지적 여부, config/verification.yaml 의 fail_on)
+        # 워크플로우와 같은 합격 기준 (점수 + 심각한 지적 여부)
         cfg = verification.critic_settings(verification_cfg, team.verification)
-        ok = verification.critic_passed(step.critic, cfg["min_score"], cfg["fail_on"])
+        ok = verification.critic_passed(step.critic, cfg["min_score"])
         noted = " · 지적 있음" if ok and (step.critic.logical_leaps or step.critic.rule_violations) else ""
         by = critic_badge(step)
         marks.append(f"⚖️ 비평 {step.critic.score}/5 {'통과' if ok else '불합격'}{noted}" + (f" · {by}" if by else ""))

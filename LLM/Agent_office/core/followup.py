@@ -625,7 +625,7 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
             if done.is_fallback and done.spec:
                 log.append(f"부서장 대안 모델 {done.spec.label} 로 검토")
             reviewed = done
-            passed = verification.critic_passed(done.critic, cfg["min_score"], cfg["fail_on"])
+            passed = verification.critic_passed(done.critic, cfg["min_score"])
             tried.append(Reviewed(draft, done, passed, fixed, earlier))
             if not passed:  # 🔁 앞 불합격 검토와 같은 지적이 또 나왔다 — 다시 써도 같은 이유로 불합격일 것이라 남은 상한을 쓰지 않는다
                 prev = next((t.review.critic for t in reversed(tried[:-1]) if not t.passed), None)

@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 from core.schemas import Team
 
 MAKERS = {"career_docs": "core.tools.career_docs:ask_first_questions"}
+MAX_QUESTIONS = 3  # 시작 전에 묻는 질문은 많아야 3개 (schemas.AskFirst 설명과 같다)
 HEADER = "[먼저 답한 질문 — 사람이 정한 답이다. 이 답을 따른다]"
 
 
@@ -41,14 +42,14 @@ def _maker(path: str):
 
 
 def questions_for(team: Team, task_id: str, tool_inputs: dict) -> list[AskItem]:
-    """이 업무에서 시작 전에 물을 질문 (최대 max_questions). 설정이 없거나 질문이 없으면 빈 목록."""
+    """이 업무에서 시작 전에 물을 질문 (최대 MAX_QUESTIONS). 설정이 없거나 질문이 없으면 빈 목록."""
     if not enabled(team, task_id):
         return []
     items: list[AskItem] = []
     for tool in team.tools:
         if tool in MAKERS:
             items += _maker(MAKERS[tool])(tool_inputs)
-    return items[: team.ask_first.max_questions]
+    return items[:MAX_QUESTIONS]
 
 
 def answer_lines(answers: list[dict]) -> list[str]:

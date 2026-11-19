@@ -12,9 +12,9 @@ from core.config import load_verification
 from core.schemas import HumanDecision, Lesson, LessonSet, Team
 from core.storage import Storage
 from core.workflow import build_office_graph, restart_from, resume_with_decision, stream_office
-from tests.fakes import Script, make_critic, make_delegation, make_review
+from tests.fakes import Script, make_critic, make_delegation, make_review, prompt_lessons
 
-SETTINGS = {"review": {"rewrite_answer": True}}
+SETTINGS = {}
 CRITIC_ON = {"critic": {"enabled": True, "scope": "final", "min_score": 4, "max_self_corrections": 1}}
 
 
@@ -130,7 +130,7 @@ def test_quick_plain_adopt_makes_the_lesson_without_a_model(org, ranks, team, mo
     lessons = next(p for k, p in events if k == "lessons")
     assert model_calls(script) == []  # 고친 곳·코멘트 없는 채택 → 교훈은 규칙으로 (모델 0번)
     assert [(l.agent_id, l.kind) for l in lessons] == [("lead", "praise")]
-    assert storage.recent_lessons(team.id, "lead", 5)  # 교훈은 팀장에게 저장된다
+    assert prompt_lessons(storage, team.id, "lead", 5)  # 교훈은 팀장에게 저장된다
 
 
 def test_quick_adopt_with_comment_still_asks_the_lesson_model(org, ranks, team, models, storage, use_script):
@@ -153,7 +153,7 @@ def test_quick_plain_adopt_merges_repeated_praise_by_code(org, ranks, team, mode
         list(stream_office(graph, org, "질문", "lead", thread_id=tid, quick=True))
         list(resume_with_decision(graph, org, HumanDecision(action="adopt", adopted_node_id="lead", final_answer="x", score=5), tid))
     assert "LessonGroupSet" not in model_calls(script)  # 겹친 교훈 찾기도 모델 없이 (문장 비교)
-    assert len(storage.recent_lessons(team.id, "lead", 5)) == 1  # 같은 칭찬 교훈은 하나로 합쳐진다
+    assert len(prompt_lessons(storage, team.id, "lead", 5)) == 1  # 같은 칭찬 교훈은 하나로 합쳐진다
 
 
 # ─── 화면 상태: 진행률 · 참여자 · 진행 단계 ───────────────────────────

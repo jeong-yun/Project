@@ -242,9 +242,6 @@ class CapsStore:
     def set_replacement(self, removed: str, new: str | None) -> None:
         self._update("replace", removed, new or None)
 
-    def replacements(self) -> dict[str, str]:
-        return {k: v for k, v in self.read()["replace"].items() if isinstance(v, str) and v}
-
 
 # ─── 상태: 기본 데이터 폴더 ──────────────────────────────────────────
 

@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from core import llm_factory, member_models, model_caps
 from core.call_monitor import CallRecord
-from core.schemas import ModelsConfig, ModelSpec, OrgNode, Team
+from core.schemas import ModelsConfig, OrgNode, Team
 
 AGENT_KINDS = {"plan", "draft", "review", "self_correct", "harness", "directions", "followup"}
 
@@ -53,7 +53,3 @@ def options(rec: CallRecord, org: OrgNode, team: Team | None, base_models: Model
             reason = llm_factory.STATUS_REASONS.get(status.get(provider, "no_key"), status.get(provider, ""))
         out.append(Option(key, not reason, reason))
     return out
-
-
-def spec_for(key: str, base_models: ModelsConfig, team: Team | None, rank_id: str = "") -> ModelSpec:
-    return member_models.spec_for(key, base_models, team, rank_id or next(iter(base_models.ranks), ""))

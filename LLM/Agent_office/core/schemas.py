@@ -86,7 +86,6 @@ class OrgNode(BaseModel):
     name: str | None = None  # 화면 표시 이름. 없으면 직급 이름
     specialty: str = ""
     persona: str = ""  # 비우면 team.personas[rank] → ranks.yaml 의 role 순서로 대체
-    avatar: str | None = None  # 이 에이전트 전용 이미지 경로 (선택)
     # 팀 스킬 중 이 에이전트에게 넣을 절 — 절 제목 줄('[1단계·…')의 앞부분 목록. 비우면 스킬 전문 (OrgAgent)
     #   '-[문체' 처럼 '-' 를 붙이면 그 절만 뺀다 (공용 문체 스킬을 최종 답·통합을 쓰는 팀원에게만 줄 때)
     #   실무자에게 맡은 일에 필요한 절만 주면 프롬프트가 짧아지고, 최종본 형식 같은 남의 일까지 쓰지 않는다
@@ -191,7 +190,6 @@ class AskFirst(BaseModel):
     """
 
     tasks: list[str] = Field(default_factory=list)  # 묻는 업무 id (비우면 이 팀의 모든 업무 양식)
-    max_questions: int = Field(default=3, ge=1, le=3)
 
 
 class Team(BaseModel):
@@ -208,7 +206,6 @@ class Team(BaseModel):
     disclaimer: str = ""
     org: OrgNode | None = None  # 없으면 ranks.yaml 순서대로 일렬 조직도를 자동 생성
     harness: HarnessConfig = Field(default_factory=HarnessConfig)
-    rubric: dict | None = None  # 없으면 config/verification.yaml 의 review_rubric 사용
     tasks: list[TaskTemplate] = Field(default_factory=list)  # 정형 업무 양식 (없으면 자유 질문만)
     scope: TeamScope | None = None  # 자유 질문 범위 (없으면 범위 확인 없이 받는다)
     free_examples: list[FreeExample] = Field(default_factory=list)  # 자유 질문 예시 (이 팀 분야만)
