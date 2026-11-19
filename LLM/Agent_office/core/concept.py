@@ -22,7 +22,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from core.brief import DesiredState
-from core.catalog import CATEGORY_FILES, LEGACY_FILES, TAGS, Catalog, Entry, is_header, today_label, with_updated_date
+from core.catalog import CATEGORY_FILES, LEGACY_FILES, TAGS, Catalog, Entry, is_header, keep_dates, today_label, with_updated_date
 from core.config import TEAMS_DIR, load_skills, shared_rules_path
 from core.harness.base import json_blocks
 from core.memo import SigCache, file_sig
