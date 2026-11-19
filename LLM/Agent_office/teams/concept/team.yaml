@@ -118,6 +118,9 @@ tools: [web_search]
 search:
   hint: "개념의 원전 논문(영문 정식 명칭 + arXiv 또는 학회명), 공식 문서·GitHub, 후속 반박·한계 논문을 찾는 검색어를 만든다. 영어 검색어를 우선한다."
   max_total_results: 10
+  # 원문 읽기: 검색 요약 한두 줄로는 원전을 확인할 수 없어 '미확인'이 남았다(저장 결과 24건 전부, 한 건 중앙값 8번 — 2026-11-19).
+  # 결과 중 arXiv·GitHub·공식 문서를 4곳까지 읽어(core/search.read_sources, 한 곳 3,000자) 팩트체크 대리에게만 준다
+  source_pages: {count: 4, for: [am_fact]}
 
 # 편집장 검토는 1만 자 최종본을 통째로 다시 쓰지 않고 고칠 곳만 '찾을 문장 → 바꿀 문장'으로 (2026-10-27 실측: 다시 쓰기 84~446초)
 review_mode: edit
