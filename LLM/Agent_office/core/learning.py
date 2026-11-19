@@ -46,6 +46,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from core.config import BASE_DIR, load_settings
+from core.jsonfile import write_atomic
 
 # ─── 수준 ────────────────────────────────────────────────────────────
 
@@ -725,11 +726,7 @@ class LearningStore:
     def save(self, course: Course) -> Course:
         with self._lock:
             course.updated_at = now_text()
-            path = self.path(course.id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(f".{threading.get_ident()}.tmp")
-            tmp.write_text(course.model_dump_json(indent=2), encoding="utf-8")
-            os.replace(tmp, path)  # 쓰는 도중 꺼져도 예전 파일이 깨지지 않게
+            write_atomic(self.path(course.id), course.model_dump_json(indent=2))
             return course
 
     def update(self, course_id: str, fn: Callable[[Course], object]):

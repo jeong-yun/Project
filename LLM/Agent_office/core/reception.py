@@ -12,7 +12,6 @@
      → [나중에]는 LaterStore (data/new_dept_later.json) 에 남긴다
 """
 
-import json
 import re
 import time
 import uuid
@@ -20,6 +19,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from core.jsonfile import JsonFile
 from core.schemas import Team
 
 LATER_FILE = "new_dept_later.json"
@@ -274,22 +274,14 @@ class LaterStore:
     """data/new_dept_later.json — [{id, question, proposal, created_at}] (최근 것이 앞)."""
 
     def __init__(self, data_dir: Path | str):
-        self.path = Path(data_dir) / LATER_FILE
+        self.file = JsonFile(Path(data_dir) / LATER_FILE, [])
+        self.path = self.file.path
 
     def items(self) -> list[dict]:
-        if not self.path.exists():
-            return []
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
-        return data if isinstance(data, list) else []
+        return self.file.load()
 
     def _write(self, items: list[dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(self.path)
+        self.file.save(items)
 
     def add(self, question: str, proposal: dict) -> dict:
         item = {"id": uuid.uuid4().hex[:10], "question": question, "proposal": proposal,

@@ -24,7 +24,6 @@
 """
 
 import hashlib
-import json
 import os
 import re
 import threading
@@ -42,6 +41,7 @@ from pydantic import BaseModel, Field
 
 from core import llm_factory, search, usage
 from core.config import BASE_DIR, date_label, today
+from core.jsonfile import JsonFile
 from core.llm_factory import NoAvailableModelError
 from core.schemas import ModelsConfig
 
@@ -650,30 +650,16 @@ def summarize(items: list[FeedItem], models: ModelsConfig, cfg: dict, teams: lis
 # ════════════════════════════════════════════════════════════════════
 
 
-_file_lock = threading.Lock()
-
-
 def _dir(data_dir: Path) -> Path:
     return Path(data_dir) / "feeds"
 
 
-def _read(path: Path, default):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return default
-
-
 def _write(path: Path, data) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    with _file_lock:
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, path)
+    JsonFile(path, indent=1).save(data)
 
 
 def load_snapshot(data_dir: Path) -> dict | None:
-    return _read(_dir(data_dir) / "latest.json", None)
+    return JsonFile(_dir(data_dir) / "latest.json").load()
 
 
 def is_stale(snapshot: dict | None, ttl_hours: float, now: float | None = None) -> bool:
@@ -769,7 +755,7 @@ def start_collect(settings: dict, models: ModelsConfig, data_dir: Path, teams: l
 
 
 def card_states(data_dir: Path) -> dict[str, dict]:
-    return _read(_dir(data_dir) / "cards.json", {})
+    return JsonFile(_dir(data_dir) / "cards.json", {}).load()
 
 
 def set_card_state(data_dir: Path, card: dict, state: str | None) -> None:
