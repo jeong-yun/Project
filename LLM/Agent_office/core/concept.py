@@ -19,13 +19,13 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from functools import lru_cache
 from pathlib import Path
 
 from core.brief import DesiredState
 from core.catalog import CATEGORY_FILES, LEGACY_FILES, TAGS, Catalog, Entry, is_header, today_label, with_updated_date
 from core.config import TEAMS_DIR, load_skills, shared_rules_path
 from core.harness.base import json_blocks
+from core.memo import SigCache, file_sig
 from core.search import neutralize
 
 ACTIONS = {"add": "추가", "update": "수정", "delete": "삭제"}
@@ -558,24 +558,26 @@ AI_CHOICE = ("'AI-App'(LLM 앱이 프롬프트·호출 흐름·검색·검증 �
              "'AI-Model'(앱 적용 불가 — 모델 구조·서빙·GPU 커널·가중치 학습·모델 내부 분석, 그 기술을 쓴 모델을 고르는 것으로만 반영) 중 하나")
 
 
+_cache = SigCache()  # 파일이 그대로면 직전 결과 (core/memo.py) — 적용 현황 행·프롬프트 판
+
+
 def status_path():
     return TEAMS_DIR / TEAM_ID / "ai_app_status.yaml"
 
 
-@lru_cache(maxsize=4)
-def _status_rows(path: str, mtime: float) -> tuple[dict, ...]:
+def _status_rows(path: Path) -> tuple[dict, ...]:
     import yaml
 
     from core.catalog import name_keys
 
-    data = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
+    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     return tuple({**row, "_keys": frozenset(name_keys(str(row.get("name", ""))))} for row in data.get("entries") or [])
 
 
 def status_rows() -> tuple[dict, ...]:
     """ai_app_status.yaml 의 행 (파일이 그대로면 직전에 읽은 것)."""
     path = status_path()
-    return _status_rows(str(path), path.stat().st_mtime) if path.exists() else ()
+    return _cache.get(("status", str(path)), file_sig(path), lambda: _status_rows(path)) if path.exists() else ()
 
 
 def app_status(entry: Entry, rows: tuple[dict, ...] | None = None) -> dict | None:
@@ -601,11 +603,10 @@ def _git(folder, *args: str) -> str:
     return out.stdout.strip() if out.returncode == 0 else ""
 
 
-@lru_cache(maxsize=8)
-def _version(skills_dir: str, sig: tuple) -> dict:
+def _version(skills_dir: Path, files: list[Path]) -> dict:
     text = load_skills(TEAM_ID)
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
-    updated = datetime.fromtimestamp(max((m for _, m in sig), default=0)).strftime("%Y-%m-%d %H:%M")
+    updated = datetime.fromtimestamp(max((p.stat().st_mtime for p in files), default=0)).strftime("%Y-%m-%d %H:%M")
     commit = _git(skills_dir, "log", "-1", "--format=%h %cs", "--", ".")
     dirty = bool(_git(skills_dir, "status", "--porcelain", "--", "."))
     label = f"IT 개념 프롬프트 v{digest} (스킬 파일 수정 {updated}"
@@ -619,11 +620,12 @@ def prompt_version() -> dict:
     {"hash", "updated", "commit", "dirty", "label", "text"} — 파일이 그대로면 직전에 계산한 것을 쓴다.
     """
     skills_dir = TEAMS_DIR / TEAM_ID / "skills"
-    sig = tuple((p.name, p.stat().st_mtime) for p in sorted(skills_dir.glob("*.md")))
+    files = sorted(skills_dir.glob("*.md"))
     shared = shared_rules_path(TEAM_ID)  # knowledge/ 에 올린 고정 규칙도 프롬프트에 들어간다
     if shared and shared.exists():
-        sig += ((shared.name, shared.stat().st_mtime),)
-    return _version(str(skills_dir), sig)
+        files.append(shared)
+    key = ("version", str(skills_dir), tuple(p.name for p in files))
+    return _cache.get(key, file_sig(*files), lambda: _version(skills_dir, files))
 
 
 def used_prompt_version(question: str) -> str:
