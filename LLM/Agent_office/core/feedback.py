@@ -34,6 +34,7 @@ from core.llm_factory import NoAvailableModelError
 from core.schemas import (
     AgentAnswer, CleanupProposal, HumanDecision, Lesson, LessonGroup, LessonGroupSet, LessonSet, ModelsConfig, Rank, RuleDraft, Team,
 )
+from core.scope import char_pairs
 
 ANSWER_PREVIEW_CHARS = 600
 EDIT_DIFF_CHARS = 2000  # 교훈 모델에 보낼 '사람이 고친 곳'의 최대 글자 수 (추정값 — 실제 모델로 재지 않음)
@@ -378,7 +379,7 @@ LESSON_PREVIEW_CHARS = 4000  # 정리 모델에 보낼 교훈 한 개의 최대 
 
 def similarity(a: str, b: str) -> float:
     """두 교훈 문장(사람 코멘트 뺀 부분)의 글자 2개 묶음 겹침 비율 (0~1)."""
-    grams = [{t[i:i + 2] for i in range(len(t) - 1)} for t in (re.sub(r"\s+", "", public_lesson(x)) for x in (a, b))]
+    grams = [char_pairs(re.sub(r"\s+", "", public_lesson(x))) for x in (a, b)]
     union = grams[0] | grams[1]
     return len(grams[0] & grams[1]) / len(union) if union else 0.0
 

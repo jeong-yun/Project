@@ -43,16 +43,22 @@ def keyword_hits(text: str, team: Team) -> list[str]:
     return [w for w in team.scope.keywords if w.strip() and _keyword_pattern(w).search(text)]
 
 
-def _bigrams(text: str) -> set[str]:
+def char_pairs(text: str) -> set[str]:
+    """글자 2개 묶음 ('사과나무' → 사과·과나·나무). 2글자보다 짧으면 빈 집합 — 팀 고르기·범위 확인·지적·교훈 비교가 함께 쓴다."""
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def word_pairs(text: str, singles: bool = False) -> set[str]:
+    """낱말(한글·영숫자)마다 글자 2개 묶음. singles=True 면 1글자 낱말도 그대로 넣는다."""
     words = re.findall(r"[0-9A-Za-z가-힣]+", text.lower())
-    return {w[i:i + 2] for w in words if len(w) > 1 for i in range(len(w) - 1)}
+    return set().union(*(char_pairs(w) or ({w} if singles else set()) for w in words))
 
 
 def is_followup(question: str, last_text: str, others_hit: bool) -> bool:
     """직전 결과에 대한 짧은 후속 질문인가 — 짧고, (직전 결과와 낱말이 겹치거나 / 후속 표현이 있고 다른 팀 낱말이 없음)."""
     if not last_text.strip() or len(question.strip()) > FOLLOWUP_MAX_CHARS:
         return False
-    overlap = len(_bigrams(question) & _bigrams(last_text))
+    overlap = len(word_pairs(question) & word_pairs(last_text))
     if overlap >= 3:
         return True
     return not others_hit and any(m in question for m in FOLLOWUP_MARKERS)

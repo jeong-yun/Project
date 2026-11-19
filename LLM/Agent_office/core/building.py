@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from core.config import CONFIG_DIR, load_yaml
 from core.office import DEFAULT_COLOR, RANK_COLORS
 from core.schemas import OrgNode, Rank, Team
+from core.scope import word_pairs
 
 DEPARTMENTS_FILE = CONFIG_DIR / "departments.yaml"
 DEFAULT_PER_FLOOR = 4
@@ -296,18 +297,13 @@ class TeamPick(BaseModel):
     reason: str = Field(description="그 팀을 고른 이유 한 문장")
 
 
-def _bigrams(text: str) -> set[str]:
-    words = re.findall(r"[0-9A-Za-z가-힣]+", text.lower())
-    return {w[i:i + 2] for w in words for i in range(max(1, len(w) - 1))}
-
-
 def keyword_pick(text: str, candidates: list[Team]) -> tuple[str, str]:
     """모델 없이 낱말(두 글자 묶음)이 가장 많이 겹치는 팀 — 동점이면 부서에 먼저 적힌 팀."""
-    want = _bigrams(text)
+    want = word_pairs(text, singles=True)
     best, best_score = candidates[0], -1
     for team in candidates:
         corpus = " ".join([team.name, team.description, *(f"{t.title} {t.description}" for t in team.tasks)])
-        score = len(want & _bigrams(corpus))
+        score = len(want & word_pairs(corpus, singles=True))
         if score > best_score:
             best, best_score = team, score
     return best.id, f"요청과 겹치는 낱말이 가장 많은 팀 ({best_score}개)"
