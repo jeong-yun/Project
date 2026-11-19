@@ -7,6 +7,7 @@
   - 최종 결과: 최종본·검증 로그·GitHub 요약·적용 계획 탭, 형식 검사
     · 기존 항목 수정이면 맨 앞에 '✏️ 변경 제안' 탭 — 변경마다 고치기 전 → 고친 뒤와 근거를 보고 반영할지 고른다 (원본은 그대로,
       고른 변경만 코드가 끼워 넣는다. 근거 글은 화면에만 — 카탈로그·커밋 메시지에는 들어가지 않는다)
+  - 🎧 듣기용 MP3: 최종본 → 읽기용 대본 → OpenAI TTS (core/listen.py) — 버튼을 눌렀을 때만, 만든 파일은 결과 폴더에 저장해 재사용
   - 📜 적용된 프롬프트: 입력칸 아래·결과 위 — 스킬(IT 개념 프롬프트) 판·전문, 보낸 업무 브리프, 에이전트별 시스템 프롬프트
   - 채택 후: 📚 카탈로그 반영 → 💾 커밋 → 🚀 푸시 (GitHub 에 이 PC 에 없는 커밋이 있으면 먼저 자동 rebase, 충돌하면 되돌리고 중단)
 """
@@ -21,7 +22,7 @@ import streamlit as st
 
 import prompt_ui
 from core import catalog as cat
-from core import concept
+from core import concept, listen, music, usage
 from core.config import BASE_DIR, load_team
 from core.memo import SigCache, file_sig
 
@@ -455,8 +456,9 @@ def _prefill_merge(name: str, draft: str, target_name: str) -> None:
     st.session_state[f"cw_merge_{team_id}"] = {"name": name, "target": target_name}  # input_form 이 '편입 — 원본 기반 수정'을 고르게 한다
 
 
-def result_tabs(content: str, run: dict) -> None:
-    """최종 결과를 탭으로 — (기존 항목 수정이면 변경 제안 /) 최종본(카탈로그에 들어갈 글) / 검증 로그 / GitHub 요약 / 적용 계획."""
+def result_tabs(content: str, run: dict) -> str:
+    """최종 결과를 탭으로 — (기존 항목 수정이면 변경 제안 /) 최종본(카탈로그에 들어갈 글) / 검증 로그 / GitHub 요약 / 적용 계획.
+    돌려주는 값 = 지금 보이는 최종본 (🎧 듣기용 MP3 의 본문)."""
     opts = change_options(run)
     res = read_result(content, run)
     info = run.get("concept") or {}
@@ -509,6 +511,98 @@ def result_tabs(content: str, run: dict) -> None:
         st.json({k: v for k, v in plan.items() if k != "changes"} if changing else plan)  # 변경 제안은 첫 탭에서 본다
         for e in plan.get("edits") or []:
             st.caption(f"✏️ 다른 항목 수정 — {e.get('entry')}: {e.get('reason', '')}")
+    return final_entry
+
+
+def _show_script(saved: listen.ScriptResult) -> None:
+    with st.container(height=260):
+        for s in saved.script.sections:
+            st.markdown(f"**{s.heading}**  \n{s.text}")
+
+
+def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
+    """🎧 듣기용 MP3 — ① 대본 쓰기(보조 모델) → 예상 길이·요금(추정) 확인 → ② 음성 만들기(OpenAI TTS) → 듣기·받기.
+
+    모델·TTS 는 버튼을 눌렀을 때만 부른다. 대본(.json)·음성(.mp3)은 folder 에 저장해 다시 그릴 때·앱을 다시 켤 때 재사용한다.
+    on_calls(run): 호출을 마친 뒤 ⏱ 호출 기록을 저장하는 함수 (app.save_monitor).
+    """
+    if not entry.strip():
+        return
+    rid = run.get("run_id", "")
+    json_path, mp3_path = listen.paths(folder, rid, entry)
+    saved = listen.load_script(json_path)
+    with st.expander("🎧 듣기용 MP3 — 들으며 이해하기", expanded=saved is not None):
+        error = ""
+        if mp3_path.exists():
+            data = mp3_path.read_bytes()
+            st.audio(data, format="audio/mpeg")
+            st.caption(f"{music.fmt_time(music.audio_duration(mp3_path))} · 대본 {listen.script_chars(saved.script) if saved else '?'}자 · "
+                       f"OpenAI {listen.TTS_MODEL} ({listen.TTS_VOICE} 목소리) · AI 로 합성한 음성 · "
+                       "결과 폴더에 저장 — 앱을 다시 켜도 🕘 지난 업무에서 들을 수 있습니다.")
+            c1, c2 = st.columns(2)
+            c1.download_button("⬇ MP3 받기", data=data, file_name=mp3_path.name, mime="audio/mpeg",
+                               key=f"listen_dl_{rid}", use_container_width=True)
+            if c2.button("📝 대본부터 다시 만들기", key=f"listen_reset_{rid}", use_container_width=True):
+                mp3_path.unlink(missing_ok=True)
+                json_path.unlink(missing_ok=True)
+                st.rerun()
+            if saved:
+                _show_script(saved)
+            return
+        if saved is None:
+            minutes, usd = listen.estimate(listen.MAX_SCRIPT_CHARS)
+            st.caption(f"카탈로그 본문으로 {listen.MIN_SCRIPT_CHARS}~{listen.MAX_SCRIPT_CHARS}자(약 3~{minutes:.0f}분) 읽기용 대본을 먼저 쓰고, "
+                       f"예상 요금을 확인한 뒤 음성을 만듭니다. 대본은 보조 모델 1~2번 호출, 음성은 많아야 약 ${usd:.2f} (추정 — OpenAI "
+                       f"{listen.TTS_MODEL} 분당 약 ${listen.COST_PER_MIN_USD} 기준).")
+            if st.button("🎧 듣기용 MP3 만들기 (1/2 대본 쓰기)", key=f"listen_script_{rid}", type="primary"):
+                try:
+                    with st.spinner("대본 쓰는 중… (보통 10~40초)"), usage.scope(team_id=run.get("team_id", ""), run_id=rid,
+                                                                             purpose="듣기용 MP3 대본"):
+                        saved = listen.make_script(entry, models)
+                    listen.save_script(json_path, saved)
+                except Exception as e:  # noqa: BLE001 — 모델 오류는 제각각, 화면에 이유만
+                    error = f"대본을 쓰지 못했습니다 ({type(e).__name__}: {str(e)[:200]}). 잠시 뒤 다시 눌러 주세요."
+                on_calls(run)
+            if saved is None:
+                if error:
+                    st.error(error)
+                return
+        minutes, usd = listen.estimate(listen.script_chars(saved.script))
+        st.caption(f"대본 {listen.script_chars(saved.script)}자(공백 제외) · 절 {len(saved.script.sections)}개 · 예상 길이 약 {minutes:.1f}분 · "
+                   f"예상 요금 약 ${usd:.3f} (추정 — 실제 청구는 OpenAI 사용량 화면에서 확인)")
+        if saved.warnings:
+            st.warning("코드 검사에서 남은 점 — 본문에 없는 내용일 수 있으니 아래 대본을 읽어 보고, 이상하면 '대본 다시 쓰기'를 눌러 주세요:\n"
+                       + "\n".join(f"- {w}" for w in saved.warnings))
+        _show_script(saved)
+        c1, c2 = st.columns(2)
+        if c1.button(f"🔊 음성 만들기 (2/2 · 약 ${usd:.3f} 추정)", key=f"listen_tts_{rid}", type="primary", use_container_width=True):
+            try:
+                with st.spinner("음성 만드는 중… (조각마다 몇 초씩, 보통 1분 안)"), usage.scope(
+                        team_id=run.get("team_id", ""), run_id=rid, purpose="듣기용 MP3 음성"):
+                    listen.make_audio(saved.script, mp3_path, models)
+            except listen.ListenError as e:
+                error = str(e)
+            except Exception as e:  # noqa: BLE001 — 파일 쓰기 등 TTS 밖의 오류도 화면에 이유만
+                error = f"음성 파일을 만들지 못했습니다 ({type(e).__name__}: {str(e)[:200]}). 잠시 뒤 다시 눌러 주세요."
+            on_calls(run)
+            if not error:
+                st.rerun()
+        if c2.button("📝 대본 다시 쓰기", key=f"listen_rewrite_{rid}", use_container_width=True):
+            json_path.unlink(missing_ok=True)
+            st.rerun()
+        if error:
+            st.error(error)
+
+
+def history_listen(folder: Path, run_id: str) -> None:
+    """🕘 지난 업무 창 — 이 업무로 만든 듣기용 MP3 (없으면 아무것도 그리지 않는다)."""
+    path = listen.saved_audio(folder, run_id)
+    if path:
+        data = path.read_bytes()
+        st.markdown("##### 🎧 듣기용 MP3")
+        st.audio(data, format="audio/mpeg")
+        st.download_button("⬇ MP3 받기", data=data, file_name=path.name, mime="audio/mpeg",
+                           key=f"hist_listen_{run_id}")
 
 
 def decision_fields(content: str, key: str, run: dict | None = None) -> tuple[str, str]:

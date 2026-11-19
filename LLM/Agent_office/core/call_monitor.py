@@ -41,7 +41,7 @@ from core import usage
 KIND_LABELS = {
     "brief": "🎯 요청 정리", "search": "🌐 검색어", "directions": "🔀 방향 제안", "plan": "📋 업무 분배",
     "draft": "✍️ 초안", "review": "🔍 검토·통합", "critic": "⚖️ 비평", "self_correct": "🔁 자가 교정",
-    "harness": "🧪 하네스 재작성", "lessons": "📚 교훈", "followup": "💬 문의", "other": "기타",
+    "harness": "🧪 하네스 재작성", "lessons": "📚 교훈", "followup": "💬 문의", "listen": "🎧 듣기용 MP3", "other": "기타",
 }
 _SCHEMA_KIND = {
     "Delegation": "plan", "ReviewResult": "review", "ReviewEdits": "review", "CriticResult": "critic",

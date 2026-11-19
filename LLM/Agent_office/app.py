@@ -1556,7 +1556,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
     if final:
         st.markdown(f"#### 📌 최종 결과 — {name_of(final.node_id)}" + (f" · {version}" if version else ""))
         if is_concept:
-            concept_ui.result_tabs(final.content, run)  # 최종본·검증 로그·GitHub 요약·적용 계획
+            entry = concept_ui.result_tabs(final.content, run)  # 최종본·검증 로그·GitHub 요약·적용 계획
+            concept_ui.listen_panel(entry, run, RESULTS_DIR / team_id, models, save_monitor)  # 🎧 듣기용 MP3
         else:
             with st.container(height=420, border=True):
                 st.markdown(education_ui.result_text(run, final.content) if is_edu else final.content)  # 퀴즈 정답은 감춤
@@ -1756,6 +1757,8 @@ def history_dialog(run_id: str) -> None:
         st.warning(f"❌ 전체 반려 · 만족도 {decision.score}/5")
     if decision and decision.comment:
         st.caption(f"코멘트: {decision.comment}")
+    if tid in teams_by_id and concept_ui.CONCEPT_FEATURE in teams_by_id[tid].features:
+        concept_ui.history_listen(RESULTS_DIR / tid, run_id)  # 🎧 이 업무로 만든 듣기용 MP3
     turns, problem = saved_followups(run_id)  # 💬 결정 전에 주고받은 문의·수정 요청 (보기만)
     if problem:
         st.caption(f"💬 {problem}")

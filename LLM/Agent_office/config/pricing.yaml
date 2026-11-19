@@ -16,6 +16,7 @@ models:
   gpt-5.4:      {input: 2.50, output: 15.00, cached_input: 0.25,  source: third_party}
   gpt-5.4-mini: {input: 0.75, output: 4.50,  cached_input: 0.075, source: third_party}
   gpt-5.4-nano: {input: 0.20, output: 1.25,  cached_input: 0.02,  source: third_party}
+  gpt-4o-mini-tts: {input: 0.60, output: 12.00, source: official}  # 음성(TTS) — 출력 = 오디오 토큰. 확인일 2026-11-19, 2027-01-06 종료 예정
   # Google Gemini (출력 가격에 thinking 토큰 포함)
   gemini-3.8-flash:
     {input: 0.75, output: 3.75, source: official, changes: [{from: "2027-01-01", input: 1.50, output: 7.50}]}  # 도입 가격 2026-12-31 까지
