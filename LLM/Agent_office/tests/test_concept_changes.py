@@ -587,3 +587,13 @@ def test_app_merge_flow_reruns_as_original_based_update(app_env, use_script, roo
     assert len([b for b in at.checkbox if "반영" in b.label]) == 1 and not rerun_button(at)  # 변경 제안 탭 — 수정과 같은 화면
     entry = next(t for t in at.text_area if (t.key or "").startswith("ce_")).value
     assert entry == ORIGINAL.replace(FACT["find"], FACT["replace"]).replace(ORIGINAL.split("\n")[0], HEADER)  # 변경 밖은 원본 그대로
+
+
+def test_assemble_keeps_date_history_when_title_line_changes():
+    """제목 줄을 고치는 변경을 고르면 새 제목 + 원본의 날짜 이력으로 합친다 (예전에는 keep_dates 를 import 하지 않아 NameError)."""
+    old_title = ORIGINAL.split("\n")[0]
+    find = "그룹 상대적 정책 최적화"
+    change = concept.Proposal(find=find, replace="그룹 상대 정책 최적화", start=old_title.index(find))
+    first = concept.assemble(ORIGINAL, [change], [True], HEADER).split("\n", 1)[0]
+    assert first == cat.keep_dates(old_title.replace(find, "그룹 상대 정책 최적화"), HEADER)
+    assert "그룹 상대 정책 최적화" in first and "(작성일: 26.08.19)" in first
