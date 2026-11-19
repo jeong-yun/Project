@@ -31,16 +31,14 @@
 import base64
 import fnmatch
 import io
-import json
-import os
 import random
 import re
-import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from core.jsonfile import JsonFile
 from core.memo import SigCache, file_sig
 from core.schemas import ModelsConfig, ModelSpec
 
@@ -205,7 +203,6 @@ def _api_values(meta: dict | None) -> dict:
 # ─── 데이터 폴더의 기록 (model_caps.json) ─────────────────────────────
 
 
-_lock = threading.Lock()
 _store_cache = SigCache()
 
 
@@ -214,25 +211,12 @@ class CapsStore:
         "user": {key: {"vision": bool, ...}}, "replace": {사라진 key: 대체 key}}"""
 
     def __init__(self, data_dir: Path | str):
-        self.path = Path(data_dir) / CAPS_FILE
+        self.file = JsonFile(Path(data_dir) / CAPS_FILE, {})
+        self.path = self.file.path
 
     def read(self) -> dict:
-        def load() -> dict:
-            try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                data = {}
-            return data if isinstance(data, dict) else {}
-
-        data = _store_cache.get(str(self.path), file_sig(self.path), load) if self.path.exists() else {}
+        data = _store_cache.get(str(self.path), file_sig(self.path), self.file.load) if self.path.exists() else {}
         return {s: dict(data.get(s) or {}) for s in ("probe", "user", "replace")}
-
-    def _write(self, data: dict) -> None:
-        with _lock:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, self.path)
 
     def _update(self, section: str, key: str, value) -> None:
         data = self.read()
@@ -240,7 +224,7 @@ class CapsStore:
             data[section].pop(key, None)
         else:
             data[section][key] = value
-        self._write(data)
+        self.file.save(data)
 
     def record_probe(self, key: str, values: dict, detail: str = "", now: float | None = None) -> None:
         old = self.read()["probe"].get(key) or {}
@@ -257,9 +241,6 @@ class CapsStore:
 
     def set_replacement(self, removed: str, new: str | None) -> None:
         self._update("replace", removed, new or None)
-
-    def replacements(self) -> dict[str, str]:
-        return {k: v for k, v in self.read()["replace"].items() if isinstance(v, str) and v}
 
 
 # ─── 상태: 기본 데이터 폴더 ──────────────────────────────────────────

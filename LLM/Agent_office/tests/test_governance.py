@@ -193,7 +193,6 @@ def test_schedule_and_approval_queue(tmp_path):
     assert plan["weekly_control_check"]["last_result"]["quote_mismatches"] == 0
     assert plan["new_job"]["due"] and plan["new_job"]["last"] is None
     assert [q["action"] for q in autonomy.approval_queue(audit)] == ["apply_config"]
-    assert autonomy.autonomy_cost_since(audit, now - 86400) == pytest.approx(0.0123)
 
 
 def test_autonomy_panel_renders_on_home(tmp_path, monkeypatch):

@@ -438,4 +438,3 @@ disclaimer: "올린 문서에 있는 사실만으로 쓴 초안입니다. 제출
 #   이 설정이 없는 팀은 지금처럼 바로 시작한다.
 ask_first:
   tasks: [portfolio, portfolio_update]
-  max_questions: 3

@@ -30,14 +30,12 @@
 config/*.yaml 은 바꾸지 않는다. 바꾼 선택은 다음에 맡기는 업무부터 쓰인다 (진행 중인 업무는 시작할 때의 모델 그대로).
 """
 
-import json
-import os
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 
 from core import model_recs
 from core.config import rank_models
+from core.jsonfile import JsonFile
 from core.schemas import ModelsConfig, ModelSpec, OrgNode, RankModels, Team
 
 FILE_NAME = "member_models.json"
@@ -252,28 +250,20 @@ def apply_choice(
 class MemberModelStore:
     """팀원별 모델 선택 저장소 — {팀 id: {에이전트 id: "provider:model"}}."""
 
-    _lock = threading.Lock()
-
     def __init__(self, data_dir: Path | str):
-        self.path = Path(data_dir) / FILE_NAME
-
-    def _read_all(self) -> dict:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        return data if isinstance(data, dict) else {}
+        self.file = JsonFile(Path(data_dir) / FILE_NAME, {})
+        self.path = self.file.path
 
     def load(self, team_id: str, inherit: str | None = None) -> dict[str, str]:
         """inherit = 나뉘기 전 옛 팀 id — 이 팀이 아직 한 번도 저장하지 않았으면 옛 팀의 선택을 그대로 쓴다 (파일은 안 고침)."""
-        data = self._read_all()
+        data = self.file.load()
         team = data.get(team_id) if team_id in data or not inherit else data.get(inherit)
         team = team or {}
         return {k: v for k, v in team.items() if isinstance(k, str) and isinstance(v, str) and v} if isinstance(team, dict) else {}
 
     def save(self, team_id: str, choices: dict[str, str], inherit: str | None = None) -> None:
-        with self._lock:
-            data = self._read_all()
+        with self.file.lock:
+            data = self.file.load()
             cleaned = {k: v for k, v in choices.items() if v}
             if cleaned:
                 data[team_id] = cleaned
@@ -281,7 +271,4 @@ class MemberModelStore:
                 data[team_id] = {}  # '기본으로' 되돌림을 기억 — 지우면 옛 팀 선택이 다시 보인다
             else:
                 data.pop(team_id, None)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, self.path)  # 쓰는 도중 꺼져도 예전 파일이 깨지지 않게
+            self.file.save(data)

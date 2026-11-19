@@ -7,6 +7,7 @@ import pytest
 from core import feedback_sync
 from core.schemas import AgentAnswer, HumanDecision, Lesson, ModelSpec
 from core.storage import Storage
+from tests.fakes import prompt_lessons
 
 SECRET_Q = "삼성전자 120주 평단 71,500원, 다음 주 오사카 3박 4일"
 SECRET_A = "보유 120주는 72,000원에 절반 매도"
@@ -68,7 +69,7 @@ def test_new_pc_imports_lessons_from_knowledge_without_duplicates(tmp_path, monk
     fresh = Storage(tmp_path / "new.db")  # clone 한 PC — 시작할 때 knowledge/ 의 교훈을 가져온다
     lessons = fresh.list_lessons("stock")
     assert {l["lesson"] for l in lessons} == {"손절가를 기간별 기준으로 쓴다", "시세 출처와 기준일을 단다"}
-    assert fresh.recent_lessons("stock", "lead", 5) == ["손절가를 기간별 기준으로 쓴다"]  # 프롬프트에 바로 쓰인다
+    assert prompt_lessons(fresh, "stock", "lead", 5) == ["손절가를 기간별 기준으로 쓴다"]  # 프롬프트에 바로 쓰인다
     Storage(tmp_path / "new.db")  # 다시 켜도 중복으로 넣지 않는다
     assert len(Storage(tmp_path / "new.db").list_lessons("stock")) == 2
 
@@ -133,7 +134,7 @@ def test_other_pc_follows_merged_lessons_instead_of_keeping_both(tmp_path, monke
     b = Storage(tmp_path / "b.db")  # 다른 PC 를 다시 켠다 (git pull 로 knowledge/ 를 받은 뒤)
     assert {r["lesson"]: (bool(r["active"]), r["hits"]) for r in b.list_lessons("general")} == {
         "출처를 단다": (False, 1), "출처 링크를 붙인다": (False, 1), "모든 주장에 출처 링크를 단다": (True, 2)}
-    assert b.recent_lessons("general", "lead", 5) == ["모든 주장에 출처 링크를 단다"]  # 프롬프트에는 합친 교훈만
+    assert prompt_lessons(b, "general", "lead", 5) == ["모든 주장에 출처 링크를 단다"]  # 프롬프트에는 합친 교훈만
     assert (folder / feedback_sync.LESSONS).read_text(encoding="utf-8") == written_by_a  # 파일이 뒤집히지 않는다
     assert b.last_feedback_sync["aligned"] == 2 and b.last_feedback_sync["changed"] == []
 

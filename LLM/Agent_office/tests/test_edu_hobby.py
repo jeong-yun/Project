@@ -5,7 +5,9 @@
 날짜 계산은 today 를 직접 넘겨 시간에 흔들리지 않게 한다. CSV 는 BOM 과 상관없이 읽는다.
 """
 
+import csv
 import importlib
+import io
 import json
 from datetime import date, timedelta
 
@@ -18,6 +20,12 @@ from core.harness import REGISTRY
 from core.schemas import HumanDecision
 from core.tools import TOOLS
 from tests.fakes import Script
+
+
+def parse_vocab_csv(text: str) -> list[dict]:
+    """vocab_csv 글을 Anki 처럼 다시 읽는다 — BOM 과 '#' 머리말은 건너뛴다."""
+    rows = [r for r in csv.reader(io.StringIO(text.lstrip("﻿"))) if r and not r[0].startswith("#")]
+    return [dict(zip(hobby.CSV_COLUMNS, r)) for r in rows]
 
 TODAY = date(2026, 11, 5)
 
@@ -202,8 +210,8 @@ def test_vocab_csv_for_anki_and_markdown():
     text = hobby.vocab_csv(c.extras["vocab"])
     head = text.splitlines()[:3]
     assert head[0] == "#separator:Comma" and head[1] == "#html:false" and head[2].startswith("#columns:단어,뜻,읽는 법")
-    rows = hobby.parse_vocab_csv("﻿" + text)  # BOM 이 있든 없든 같은 결과
-    assert rows == hobby.parse_vocab_csv(text)
+    rows = parse_vocab_csv("﻿" + text)  # BOM 이 있든 없든 같은 결과
+    assert rows == parse_vocab_csv(text)
     assert rows[0]["term"] == "il conto" and rows[0]["meaning"] == "계산서" and rows[0]["known"] == "예" and rows[0]["level"] == "입문(신규)"
     assert rows[-1]["term"] == 'say "ciao", ok' and rows[-1]["meaning"] == "따옴표, 쉼표"  # 쉼표·따옴표도 칸이 깨지지 않음
     md = hobby.vocab_markdown(c, c.extras["vocab"])

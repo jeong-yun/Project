@@ -15,13 +15,12 @@
    "needs_check": ["원문에 없어 [확인 필요]로 표시한 내용"]}
 """
 
-import json
 import re
 from dataclasses import dataclass, field
 
 from core.config import TEAMS_DIR
 from core.governance import normalize_text, quote_snippets
-from core.harness.base import extract_code_blocks
+from core.harness.base import find_json
 
 NEEDS_CHECK = "[확인 필요]"
 COVER_STATUSES = ("근거 있음", "부분", "공백")
@@ -133,7 +132,7 @@ def limit_rows(answer: str, questions: list[Question]) -> list[LimitRow]:
 
 def short_for_lack_of_evidence(answer: str, no: int) -> bool:
     """JSON needs_check 에 '근거 부족 — 문항 N …'이라고 밝혔는가 — 문서에 더 쓸 근거가 없어 짧은 답변은 다시 쓰게 하지 않는다."""
-    notes = (answer_json(answer) or {}).get("needs_check")
+    notes = (find_json(answer) or {}).get("needs_check")
     return any("근거 부족" in str(n) and re.search(rf"문항\s*{no}(?!\d)", str(n)) for n in (notes if isinstance(notes, list) else []))
 
 
@@ -284,18 +283,6 @@ def _cell(text: str) -> str:
 
 
 # ─── 답변 JSON ──────────────────────────────────────────────────────────
-
-
-def answer_json(answer: str) -> dict | None:
-    """최종 답변의 마지막 ```json 블록 (없거나 깨졌으면 None)."""
-    for src in reversed(extract_code_blocks(answer, "json")):
-        try:
-            data = json.loads(src)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            return data
-    return None
 
 
 def _items(data: dict | None, key: str) -> list[dict]:
@@ -532,7 +519,7 @@ def unsourced_numbers(body: str, allowed: set[str]) -> list[str]:
 def check_facts(answer: str, source: str, reference: str = "") -> FactCheck:
     """지어낸 사실 검사 — source = 올린 문서 원문, reference = JD·문항·회사 메모 (숫자만 허용)."""
     result = FactCheck()
-    data = answer_json(answer)
+    data = find_json(answer)
     src = normalize_text(source)
     fit_cover = [x for fit in _items(data, "jd_fit") for x in _items(fit, "coverage")]  # JD 추천의 JD 마다 판정
     for item in [*_items(data, "evidence"), *_items(data, "jd_coverage"), *fit_cover]:
@@ -552,7 +539,7 @@ def check_facts(answer: str, source: str, reference: str = "") -> FactCheck:
 
 def check_coverage_ids(answer: str, req_ids: list[str]) -> list[str]:
     """JSON jd_coverage 가 코드가 뽑은 요구사항(R1…)을 모두 다루는지, 판정 값이 정해진 것인지, 근거 판정에 인용이 있는지."""
-    items = _items(answer_json(answer), "jd_coverage")
+    items = _items(find_json(answer), "jd_coverage")
     if req_ids and not items:
         return [f"JSON 에 jd_coverage 가 없다 — 근거 자료의 JD 요구사항 {', '.join(req_ids)} 를 모두 판정하라"]
     seen = {str(x.get("id") or "").strip() for x in items}
@@ -720,7 +707,7 @@ def job_posts(parts: list[tuple[str, str]], limit: int = 15) -> list[JobPost]:
 
 def fit_items(answer: str) -> dict[str, dict]:
     """JSON jd_fit → {JD id: 그 JD 판정}."""
-    return {str(x.get("jd") or "").strip(): x for x in _items(answer_json(answer), "jd_fit")}
+    return {str(x.get("jd") or "").strip(): x for x in _items(find_json(answer), "jd_fit")}
 
 
 @dataclass
@@ -807,7 +794,7 @@ def ranking_text(scores: list[JdScore]) -> str:
 
 def check_recommend(answer: str, jds: list[dict], source: str | None = None) -> list[str]:
     """JD 추천 검사 — 모든 JD·요구사항을 판정했는지, 순위·추천이 코드가 계산한 점수와 맞는지."""
-    data = answer_json(answer)
+    data = find_json(answer)
     fits = fit_items(answer)
     if not fits:
         return [f"JSON 에 jd_fit 가 없다 — {', '.join(j['id'] for j in jds)} 마다 요구사항 판정(coverage)·한 줄 요약을 적는다"]
@@ -860,7 +847,7 @@ def check_recommend(answer: str, jds: list[dict], source: str | None = None) -> 
 def recommend_markdown(answer: str, jds: list[dict], source: str | None = None) -> str:
     """코드가 만든 추천 표 — 순위·점수·점수 근거, JD 마다 요구사항 대응표·강점·공백·먼저 채울 것."""
     fits = fit_items(answer)
-    data = answer_json(answer) or {}
+    data = find_json(answer) or {}
     scores = ranked(score_jds(answer, jds, source))
     lines = ["## 추천 순위 (점수는 코드가 계산)", "", f"> {SCORE_RULE}", "",
              "| 순위 | JD | 한 줄 요약 | 적합도 | 점수 근거 |", "|---|---|---|---|---|"]
@@ -967,7 +954,7 @@ def check_changes(answer: str, old: str, source: str, urls: list[str], web_count
       after  : 내 문서에 없는 숫자를 넣지 않는다 (외부 자료의 숫자는 내 경력이 아니다)
       본문 [W번호] 는 외부 자료 목록 안의 번호
     """
-    data = answer_json(answer)
+    data = find_json(answer)
     changes = _items(data, "changes")
     if not changes:
         if str((data or {}).get("no_changes") or "").strip():
@@ -1182,7 +1169,7 @@ def render_document(answer: str, kind: str, questions: list[Question] | None = N
     if title and not body.lstrip().startswith("# "):
         body = f"# {title}\n\n{body}"
 
-    data = answer_json(answer) or {}
+    data = find_json(answer) or {}
     appendix: list[str] = []
     cover = _items(data, "jd_coverage")
     if cover:

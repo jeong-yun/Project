@@ -60,6 +60,7 @@ from core.agent import EDIT_RETRY_NOTE, OrgAgent, apply_text_edits, with_feedbac
 from core.dept_heads import CriticPlan
 from core.llm_factory import NoAvailableModelError
 from core.schemas import CriticResult, HarnessResult, ModelSpec, TextEdit
+from core.scope import char_pairs
 
 QUESTION_CHARS = 4000  # 원 질문(개념 편집 팀은 초안·관련 항목까지 들어 있어 길다)
 HISTORY_TURNS = 6  # 프롬프트에 넣을 최근 대화 수
@@ -96,10 +97,6 @@ def _norm(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z가-힣]", "", text).lower()
 
 
-def _bigrams(text: str) -> set[str]:
-    return {text[i:i + 2] for i in range(len(text) - 1)} or {text}
-
-
 SAME_POINT_RATIO = 0.6  # 두 지적의 글자 쌍이 이만큼 겹치면 같은 지적 (추정값 — 아래 예시로만 맞춤, 실제 부서장 출력으로 재지 않음)
 
 
@@ -127,7 +124,7 @@ def same_point(a: str, b: str) -> bool:
 
 
 def _dice(a: str, b: str) -> float:
-    x, y = _bigrams(a), _bigrams(b)
+    x, y = char_pairs(a) or {a}, char_pairs(b) or {b}
     return 2 * len(x & y) / (len(x) + len(y))
 
 
@@ -628,7 +625,7 @@ def respond(agent: OrgAgent, question: str, current: str, request: str, turns: l
             if done.is_fallback and done.spec:
                 log.append(f"부서장 대안 모델 {done.spec.label} 로 검토")
             reviewed = done
-            passed = verification.critic_passed(done.critic, cfg["min_score"], cfg["fail_on"])
+            passed = verification.critic_passed(done.critic, cfg["min_score"])
             tried.append(Reviewed(draft, done, passed, fixed, earlier))
             if not passed:  # 🔁 앞 불합격 검토와 같은 지적이 또 나왔다 — 다시 써도 같은 이유로 불합격일 것이라 남은 상한을 쓰지 않는다
                 prev = next((t.review.critic for t in reversed(tried[:-1]) if not t.passed), None)

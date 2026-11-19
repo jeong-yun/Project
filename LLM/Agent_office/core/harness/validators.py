@@ -36,7 +36,7 @@ import time
 from datetime import date, timedelta
 
 from core.config import BASE_DIR
-from core.harness.base import Validator, extract_code_blocks, register
+from core.harness.base import Validator, extract_code_blocks, find_json, register
 
 
 @register
@@ -360,7 +360,7 @@ class ControlIdsValidator(Validator):
 
         framework = str(options.get("control_framework") or "").strip()
         if not framework:
-            framework = str(((governance.answer_json(answer) or {}).get("summary") or {}).get("framework") or "").strip()
+            framework = str(((find_json(answer) or {}).get("summary") or {}).get("framework") or "").strip()
         if not framework:
             return self.ok("검사할 프레임워크 정보 없음")
         try:
@@ -608,7 +608,7 @@ class PortfolioChangesValidator(Validator):
         if problems:
             return self.fail("변경 목록 오류: " + " / ".join(problems[:10]) + " — 내 경험·숫자는 내 문서에서만, 외부 자료는 용어·트렌드에만 "
                              "쓰고 출처 URL 을 단다.")
-        changes = career._items(career.answer_json(answer), "changes")
+        changes = career._items(find_json(answer), "changes")
         outside = sum(str(c.get("kind")).strip() == "외부" for c in changes)
         return self.ok(f"변경 목록 통과 — {len(changes)}건 (문서 {len(changes) - outside} · 외부 {outside})")
 

@@ -12,7 +12,7 @@ from core.schemas import HumanDecision, Lesson, OrgNode, Team
 from core.storage import Storage
 from core.tasks import build_request
 from core.usage import UsageEvent
-from tests.fakes import Script
+from tests.fakes import Script, prompt_lessons
 
 APP = str(BASE_DIR / "app.py")
 
@@ -183,7 +183,7 @@ def test_old_travel_runs_lessons_usage_show_in_split_teams(tmp_path):
     dom = {r["id"] for r in storage.list_runs("travel_domestic")}
     abr = {r["id"] for r in storage.list_runs("travel_abroad")}
     assert dom == {"r_dom", "r_free"} and abr == {"r_abr", "r_free"}  # 어느 말도 없는 기록은 두 팀 모두에 (숨기지 않음)
-    assert storage.recent_lessons("travel_abroad", "lead", 5) == ["이동 시간을 꼭 쓴다"]  # 교훈은 두 팀이 물려받음
+    assert prompt_lessons(storage, "travel_abroad", "lead", 5) == ["이동 시간을 꼭 쓴다"]  # 교훈은 두 팀이 물려받음
     assert storage.lesson_counts("travel_domestic") == {"lead": 1}
     assert storage.usage_by_agent("travel_abroad", since=0)["lead"][0]["cost_usd"] == 0.25
     assert storage.team_for("travel", "… 해외 여행 계획") == "travel_abroad" and storage.team_for("travel") == "travel_abroad"

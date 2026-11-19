@@ -20,7 +20,7 @@ from core.step_mode import DirectionOption, DirectionOptions
 from core.workflow import build_office_graph, resume_step, stream_office
 from tests.fakes import Script, make_critic, make_delegation, make_review
 
-SETTINGS = {"review": {"rewrite_answer": True}}
+SETTINGS = {}
 CRITIC_ON = {"critic": {"enabled": True, "scope": "final", "min_score": 4, "max_self_corrections": 0}}
 GUESSES = ["HBF 는 고대역폭 플래시(High Bandwidth Flash) 메모리를 뜻한다고 봤습니다", "개인 공부용 설명으로 봤습니다"]
 

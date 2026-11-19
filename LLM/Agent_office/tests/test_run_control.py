@@ -18,7 +18,7 @@ from core.step_mode import DirectionOption, DirectionOptions
 from core.workflow import build_office_graph, restart_from, resume_step, stream_office
 from tests.fakes import Script, make_critic, make_delegation, make_review
 
-SETTINGS = {"review": {"rewrite_answer": True}}
+SETTINGS = {}
 NO_CRITIC = {"critic": {"enabled": False}}
 BRIEF = DesiredState(goal="원래 목표", context="", success_criteria=["기준A"], constraints=[], output_format="", assumptions=[])
 

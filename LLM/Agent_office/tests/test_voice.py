@@ -21,7 +21,7 @@ from core.config import BASE_DIR, list_teams, load_models, load_ranks, load_team
 from core.harness import REGISTRY
 from core.tasks import TaskInputError, build_request
 from core.tools import TOOLS
-from tests.fakes import Script, make_delegation, make_review
+from tests.fakes import Script, make_delegation, make_review, prompt_lessons
 
 APP = str(BASE_DIR / "app.py")
 ROOT = str(BASE_DIR)
@@ -480,8 +480,8 @@ def test_old_voice_records_stay_with_the_song_team(tmp_path):
     storage.set_team_links(links)
     assert [r["id"] for r in storage.list_runs("voice")] == ["r_old"] and storage.list_runs("voice_speech") == []
     assert storage.team_for("voice", "아무 질문") == "voice"
-    assert storage.recent_lessons("voice", "lead", 5) == ["epochs 는 코드 값 그대로"]
-    assert storage.recent_lessons("voice_speech", "lead", 5) == []
+    assert prompt_lessons(storage, "voice", "lead", 5) == ["epochs 는 코드 값 그대로"]
+    assert prompt_lessons(storage, "voice_speech", "lead", 5) == []
 
 
 def test_speech_kit_modes_and_borrowed_settings():

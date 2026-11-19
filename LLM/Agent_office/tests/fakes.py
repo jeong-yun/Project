@@ -101,3 +101,11 @@ def make_critic(score=5, leaps=None, violations=None, severity=None):
     return CriticResult(
         analysis="논리 점검", logical_leaps=leaps or [], rule_violations=violations or [], severity=severity, score=score
     )
+
+
+def prompt_lessons(storage, team_id: str, agent_id: str, limit: int = 5) -> list[str]:
+    """에이전트에게 들어갈 켜 둔 교훈 중 최근 limit 개 (오래된 것 → 최신) — 앱과 같은 길(feedback.active_lessons)로 읽는다.
+    나뉜 팀은 옛 팀 교훈도 함께 물려받는다."""
+    from core import feedback
+
+    return [r["lesson"] for r in reversed(feedback.active_lessons(storage, team_id).get(agent_id, [])[:limit])]

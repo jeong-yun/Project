@@ -32,13 +32,11 @@
   부서장 모델을 고르지 않았으면 팀장 모델로 비평한다 (위 2). 골랐는데 그 제공처가 팀원들이 쓰는 제공처에 없으면 경고한다.
 """
 
-import json
-import os
-import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from core import member_models, model_recs
+from core.jsonfile import JsonFile
 from core.schemas import ModelsConfig, ModelSpec, RankModels, Team
 
 FILE_NAME = "department_models.json"
@@ -223,31 +221,22 @@ def critic_plan(models: ModelsConfig, team: Team | None, chains: dict[str, RankM
 class DeptModelStore:
     """부서장 모델 저장소 — {부서 id: "provider:model"}. 없으면 기본(critic → utility)."""
 
-    _lock = threading.Lock()
-
     def __init__(self, data_dir: Path | str):
-        self.path = Path(data_dir) / FILE_NAME
+        self.file = JsonFile(Path(data_dir) / FILE_NAME, {})
+        self.path = self.file.path
 
     def load_all(self) -> dict[str, str]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return {}
-        if not isinstance(data, dict):
-            return {}
+        data = self.file.load()
         return {k: v for k, v in data.items() if isinstance(k, str) and isinstance(v, str) and v}
 
     def get(self, dept_id: str) -> str:
         return self.load_all().get(dept_id, "")
 
     def set(self, dept_id: str, key: str) -> None:
-        with self._lock:
+        with self.file.lock:
             data = self.load_all()
             if key:
                 data[dept_id] = key
             else:
                 data.pop(dept_id, None)
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-            os.replace(tmp, self.path)  # 쓰는 도중 꺼져도 예전 파일이 깨지지 않게
+            self.file.save(data)

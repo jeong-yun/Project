@@ -26,6 +26,7 @@ from pathlib import Path
 from langchain_core.callbacks import BaseCallbackHandler
 
 from core.config import CONFIG_DIR, load_yaml
+from core.memo import SigCache, file_sig
 
 PRICING_FILE = CONFIG_DIR / "pricing.yaml"
 UNPRICED = "가격 미등록"  # 가격표에 없는 모델 — 비용을 0 으로 치지 않고 비워 둔다 (화면 표시)
@@ -52,24 +53,19 @@ class UsageEvent:
 # ─── 가격 ───────────────────────────────────────────────────────────────
 
 
-_pricing_cache: tuple[float, dict] | None = None
+_pricing_cache = SigCache()
 
 
 def load_pricing(path: Path = PRICING_FILE) -> dict:
     """가격표 (파일이 바뀌면 다시 읽는다 — 앱을 다시 켜지 않아도 반영)."""
-    global _pricing_cache
-    try:
-        mtime = path.stat().st_mtime
-    except OSError:
-        return {"models": {}, "per_call": {}, "free_providers": []}
-    if _pricing_cache and _pricing_cache[0] == mtime:
-        return _pricing_cache[1]
-    data = load_yaml(path) or {}
-    data.setdefault("models", {})
-    data.setdefault("per_call", {})
-    data.setdefault("free_providers", [])
-    _pricing_cache = (mtime, data)
-    return data
+    def read() -> dict:
+        data = (load_yaml(path) if path.exists() else None) or {}
+        data.setdefault("models", {})
+        data.setdefault("per_call", {})
+        data.setdefault("free_providers", [])
+        return data
+
+    return _pricing_cache.get(str(path), file_sig(path), read)
 
 
 _overrides: Callable[[], dict] | None = None

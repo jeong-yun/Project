@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 import streamlit as st
 
-from core import call_monitor, followup, llm_factory, progress, step_mode, switch_rules
+from core import call_monitor, followup, llm_factory, member_models, progress, step_mode, switch_rules
 from core.brief import DesiredState, empty_state
 from core.schemas import ModelsConfig, OrgNode, Team
 from core.workflow import RESTART_POINTS
@@ -261,7 +261,8 @@ def _switch_form(ctx: Ctx, run: dict, live, now: float) -> None:
                            help="이번 실행에서 같은 담당의 다음 호출도 이 모델을 먼저 씁니다 (다음 업무에는 영향 없음).")
     if c_rest.button("⏭ 이 호출 끊고 이 모델로 다시", key=f"sw_go_{rec.id}", type="primary", disabled=choice is None):
         node = next((n for n in ctx.org.walk() if n.id == rec.agent_id), None)
-        spec = switch_rules.spec_for(choice, ctx.base_models, ctx.team, node.rank if node else "")
+        spec = member_models.spec_for(choice, ctx.base_models, ctx.team,
+                                       (node.rank if node else "") or next(iter(ctx.base_models.ranks), ""))
         if call_monitor.switch(rec.id, spec, for_rest=rest):
             st.toast(f"⏭ {rec.who}: {rec.provider}:{rec.model} → {choice} 로 다시 합니다")
         else:

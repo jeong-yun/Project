@@ -143,10 +143,9 @@ def build_office_graph(
     없으면 models.yaml critic → utility 로 비평한다 (비공개 팀은 팀장 모델).
     """
     verification_cfg = verification_cfg or {}
-    rewrite_answer = settings.get("review", {}).get("rewrite_answer", True)
     lesson_chars = lesson_budget(settings)  # 에이전트마다 교훈 글자 한도 — 켜 둔 교훈은 이 안이면 모두 들어간다
     critic_cfg = verification.critic_settings(verification_cfg, team.verification)
-    rubric = team.rubric or verification_cfg.get("review_rubric")
+    rubric = verification_cfg.get("review_rubric")
     with_human = checkpointer is not None  # interrupt 는 체크포인터가 있어야 동작한다
     if "llm_concurrency" in settings:
         llm_factory.set_concurrency(settings["llm_concurrency"])  # provider 별 동시 LLM 호출 수 (형제 동시 진행)
@@ -391,15 +390,15 @@ def build_office_graph(
         question, web = brief.as_prompt(state["question"]), web_text(state)
         kind = "integrate" if len(children) > 1 else "review"
         emit({"type": "start", "node": node_id, "kind": kind})
-        messages = agent.review_messages(question, task, children, web, lessons, rewrite_answer)
-        answer = agent.review(messages, children, rewrite_answer)
+        messages = agent.review_messages(question, task, children, web, lessons)
+        answer = agent.review(messages, children)
 
         def again(feedback: str, previous: AgentAnswer) -> AgentAnswer:
             # 고칠 곳(edits) 방식이면 모델이 마지막으로 본 글(직전 결과)에 적용한다
             base = previous.content if agent.edit_mode else None
-            if agent.edit_mode and len(children) == 1 and rewrite_answer:  # edits 로 고치는 회차 (agent.review 와 같은 조건)
+            if agent.edit_mode and len(children) == 1:  # edits 로 고치는 회차 (agent.review 와 같은 조건)
                 feedback = f"{feedback}\n{EDIT_RETRY_NOTE}"  # 앞서 낸 edits 는 이미 반영됐다 — 지금 글 기준으로 새로 고칠 곳만
-            return agent.review(with_feedback(messages, previous.review.model_dump_json(), feedback), children, rewrite_answer, base)
+            return agent.review(with_feedback(messages, previous.review.model_dump_json(), feedback), children, base)
 
         # 비평가(Critic): 검토 과정의 논리 비약을 채점 → 불합격이면 자가 교정
         use_critic = critic_cfg["enabled"] and (critic_cfg["scope"] == "all" or node_id == state["root_id"])
@@ -436,7 +435,7 @@ def build_office_graph(
                 if done.is_fallback and done.spec:
                     answer.verification_log.append(f"비평가 대안 모델 {done.spec.label} 로 비평")
                 tried.append(answer)
-                passed = verification.critic_passed(critic, critic_cfg["min_score"], critic_cfg["fail_on"])
+                passed = verification.critic_passed(critic, critic_cfg["min_score"])
                 if passed or round_ == critic_cfg["max_self_corrections"]:
                     break
                 emit({"type": "retry", "node": node_id, "reason": "critic"})

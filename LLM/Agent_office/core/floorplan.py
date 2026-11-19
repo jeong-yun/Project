@@ -32,6 +32,8 @@ from shapely.geometry.base import BaseGeometry
 from shapely.geometry import LineString, MultiLineString, Point, Polygon, box
 from shapely.ops import linemerge, unary_union
 
+from core.harness.base import find_json
+
 Side = Literal["N", "E", "S", "W"]
 EPS = 0.01  # 좌표 비교 허용 오차 (m)
 SNAP = 0.05  # 두 방이 '맞닿았다'고 볼 간격 (m) — LLM 좌표의 작은 틈 허용
@@ -280,26 +282,18 @@ class Layout(BaseModel):
 # JSON 읽기 (LLM 답변 → Layout)
 # ════════════════════════════════════════════════════════════════════
 
-JSON_BLOCK = re.compile(r"```[ \t]*json[ \t]*\n(.*?)```", re.DOTALL | re.IGNORECASE)
-
-
 class LayoutParseError(ValueError):
     """레이아웃 JSON 이 없거나 형식이 틀림 (메시지는 그대로 LLM 피드백으로 쓴다)."""
 
 
 def find_layout_json(text: str) -> dict | None:
-    """답변 속 ```json 블록 중 'floors' 를 가진 마지막 블록 (수정 과정에서 여러 번 썼으면 마지막이 최종)."""
-    found = None
-    for src in JSON_BLOCK.findall(text):
-        try:
-            data = json.loads(src)
-        except json.JSONDecodeError as e:
-            if '"floors"' in src:
-                raise LayoutParseError(f"레이아웃 JSON 파싱 오류: {e.msg} (줄 {e.lineno}, 칸 {e.colno})") from e
-            continue
-        if isinstance(data, dict) and "floors" in data:
-            found = data
-    return found
+    """답변 속 ```json 블록 중 'floors' 를 가진 마지막 블록 (수정 과정에서 여러 번 썼으면 마지막이 최종).
+    'floors' 가 든 블록이 깨졌으면 건너뛰지 않고 LayoutParseError (그대로 LLM 피드백)."""
+    def broken(src: str, e: json.JSONDecodeError):
+        if '"floors"' in src:
+            raise LayoutParseError(f"레이아웃 JSON 파싱 오류: {e.msg} (줄 {e.lineno}, 칸 {e.colno})") from e
+
+    return find_json(text, "floors", on_error=broken)
 
 
 def schema_errors(e: ValidationError) -> str:

@@ -321,9 +321,3 @@ def approval_queue(audit: AuditLog) -> list[dict]:
     from core import approvals  # approvals 가 이 모듈을 쓰므로 여기서 읽는다
 
     return approvals.pending(audit)
-
-
-def autonomy_cost_since(audit: AuditLog, since: float) -> float:
-    """자율 실행만의 추정 비용 합계 (run_end·run_error 의 cost_usd)."""
-    return sum(float(rec.get("cost_usd") or 0) for rec in audit.entries()
-               if rec["event"] in ("run_end", "run_error") and rec["ts"] >= since)

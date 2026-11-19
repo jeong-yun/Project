@@ -33,7 +33,6 @@
 from __future__ import annotations
 
 import importlib
-import json
 import os
 import re
 import threading
@@ -47,6 +46,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from core.config import BASE_DIR, load_settings
+from core.jsonfile import write_atomic
 
 # ─── 수준 ────────────────────────────────────────────────────────────
 
@@ -374,23 +374,11 @@ QUIZ_JSON_HELP = (
 )
 
 
-def json_blocks(text: str) -> list:
-    """답변 속 ```json 블록을 읽는다 (깨진 블록은 건너뜀)."""
-    from core.harness.base import extract_code_blocks  # 순환 import 방지
-
-    out = []
-    for src in extract_code_blocks(text or "", "json"):
-        try:
-            out.append(json.loads(src))
-        except json.JSONDecodeError:
-            continue
-    return out
-
-
 def find_json(text: str, key: str) -> dict | None:
-    """key 를 가진 마지막 ```json 블록 (dict)."""
-    found = [b for b in json_blocks(text) if isinstance(b, dict) and key in b]
-    return found[-1] if found else None
+    """key 를 가진 마지막 ```json 블록 (dict) — core.harness.base.find_json. harness 가 이 모듈을 불러 늦게 import 한다 (순환 방지)."""
+    from core.harness.base import find_json as find
+
+    return find(text, key)
 
 
 def quiz_problems(data: object, expected_count: int | None = None, kind: str | None = None) -> list[str]:
@@ -738,11 +726,7 @@ class LearningStore:
     def save(self, course: Course) -> Course:
         with self._lock:
             course.updated_at = now_text()
-            path = self.path(course.id)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(f".{threading.get_ident()}.tmp")
-            tmp.write_text(course.model_dump_json(indent=2), encoding="utf-8")
-            os.replace(tmp, path)  # 쓰는 도중 꺼져도 예전 파일이 깨지지 않게
+            write_atomic(self.path(course.id), course.model_dump_json(indent=2))
             return course
 
     def update(self, course_id: str, fn: Callable[[Course], object]):

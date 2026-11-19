@@ -9,12 +9,12 @@
   - 한 종목이 실패하면 그 칸만 이전 값, 이전 값도 없으면 '—'. 띠가 비어도 보드는 그대로 돈다
 """
 
-import json
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+from core.jsonfile import JsonFile
 
 DEFAULT_MARKET = [
     {"name": "코스피", "ticker": "^KS11"},
@@ -84,10 +84,7 @@ def cache_path(data_dir: Path) -> Path:
 
 
 def load_cache(data_dir: Path) -> dict:
-    try:
-        return json.loads(cache_path(data_dir).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
+    return JsonFile(cache_path(data_dir), {}).load()
 
 
 def refresh(items: list[dict], data_dir: Path, timeout: float = 10, now: float | None = None) -> dict:
@@ -98,11 +95,7 @@ def refresh(items: list[dict], data_dir: Path, timeout: float = 10, now: float |
     quotes = [q or {**previous.get(m["ticker"], blank(m["name"], m["ticker"])), "name": m["name"]}
               for m, q in zip(items, got)]
     cache = {"fetched_at": now or time.time(), "quotes": quotes}
-    path = cache_path(data_dir)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f"{path.stem}.{threading.get_ident()}.tmp")
-    tmp.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+    JsonFile(cache_path(data_dir), indent=1).save(cache)
     return cache
 
 

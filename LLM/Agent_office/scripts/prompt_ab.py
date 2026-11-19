@@ -328,11 +328,11 @@ def run_draft(q: dict, ctx: Ctx) -> None:
     tools: list = []
     original = OrgAgent.review_messages
 
-    def hook(self, question, task, child_results, web_context="", lessons=None, rewrite_answer=True):
+    def hook(self, question, task, child_results, web_context="", lessons=None):
         if self.node.id == org.id:
-            captured.update(question=question, task=task, children=child_results, web=web_context, rewrite=rewrite_answer)
+            captured.update(question=question, task=task, children=child_results, web=web_context)
             raise StopAtLead()
-        return original(self, question, task, child_results, web_context, lessons, rewrite_answer)
+        return original(self, question, task, child_results, web_context, lessons)
 
     OrgAgent.review_messages = hook
     started = time.perf_counter()
@@ -357,7 +357,7 @@ def run_draft(q: dict, ctx: Ctx) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
         "id": q["id"], "team": team.id, "user_question": question, "question": captured["question"], "task": captured["task"],
-        "web": captured["web"], "rewrite": captured["rewrite"], "validators": validators, "options": options,
+        "web": captured["web"], "validators": validators, "options": options,
         "children": [c.model_dump(mode="json") for c in captured["children"]],
         "steps": [step_row(s) for s in steps], "seconds": round(time.perf_counter() - started, 1),
     }, ensure_ascii=False, indent=1), encoding="utf-8")
@@ -382,14 +382,14 @@ def lead_agent(team, ctx: Ctx) -> OrgAgent:
 def run_variant(agent: OrgAgent, cap: dict, variant: str) -> tuple[AgentAnswer, AgentAnswer | None]:
     """방식 하나 = 팀장의 검토·통합 1회 (T1 은 앞에 '도구 묻기' 1회). (최종 답변, T1 의 첫 답)"""
     children = [AgentAnswer.model_validate(c) for c in cap["children"]]
-    system, human = agent.review_messages(cap["question"], cap["task"], children, cap["web"], None, cap["rewrite"])
+    system, human = agent.review_messages(cap["question"], cap["task"], children, cap["web"], None)
     if variant == "C":
-        return agent.review([system, human], children, cap["rewrite"]), None
+        return agent.review([system, human], children), None
     if variant == "T2":
-        return agent.review([SystemMessage(f"{system.content}\n\n{T2_RULE}"), human], children, cap["rewrite"]), None
+        return agent.review([SystemMessage(f"{system.content}\n\n{T2_RULE}"), human], children), None
     ask = [system, HumanMessage(f"{human.content}\n\n{T1_ASK_TOOLS}\n{T1_ASK_TOOLS_NOTE}")]
     tools = agent.draft(ask)  # 형식 없는 글로 도구를 답하게 한다
-    return agent.review([*ask, AIMessage(tools.content), HumanMessage(T1_ASK_WRITE)], children, cap["rewrite"]), tools
+    return agent.review([*ask, AIMessage(tools.content), HumanMessage(T1_ASK_WRITE)], children), tools
 
 
 def run_lead(q: dict, ctx: Ctx, variants) -> None:

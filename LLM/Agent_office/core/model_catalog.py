@@ -20,7 +20,6 @@ config/models.yaml 에 없는 모델도 '🎛 팀원 모델 선택'에서 고를
   새 모델은 새 줄을 만들지 않고 기존 줄 하나에 '같은 급'으로 들어간다 → core/member_models.py 의 규칙이 그대로 동작한다.
 """
 
-import json
 import os
 import re
 import threading
@@ -32,6 +31,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from core.jsonfile import JsonFile
 from core.memo import SigCache, file_sig
 from core.schemas import ModelsConfig, ModelSpec, Team
 
@@ -250,28 +250,13 @@ SELECTOR_PROVIDERS = ("openai", "google", "anthropic", "upstage", "claude_cli")
 _lock = threading.Lock()
 
 
-def _read_json(path: Path) -> dict:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)  # 쓰는 도중 꺼져도 예전 파일이 깨지지 않게
-
-
 _cache = SigCache()
 
 
 def load_catalog(data_dir: Path | str) -> dict:
     """{"providers": {provider: {"fetched_at", "error", "models": {id: {...}}, "all_ids": [...]}}} — 파일이 그대로면 다시 안 읽음."""
     path = Path(data_dir) / CATALOG_FILE
-    return _cache.get(str(path), file_sig(path), lambda: _read_json(path)) if path.exists() else {}
+    return _cache.get(str(path), file_sig(path), lambda: JsonFile(path, {}).load()) if path.exists() else {}
 
 
 def catalog_prices(data_dir: Path | str) -> dict[str, dict]:
@@ -306,9 +291,9 @@ def refresh(models: ModelsConfig, data_dir: Path | str, now: float | None = None
 
     with ThreadPoolExecutor(max_workers=max(1, len(targets))) as pool:
         results = list(pool.map(one, targets))
-    path = Path(data_dir) / CATALOG_FILE
-    with _lock:
-        data = _read_json(path)
+    file = JsonFile(Path(data_dir) / CATALOG_FILE, {})
+    with file.lock:
+        data = file.load()
         providers = data.setdefault("providers", {})
         for provider, got, error in results:
             entry = providers.setdefault(provider, {"models": {}})
@@ -329,7 +314,7 @@ def refresh(models: ModelsConfig, data_dir: Path | str, now: float | None = None
             entry["all_ids"] = sorted(set(all_ids))
             entry["fetched_at"] = now
         data["refreshed_at"] = now
-        _write_json(path, data)
+        file.save(data)
     return data
 
 
@@ -400,8 +385,7 @@ class CustomStore:
         return self.read()["tiers"]
 
     def _save(self, data: dict) -> None:
-        with _lock:
-            _write_json(self.path, data)
+        JsonFile(self.path).save(data)
 
     def add(self, provider: str, model: str, display: str, models: ModelsConfig) -> str:
         provider, model, display = provider.strip(), model.strip(), display.strip()
@@ -436,7 +420,7 @@ _custom_cache = SigCache()
 
 
 def load_catalog_file(path: Path) -> dict:
-    return _custom_cache.get(str(path), file_sig(path), lambda: _read_json(path)) if path.exists() else {}
+    return _custom_cache.get(str(path), file_sig(path), lambda: JsonFile(path, {}).load()) if path.exists() else {}
 
 
 # ─── 강도 추정 (이름 규칙) ───────────────────────────────────────────────

@@ -43,16 +43,22 @@ def keyword_hits(text: str, team: Team) -> list[str]:
     return [w for w in team.scope.keywords if w.strip() and _keyword_pattern(w).search(text)]
 
 
-def _bigrams(text: str) -> set[str]:
+def char_pairs(text: str) -> set[str]:
+    """글자 2개 묶음 ('사과나무' → 사과·과나·나무). 2글자보다 짧으면 빈 집합 — 팀 고르기·범위 확인·지적·교훈 비교가 함께 쓴다."""
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def word_pairs(text: str, singles: bool = False) -> set[str]:
+    """낱말(한글·영숫자)마다 글자 2개 묶음. singles=True 면 1글자 낱말도 그대로 넣는다."""
     words = re.findall(r"[0-9A-Za-z가-힣]+", text.lower())
-    return {w[i:i + 2] for w in words if len(w) > 1 for i in range(len(w) - 1)}
+    return set().union(*(char_pairs(w) or ({w} if singles else set()) for w in words))
 
 
 def is_followup(question: str, last_text: str, others_hit: bool) -> bool:
     """직전 결과에 대한 짧은 후속 질문인가 — 짧고, (직전 결과와 낱말이 겹치거나 / 후속 표현이 있고 다른 팀 낱말이 없음)."""
     if not last_text.strip() or len(question.strip()) > FOLLOWUP_MAX_CHARS:
         return False
-    overlap = len(_bigrams(question) & _bigrams(last_text))
+    overlap = len(word_pairs(question) & word_pairs(last_text))
     if overlap >= 3:
         return True
     return not others_hit and any(m in question for m in FOLLOWUP_MARKERS)
@@ -140,11 +146,6 @@ def blocked_message(decision: dict, team: Team, teams: list[Team], cfg: dict | N
     return f"이 질문은 **{team.name}** 범위가 아닙니다 — **{other.name}**" + (f"({dept})" if dept else "") + "이 맞습니다."
 
 
-def summary_line(team: Team) -> str:
-    """'이 팀이 다루는 질문: …' 한 줄 (scope 없으면 빈 글)."""
-    return team.scope.summary if team.scope else ""
-
-
 def log_decision(path: Path, team: Team, question: str, decision: dict) -> None:
     """범위 판단 한 줄 기록 (data/scope_log.jsonl) — 실패해도 업무를 막지 않는다."""
     row = {"ts": round(time.time(), 1), "team": team.id, "question": question[:300], **decision}
@@ -154,10 +155,3 @@ def log_decision(path: Path, team: Team, question: str, decision: dict) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     except OSError:
         pass
-
-
-def read_log(path: Path, limit: int = 200) -> list[dict]:
-    if not Path(path).exists():
-        return []
-    rows = [json.loads(line) for line in Path(path).read_text(encoding="utf-8").splitlines() if line.strip()]
-    return rows[-limit:]

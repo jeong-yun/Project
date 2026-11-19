@@ -6,7 +6,7 @@
   - '지적 → 수정' 과정이 비약한다 → 별도 비평가가 그 과정과, 수정 답변이 기준·근거 자료에 맞는지를 본다 (critique)
   - 비평가가 불합격을 주면        → "A 부분이 B 규칙에 어긋난다. 수정하라" 를 돌려줘 다시 쓴다 (correction_message)
 
-설정: config/verification.yaml (팀별 루브릭은 team.yaml 의 rubric)
+설정: config/verification.yaml
 """
 
 from dataclasses import dataclass, field
@@ -23,7 +23,6 @@ DEFAULT_CRITIC = {
     "scope": "final",
     "min_score": 4,
     "max_self_corrections": 1,
-    "fail_on": "severe",  # severe: 심각한 위반이 있을 때만 불합격 / any: 지적이 하나라도 있으면 불합격 (이전 동작)
     "evidence_chars": 6000,  # 비평가에게 넘기는 근거 자료(데이터 툴·웹 검색) 최대 글자 수
     # 비평가에게 넘기는 검토 대상(하위 결과 모음)·수정 답변 최대 글자 수 — 팀장 통합본(출력 4만 토큰)과 하위 결과를
     # 그대로 넘기면 입력이 너무 커져 느리고 멈췄다 (2026-11-04 실측). 앞·뒤를 남기고 가운데를 줄인다.
@@ -220,19 +219,12 @@ def run_critic(messages: list, models: ModelsConfig, chain: RankModels | None = 
     return Critique(critic, call.errors, call.spec, call.is_fallback)
 
 
-def critic_passed(critic: CriticResult | None, min_score: int, fail_on: str = "severe") -> bool:
-    """합격 = 점수가 min_score 이상이고, 불합격 사유가 될 지적이 없음.
-
-    fail_on="severe": severity 가 severe 일 때만 지적을 불합격 사유로 본다 (사소한 지적이 붙은 4/5 는 통과)
-    fail_on="any"   : 논리 비약·규칙 위반이 하나라도 있으면 불합격 (이전 동작 — 실측 불합격률 75%)
-    """
+def critic_passed(critic: CriticResult | None, min_score: int) -> bool:
+    """합격 = 점수가 min_score 이상이고, severity 가 severe(사실 오류·근거와 다른 숫자 등)가 아님.
+    사소한 지적이 붙은 4/5 는 통과 (예전의 '지적이 하나라도 있으면 불합격'은 실측 불합격률 75% 라 버림)."""
     if critic is None:
         return True  # 비평을 못 했으면 통과로 본다
-    if critic.score < min_score:
-        return False
-    if fail_on == "any":
-        return not critic.logical_leaps and not critic.rule_violations
-    return critic.severity != "severe"
+    return critic.score >= min_score and critic.severity != "severe"
 
 
 def best_attempt(critics: list[CriticResult | None]) -> int:

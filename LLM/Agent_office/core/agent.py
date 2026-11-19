@@ -128,10 +128,6 @@ class OrgAgent:
     def name(self) -> str:
         return self.node.name or self.rank.name
 
-    @property
-    def is_manager(self) -> bool:
-        return bool(self.node.children)
-
     # ─── 공통 프롬프트 ─────────────────────────────────────────────
 
     def system_prompt(self, lessons: list[str] | None = None) -> str:
@@ -248,7 +244,6 @@ class OrgAgent:
         child_results: list[AgentAnswer],
         web_context: str = "",
         lessons: list[str] | None = None,
-        rewrite_answer: bool = True,
     ) -> list[BaseMessage]:
         """하위 결과를 검토(1명) 또는 통합(여러 명)하는 프롬프트."""
         integrate = len(child_results) > 1
@@ -272,9 +267,7 @@ class OrgAgent:
                 "- 출처 [번호] 표기는 유지한다.",
             ]
         else:
-            if not rewrite_answer:
-                rule = "답변을 직접 고쳐 쓰지 말고 revised_answer 는 빈 문자열로 둔다. 지적은 issues 에 남긴다."
-            elif self.edit_mode:
+            if self.edit_mode:
                 rule = (
                     "revise 이면 답변 전문을 다시 쓰지 말고 edits 에 고칠 곳마다 {find: 검토 대상 답변의 바꿀 부분 글자 그대로"
                     " (답변 안에서 한 번만 나오게 앞뒤를 조금 포함), replace: 바꿀 글} 을 쓰고 revised_answer 는 빈 문자열로 둔다."
@@ -322,22 +315,21 @@ class OrgAgent:
         return self.team.review_mode == "edit"
 
     def review(
-        self, messages: list[BaseMessage], child_results: list[AgentAnswer], rewrite_answer: bool = True,
-        base: str | None = None,
+        self, messages: list[BaseMessage], child_results: list[AgentAnswer], base: str | None = None,
     ) -> AgentAnswer:
         """검토·통합 LLM 호출 1회. 승인이면 하위 답변을 그대로 올린다.
 
         base: 고칠 곳(edits)을 적용할 글 — 처음 검토는 하위 답변, 자가 교정·하네스 재시도는 직전 결과(모델이 마지막으로 본 글).
         """
         integrate = len(child_results) > 1
-        edit = self.edit_mode and not integrate and rewrite_answer
+        edit = self.edit_mode and not integrate
         call = llm_factory.invoke_structured(self.rank_models, self.models, ReviewEdits if edit else ReviewResult, messages, self.name)
         review: ReviewResult = call.parsed
         review.score = min(max(review.score, 1), 10)
         base = child_results[0].content if base is None else base
         log: list[str] = []
 
-        if review.revised_answer.strip() and (integrate or (review.verdict == "revise" and rewrite_answer)):
+        if review.revised_answer.strip() and (integrate or review.verdict == "revise"):
             content = review.revised_answer
             if edit:
                 log.append("고칠 곳 대신 전문을 다시 씀")

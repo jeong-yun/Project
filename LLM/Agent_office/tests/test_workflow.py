@@ -7,7 +7,7 @@ from core.schemas import Team
 from core.workflow import build_office_graph, stream_office
 from tests.fakes import Script, make_critic, make_delegation, make_review
 
-SETTINGS = {"review": {"rewrite_answer": True}}
+SETTINGS = {}
 NO_CRITIC = {"critic": {"enabled": False}}
 BRIEF = DesiredState(goal="목표", context="", success_criteria=["기준A"], constraints=[], output_format="", assumptions=[])
 
@@ -253,15 +253,6 @@ def test_severe_violation_fails_even_with_high_score(org, ranks, team, models, u
     _, steps = run(org, ranks, team, models, root="am_action", verification=CRITIC_ON)
     assert steps[-1].content == "교정본"
     assert any("자가 교정 후 비평가 통과(5/5)" in log for log in steps[-1].verification_log)
-
-
-def test_fail_on_any_keeps_strict_rule(org, ranks, team, models, use_script):
-    script = use_script(full_script())
-    script.outputs["CriticResult"] = [make_critic(4, violations=["사소함"], severity="minor"), make_critic(5)]
-    script.outputs["ReviewResult"] = [make_review(answer="1차"), make_review(answer="교정본")]
-    cfg = {"critic": {**CRITIC_ON["critic"], "fail_on": "any"}}
-    _, steps = run(org, ranks, team, models, root="am_action", verification=cfg)
-    assert steps[-1].content == "교정본"
 
 
 def _team_with_tool(team, monkeypatch, content):
