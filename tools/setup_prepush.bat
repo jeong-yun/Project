@@ -14,10 +14,12 @@ set "REPO=%~dp0.."
 cd /d "%REPO%"
 rem Find python (resolve pyenv's python.bat shim to the real python.exe)
 set "PY="
-for /f "delims=" %%p in ('python -c "import sys;print(sys.executable)" 2^>nul') do set "PY=%%p"
+rem Prefer the Agent Office venv (has pytest and the app packages). The default python may be a newer one without them.
+if exist "LLM\Agent_office\.venv\Scripts\python.exe" set "PY=%CD%\LLM\Agent_office\.venv\Scripts\python.exe"
+if not defined PY for /f "delims=" %%p in ('python -c "import sys;print(sys.executable)" 2^>nul') do set "PY=%%p"
 if not defined PY for /f "delims=" %%p in ('py -3 -c "import sys;print(sys.executable)" 2^>nul') do set "PY=%%p"
 if not defined PY (
-  echo [ERROR] Python not found. Install Python 3.11 and add it to PATH, then run this again.
+  echo [ERROR] Python not found. Install Python 3.11 - 3.13 and add it to PATH, then run this again.
   pause
   exit /b 1
 )
