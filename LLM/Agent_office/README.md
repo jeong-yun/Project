@@ -62,7 +62,7 @@
 | 항목 | 요구 사항 |
 |---|---|
 | OS | Windows 10/11, macOS, Linux |
-| Python | **3.11 이상** (개발 환경: 3.11.9) |
+| Python | **3.11 ~ 3.13** (개발 환경: 3.11.9 · 3.13.17). 3.14 부터는 표 라이브러리 pyarrow 19 설치 파일이 없어 설치가 실패합니다 |
 | CPU / RAM | 일반 PC 수준, RAM 8GB 이상 권장 |
 | GPU | 불필요 (모든 추론은 API 호출) |
 | 디스크 | 약 1GB (가상환경 포함) |
@@ -237,9 +237,11 @@ python -c "from core import claude_cli as c; print(c.find_executable()); print(c
 git clone https://github.com/jeong-yun/Project.git
 cd Project\LLM\Agent_office
 
-# 2) 가상환경 만들기 → 켜기 (Python 3.11 이상)
+# 2) 가상환경 만들기 → 켜기 (Python 3.11 ~ 3.13)
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+#   기본 python 이 3.14 이상이면:  py -V:3.13 -m venv .venv   (설치된 버전 보기: py list, 예전 py 는 py -0)
+#   Activate.ps1 이 실행 정책 때문에 막히면: 켜지 않고 아래 명령의 python 을 .venv\Scripts\python.exe 로 바꿔 쓰면 됩니다
 #   macOS / Linux:  python3 -m venv .venv  →  source .venv/bin/activate
 
 # 3) 패키지 설치
@@ -1839,7 +1841,9 @@ pip install -r requirements-dev.txt
 python -m pytest -q
 ```
 
-테스트는 가짜 모델·가짜 검색을 쓰므로 API 키·비용·인터넷 없이 실행됩니다 (2026-11-13 기준 1,266건).
+테스트는 가짜 모델·가짜 검색을 쓰므로 API 키·비용·인터넷 없이 실행됩니다 (2026-11-20 기준 1,485건 — Python 3.11.9·3.13.17 둘 다 전부 통과).
+GitHub 검사는 Python 3.11 과 3.13 두 버전에서 각각 돌고, 둘 다 통과해야 main 에 반영됩니다.
+가상환경을 켜지 않았다면 `python` 대신 `.venv\Scripts\python.exe` 로 실행합니다 (예: `.venv\Scripts\python.exe -m pytest -q`).
 폴더에 `.env` 가 있어도 테스트는 읽지 않습니다. 가짜 모델을 끼우지 않은 테스트가 모델을 만들면 그 테스트는 실패합니다 (`tests/conftest.py`).
 GitHub 검사에서 테스트가 실패하면 실패한 테스트 이름과 오류 첫 줄이 실행 요약의 주석(Annotations)에 남습니다 — 로그인하지 않아도 보입니다.
 OR-Tools 배치 엔진 테스트 몇 건과 동시 실행·피드 시간 테스트는 PC 가 바쁘면 시간 제한에 걸릴 수 있습니다 — 실패하면 그 테스트만 다시 돌려 보세요.

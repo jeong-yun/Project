@@ -36,7 +36,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Python 두 버전에서 각각 돈다 (검사 이름: 'pytest (3.11)' · 'pytest (3.13)').
+  #   3.11: 예전 PC 가 이 버전으로 앱을 돌린다.  3.13: 새 PC. (3.14 부터는 pyarrow 19 설치 파일이 없다 — requirements.txt 참고)
+  # 하나가 실패해도 다른 버전은 끝까지 돌린다(fail-fast: false). promote-to-main.yml 은 둘 다 통과해야 main 에 반영한다.
   pytest:
+    name: pytest (${{ matrix.python-version }})
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
     runs-on: ubuntu-latest
     timeout-minutes: 40
     defaults:
@@ -53,7 +61,7 @@ jobs:
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
           cache: pip
           cache-dependency-path: |
             LLM/Agent_office/requirements.txt

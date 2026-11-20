@@ -2758,6 +2758,20 @@
 - 알아 둘 것: 지금 쓰는 TTS 모델 `gpt-4o-mini-tts` 는 OpenAI 가 **2027-01-06 종료 예정**이라고 알렸다 — 그 전에 다른 음성 모델로 바꿔야 한다.
 - 다음 할 일: MP3 실제 샘플 하나(허락 뒤), 2단계 슬라이드 영상(MP4), 원문 읽기 전·후 미확인 수 비교, 수정 요청 몇 번 뒤 출력 토큰 비교.
 
+**💻 새 PC(Windows 11 · Python 3.13)에서 테스트 · GitHub 검사를 3.11 + 3.13 두 버전으로**
+- 배경: 새 PC 에는 Python 3.15(기본)와 3.13 만 있다. 3.15 는 `pyarrow>=19,<20` 고정(25.0 에서 앱 강제 종료 — 위 11-02·11-05) 때문에 설치가 안 된다. 예전 PC 는 아직 3.11.9 로 앱을 돌린다.
+- 작업:
+  - `py -V:3.13 -m venv .venv` → `.venv\Scripts\python.exe -m pip install -r requirements-dev.txt` (PowerShell 실행 정책 때문에 `Activate.ps1` 대신 venv 의 python.exe 를 바로 씀). `pip check` 문제 없음.
+  - CI(`agent-office-tests.yml`)를 matrix 로: Python 3.11 · 3.13 각각 전체 테스트, 하나가 실패해도 다른 버전은 끝까지(`fail-fast: false`). 검사 이름이 `pytest (3.11)` · `pytest (3.13)` 으로 바뀌지만
+    main 에 필수 검사 규칙이 없고(GitHub 설정 조회), `promote-to-main.yml` 은 불러온 워크플로 전체 결과(두 버전 모두 통과해야 success)만 보므로 고칠 곳 없음.
+  - README(요구 사양 · 설치 · 테스트) · `AGENTS.md`(CI 와 다른 점) · `requirements.txt` 주석의 Python 버전을 '3.11 ~ 3.13' 으로.
+- 기술: GitHub Actions matrix, 재사용 워크플로(workflow_call) 결과 합치기, pip `--dry-run --python-version` 으로 다른 Python 버전의 설치 파일 유무 보기.
+- 성과:
+  - Python 3.13.17 에서 전체 **1,485 통과**(실패 0, 10분 10초) — 3.13 때문에 고친 코드 없음. 같은 1,485건이 예전 PC 3.11.9 에서는 19분 19초(다른 PC 라 속도 비교는 아님. 새 PC: Core Ultra 7 155U 12코어 14스레드 · RAM 32GB, 다른 작업 없음).
+  - pyarrow 19.0.1 설치 파일은 Python 3.14 · 3.15 용이 없음(3.14 는 22.0 부터, 3.15 는 26.0 부터) → 이 앱은 3.11 ~ 3.13.
+- 확인 못 한 것: 이 PC 에서 실제 화면(`streamlit run`)과 실제 모델 호출, GitHub 러너에서 3.13 실행(올린 뒤 검사 결과로 확인), 이 PC 의 '올리기 전 검사' 설정(`tools/setup_prepush.bat` — 기본 `python` 이 3.15 라 그대로 돌리면 패키지 없는 3.15 가 기록될 수 있음).
+- 다음 할 일: 이 PC 의 올리기 전 검사가 3.13 venv 를 쓰게 설정, 예전 PC 를 3.13 으로 옮길지 정하기(옮기면 CI 에서 3.11 을 빼도 됨).
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
