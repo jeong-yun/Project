@@ -2782,6 +2782,23 @@
   `.venv` 가 없는 예전 PC 는 이전과 같은 순서로 찾는다.
 - 다음 할 일: 없음 (바탕화면에 `Agent_Office_검사후_올리기.bat` 복사는 원할 때).
 
+## 2026-11-23
+
+**🎯 요청 정리(브리프)가 📎 첨부 파일을 알게 (docs/TODO_요청정리_첨부파일.md)**
+- 배경: 부서장 창구에 JD + 경력 문서 2개를 첨부했는데, 첨부는 팀까지 잘 읽혔지만 브리프가 '초안 미제공 → 플레이스홀더' · 'JD 내용만을 기반' 같은 완료 기준·제약을 만들었다.
+  브리프는 모든 팀원의 목표이자 부장 비평의 채점 기준이라 결과가 빈칸 쪽으로 끌려간다.
+- 작업:
+  - 원인: `brief_node` → `draft_brief()` 가 질문·사용자가 채운 브리프·웹 여부만 받고 `tool_inputs` 의 첨부는 받지 않았다 (자료 수집 단계는 첨부를 읽는다).
+  - 실패하는 테스트 3건부터 (`tests/test_attachments.py`, 가짜 모델) → `draft_brief(..., files=[이름])` 추가. 파일이 있으면 시스템 메시지에
+    'N개 첨부 · 내용은 근거 자료로 들어간다 · 초안 미제공·플레이스홀더 기준 금지 · '첨부 문서를 근거로 한다'를 기준에 · 첨부 여부를 가정으로 묻지 않는다'.
+    파일 이름은 데이터라 사람 메시지 `[첨부 파일]` 칸에만(5개 + '외 N개'), 내용은 넣지 않는다.
+  - `brief_node` 가 `attachments.files()` 이름을 `attachments._label()`(한 줄 · 표시선 무력화 · 80자)로 정리해 넘긴다 — 📮 접수 · 👔 부서장 · 💬 자유 질문 공통.
+  - 업무 양식 파일 칸 15개는 이미 질문 템플릿에 이름이 들어가 있음을 확인 — 이번에는 바꾸지 않음 (TODO 문서에 이유).
+- 기술: 프롬프트 조립 조건 분기(첨부 없으면 글자 그대로 같은 메시지), 가짜 모델이 받은 메시지로 검증, 순환 import 피해 정리 위치 정하기.
+- 성과: 바꾼 테스트 파일 3개 65 통과, 전체 테스트 **1,488 통과**(1,485 + 새 3건, 7분 28초, 실패 0).
+- 확인 못 한 것: 진짜 모델이 이 문장을 받고 실제로 '초안 미제공·플레이스홀더' 기준을 안 만드는지 (실측은 허락 뒤).
+- 다음 할 일: 같은 첨부 요청을 실제 모델로 한 번 돌려 브리프 확인(허락 뒤), 양식 파일 칸에서 같은 문제가 보이면 칸 종류에 맞는 문장 추가.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

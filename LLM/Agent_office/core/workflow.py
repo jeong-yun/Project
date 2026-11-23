@@ -65,7 +65,7 @@ from core.schemas import AgentAnswer, CleanupProposal, HumanDecision, Lesson, Mo
 from core.search import WebContext
 from core.storage import Storage
 from core.tools import run_tools
-from core.tools.attachments import KEY as ATTACHMENTS
+from core.tools.attachments import KEY as ATTACHMENTS, _label, files as attached_files
 
 WEB_SEARCH_TOOL = "web_search"
 DRAFT_TAG = "draft:"  # 초안 스트리밍 토큰에 붙이는 태그 접두어 (뒤에 에이전트 id)
@@ -284,8 +284,10 @@ def build_office_graph(
         emit({"type": "start", "node": state["root_id"], "kind": "brief"})
         try:
             # 웹 검색을 안 쓰는 업무면 '출처·최신 뉴스' 완료 기준을 넣지 않게 알린다 (research_node 와 같은 조건)
+            # 📎 첨부는 이름만 알린다 — 모르면 '초안 미제공 → 플레이스홀더' 기준을 만든다 (내용은 research_node 가 근거 자료로)
             brief, notes = draft_brief(state["question"], models, partial,
-                                       use_web=bool(state.get("use_web") and WEB_SEARCH_TOOL in team.tools))
+                                       use_web=bool(state.get("use_web") and WEB_SEARCH_TOOL in team.tools),
+                                       files=[_label(n) for _, n in attached_files(state.get("tool_inputs") or {})])
         except call_monitor.CallCancelled:  # ⏹ 중단 → 질문을 그대로 목표로
             return {"brief": partial.model_copy(update={"goal": partial.goal or state["question"]}),
                     "notes": ["⏹ 사용자가 중단 — 요청 정리 생략"]}
