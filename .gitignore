@@ -27,6 +27,10 @@ LLM/Agent_office/teams/*/avatars/
 
 # ─── 파이썬·도구 부산물 ───
 .claude/
+# 예외: ITtoYT 는 Claude Code 스킬 자체가 프로젝트 내용이라 skills/ 만 올린다 (settings 등 나머지 .claude 는 계속 제외)
+!LLM/ITtoYT/.claude/
+LLM/ITtoYT/.claude/*
+!LLM/ITtoYT/.claude/skills/
 __pycache__/
 *.pyc
 .venv/
