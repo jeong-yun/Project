@@ -113,3 +113,12 @@ def test_streamlit_config_does_not_scan_module_files_for_new_sessions():
     그동안 모든 화면이 멈춘다 (2026-11-12 측정은 today_worked.md). 꺼 두면 코드를 고친 뒤 앱을 다시 켜야 반영된다.
     """
     assert _streamlit_reads("config.get_option('server.fileWatcherType')") == "none"
+
+
+def test_streamlit_config_opens_app_only_on_this_pc():
+    """`.streamlit/config.toml` — 앱을 이 PC 안쪽 주소(127.0.0.1)에서만 연다.
+
+    앱에는 로그인이 없어서, 같은 와이파이·랜의 다른 기기가 들어오면 내 API 키로 업무를 돌리고 지난 기록·올린 파일을 볼 수 있다.
+    Streamlit 기본값은 모든 네트워크 주소에서 여는 것이다 (방화벽이 막아 주더라도 '허용'을 한 번 누르면 열린다 — 2026-11-23).
+    """
+    assert _streamlit_reads("config.get_option('server.address')") == "127.0.0.1"

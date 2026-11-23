@@ -2799,6 +2799,15 @@
 - 확인 못 한 것: 진짜 모델이 이 문장을 받고 실제로 '초안 미제공·플레이스홀더' 기준을 안 만드는지 (실측은 허락 뒤).
 - 다음 할 일: 같은 첨부 요청을 실제 모델로 한 번 돌려 브리프 확인(허락 뒤), 양식 파일 칸에서 같은 문제가 보이면 칸 종류에 맞는 문장 추가.
 
+**🔒 앱을 이 PC 에서만 열기 (`.streamlit/config.toml` `server.address = "127.0.0.1"`)**
+- 배경: 새 PC 에서 앱을 켜니 Streamlit 기본값대로 모든 네트워크 주소(내부망 주소 · 외부 주소)에 열렸다. 앱에는 로그인이 없어 들어오면 내 API 키로 업무를 돌리고
+  지난 기록·올린 파일을 보고 개념 카탈로그를 GitHub 에 푸시할 수 있다. 지금은 Windows 방화벽(공용 네트워크 · Python 3.13 들어오는 연결 차단)이 막고 있지만 '허용' 한 번이면 열린다.
+- 작업: 설정 한 줄 + 이유 주석, 설정이 실제로 읽히는지 보는 테스트(`test_streamlit_config_opens_app_only_on_this_pc`, 바꾸기 전 실패 → 후 통과).
+  다른 기기에서 꼭 봐야 하면 그때만 `streamlit run app.py --server.address 0.0.0.0` (방화벽 허용도 필요).
+- 성과: 시험용 앱(8502)으로 확인 — 127.0.0.1:8502 에서만 듣고, `localhost` 는 열림 · 내부망 주소로는 연결 안 됨 (예전 설정 8501 은 0.0.0.0·[::] 에서 듣고 내부망 주소로도 열림).
+  전체 테스트 **1,489 통과**(9분 45초, 실패 0).
+- 확인 못 한 것: 다른 기기에서 직접 접속해 보기(같은 PC 에서 내부망 주소로만 확인). 켜져 있던 앱(8501)은 진행 중 업무 때문에 다시 켜지 않음 — 다음에 켤 때부터 적용.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

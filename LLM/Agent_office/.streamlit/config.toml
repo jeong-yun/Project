@@ -25,3 +25,10 @@ gatherUsageStats = false
 # 개발 중에 코드 변경을 바로 보고 싶으면 `streamlit run app.py --server.fileWatcherType auto` 로 켠다.
 # 이 설정도 tests/test_config.py 가 실제로 적용되는지 확인한다.
 fileWatcherType = "none"
+
+# 앱을 이 PC 안쪽 주소(127.0.0.1)에서만 연다 — 같은 와이파이·랜의 다른 기기(휴대폰·다른 PC)는 들어올 수 없다.
+# 이유: 앱에는 로그인이 없어 들어오면 내 API 키로 업무를 돌리고 지난 기록·올린 파일을 볼 수 있다. Streamlit 기본값은 모든 네트워크 주소에서 여는 것이다
+# (2026-11-23 새 PC — 방화벽이 막고 있었지만 '허용'을 한 번 누르면 열린다). 이 PC 에서는 http://localhost:8501 로 그대로 열린다.
+# 다른 기기에서 꼭 봐야 하면 그때만 `streamlit run app.py --server.address 0.0.0.0` 으로 켠다.
+# 이 설정도 tests/test_config.py 가 실제로 적용되는지 확인한다.
+address = "127.0.0.1"
