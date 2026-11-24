@@ -456,9 +456,9 @@ def _prefill_merge(name: str, draft: str, target_name: str) -> None:
     st.session_state[f"cw_merge_{team_id}"] = {"name": name, "target": target_name}  # input_form 이 '편입 — 원본 기반 수정'을 고르게 한다
 
 
-def result_tabs(content: str, run: dict) -> str:
+def result_tabs(content: str, run: dict) -> tuple[str, str]:
     """최종 결과를 탭으로 — (기존 항목 수정이면 변경 제안 /) 최종본(카탈로그에 들어갈 글) / 검증 로그 / GitHub 요약 / 적용 계획.
-    돌려주는 값 = 지금 보이는 최종본 (🎧 듣기용 MP3 의 본문)."""
+    돌려주는 값 = (지금 보이는 최종본, 적용 계획의 범주 — 없으면 '') — 🎧 듣기용 MP3 의 본문과 저장 폴더."""
     opts = change_options(run)
     res = read_result(content, run)
     info = run.get("concept") or {}
@@ -511,7 +511,7 @@ def result_tabs(content: str, run: dict) -> str:
         st.json({k: v for k, v in plan.items() if k != "changes"} if changing else plan)  # 변경 제안은 첫 탭에서 본다
         for e in plan.get("edits") or []:
             st.caption(f"✏️ 다른 항목 수정 — {e.get('entry')}: {e.get('reason', '')}")
-    return final_entry
+    return final_entry, str(plan.get("category") or "")
 
 
 def _show_script(saved: listen.ScriptResult) -> None:
@@ -550,17 +550,18 @@ def _made_with(model: str) -> str:
     return f"{listen.provider_name(model)} {model} ({spec.voice} 목소리)" if spec else model
 
 
-def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
+def listen_panel(entry: str, run: dict, folder: Path, models, on_calls, category: str = "") -> None:
     """🎧 듣기용 MP3 — 음성 모델 고르기 → ① 대본 쓰기(보조 모델) → 예상 길이·요금(추정) 확인 → ② 음성 만들기(고른 TTS) → 듣기·받기.
 
-    모델·TTS 는 버튼을 눌렀을 때만 부른다. 대본(.json)·음성(.mp3)은 folder 에 저장해 다시 그릴 때·앱을 다시 켤 때 재사용한다.
+    모델·TTS 는 버튼을 눌렀을 때만 부른다. 대본(.json)·음성(.mp3)은 folder(팀 폴더)/<category 범주>/ 에 저장해
+    다시 그릴 때·앱을 다시 켤 때 재사용한다 (범주 폴더로 나누기 전 팀 폴더 바로 아래 파일도 찾는다 — listen.paths).
     만든 음성의 모델은 대본 .json 의 audio_model 에 남긴다. '다른 음성 모델로 다시 만들기'는 대본을 두고 음성만 지운다.
     on_calls(run): 호출을 마친 뒤 ⏱ 호출 기록을 저장하는 함수 (app.save_monitor).
     """
     if not entry.strip():
         return
     rid = run.get("run_id", "")
-    json_path, mp3_path = listen.paths(folder, rid, entry)
+    json_path, mp3_path = listen.paths(folder, rid, entry, category)
     saved = listen.load_script(json_path)
     with st.expander("🎧 듣기용 MP3 — 들으며 이해하기", expanded=saved is not None):
         error = ""
@@ -569,7 +570,8 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
             st.audio(data, format="audio/mpeg")
             st.caption(f"{music.fmt_time(music.audio_duration(mp3_path))} · 대본 {listen.script_chars(saved.script) if saved else '?'}자 · "
                        f"{_made_with((saved.audio_model if saved else '') or listen.OLD_TTS)} · AI 로 합성한 음성 · "
-                       "결과 폴더에 저장 — 앱을 다시 켜도 🕘 지난 업무에서 들을 수 있습니다.")
+                       f"`{mp3_path.parent.relative_to(folder.parent).as_posix()}/` 폴더에 저장 — "
+                       "앱을 다시 켜도 🕘 지난 업무에서 들을 수 있습니다.")
             c1, c2, c3 = st.columns(3)
             c1.download_button("⬇ MP3 받기", data=data, file_name=mp3_path.name, mime="audio/mpeg",
                                key=f"listen_dl_{rid}", use_container_width=True)
