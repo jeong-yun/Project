@@ -410,7 +410,8 @@ def test_panel_uses_chosen_model_and_can_remake_voice_only(fake_tts, use_script,
     assert not at.exception, at.exception
     assert set(fake_tts.models) == {GEMINI_LITE}
     assert any(GEMINI_LITE in c.value for c in at.caption)  # 어느 모델로 만든 음성인지 보인다
-    json_path, mp3_path = listen.paths(tmp_path, "run12345678", ENTRY)
+    # 화면의 대본 말투는 기본 '쉽게' — 그 이름(끝에 _쉽게)으로 저장된다
+    json_path, mp3_path = (listen.level_path(p, listen.DEFAULT_LEVEL) for p in listen.paths(tmp_path, "run12345678", ENTRY))
     assert listen.load_script(json_path).audio_model == GEMINI_LITE
     next(b for b in at.button if "다른 음성 모델로" in b.label).click().run()  # 대본은 두고 음성만 지운다
     assert not mp3_path.exists() and json_path.exists() and len(s.calls) == 1
@@ -441,7 +442,8 @@ def test_panel_makes_audio_on_click_only(fake_tts, use_script, tmp_path):
     at.run()  # 다시 그려도 TTS·모델을 또 부르지 않는다 (저장한 파일 재사용)
     assert len(fake_tts) == n_tts and len(s.calls) == 1
     assert saved  # ⏱ 호출 기록 저장을 불렀다
-    assert [p.name for p in (tmp_path / "AI-App").glob("*.mp3")] == [listen.paths(tmp_path, "run12345678", ENTRY, "AI-App")[1].name]
+    made = listen.level_path(listen.paths(tmp_path, "run12345678", ENTRY, "AI-App")[1], listen.DEFAULT_LEVEL)  # 기본 말투 '쉽게'
+    assert [p.name for p in (tmp_path / "AI-App").glob("*.mp3")] == [made.name]
     assert not list(tmp_path.glob("듣기_*"))  # 팀 폴더 바로 아래에는 새로 만들지 않는다
     assert any(f"{tmp_path.name}/AI-App/" in c.value for c in at.caption)  # 어느 폴더에 저장했는지 알려 준다
 
@@ -456,6 +458,8 @@ def test_panel_plays_file_made_before_category_folders(fake_tts, use_script, tmp
     listen.save_script(old.with_suffix(".json"), listen.ScriptResult(GOOD, [], 1))
     at = AppTest.from_function(_panel, kwargs={"entry": ENTRY, "folder": tmp_path, "saved": [], "category": "AI-App"},
                                default_timeout=30).run()
+    assert not at.exception, at.exception
+    at.radio(key="listen_level_run12345678").set_value("normal").run()  # 말투를 고르기 전에 만든 MP3 는 '보통'에 있다
     assert not at.exception, at.exception
     assert len(at.get("audio")) == 1 and any("MP3 받기" in b.label for b in at.get("download_button"))
     assert fake_tts == [] and s.calls == [] and not (tmp_path / "AI-App").exists()

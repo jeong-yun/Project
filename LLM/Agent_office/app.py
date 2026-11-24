@@ -2241,10 +2241,12 @@ def render_task_input() -> dict:
         task: TaskTemplate | None = next((t for t in team.tasks if t.id == mode), None)
 
         if task and is_concept:
-            # ── 개념 편집 팀: ✍️ 작성(추가·수정 자동 판정) / 🗑 삭제 (concept_ui.py) ──
+            # ── 개념 편집 팀: ✍️ 작성(추가·수정 자동 판정) / 🗑 삭제 / 🎧 개념 듣기 (concept_ui.py) ──
             st.caption(task.description)
             if concept_ctx is None:
                 st.warning("사이드바의 '📁 개념 카탈로그' 폴더를 먼저 맞춰 주세요.")
+            elif task.id == concept_ui.TASK_LISTEN:  # 카탈로그 개념 하나 → 듣기용 MP3 (팀에 맡기지 않음, 버튼을 눌렀을 때만)
+                concept_ui.catalog_listen(concept_ctx, team_id, RESULTS_DIR / team_id, models)
             else:
                 request = concept_ui.input_form(concept_ctx, task.id, team_id, web_available, running,
                                                 settings.get("concept", {}).get("related_limit", 6)) or {}
