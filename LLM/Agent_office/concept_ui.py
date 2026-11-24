@@ -3,7 +3,7 @@
 메인 화면의 조직도·에이전트 패널·이미지 편집·타임라인·최종 결정은 다른 팀과 똑같이 쓰고,
 개념 편집 팀에만 필요한 부분만 여기서 그린다.
   - 사이드바: 카탈로그(GitHub jeong-yun/CS 의 Term/Every_day) 위치·git 상태
-  - 업무 입력: ✍️ 작성(기존에 있으면 수정 · 없으면 추가 — 자동 판정) / 🗑 삭제
+  - 업무 입력: ✍️ 작성(기존에 있으면 수정 · 없으면 추가 — 자동 판정) / 🗑 삭제 / 🎧 개념 듣기(카탈로그 개념 하나 → 듣기용 MP3)
   - 최종 결과: 최종본·검증 로그·GitHub 요약·적용 계획 탭, 형식 검사
     · 기존 항목 수정이면 맨 앞에 '✏️ 변경 제안' 탭 — 변경마다 고치기 전 → 고친 뒤와 근거를 보고 반영할지 고른다 (원본은 그대로,
       고른 변경만 코드가 끼워 넣는다. 근거 글은 화면에만 — 카탈로그·커밋 메시지에는 들어가지 않는다)
@@ -28,6 +28,7 @@ from core.memo import SigCache, file_sig
 
 CONCEPT_FEATURE = "concept_catalog"  # team.yaml features 에 있으면 이 화면 조각을 쓴다
 TASK_WRITE, TASK_DELETE = "write", "delete"
+TASK_LISTEN = "listen"  # 🎧 개념 듣기 — 팀에 맡기지 않고 바로 (catalog_listen)
 
 # ─── 캐시: 화면을 다시 그릴 때마다 git 명령(한 번에 0.3~1초)·카탈로그 파싱을 되풀이하지 않게 ──────────────
 # 카탈로그 파일·.git 의 HEAD·index 등이 바뀌면 바로 다시 읽고, 바뀐 게 없어도 GIT_TTL_SEC 마다 새로 읽는다
@@ -529,16 +530,22 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
     if not entry.strip():
         return
     rid = run.get("run_id", "")
-    json_path, mp3_path = listen.paths(folder, rid, entry)
+    level_key = f"listen_level_{rid}"
+    level = st.session_state.get(level_key, listen.DEFAULT_LEVEL)  # 아래 말투 고르기 칸의 값 — 그리기 전에 파일 이름을 정한다
+    json_path, mp3_path = (listen.level_path(p, level) for p in listen.paths(folder, rid, entry))
     saved = listen.load_script(json_path)
-    with st.expander("🎧 듣기용 MP3 — 들으며 이해하기", expanded=saved is not None):
+    with st.expander("🎧 듣기용 MP3 — 들으며 이해하기", expanded=saved is not None or rid == listen.CATALOG_RUN):
+        st.radio("대본 말투", list(listen.LEVELS), format_func=listen.LEVELS.get, key=level_key, horizontal=True,
+                 help="쉽게: 초등학생도 알아듣게 짧은 문장과 일상 비유로, 어려운 말은 처음 나올 때 풀어 말합니다. 보통: 강의 말투. "
+                      "두 말투는 따로 저장되어 바꿔 가며 들을 수 있습니다 (말투를 고르기 전에 만든 MP3 는 '보통'에 있습니다).")
         error = ""
         if mp3_path.exists():
             data = mp3_path.read_bytes()
             st.audio(data, format="audio/mpeg")
             st.caption(f"{music.fmt_time(music.audio_duration(mp3_path))} · 대본 {listen.script_chars(saved.script) if saved else '?'}자 · "
                        f"OpenAI {listen.TTS_MODEL} ({listen.TTS_VOICE} 목소리) · AI 로 합성한 음성 · "
-                       "결과 폴더에 저장 — 앱을 다시 켜도 🕘 지난 업무에서 들을 수 있습니다.")
+                       "결과 폴더에 저장 — 앱을 다시 켜도 "
+                       + ("같은 개념을 고르면 여기서" if rid == listen.CATALOG_RUN else "🕘 지난 업무에서") + " 들을 수 있습니다.")
             c1, c2 = st.columns(2)
             c1.download_button("⬇ MP3 받기", data=data, file_name=mp3_path.name, mime="audio/mpeg",
                                key=f"listen_dl_{rid}", use_container_width=True)
@@ -558,7 +565,7 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
                 try:
                     with st.spinner("대본 쓰는 중… (보통 10~40초)"), usage.scope(team_id=run.get("team_id", ""), run_id=rid,
                                                                              purpose="듣기용 MP3 대본"):
-                        saved = listen.make_script(entry, models)
+                        saved = listen.make_script(entry, models, level)
                     listen.save_script(json_path, saved)
                 except Exception as e:  # noqa: BLE001 — 모델 오류는 제각각, 화면에 이유만
                     error = f"대본을 쓰지 못했습니다 ({type(e).__name__}: {str(e)[:200]}). 잠시 뒤 다시 눌러 주세요."
@@ -603,6 +610,23 @@ def history_listen(folder: Path, run_id: str) -> None:
         st.audio(data, format="audio/mpeg")
         st.download_button("⬇ MP3 받기", data=data, file_name=path.name, mime="audio/mpeg",
                            key=f"hist_listen_{run_id}")
+
+
+def catalog_listen(ctx: CatalogContext, team_id: str, folder: Path, models) -> None:
+    """🎧 개념 듣기 — 카탈로그에 이미 있는 개념 하나를 골라 듣기용 MP3 (결과 화면과 같은 listen_panel: 대본 → 예상 요금 확인 → 음성).
+
+    한 번에 하나씩, 버튼을 눌렀을 때만 만든다 (여러 개를 한꺼번에 만드는 기능은 요금 때문에 두지 않는다).
+    파일 이름의 업무 번호 자리는 listen.CATALOG_RUN — 같은 개념을 다시 고르면 저장한 대본·MP3 를 그대로 쓰고,
+    카탈로그 본문이 바뀌면(채택·직접 수정) 지문이 달라져 새로 만든다. 업무가 아니라 ⏱ 호출 기록은 저장하지 않고 🏠 사용량에만 남는다.
+    """
+    entries = ctx.catalog.entries
+    if not entries:
+        st.info("카탈로그에 항목이 없습니다. 사이드바 '📁 개념 카탈로그'의 폴더 경로를 확인해 주세요.")
+        return
+    name = st.selectbox("들을 개념 (카탈로그 항목 — 이름을 쳐서 찾을 수 있습니다)", [e.name for e in entries],
+                        format_func=ctx.label, key=f"cl_target_{team_id}")
+    entry = next(e for e in entries if e.name == name)
+    listen_panel(entry.text, {"run_id": listen.CATALOG_RUN, "team_id": team_id}, folder, models, lambda run: None)
 
 
 def decision_fields(content: str, key: str, run: dict | None = None) -> tuple[str, str]:

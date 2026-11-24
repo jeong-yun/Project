@@ -1,8 +1,11 @@
 """🎧 듣기용 MP3 — 개념 카탈로그 항목(본문) → 읽기용 대본(절 목록) → OpenAI TTS → MP3 하나.
 
-정리한 IT 개념을 출퇴근길에 귀로 듣고 이해하려는 기능이다 (📚 개념 편집 팀 결과 화면 — concept_ui.listen_panel).
+정리한 IT 개념을 출퇴근길에 귀로 듣고 이해하려는 기능이다 (📚 개념 편집 팀 결과 화면 — concept_ui.listen_panel,
+카탈로그에 이미 있는 개념은 '🎧 개념 듣기' 업무 — concept_ui.catalog_listen, 파일 이름의 업무 번호 자리 = CATALOG_RUN).
   1) 대본   : 보조(utility) 모델 1번, 구조화 출력 ListenScript = 절(heading 제목 + text 읽을 글) 목록
               정의 → 쉬운 비유 → 예시 → 핵심 정리, 공백 빼고 MAX_SCRIPT_CHARS 자 이하(약 5분)
+              말투 LEVELS 는 화면에서 고른다 — 쉽게(기본, 초등학생 눈높이 — EASY 규칙을 더함) · 보통(강의 말투).
+              쉽게 대본·음성은 이름 끝에 '_쉽게'를 붙여 따로 저장한다 (level_path — 말투를 고르기 전에 만든 파일은 모두 보통)
   2) 코드 검사 : check_script — 길이 상한, 본문에 없는 숫자(커리어부 사실 검사 core/career 를 그대로), 본문에 없는 영문 용어.
               걸리면 걸린 점을 알려 주고 한 번만 다시 쓰게 하고(호출 최대 2번), 그래도 남으면 화면에 경고로 보인다.
   3) 음성   : 절마다 문장 경계로 TTS_CHUNK_CHARS 자 이하로 나눠 OpenAI TTS → pedalboard(내장 LAME, ffmpeg 불필요)로 이어 붙여 MP3 하나
@@ -140,6 +143,19 @@ SYSTEM = "\n".join([
     "- 숫자는 본문에 있는 것만 아라비아 숫자로 쓴다. 본문에 없는 숫자·연도·회사 이름·사례를 보태지 않는다. 비유는 일상 사물로 하되 사실처럼 말하지 않는다.",
     "- 문장은 짧게, 귀로 들어도 따라올 수 있게 쓴다. '다양한'·'효율적으로'·'혁신적' 같은 꾸밈말 대신 무엇이 얼마나 달라지는지 쓴다.",
 ])
+LEVELS = {"easy": "🧒 쉽게 — 초등학생도 알아듣게", "normal": "🎓 보통 — 강의 말투"}  # 대본 말투 (화면에서 고른다)
+DEFAULT_LEVEL = "easy"
+EASY = "\n".join([  # '쉽게' 말투일 때 SYSTEM 뒤에 더하는 규칙 — 본문에 없는 숫자·영문 용어 코드 검사(check_script)는 그대로
+    "[쉽게 말하기 — 위 규칙에 더한다. 겹치면 이 규칙을 따른다]",
+    "- 듣는 사람은 IT 를 처음 듣는 초등학생이다. 그 아이가 한 번 듣고 따라올 수 있게 '~해요' 말투로 다정하게 쓴다.",
+    "- 문장은 아주 짧게 쓴다. 한 문장에 생각 하나만 담고, 긴 문장은 둘로 나눈다.",
+    "- 어려운 말(전문 용어·한자어·약어)은 처음 나올 때 바로 쉬운 말로 풀어 준다 (예: '알고리즘, 곧 일을 하는 순서예요'). "
+    "풀어 주지 않은 어려운 말을 새로 꺼내지 않는다.",
+    "- 비유는 아이가 날마다 보는 것(교실, 책가방, 도서관, 장난감 정리, 줄 서기)으로 든다. 비유는 '~와 비슷해요'·'~라고 생각해 봐요'로 말하고, "
+    "바로 뒤에 '실제로는 ~예요'로 진짜 내용과 이어 준다. 비유를 사실처럼 말하지 않는다.",
+    "- 쉽게 말하려고 뜻을 바꾸거나 중요한 내용을 빼지 않는다. 쉬운 말과 본문의 뜻이 부딪치면 본문의 뜻을 따른다.",
+    "- 예시는 아이가 떠올릴 수 있는 장면으로 들되, 본문에 없는 숫자·회사 이름·사례는 여전히 보태지 않는다.",
+])
 ENTRY_LIMIT = 12000  # 본문이 이보다 길면 앞부분만 (카탈로그 항목은 보통 3천~6천 자)
 
 
@@ -154,9 +170,10 @@ def _render(script: ListenScript) -> str:
     return "\n\n".join(f"[{s.heading}]\n{s.text}" for s in script.sections)
 
 
-def make_script(entry: str, models: ModelsConfig) -> ScriptResult:
-    """보조 모델로 대본을 쓰고 코드로 검사한다. 걸리면 한 번만 다시 쓰게 한다 (문제가 적은 쪽을 쓴다)."""
-    messages = [SystemMessage(SYSTEM), _entry_message(entry)]
+def make_script(entry: str, models: ModelsConfig, level: str = DEFAULT_LEVEL) -> ScriptResult:
+    """보조 모델로 대본을 쓰고 코드로 검사한다. 걸리면 한 번만 다시 쓰게 한다 (문제가 적은 쪽을 쓴다).
+    level: 'easy'(초등학생 눈높이) · 'normal'(강의 말투) — LEVELS."""
+    messages = [SystemMessage(f"{SYSTEM}\n{EASY}" if level == "easy" else SYSTEM), _entry_message(entry)]
     with call_monitor.purpose("listen"):
         script = llm_factory.invoke_structured(models.utility, models, ListenScript, messages, WHO).parsed
         problems = check_script(script, entry)
@@ -318,3 +335,11 @@ def saved_audio(folder: Path, run_id: str) -> Path | None:
     """이 업무로 만든 가장 최근 MP3 (🕘 지난 업무 창)."""
     hits = list(folder.glob(f"듣기_*_{run_id[:8]}_*.mp3")) if folder.is_dir() else []
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
+
+
+CATALOG_RUN = "catalog"  # 카탈로그 개념으로 만든 대본·MP3 — 파일 이름의 업무 번호 자리 (concept_ui.catalog_listen)
+
+
+def level_path(path: Path, level: str) -> Path:
+    """말투별 저장 이름 — 쉽게는 이름 끝에 '_쉽게', 보통은 그대로 (말투를 고르기 전에 만든 파일은 모두 보통이다)."""
+    return path.with_name(f"{path.stem}_쉽게{path.suffix}") if level == "easy" else path
