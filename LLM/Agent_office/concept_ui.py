@@ -7,7 +7,7 @@
   - 최종 결과: 최종본·검증 로그·GitHub 요약·적용 계획 탭, 형식 검사
     · 기존 항목 수정이면 맨 앞에 '✏️ 변경 제안' 탭 — 변경마다 고치기 전 → 고친 뒤와 근거를 보고 반영할지 고른다 (원본은 그대로,
       고른 변경만 코드가 끼워 넣는다. 근거 글은 화면에만 — 카탈로그·커밋 메시지에는 들어가지 않는다)
-  - 🎧 듣기용 MP3: 최종본 → 읽기용 대본 → OpenAI TTS (core/listen.py) — 버튼을 눌렀을 때만, 만든 파일은 결과 폴더에 저장해 재사용
+  - 🎧 듣기용 MP3: 최종본 → 읽기용 대본 → 고른 음성 모델(Gemini·OpenAI TTS, core/listen.py) — 버튼을 눌렀을 때만, 만든 파일은 결과 폴더에 저장해 재사용
   - 📜 적용된 프롬프트: 입력칸 아래·결과 위 — 스킬(IT 개념 프롬프트) 판·전문, 보낸 업무 브리프, 에이전트별 시스템 프롬프트
   - 채택 후: 📚 카탈로그 반영 → 💾 커밋 → 🚀 푸시 (GitHub 에 이 PC 에 없는 커밋이 있으면 먼저 자동 rebase, 충돌하면 되돌리고 중단)
 """
@@ -15,14 +15,14 @@
 import json
 import time
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import streamlit as st
 
 import prompt_ui
 from core import catalog as cat
-from core import concept, listen, music, usage
+from core import concept, listen, llm_factory, music, usage
 from core.config import BASE_DIR, load_team
 from core.memo import SigCache, file_sig
 
@@ -520,10 +520,41 @@ def _show_script(saved: listen.ScriptResult) -> None:
             st.markdown(f"**{s.heading}**  \n{s.text}")
 
 
+def _tts_label(model: str, models) -> str:
+    """음성 모델 고르기 상자의 한 줄 — 설명 · 모델 이름 · 분당 요금(추정) · 종료 예정 · 키 없음."""
+    spec = listen.TTS_MODELS[model]
+    now = listen.estimate(listen.CHARS_PER_MIN, model)[1]
+    later = listen.next_price(model)
+    price = f"분당 약 ${now:.3f}" + (f" → {later[0]} 부터 ${later[1]:.3f}" if later and later[1] != now else "")
+    parts = [f"{spec.note} — {model}", f"{price} (추정)"]
+    if spec.shutdown:
+        parts.append(f"{spec.shutdown} 종료 예정")
+    if not llm_factory.is_available(spec.provider, models):
+        parts.append("키 없음")
+    return " · ".join(parts)
+
+
+def _pick_tts(models) -> str:
+    """🔊 음성 모델 고르기 — 처음에는 키가 있는 첫 모델(추천 순서). 고른 값은 앱을 켜 둔 동안 모든 업무에 이어진다."""
+    choices = listen.tts_choices()
+    if st.session_state.get("listen_tts_model") not in choices:  # 앱을 켜 둔 사이 종료일이 지난 모델
+        st.session_state.pop("listen_tts_model", None)
+    ready = [m for m in choices if llm_factory.is_available(listen.TTS_MODELS[m].provider, models)]
+    return st.selectbox("🔊 음성 모델", choices, index=choices.index(ready[0]) if ready else 0, key="listen_tts_model",
+                        format_func=lambda m: _tts_label(m, models),
+                        help="음성을 만들 때 쓸 모델입니다. 요금은 대본 길이로 셈한 추정이고, 실제 청구는 각 회사 사용량 화면에서 확인합니다.")
+
+
+def _made_with(model: str) -> str:
+    spec = listen.TTS_MODELS.get(model)
+    return f"{listen.provider_name(model)} {model} ({spec.voice} 목소리)" if spec else model
+
+
 def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
-    """🎧 듣기용 MP3 — ① 대본 쓰기(보조 모델) → 예상 길이·요금(추정) 확인 → ② 음성 만들기(OpenAI TTS) → 듣기·받기.
+    """🎧 듣기용 MP3 — 음성 모델 고르기 → ① 대본 쓰기(보조 모델) → 예상 길이·요금(추정) 확인 → ② 음성 만들기(고른 TTS) → 듣기·받기.
 
     모델·TTS 는 버튼을 눌렀을 때만 부른다. 대본(.json)·음성(.mp3)은 folder 에 저장해 다시 그릴 때·앱을 다시 켤 때 재사용한다.
+    만든 음성의 모델은 대본 .json 의 audio_model 에 남긴다. '다른 음성 모델로 다시 만들기'는 대본을 두고 음성만 지운다.
     on_calls(run): 호출을 마친 뒤 ⏱ 호출 기록을 저장하는 함수 (app.save_monitor).
     """
     if not entry.strip():
@@ -537,23 +568,28 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
             data = mp3_path.read_bytes()
             st.audio(data, format="audio/mpeg")
             st.caption(f"{music.fmt_time(music.audio_duration(mp3_path))} · 대본 {listen.script_chars(saved.script) if saved else '?'}자 · "
-                       f"OpenAI {listen.TTS_MODEL} ({listen.TTS_VOICE} 목소리) · AI 로 합성한 음성 · "
+                       f"{_made_with((saved.audio_model if saved else '') or listen.OLD_TTS)} · AI 로 합성한 음성 · "
                        "결과 폴더에 저장 — 앱을 다시 켜도 🕘 지난 업무에서 들을 수 있습니다.")
-            c1, c2 = st.columns(2)
+            c1, c2, c3 = st.columns(3)
             c1.download_button("⬇ MP3 받기", data=data, file_name=mp3_path.name, mime="audio/mpeg",
                                key=f"listen_dl_{rid}", use_container_width=True)
-            if c2.button("📝 대본부터 다시 만들기", key=f"listen_reset_{rid}", use_container_width=True):
+            if c2.button("🔁 다른 음성 모델로 다시 만들기", key=f"listen_revoice_{rid}", use_container_width=True,
+                         help="대본은 그대로 두고 음성만 지웁니다 — 모델을 고른 뒤 '음성 만들기'를 누르면 됩니다."):
+                mp3_path.unlink(missing_ok=True)
+                st.rerun()
+            if c3.button("📝 대본부터 다시 만들기", key=f"listen_reset_{rid}", use_container_width=True):
                 mp3_path.unlink(missing_ok=True)
                 json_path.unlink(missing_ok=True)
                 st.rerun()
             if saved:
                 _show_script(saved)
             return
+        model = _pick_tts(models)
         if saved is None:
-            minutes, usd = listen.estimate(listen.MAX_SCRIPT_CHARS)
+            minutes, usd = listen.estimate(listen.MAX_SCRIPT_CHARS, model)
             st.caption(f"카탈로그 본문으로 {listen.MIN_SCRIPT_CHARS}~{listen.MAX_SCRIPT_CHARS}자(약 3~{minutes:.0f}분) 읽기용 대본을 먼저 쓰고, "
-                       f"예상 요금을 확인한 뒤 음성을 만듭니다. 대본은 보조 모델 1~2번 호출, 음성은 많아야 약 ${usd:.2f} (추정 — OpenAI "
-                       f"{listen.TTS_MODEL} 분당 약 ${listen.COST_PER_MIN_USD} 기준).")
+                       f"예상 요금을 확인한 뒤 음성을 만듭니다. 대본은 보조 모델 1~2번 호출, 음성은 많아야 약 ${usd:.2f} "
+                       f"(추정 — {listen.provider_name(model)} {model} 기준).")
             if st.button("🎧 듣기용 MP3 만들기 (1/2 대본 쓰기)", key=f"listen_script_{rid}", type="primary"):
                 try:
                     with st.spinner("대본 쓰는 중… (보통 10~40초)"), usage.scope(team_id=run.get("team_id", ""), run_id=rid,
@@ -567,9 +603,9 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
                 if error:
                     st.error(error)
                 return
-        minutes, usd = listen.estimate(listen.script_chars(saved.script))
+        minutes, usd = listen.estimate(listen.script_chars(saved.script), model)
         st.caption(f"대본 {listen.script_chars(saved.script)}자(공백 제외) · 절 {len(saved.script.sections)}개 · 예상 길이 약 {minutes:.1f}분 · "
-                   f"예상 요금 약 ${usd:.3f} (추정 — 실제 청구는 OpenAI 사용량 화면에서 확인)")
+                   f"예상 요금 약 ${usd:.3f} (추정 — 실제 청구는 {listen.provider_name(model)} 사용량 화면에서 확인)")
         if saved.warnings:
             st.warning("코드 검사에서 남은 점 — 본문에 없는 내용일 수 있으니 아래 대본을 읽어 보고, 이상하면 '대본 다시 쓰기'를 눌러 주세요:\n"
                        + "\n".join(f"- {w}" for w in saved.warnings))
@@ -579,7 +615,8 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls) -> None:
             try:
                 with st.spinner("음성 만드는 중… (조각마다 몇 초씩, 보통 1분 안)"), usage.scope(
                         team_id=run.get("team_id", ""), run_id=rid, purpose="듣기용 MP3 음성"):
-                    listen.make_audio(saved.script, mp3_path, models)
+                    listen.make_audio(saved.script, mp3_path, models, model)
+                listen.save_script(json_path, replace(saved, audio_model=model))  # 어느 모델로 만든 음성인지 (화면에 보인다)
             except listen.ListenError as e:
                 error = str(e)
             except Exception as e:  # noqa: BLE001 — 파일 쓰기 등 TTS 밖의 오류도 화면에 이유만

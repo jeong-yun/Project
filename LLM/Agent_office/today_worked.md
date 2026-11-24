@@ -2808,6 +2808,38 @@
   전체 테스트 **1,489 통과**(9분 45초, 실패 0).
 - 확인 못 한 것: 다른 기기에서 직접 접속해 보기(같은 PC 에서 내부망 주소로만 확인). 켜져 있던 앱(8501)은 진행 중 업무 때문에 다시 켜지 않음 — 다음에 켤 때부터 적용.
 
+**🔊 듣기용 MP3 — 음성 모델을 화면에서 고르기 (OpenAI gpt-4o-mini-tts 2027-01-06 종료 대비)**
+- 배경: 🎧 듣기용 MP3 는 OpenAI `gpt-4o-mini-tts` 만 썼는데 2027-01-06 에 끝난다. 후보를 공식 문서로 비교해 보고했고, 사용자가 "가능한 모델을 고르게" 해 달라고 함.
+- 조사 (공식 문서, 확인일 2026-11-23):
+
+  | 후보 | 한국어 | 목소리 | 한 번에 | 오디오 출력(100만 토큰당) · 분당 | 종료 예정 |
+  |---|---|---|---|---|---|
+  | OpenAI gpt-4o-mini-tts (지금까지) | 지원 | 13개 | 4,096자 | $12 · 약 $0.015 (추정) | **2027-01-06** |
+  | OpenAI gpt-realtime-2.1-mini (OpenAI 공식 후속) | 확인 못 함 | — | — | $20 · 공식 환산 없음 | 없음 |
+  | OpenAI gpt-audio-1.5 | 확인 못 함 | — | — | $64 · 공식 환산 없음 | 표시 없음 |
+  | **Google gemini-3.8-flash-tts** | ✔ | 30개+ | 입력 8,192 토큰 | $9 → 2027-01-01 부터 $18 · $0.0135 → $0.027 | 없음 (2026-09-22 정식) |
+  | Google gemini-3.8-flash-lite-tts | ✔ | 30개+ | 입력 8,192 토큰 | $6 → $12 · $0.009 → $0.018 | 없음 (2026-09-22 정식) |
+  | Google Cloud TTS Chirp 3 HD | 확인 못 함 | — | — | 100만 자당 $30, 매달 100만 자 무료 | — |
+
+  - OpenAI 후속은 지금 쓰는 음성 주소(`/v1/audio/speech`)로 못 쓰고 Realtime API(대화 세션)만 되며, '주어진 글 그대로 읽기' 안내가 없다 → 넣지 않음.
+  - Gemini 3.8 TTS 는 "text 를 그대로 읽는 대본으로 다룬다"고 문서에 적혀 있고, 답은 WAV(24 kHz 모노). 오디오 1초 = 토큰 25개(공식).
+  - 출처: developers.openai.com/api/docs/deprecations · /guides/text-to-speech · /models/gpt-realtime-2.1-mini · /models/gpt-audio-1.5 · /pricing,
+    ai.google.dev/gemini-api/docs/speech-generation · /pricing · /deprecations · /models/gemini-3.8-flash-lite-tts, cloud.google.com/text-to-speech/pricing
+- 작업:
+  - `core/listen.py`: 모델 표 `TTS_MODELS`(제공처 · 목소리 · 초당 토큰 · 설명 · 종료일) — Gemini Flash(기본) · Flash-Lite · OpenAI(종료일부터 목록에서 빠짐).
+    `tts_request(text, key, model)` 가 Gemini 는 `google-genai` `interactions.create`(말투는 `speech_metadata.style` 로 따로, 목소리 Charon), OpenAI 는 예전 그대로.
+    예상 요금은 가격표로 셈(`estimate(chars, model)` → `usage.estimate_cost`, 날짜별 가격) — 고정값 `COST_PER_MIN_USD` 는 지움. 바뀔 가격은 `next_price`.
+    오류 안내를 Google 문구(API key not valid · PERMISSION_DENIED · RESOURCE_EXHAUSTED · NOT_FOUND)까지 쉬운 한국어로, '다른 음성 모델을 골라' 다음 할 일을 함께.
+  - `concept_ui.listen_panel`: 🔊 음성 모델 고르기 상자(분당 요금 추정 · '2027-01-01 부터' 오른 값 · 종료 예정 · 키 없음 표시, 처음에는 키가 있는 첫 모델).
+    만든 모델을 대본 .json 의 `audio_model` 에 남겨 화면에 보이고(예전 파일은 gpt-4o-mini-tts), '🔁 다른 음성 모델로 다시 만들기'는 대본을 두고 음성만 지운다.
+  - `config/pricing.yaml`: 두 Gemini TTS 가격(2027-01-01 변경 포함). 테스트 준비물 `fake_tts` 는 모델별 실제 답 모양(Gemini WAV · OpenAI MP3)과 받은 모델 이름(`.models`)을 남긴다.
+- 기술: 공식 문서 대조, google-genai Interactions API 로 음성 받기, 날짜별 가격표 재사용, Streamlit 고르기 상자 상태 유지, 가짜 클라이언트로 요청 모양 검사.
+- 성과: 실패하는 테스트부터 — `tests/test_listen.py` 24 → 47건(요청 모양 · 모델별 기록 · 키 · 오류 문구 · 공식 '10초당' 가격과 대조 · 화면에서 모델 바꿔 다시 만들기).
+  전체 테스트 **1,512 통과**(1,489 + 23, 8분 16초, 실패 0).
+- 확인 못 한 것: 실제 Gemini 음성(한국어 발음 · 영문 약어 · Charon 목소리 · 말투 문구) — 진짜 샘플은 요금이 들어 허락 뒤에. Gemini 사용 한도, Google 키가 무료 등급인지
+  (무료 등급은 요금이 없지만 입력이 제품 개선에 쓰일 수 있음).
+- 다음 할 일: 허락 받으면 Flash · Flash-Lite 로 같은 대본 샘플 하나씩 만들어 듣고 기본 모델 · 목소리 정하기. 'listen-category-folders' 브랜치와 합칠 때 `listen.py` · `listen_panel` 겹침 확인.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

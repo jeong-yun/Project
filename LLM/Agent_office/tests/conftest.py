@@ -1,7 +1,7 @@
 """pytest 공용 준비물 (fixture).
 
 - 실제 웹 검색·LLM 호출을 모두 막고 가짜로 바꾼다 → API 키·비용·네트워크 없이 테스트
-- 실제 OpenAI TTS(🎧 듣기용 MP3)도 막는다 (no_real_tts) — 음성이 필요한 테스트는 fake_tts (짧은 무음 MP3)
+- 실제 TTS(🎧 듣기용 MP3 — Google·OpenAI)도 막는다 (no_real_tts) — 음성이 필요한 테스트는 fake_tts (짧은 무음 — Google 은 WAV, OpenAI 는 MP3)
 - 모든 테스트에서 `.env` 를 읽지 않고 제공처 키를 지운다. 가짜 모델을 끼우지 않고 모델을 만들면 그 테스트는 실패한다
   (no_real_keys · no_real_models — 확인: tests/test_conftest_guards.py)
 - GitHub 검사에서 실패하면 실패한 테스트 이름을 주석(::error)으로 찍는다 → 로그인 없이 보인다 (맨 아래 pytest_terminal_summary)
@@ -71,7 +71,7 @@ BLOCKED_TTS = "테스트 중 실제 TTS 금지"
 
 @pytest.fixture(autouse=True)
 def no_real_tts(monkeypatch):
-    """실제 OpenAI TTS(🎧 듣기용 MP3 — core/listen.tts_request)를 부르면 그 테스트를 실패시킨다 — 모든 테스트에서.
+    """실제 TTS(🎧 듣기용 MP3 — core/listen.tts_request, Google·OpenAI)를 부르면 그 테스트를 실패시킨다 — 모든 테스트에서.
 
     앱 코드는 TTS 오류를 쉬운 안내 문장으로 바꿔 삼키므로, 닿은 글을 반환 리스트에 적어 두고 테스트가 끝날 때 실패시킨다.
     가짜는 fake_tts 준비물을 쓴다."""
@@ -79,7 +79,7 @@ def no_real_tts(monkeypatch):
 
     reached: list[str] = []
 
-    def blocked(text, api_key):
+    def blocked(text, api_key, model):
         reached.append(text[:20])
         raise RuntimeError(f"{BLOCKED_TTS} — fake_tts 준비물을 쓰세요")
 
@@ -90,16 +90,31 @@ def no_real_tts(monkeypatch):
                     pytrace=False)
 
 
+class TtsCalls(list):
+    """가짜 TTS 가 받은 글 목록 (호출 순서). .models 에 모델 이름이 같은 순서로 쌓인다."""
+
+    def __init__(self):
+        super().__init__()
+        self.models: list[str] = []
+
+
 @pytest.fixture
 def fake_tts(monkeypatch, set_keys, no_real_tts):
-    """TTS 를 짧은 무음 MP3(0.3초)를 돌려주는 가짜로 바꾸고 가짜 OpenAI 키를 넣는다. 반환값 = 받은 글 목록 (호출 순서)."""
+    """TTS 를 짧은 무음(0.3초 — Google 모델은 WAV, OpenAI 는 MP3, 실제 답 모양대로)을 돌려주는 가짜로 바꾸고
+    가짜 Google·OpenAI 키를 넣는다. 반환값 = 받은 글 목록 (TtsCalls — .models 는 모델 이름)."""
     from core import listen
-    from tests.fakes import silent_mp3
+    from tests.fakes import silent_mp3, silent_wav
 
-    texts: list[str] = []
-    set_keys("openai")
-    monkeypatch.setattr(listen, "tts_request", lambda text, api_key: texts.append(text) or silent_mp3())
-    return texts
+    calls = TtsCalls()
+
+    def fake(text, api_key, model):
+        calls.append(text)
+        calls.models.append(model)
+        return silent_wav() if listen.TTS_MODELS[model].provider == "google" else silent_mp3()
+
+    set_keys("google", "openai")
+    monkeypatch.setattr(listen, "tts_request", fake)
+    return calls
 
 
 @pytest.fixture

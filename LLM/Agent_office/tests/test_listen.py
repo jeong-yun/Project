@@ -2,11 +2,18 @@
 
 실제 모델·실제 TTS 는 부르지 않는다 (use_script · fake_tts — tests/conftest.py)."""
 
+import base64
+import json
+from types import SimpleNamespace
+
 import pytest
 
 from core import call_monitor, listen, usage
 from core.music import audio_duration
-from tests.fakes import Script, silent_mp3
+from tests.fakes import Script, silent_mp3, silent_wav
+
+REAL_TTS = listen.tts_request  # conftest 가 막기 전의 진짜 함수 — 모듈을 읽을 때 잡아 두고, 요청 모양만 가짜 클라이언트로 본다
+GEMINI, GEMINI_LITE, OPENAI_OLD = "gemini-3.8-flash-tts", "gemini-3.8-flash-lite-tts", "gpt-4o-mini-tts"
 
 ENTRY = """[Perf]플래시어텐션(FlashAttention) (작성일: 26.10.20)
 1. 정의 및 개념
@@ -59,10 +66,43 @@ def test_empty_script_is_flagged():
     assert listen.check_script(listen.ListenScript(sections=[]), ENTRY)
 
 
-def test_estimate_uses_reading_speed_and_price():
-    minutes, usd = listen.estimate(listen.CHARS_PER_MIN * 4)
+@pytest.mark.parametrize("model", [GEMINI, GEMINI_LITE, OPENAI_OLD])
+def test_estimate_uses_reading_speed_and_model_price(model):
+    spec = listen.TTS_MODELS[model]
+    chars = listen.CHARS_PER_MIN * 4
+    minutes, usd = listen.estimate(chars, model)
     assert minutes == pytest.approx(4)
-    assert usd == pytest.approx(4 * listen.COST_PER_MIN_USD)
+    assert usd > 0  # 가격표(config/pricing.yaml)에 있다
+    assert usd == pytest.approx(usage.estimate_cost(spec.provider, model, chars, round(4 * 60 * spec.tokens_per_sec)))
+
+
+def test_estimate_defaults_to_recommended_model():
+    assert listen.DEFAULT_TTS == GEMINI
+    assert listen.estimate(900) == listen.estimate(900, GEMINI)
+    assert listen.estimate(900, GEMINI_LITE)[1] < listen.estimate(900, GEMINI)[1]
+
+
+@pytest.mark.parametrize("model, day, per_min", [
+    (GEMINI, "2026-12-31", 0.0135), (GEMINI, "2027-01-01", 0.027),  # 공식: 10초당 $0.00225 → $0.0045
+    (GEMINI_LITE, "2026-12-31", 0.009), (GEMINI_LITE, "2027-01-01", 0.018),  # 공식: 10초당 $0.0015 → $0.003
+])
+def test_gemini_tts_minute_price_matches_official_page(model, day, per_min):
+    tokens = 60 * listen.TTS_MODELS[model].tokens_per_sec  # 공식: 오디오 1초 = 토큰 25개
+    assert usage.estimate_cost("google", model, 0, tokens, day=day) == pytest.approx(per_min)
+
+
+def test_next_price_shows_upcoming_price_change():
+    day, per_min = listen.next_price(GEMINI, "2026-11-23")
+    assert day == "2027-01-01" and per_min == pytest.approx(0.027, abs=0.001)  # 공식: 2027-01-01 부터 2배
+    assert listen.next_price(GEMINI, "2027-01-01") is None  # 이미 바뀐 뒤
+    assert listen.next_price(OPENAI_OLD, "2026-11-23") is None  # 바뀔 가격이 없다
+
+
+def test_tts_choices_put_default_first_and_hide_shut_down_models():
+    assert listen.tts_choices("2026-11-23")[0] == listen.DEFAULT_TTS
+    assert set(listen.tts_choices("2026-11-23")) == {GEMINI, GEMINI_LITE, OPENAI_OLD}
+    assert OPENAI_OLD in listen.tts_choices("2027-01-05")
+    assert listen.tts_choices("2027-01-06") == [GEMINI, GEMINI_LITE]  # 종료일부터 고르기 목록에서 빠진다
 
 
 # ─── 문장 경계로 나누기 ───────────────────────────────────────────────
@@ -127,53 +167,117 @@ def test_make_audio_joins_chunks_with_pauses(fake_tts, models, tmp_path, monkeyp
     assert all(len(t) <= 40 for t in fake_tts)
     assert len(fake_tts) == result.chunks > len(GOOD.sections)  # 긴 절은 문장 경계로 나눠 보냈다
     pauses = (len(GOOD.sections) - 1) * listen.SECTION_PAUSE_SEC + (result.chunks - len(GOOD.sections)) * listen.CHUNK_PAUSE_SEC
-    audio, sr = listen._decode(silent_mp3())  # MP3 는 앞뒤에 인코더 여백이 붙어 0.3초보다 조금 길다
+    audio, sr = listen._decode(silent_wav())  # 기본 모델(Gemini)의 답 = WAV 조각
     assert audio_duration(out) == pytest.approx(result.chunks * audio.shape[1] / sr + pauses, abs=0.1)
     assert result.seconds == pytest.approx(audio_duration(out), abs=0.01)
+    assert set(fake_tts.models) == {listen.DEFAULT_TTS} and result.model == listen.DEFAULT_TTS
 
 
-def test_make_audio_records_monitor_and_usage(fake_tts, models, tmp_path):
+@pytest.mark.parametrize("model", [GEMINI, GEMINI_LITE, OPENAI_OLD])
+def test_make_audio_uses_chosen_model_and_records_it(fake_tts, models, tmp_path, model):
     events = []
     usage.set_sink(events.append)
-    with usage.scope(run_id="listen-run-2", team_id="concept"):
-        listen.make_audio(GOOD, tmp_path / "a.mp3", models)
-    recs = call_monitor.calls("listen-run-2")
+    with usage.scope(run_id=f"listen-run-2-{model}", team_id="concept"):
+        result = listen.make_audio(GOOD, tmp_path / "a.mp3", models, model)
+    assert set(fake_tts.models) == {model} and result.model == model
+    provider = listen.TTS_MODELS[model].provider
+    recs = call_monitor.calls(f"listen-run-2-{model}")
     assert len(recs) == len(fake_tts) and all(r.kind == "listen" and r.status == "done" for r in recs)
     assert [r.chars for r in recs] == [len(t) for t in fake_tts]
-    assert recs[0].model == listen.TTS_MODEL
-    assert len(events) == len(fake_tts) and all(e.model == listen.TTS_MODEL and e.run_id == "listen-run-2" for e in events)
+    assert all(r.model == model and r.provider == provider for r in recs)
+    assert len(events) == len(fake_tts)
+    assert all(e.model == model and e.provider == provider and e.run_id == f"listen-run-2-{model}" for e in events)
 
 
-def test_make_audio_without_key_explains_next_step(models, tmp_path, no_real_tts):
-    with pytest.raises(listen.ListenError, match="OPENAI_API_KEY"):
-        listen.make_audio(GOOD, tmp_path / "a.mp3", models)
+def test_make_audio_sends_the_key_of_the_chosen_provider(fake_tts, models, tmp_path, monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "google-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    keys = []
+    monkeypatch.setattr(listen, "tts_request", lambda text, api_key, model: keys.append(api_key) or silent_wav())
+    listen.make_audio(GOOD, tmp_path / "a.mp3", models, GEMINI_LITE)
+    assert set(keys) == {"google-key"}
+
+
+@pytest.mark.parametrize("model, env", [(GEMINI, "GOOGLE_API_KEY"), (OPENAI_OLD, "OPENAI_API_KEY")])
+def test_make_audio_without_key_explains_next_step(models, tmp_path, no_real_tts, model, env):
+    with pytest.raises(listen.ListenError, match=env):
+        listen.make_audio(GOOD, tmp_path / "a.mp3", models, model)
     assert no_real_tts == []  # 키가 없으면 부르지도 않는다
 
 
-@pytest.mark.parametrize("error, words", [
-    ("Error code: 401 - invalid_api_key", "키"),
-    ("Error code: 429 - insufficient_quota", "크레딧"),
-    ("Error code: 404 - model_not_found", "2027-01-06"),
-    ("Connection error.", "연결"),
+@pytest.mark.parametrize("model, error, words", [
+    (OPENAI_OLD, "Error code: 401 - invalid_api_key", "키"),
+    (OPENAI_OLD, "Error code: 429 - insufficient_quota", "크레딧"),
+    (OPENAI_OLD, "Error code: 404 - model_not_found", "2027-01-06"),
+    (OPENAI_OLD, "Connection error.", "연결"),
+    (GEMINI, "400 INVALID_ARGUMENT. {'error': {'message': 'API key not valid. Please pass a valid API key.'}}", "키"),
+    (GEMINI, "403 PERMISSION_DENIED. {'error': {'message': 'Permission denied'}}", "키"),
+    (GEMINI, "429 RESOURCE_EXHAUSTED. {'error': {'message': 'You exceeded your current quota'}}", "다른 음성 모델"),
+    (GEMINI, "404 NOT_FOUND. {'error': {'message': 'models/gemini-3.8-flash-tts is not found'}}", "다른 음성 모델"),
+    (GEMINI, "ReadTimeout: timed out", "연결"),
 ])
-def test_tts_failure_becomes_plain_message(fake_tts, models, tmp_path, monkeypatch, error, words):
-    def fail(text, api_key):
+def test_tts_failure_becomes_plain_message(fake_tts, models, tmp_path, monkeypatch, model, error, words):
+    def fail(text, api_key, model):
         raise RuntimeError(error)
 
     monkeypatch.setattr(listen, "tts_request", fail)
     with usage.scope(run_id="listen-run-3"):
         with pytest.raises(listen.ListenError) as e:
-            listen.make_audio(GOOD, tmp_path / "a.mp3", models)
+            listen.make_audio(GOOD, tmp_path / "a.mp3", models, model)
     assert words in str(e.value)
+    assert ("Google" if listen.TTS_MODELS[model].provider == "google" else "OpenAI") in str(e.value)
     assert not (tmp_path / "a.mp3").exists()
     assert call_monitor.calls("listen-run-3")[-1].status == "failed"
 
 
 def test_real_tts_is_blocked_in_tests(no_real_tts):
     with pytest.raises(RuntimeError, match="실제 TTS 금지"):
-        listen.tts_request("안녕하세요", "test-key")
+        listen.tts_request("안녕하세요", "test-key", listen.DEFAULT_TTS)
     assert no_real_tts == ["안녕하세요"]
     no_real_tts.clear()  # 막히는 것을 본 테스트이므로 끝날 때의 실패 처리는 끈다
+
+
+class FakeGenai:
+    """google.genai.Client 자리 — 받은 값을 적어 두고 Gemini TTS 답 모양(output_audio.data = base64 WAV)을 돌려준다."""
+
+    sent: dict = {}
+
+    def __init__(self, **kwargs):
+        FakeGenai.sent = {"client": kwargs}
+        self.interactions = self
+
+    def create(self, **kwargs):
+        FakeGenai.sent.update(kwargs)
+        return SimpleNamespace(output_audio=SimpleNamespace(data=base64.b64encode(silent_wav()).decode()), output_text="")
+
+
+@pytest.mark.parametrize("model", [GEMINI, GEMINI_LITE])
+def test_gemini_request_sends_text_verbatim_and_returns_wav(monkeypatch, model):
+    from google import genai
+
+    monkeypatch.setattr(genai, "Client", FakeGenai)
+    data = REAL_TTS("플래시어텐션은 GPU 메모리를 덜 오갑니다.", "test-key", model)
+    sent = FakeGenai.sent
+    assert sent["client"]["api_key"] == "test-key" and sent["model"] == model
+    content = sent["input"][0]["content"][0]
+    assert content["text"] == "플래시어텐션은 GPU 메모리를 덜 오갑니다."  # 대본 그대로 (말투는 style 로 따로)
+    assert content["annotations"][0]["type"] == "speech_metadata" and content["annotations"][0]["style"]
+    assert sent["generation_config"]["speech_config"] == [{"voice": listen.TTS_MODELS[model].voice}]
+    assert sent["response_format"]["type"] == "audio"
+    audio, sr = listen._decode(data)  # 받은 WAV 를 지금 이어 붙이기 코드가 그대로 읽는다
+    assert sr == 24000 and audio.shape[0] == 1
+
+
+def test_gemini_request_without_audio_raises(monkeypatch):
+    from google import genai
+
+    class Empty(FakeGenai):
+        def create(self, **kwargs):
+            return SimpleNamespace(output_audio=None, output_text="안전 필터로 거부")
+
+    monkeypatch.setattr(genai, "Client", Empty)
+    with pytest.raises(RuntimeError, match="음성"):
+        REAL_TTS("안녕하세요.", "test-key", GEMINI)
 
 
 # ─── 저장·재사용 ────────────────────────────────────────────────────
@@ -186,6 +290,16 @@ def test_script_is_saved_and_reused_without_model_call(use_script, models, tmp_p
     use_script(Script())  # 모델을 부르면 'no fake output' 오류
     loaded = listen.load_script(json_path)
     assert loaded.script == GOOD and loaded.warnings == ["경고"]
+
+
+def test_audio_model_is_saved_with_script(tmp_path):
+    path = tmp_path / "s.json"
+    listen.save_script(path, listen.ScriptResult(GOOD, [], 1, audio_model=GEMINI_LITE))
+    assert listen.load_script(path).audio_model == GEMINI_LITE
+    old = json.loads(path.read_text(encoding="utf-8"))
+    del old["audio_model"]  # 모델을 고르기 전에 만든 파일
+    path.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+    assert listen.load_script(path).audio_model == ""
 
 
 def test_paths_change_when_entry_changes(tmp_path):
@@ -217,6 +331,32 @@ def test_panel_before_script_shows_estimate_and_button(tmp_path):
     assert not at.exception, at.exception
     assert any("듣기용 MP3 만들기" in b.label for b in at.button)
     assert any("추정" in c.value for c in at.caption)
+    box = next(s for s in at.selectbox if "음성 모델" in s.label)
+    assert box.value == listen.DEFAULT_TTS  # 처음에는 추천 모델
+    assert any("키 없음" in o for o in box.options)  # 테스트에는 키가 없다 — 고를 수는 있지만 무엇이 필요한지 보인다
+    assert all("토큰" not in o for o in box.options)  # 내부 용어 없이
+
+
+def test_panel_uses_chosen_model_and_can_remake_voice_only(fake_tts, use_script, tmp_path):
+    from streamlit.testing.v1 import AppTest
+
+    s = use_script(Script(ListenScript=GOOD))
+    at = AppTest.from_function(_panel, kwargs={"entry": ENTRY, "folder": tmp_path, "saved": []}, default_timeout=30).run()
+    next(s for s in at.selectbox if "음성 모델" in s.label).set_value(GEMINI_LITE).run()
+    next(b for b in at.button if "듣기용 MP3 만들기" in b.label).click().run()
+    next(b for b in at.button if "음성 만들기" in b.label).click().run()
+    assert not at.exception, at.exception
+    assert set(fake_tts.models) == {GEMINI_LITE}
+    assert any(GEMINI_LITE in c.value for c in at.caption)  # 어느 모델로 만든 음성인지 보인다
+    json_path, mp3_path = listen.paths(tmp_path, "run12345678", ENTRY)
+    assert listen.load_script(json_path).audio_model == GEMINI_LITE
+    next(b for b in at.button if "다른 음성 모델로" in b.label).click().run()  # 대본은 두고 음성만 지운다
+    assert not mp3_path.exists() and json_path.exists() and len(s.calls) == 1
+    next(s for s in at.selectbox if "음성 모델" in s.label).set_value(GEMINI).run()
+    next(b for b in at.button if "음성 만들기" in b.label).click().run()
+    assert not at.exception, at.exception
+    assert fake_tts.models[-1] == GEMINI and len(s.calls) == 1  # 대본을 다시 쓰지 않았다
+    assert any(GEMINI in c.value and GEMINI_LITE not in c.value for c in at.caption if "목소리" in c.value)
 
 
 def test_panel_makes_audio_on_click_only(fake_tts, use_script, tmp_path):

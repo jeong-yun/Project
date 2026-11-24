@@ -25,6 +25,11 @@ models:
   gemini-3.5-flash:      {input: 1.50, output: 9.00, source: third_party}   # 공식 가격 페이지에서 빠짐
   gemini-3.5-flash-lite: {input: 0.30, output: 2.50, source: official}
   gemini-3.1-flash-lite: {input: 0.25, output: 1.50, source: official}
+  # 음성(TTS, 🎧 듣기용 MP3) — 출력 = 오디오 토큰 (1초 = 25토큰). 확인일 2026-11-23, 종료 예정일 없음
+  gemini-3.8-flash-tts:
+    {input: 0.50, output: 9.00, source: official, changes: [{from: "2027-01-01", input: 1.00, output: 18.00}]}
+  gemini-3.8-flash-lite-tts:
+    {input: 0.50, output: 6.00, source: official, changes: [{from: "2027-01-01", input: 1.00, output: 12.00}]}
   # Anthropic Claude
   claude-opus-5-5:   {input: 4.00, output: 20.00, cached_input: 0.20, source: official}
   claude-sonnet-5-5: {input: 2.00, output: 10.00, cached_input: 0.20, source: official}

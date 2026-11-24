@@ -1,12 +1,14 @@
-"""🎧 듣기용 MP3 — 개념 카탈로그 항목(본문) → 읽기용 대본(절 목록) → OpenAI TTS → MP3 하나.
+"""🎧 듣기용 MP3 — 개념 카탈로그 항목(본문) → 읽기용 대본(절 목록) → 음성 합성(TTS, 고른 모델) → MP3 하나.
 
 정리한 IT 개념을 출퇴근길에 귀로 듣고 이해하려는 기능이다 (📚 개념 편집 팀 결과 화면 — concept_ui.listen_panel).
   1) 대본   : 보조(utility) 모델 1번, 구조화 출력 ListenScript = 절(heading 제목 + text 읽을 글) 목록
               정의 → 쉬운 비유 → 예시 → 핵심 정리, 공백 빼고 MAX_SCRIPT_CHARS 자 이하(약 5분)
   2) 코드 검사 : check_script — 길이 상한, 본문에 없는 숫자(커리어부 사실 검사 core/career 를 그대로), 본문에 없는 영문 용어.
               걸리면 걸린 점을 알려 주고 한 번만 다시 쓰게 하고(호출 최대 2번), 그래도 남으면 화면에 경고로 보인다.
-  3) 음성   : 절마다 문장 경계로 TTS_CHUNK_CHARS 자 이하로 나눠 OpenAI TTS → pedalboard(내장 LAME, ffmpeg 불필요)로 이어 붙여 MP3 하나
+  3) 음성   : 화면에서 고른 TTS_MODELS 의 모델(기본 DEFAULT_TTS)로 절마다 문장 경계로 TTS_CHUNK_CHARS 자 이하로 나눠 보내고
+              → pedalboard(내장 LAME, ffmpeg 불필요)로 이어 붙여 MP3 하나 (Gemini 는 WAV, OpenAI 는 MP3 로 받는다 — 읽는 코드는 같다)
               (절 사이 SECTION_PAUSE_SEC, 같은 절 조각 사이 CHUNK_PAUSE_SEC 쉼). 모두 받은 뒤에 파일을 쓴다 — 실패하면 파일이 없다.
+              어느 모델로 만들었는지는 대본 .json 의 audio_model 에 남긴다 (화면에 보인다).
   4) 기록   : 대본 호출은 llm_factory → ⏱ 호출 모니터(종류 'listen'), TTS 는 조각마다 호출 모니터(글자 수·걸린 시간)와
               usage.record(🏠 사용량 — 토큰은 글자 수·길이로 추정)에 남긴다.
   5) 저장   : results/<팀>/듣기_<제목>_<업무 번호 8자>_<본문 지문>.json(대본) · .mp3 — 다시 그릴 때·앱을 다시 켤 때 재사용.
@@ -14,14 +16,27 @@
 
 2단계(슬라이드 + 음성 MP4)는 같은 절 목록(heading = 슬라이드 제목)과 같은 MP3 를 쓸 예정이다 — 영상 코드는 아직 없다.
 
-TTS 값은 OpenAI 공식 문서에서 확인 (2026-11-19):
-  - /v1/audio/speech 모델: tts-1 · tts-1-hd · gpt-4o-mini-tts — 셋 다 'deprecated', 2027-01-06 종료 예정
-    (공식 안내: Realtime API 의 gpt-realtime-2.1-mini 로 옮기라 — speech 주소로는 못 쓴다). 종료되면 TTS_MODEL 을 바꿔야 한다.
-  - gpt-4o-mini-tts: 입력 2,000 토큰·4,096 자 한도, instructions(말투 지시) 지원, 목소리 13개 중 품질 추천 marin·cedar
-  - 요금: 글 입력 100만 토큰당 $0.60, 오디오 출력 100만 토큰당 $12. 공식 '분당 요금'은 없다 →
-    COST_PER_MIN_USD 는 출시 때 알려진 환산값(약 $0.015/분, 공식 페이지에 없는 추정)이다.
+고를 수 있는 음성 모델 (TTS_MODELS — 공식 문서로 확인, 2026-11-23. 비교 기록은 today_worked.md 2026-11-23):
+  - Google gemini-3.8-flash-tts (기본) · gemini-3.8-flash-lite-tts — 2026-09-22 정식 출시, 종료 예정일 없음
+      https://ai.google.dev/gemini-api/docs/speech-generation · /deprecations · /models/gemini-3.8-flash-lite-tts
+    · 한국어 지원(언어 자동 감지), 목소리 30개(+확장 목록), 입력 8,192 토큰 · 출력 16,384 토큰(≈ 10.9분 — 아래 환산으로 계산)
+    · "text 를 그대로 읽는 대본(verbatim transcript)으로 다룬다" — 말투는 speech_metadata.style 에 짧게 따로 준다
+    · 답: WAV (24 kHz · 모노 · 16비트). google-genai >= 2.25 의 interactions.create
+    · 요금(https://ai.google.dev/gemini-api/docs/pricing, 유료 등급): 오디오 출력 100만 토큰당
+      Flash $9 → 2027-01-01 부터 $18, Flash-Lite $6 → $12 (글 입력 $0.50 → $1.00). "오디오 1초 = 토큰 25개" (공식)
+      → 분당 Flash $0.0135 → $0.027, Flash-Lite $0.009 → $0.018 (공식 '10초당' 값과 같다 — config/pricing.yaml 에 날짜별로)
+    · 무료 등급 키는 요금이 없지만 입력이 Google 제품 개선에 쓰일 수 있다 (가격 페이지 'Used to improve our products: Yes')
+  - OpenAI gpt-4o-mini-tts (지금까지 쓰던 모델) — 2027-01-06 종료 예정 → 그날부터 고르기 목록에서 빠진다
+      https://developers.openai.com/api/docs/deprecations · /guides/text-to-speech · /pricing
+    · 입력 2,000 토큰·4,096 자 한도(2026-11-19 확인), instructions(말투 지시), 목소리 13개 중 품질 추천 marin·cedar
+    · 요금: 글 입력 100만 토큰당 $0.60, 오디오 출력 $12. 공식 '분당 요금'·'초당 토큰'은 없다 →
+      분당 약 $0.015 는 출시 때 알려진 환산값(공식 페이지에 없는 추정)이고, tokens_per_sec 는 그 값을 토큰으로 바꾼 것이다.
+  - 넣지 않은 후보: OpenAI 공식 후속 gpt-realtime-2.1-mini 는 /v1/audio/speech 로 못 쓰고 Realtime API(대화 세션)만 되며
+    '주어진 글 그대로 읽기' 안내가 없다. gpt-audio-1.5 는 Chat Completions 로 되지만 오디오 출력이 100만 토큰당 $64.
+    Google Cloud Text-to-Speech(Chirp 3 HD, 100만 자당 $30)는 Cloud 프로젝트 설정이 따로 필요하다.
 """
 
+import base64
 import io
 import json
 import os
@@ -39,17 +54,32 @@ from core import call_monitor, career, llm_factory, usage
 from core.exporter import slugify
 from core.schemas import ModelsConfig, ModelSpec
 
-TTS_MODEL = "gpt-4o-mini-tts"
-TTS_VOICE = "marin"  # 공식 문서가 품질로 추천하는 목소리 (marin · cedar)
-TTS_INSTRUCTIONS = "한국어 IT 강의를 하듯 차분하고 또렷하게, 보통 빠르기로 읽는다. 영문 약어는 알파벳 그대로 읽는다."
-TTS_CHUNK_CHARS = 1000  # 한 번에 보낼 글자 수 — 공식 한도 2,000 토큰·4,096 자보다 넉넉히 (한국어는 글자당 토큰이 많다)
+@dataclass(frozen=True)
+class TtsModel:
+    provider: str  # llm_factory 제공처 — 키 이름은 config/models.yaml providers
+    voice: str
+    tokens_per_sec: float  # 오디오 1초 = 출력 토큰 — 예상 요금·🏠 사용량 기록용 (가격은 config/pricing.yaml)
+    note: str  # 고르기 상자에 보일 한 줄
+    shutdown: str = ""  # 종료 예정일 — 이 날부터 고르기 목록에서 뺀다
+
+
+# 위 설명의 공식 문서 값. 순서 = 고르기 상자 순서 (맨 앞이 기본).
+# Gemini 목소리 Charon = 공식 목록의 'Informative'(설명형) — 강의 낭독에 맞춰 고름, 실제 소리는 아직 들어 보지 않음
+TTS_MODELS = {
+    "gemini-3.8-flash-tts": TtsModel("google", "Charon", 25, "Google · 추천 — 긴 낭독·어려운 발음에 강함"),
+    "gemini-3.8-flash-lite-tts": TtsModel("google", "Charon", 25, "Google · 더 싸고 빠름"),
+    # 초당 토큰 ≈ 21 = 분당 약 $0.015(추정)를 출력 가격 $12 로 나눈 값
+    "gpt-4o-mini-tts": TtsModel("openai", "marin", 0.015 / 60 / (12 / 1_000_000), "OpenAI · 지금까지 쓰던 모델", shutdown="2027-01-06"),
+}
+DEFAULT_TTS = "gemini-3.8-flash-tts"
+OLD_TTS = "gpt-4o-mini-tts"  # 모델을 고르기 전(2026-11-23 전)에 만든 MP3 는 모두 이 모델로 만들었다 (대본 .json 에 audio_model 이 없음)
+TTS_INSTRUCTIONS = "한국어 IT 강의를 하듯 차분하고 또렷하게, 보통 빠르기로 읽는다. 영문 약어는 알파벳 그대로 읽는다."  # OpenAI 말투 지시
+GEMINI_STYLE = "calm, clear lecture tone, moderate pace"  # Gemini 말투 (공식 안내: 짧게, 대본과 따로) — 실제 소리로 아직 확인 안 함
+TTS_CHUNK_CHARS = 1000  # 한 번에 보낼 글자 수 — 가장 작은 공식 한도(OpenAI 2,000 토큰·4,096 자)보다 넉넉히 (한국어는 글자당 토큰이 많다)
 TTS_TIMEOUT_SEC = 120
-TTS_SHUTDOWN = "2027-01-06"
 MAX_SCRIPT_CHARS = 1500  # 대본 상한 (공백 제외) ≈ 5분
 MIN_SCRIPT_CHARS = 900  # 목표 하한 (≈ 3분) — 프롬프트에만 쓴다 (본문이 짧으면 짧아도 된다)
 CHARS_PER_MIN = 300  # 한국어 낭독 속도(공백 제외 글자/분) — 추정, 아직 실측 안 함 (만든 뒤에는 실제 길이를 보여 준다)
-COST_PER_MIN_USD = 0.015  # 추정 (위 설명) — 실제 청구는 OpenAI 사용량 화면
-AUDIO_TOKENS_PER_SEC = COST_PER_MIN_USD / 60 / (12 / 1_000_000)  # 위 추정을 오디오 출력 토큰으로 바꾼 값 (≈ 21) — 🏠 사용량 기록용
 SECTION_PAUSE_SEC = 0.8
 CHUNK_PAUSE_SEC = 0.25
 WHO = "🎧 듣기용 대본"
@@ -74,6 +104,7 @@ class ScriptResult:
     script: ListenScript
     warnings: list[str]  # 다시 쓴 뒤에도 남은 코드 검사 문제
     calls: int  # 대본 모델 호출 수 (1 또는 2)
+    audio_model: str = ""  # 이 대본으로 만든 음성의 TTS 모델 (아직 없거나 고르기 전에 만든 파일이면 "")
 
 
 @dataclass
@@ -82,6 +113,7 @@ class AudioResult:
     seconds: float
     chunks: int  # TTS 호출 수
     chars: int  # TTS 로 보낸 글자 수 (공백 포함)
+    model: str = DEFAULT_TTS
 
 
 # ─── 대본 ─────────────────────────────────────────────────────────────
@@ -96,10 +128,32 @@ def script_chars(script: ListenScript) -> int:
     return len(re.sub(r"\s", "", script_text(script)))
 
 
-def estimate(chars: int) -> tuple[float, float]:
-    """(예상 길이 분, 예상 TTS 요금 USD) — 둘 다 추정."""
+def estimate(chars: int, model: str = DEFAULT_TTS) -> tuple[float, float]:
+    """(예상 길이 분, 예상 TTS 요금 USD) — 둘 다 추정. 요금은 가격표(오늘 날짜 가격)로 🏠 사용량과 같은 방식으로 셈한다."""
+    spec = TTS_MODELS[model]
     minutes = chars / CHARS_PER_MIN
-    return minutes, minutes * COST_PER_MIN_USD
+    return minutes, usage.estimate_cost(spec.provider, model, chars, round(minutes * 60 * spec.tokens_per_sec)) or 0.0
+
+
+def next_price(model: str, today: str | None = None) -> tuple[str, float] | None:
+    """가격표(config/pricing.yaml changes)에 앞으로 바뀔 가격이 있으면 (그 날짜, 그날부터 분당 요금 추정). 없으면 None."""
+    today = today or time.strftime("%Y-%m-%d")
+    spec = TTS_MODELS[model]
+    changes = (usage.load_pricing()["models"].get(model) or {}).get("changes") or []
+    days = sorted(str(c["from"]) for c in changes if str(c["from"]) > today)
+    if not days:
+        return None
+    return days[0], usage.estimate_cost(spec.provider, model, CHARS_PER_MIN, round(60 * spec.tokens_per_sec), day=days[0]) or 0.0
+
+
+def tts_choices(today: str | None = None) -> list[str]:
+    """고를 수 있는 음성 모델 (종료일이 지난 모델은 뺀다). 맨 앞이 기본."""
+    today = today or time.strftime("%Y-%m-%d")
+    return [m for m, spec in TTS_MODELS.items() if not (spec.shutdown and today >= spec.shutdown)]
+
+
+def provider_name(model: str) -> str:
+    return {"google": "Google", "openai": "OpenAI"}[TTS_MODELS[model].provider]
 
 
 TERM = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:[-+.#][A-Za-z0-9]+)*")
@@ -203,32 +257,54 @@ def split_text(text: str, limit: int | None = None) -> list[str]:
     return parts
 
 
-def tts_request(text: str, api_key: str) -> bytes:
-    """OpenAI TTS 한 번 → MP3 바이트 (테스트는 tests/conftest.py 가 막고 fake_tts 로 바꾼다)."""
+def tts_request(text: str, api_key: str, model: str) -> bytes:
+    """고른 모델로 TTS 한 번 → 음성 바이트 (Gemini WAV · OpenAI MP3). 테스트는 tests/conftest.py 가 막고 fake_tts 로 바꾼다."""
+    spec = TTS_MODELS[model]
+    if spec.provider == "google":
+        from google import genai
+        from google.genai import types
+
+        # 클라이언트를 변수에 잡아 둔다 — 임시 객체로 쓰면 google-genai 가 연결을 먼저 닫는다 (core/music.call_lyria 와 같은 이유)
+        client = genai.Client(api_key=api_key, http_options=types.HttpOptions(api_version="v1beta", timeout=TTS_TIMEOUT_SEC * 1000))
+        interaction = client.interactions.create(
+            model=model,
+            input=[{"type": "user_input", "content": [{"type": "text", "text": text, "annotations": [
+                {"type": "speech_metadata", "style": GEMINI_STYLE}]}]}],
+            response_format={"type": "audio"},
+            generation_config={"speech_config": [{"voice": spec.voice}]},
+        )
+        audio = interaction.output_audio
+        if audio is None or not audio.data:
+            raise RuntimeError("Gemini 가 음성을 돌려주지 않았습니다" + (f": {interaction.output_text[:200]}" if interaction.output_text else ""))
+        return base64.b64decode(audio.data) if isinstance(audio.data, str) else bytes(audio.data)
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key, timeout=TTS_TIMEOUT_SEC, max_retries=2)  # 429·5xx 는 SDK 가 두 번 더 해 본다
-    response = client.audio.speech.create(model=TTS_MODEL, voice=TTS_VOICE, input=text, instructions=TTS_INSTRUCTIONS,
+    response = client.audio.speech.create(model=model, voice=spec.voice, input=text, instructions=TTS_INSTRUCTIONS,
                                           response_format="mp3")
     return response.content
 
 
-def friendly_error(error: Exception) -> str:
-    """TTS 오류 → 이유와 다음 할 일 (쉬운 한국어)."""
+def friendly_error(error: Exception, model: str = DEFAULT_TTS) -> str:
+    """TTS 오류 → 이유와 다음 할 일 (쉬운 한국어). Google(google-genai)·OpenAI 오류 문구를 함께 본다."""
+    who, spec = provider_name(model), TTS_MODELS[model]
+    other = "위 상자에서 다른 음성 모델을 골라 다시 눌러 주세요."
     text = f"{type(error).__name__} {error}".lower()
     if "insufficient_quota" in text or "billing" in text:
-        return "OpenAI 크레딧(사용 한도)이 부족해 음성을 만들지 못했습니다. OpenAI 결제 화면에서 잔액을 확인한 뒤 다시 눌러 주세요."
-    if "401" in text or "invalid_api_key" in text or "authentication" in text:
-        return "OpenAI API 키가 맞지 않아 음성을 만들지 못했습니다. .env 의 OPENAI_API_KEY 를 확인하고 앱을 다시 켠 뒤 눌러 주세요."
-    if "404" in text or "model_not_found" in text or "does not exist" in text:
-        return (f"음성 모델 {TTS_MODEL} 을 찾지 못했습니다. OpenAI 는 이 모델을 {TTS_SHUTDOWN} 에 끝낸다고 알렸습니다 — "
-                "지났다면 core/listen.py 의 TTS_MODEL 을 새 모델로 바꿔야 합니다.")
-    if "429" in text or "rate limit" in text:
-        return "OpenAI 에 요청이 몰려 음성을 만들지 못했습니다. 1분쯤 뒤에 다시 눌러 주세요."
+        return f"{who} 크레딧(사용 한도)이 부족해 음성을 만들지 못했습니다. {who} 결제 화면에서 잔액을 확인하거나, {other}"
+    if any(w in text for w in ("401", "403", "invalid_api_key", "api key not valid", "api_key_invalid", "permission_denied",
+                               "authentication")):
+        return (f"{who} API 키가 맞지 않거나 이 모델을 쓸 권한이 없어 음성을 만들지 못했습니다. "
+                f".env 의 {who} 키를 확인하고 앱을 다시 켜거나, {other}")
+    if "404" in text or "not_found" in text or "not found" in text or "does not exist" in text:
+        ended = f" {who} 는 이 모델을 {spec.shutdown} 에 끝낸다고 알렸습니다." if spec.shutdown else ""
+        return f"{who} 음성 모델 {model} 을 찾지 못했습니다.{ended} {other}"
+    if "429" in text or "rate limit" in text or "resource_exhausted" in text:
+        return f"{who} 요청 한도에 걸려 음성을 만들지 못했습니다 (무료 등급이면 하루 한도일 수 있음). 1분쯤 뒤에 다시 누르거나, {other}"
     if "timeout" in text or "timed out" in text or "connection" in text:
-        return "OpenAI 에 연결하지 못했습니다 (인터넷·방화벽). 연결을 확인하고 잠시 뒤 다시 눌러 주세요."
-    return (f"음성을 만들지 못했습니다 ({type(error).__name__}: {str(error)[:200]}). 잠시 뒤 다시 눌러 보고, "
-            "계속되면 ⏱ 호출 기록의 오류 내용을 확인해 주세요.")
+        return f"{who} 에 연결하지 못했습니다 (인터넷·방화벽). 연결을 확인하고 잠시 뒤 다시 눌러 주세요."
+    return (f"{who} {model} 로 음성을 만들지 못했습니다 ({type(error).__name__}: {str(error)[:200]}). 잠시 뒤 다시 눌러 보고, "
+            f"계속되면 ⏱ 호출 기록의 오류 내용을 확인하거나 {other}")
 
 
 def _decode(data: bytes) -> tuple[np.ndarray, int]:
@@ -240,40 +316,43 @@ def _decode(data: bytes) -> tuple[np.ndarray, int]:
         return audio.mean(axis=0, keepdims=True).astype(np.float32), int(f.samplerate)
 
 
-def _speak(text: str, api_key: str) -> tuple[np.ndarray, int]:
+def _speak(text: str, api_key: str, model: str) -> tuple[np.ndarray, int]:
     """TTS 한 번 — ⏱ 호출 모니터·🏠 사용량에 남긴다. 실패하면 쉬운 이유로 ListenError."""
+    spec = TTS_MODELS[model]
     with call_monitor.purpose("listen"):
-        rec = call_monitor.begin(ModelSpec(provider="openai", model=TTS_MODEL), TTS_WHO)
+        rec = call_monitor.begin(ModelSpec(provider=spec.provider, model=model), TTS_WHO)
     rec.running()
     rec.chars = len(text)
     try:
-        audio, sr = _decode(tts_request(text, api_key))
+        audio, sr = _decode(tts_request(text, api_key, model))
     except Exception as e:  # noqa: BLE001 — SDK 예외가 제각각
         rec.fail(e)
-        raise ListenError(friendly_error(e)) from e
+        raise ListenError(friendly_error(e, model)) from e
     seconds = audio.shape[1] / sr
-    out_tokens = round(seconds * AUDIO_TOKENS_PER_SEC)
-    rec.note = f"{len(text)}자 → {seconds:.1f}초 (출력 토큰은 길이로 추정)"
+    out_tokens = round(seconds * spec.tokens_per_sec)
+    rec.note = f"{len(text)}자 → {seconds:.1f}초 (출력 토큰은 길이로 셈)"
     rec.finish(len(text), out_tokens)
-    usage.record("openai", TTS_MODEL, api_key, len(text), out_tokens, purpose="듣기용 MP3 음성 (토큰은 글자 수·길이로 추정)")
+    usage.record(spec.provider, model, api_key, len(text), out_tokens, purpose="듣기용 MP3 음성 (토큰은 글자 수·길이로 셈)")
     return audio, sr
 
 
-def make_audio(script: ListenScript, out_path: Path, models: ModelsConfig) -> AudioResult:
-    """대본 → TTS(문장 경계로 나눔) → 쉼을 넣어 이어 붙인 MP3 하나."""
+def make_audio(script: ListenScript, out_path: Path, models: ModelsConfig, model: str = DEFAULT_TTS) -> AudioResult:
+    """대본 → 고른 모델로 TTS(문장 경계로 나눔) → 쉼을 넣어 이어 붙인 MP3 하나."""
     from core.audio_edit import save_audio
     from core.music import audio_duration
 
-    if not llm_factory.is_available("openai", models):
-        env = models.providers.get("openai", "OPENAI_API_KEY")
-        raise ListenError(f"OpenAI 를 쓸 수 없어 음성을 만들지 못했습니다 ({llm_factory.unavailable_reason('openai', models)}). "
-                          f".env 에 {env} 를 넣고 앱을 다시 켠 뒤 눌러 주세요. 대본은 저장되어 있어 다시 쓰지 않습니다.")
-    api_key = os.getenv(models.providers["openai"]) or ""
+    provider = TTS_MODELS[model].provider
+    if not llm_factory.is_available(provider, models):
+        env = models.providers.get(provider, f"{provider.upper()}_API_KEY")
+        raise ListenError(f"{provider_name(model)} 를 쓸 수 없어 음성을 만들지 못했습니다 ({llm_factory.unavailable_reason(provider, models)}). "
+                          f".env 에 {env} 를 넣고 앱을 다시 켜거나, 위 상자에서 키가 있는 음성 모델을 골라 주세요. "
+                          "대본은 저장되어 있어 다시 쓰지 않습니다.")
+    api_key = os.getenv(models.providers[provider]) or ""
     pieces: list[np.ndarray] = []
     rate, chunks, chars = 0, 0, 0
     for i, section in enumerate(s for s in script.sections if s.text.strip()):
         for j, text in enumerate(split_text(section.text)):
-            audio, sr = _speak(text, api_key)
+            audio, sr = _speak(text, api_key, model)
             if rate and sr != rate:
                 raise ListenError(f"음성 조각의 샘플레이트가 서로 다릅니다 ({rate} · {sr}). 다시 눌러 주세요.")
             rate = sr
@@ -285,7 +364,7 @@ def make_audio(script: ListenScript, out_path: Path, models: ModelsConfig) -> Au
     if not pieces:
         raise ListenError("읽을 대본이 없습니다. '대본부터 다시 만들기'를 눌러 주세요.")
     save_audio(out_path, np.concatenate(pieces, axis=1), rate)
-    return AudioResult(out_path, audio_duration(out_path), chunks, chars)
+    return AudioResult(out_path, audio_duration(out_path), chunks, chars, model)
 
 
 # ─── 저장·재사용 ──────────────────────────────────────────────────────
@@ -301,7 +380,7 @@ def paths(folder: Path, run_id: str, entry: str) -> tuple[Path, Path]:
 def save_script(path: Path, result: ScriptResult) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {"sections": [s.model_dump() for s in result.script.sections], "warnings": result.warnings, "calls": result.calls,
-            "chars": script_chars(result.script), "created": time.strftime("%Y-%m-%d %H:%M")}
+            "chars": script_chars(result.script), "created": time.strftime("%Y-%m-%d %H:%M"), "audio_model": result.audio_model}
     path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
@@ -309,7 +388,8 @@ def load_script(path: Path) -> ScriptResult | None:
     """저장한 대본 (없거나 깨졌으면 None)."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return ScriptResult(ListenScript(sections=data["sections"]), list(data.get("warnings") or []), int(data.get("calls") or 0))
+        return ScriptResult(ListenScript(sections=data["sections"]), list(data.get("warnings") or []), int(data.get("calls") or 0),
+                            str(data.get("audio_model") or ""))
     except (OSError, ValueError, KeyError, TypeError):
         return None
 

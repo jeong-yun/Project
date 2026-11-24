@@ -69,19 +69,24 @@ class FakeOfficeModel(FakeListChatModel):
 _silent: dict[tuple[float, int], bytes] = {}
 
 
-def silent_mp3(seconds: float = 0.3, sr: int = 24000) -> bytes:
-    """짧은 무음 MP3 바이트 — 가짜 TTS 의 답 (pedalboard 내장 LAME, 한 번 만들어 재사용)."""
-    if (seconds, sr) not in _silent:
+def silent_mp3(seconds: float = 0.3, sr: int = 24000, fmt: str = "mp3") -> bytes:
+    """짧은 무음 MP3 바이트 — 가짜 TTS 의 답 (pedalboard 내장 LAME, 한 번 만들어 재사용). fmt="wav" 면 WAV (Gemini TTS 의 답 모양)."""
+    if (seconds, sr, fmt) not in _silent:
         import io
 
         import numpy as np
         from pedalboard.io import AudioFile
 
         buf = io.BytesIO()
-        with AudioFile(buf, "w", sr, 1, format="mp3") as f:
+        with AudioFile(buf, "w", sr, 1, format=fmt) as f:
             f.write(np.zeros((1, int(sr * seconds)), dtype=np.float32))
-        _silent[(seconds, sr)] = buf.getvalue()
-    return _silent[(seconds, sr)]
+        _silent[(seconds, sr, fmt)] = buf.getvalue()
+    return _silent[(seconds, sr, fmt)]
+
+
+def silent_wav(seconds: float = 0.3, sr: int = 24000) -> bytes:
+    """짧은 무음 WAV (24 kHz 모노) — 가짜 Gemini TTS 의 답."""
+    return silent_mp3(seconds, sr, fmt="wav")
 
 
 def make_review(verdict="revise", score=7, answer="보완된 답변", comment="근거를 더 보강하세요"):
