@@ -9,7 +9,9 @@
               (절 사이 SECTION_PAUSE_SEC, 같은 절 조각 사이 CHUNK_PAUSE_SEC 쉼). 모두 받은 뒤에 파일을 쓴다 — 실패하면 파일이 없다.
   4) 기록   : 대본 호출은 llm_factory → ⏱ 호출 모니터(종류 'listen'), TTS 는 조각마다 호출 모니터(글자 수·걸린 시간)와
               usage.record(🏠 사용량 — 토큰은 글자 수·길이로 추정)에 남긴다.
-  5) 저장   : results/<팀>/듣기_<제목>_<업무 번호 8자>_<본문 지문>.json(대본) · .mp3 — 다시 그릴 때·앱을 다시 켤 때 재사용.
+  5) 저장   : results/<팀>/<범주>/듣기_<제목>_<업무 번호 8자>_<본문 지문>.json(대본) · .mp3 — 다시 그릴 때·앱을 다시 켤 때 재사용.
+              범주 = 적용 계획의 category (카탈로그 분류 이름 그대로, 예: AI-App). 없거나 모르는 값이면 미분류 폴더.
+              범주 폴더로 나누기 전(2026-11-23)에 팀 폴더 바로 아래 만든 파일은 옮기지 않고 그 자리에서 찾아 쓴다.
               본문이 바뀌면(변경 제안 고름·직접 수정) 지문이 달라져 새로 만든다.
 
 2단계(슬라이드 + 음성 MP4)는 같은 절 목록(heading = 슬라이드 제목)과 같은 MP3 를 쓸 예정이다 — 영상 코드는 아직 없다.
@@ -36,6 +38,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from core import call_monitor, career, llm_factory, usage
+from core.catalog import CATEGORY_FILES, LEGACY_FILES
 from core.exporter import slugify
 from core.schemas import ModelsConfig, ModelSpec
 
@@ -291,11 +294,27 @@ def make_audio(script: ListenScript, out_path: Path, models: ModelsConfig) -> Au
 # ─── 저장·재사용 ──────────────────────────────────────────────────────
 
 
-def paths(folder: Path, run_id: str, entry: str) -> tuple[Path, Path]:
-    """(대본 .json, 음성 .mp3) — 제목·업무 번호·본문 지문으로 이름을 정한다 (본문이 바뀌면 새 이름)."""
+UNSORTED = "미분류"  # 적용 계획에 범주가 없거나 모르는 값일 때의 폴더
+# 범주 폴더 이름 — 모델이 쓴 값이 그대로 경로가 되지 않게 아는 이름만 (옛 카탈로그의 나누기 전 분류 'AI' 포함)
+CATEGORY_FOLDERS = (*CATEGORY_FILES, *LEGACY_FILES, UNSORTED)
+
+
+def _places(folder: Path) -> list[Path]:
+    """저장한 파일을 찾을 곳 — 범주 폴더들 + 팀 폴더 바로 아래 (범주 폴더로 나누기 전에 만든 파일)."""
+    return [*(folder / name for name in CATEGORY_FOLDERS), folder]
+
+
+def paths(folder: Path, run_id: str, entry: str, category: str | None = "") -> tuple[Path, Path]:
+    """(대본 .json, 음성 .mp3) — folder(팀 폴더)/<범주>/ 아래, 제목·업무 번호·본문 지문으로 이름을 정한다 (본문이 바뀌면 새 이름).
+
+    같은 이름 파일이 이미 다른 곳(팀 폴더 바로 아래 예전 파일, 채택 때 범주를 바꾼 경우의 다른 범주 폴더)에 있으면 그 자리를 쓴다.
+    """
     title = re.sub(r"\(작성일[^)]*\)|\(수정일[^)]*\)|^\s*\[[^\]]*\]", "", entry.strip().split("\n")[0])
     stem = f"듣기_{slugify(title, 30)}_{run_id[:8]}_{zlib.crc32(entry.encode('utf-8')):08x}"
-    return folder / f"{stem}.json", folder / f"{stem}.mp3"
+    home = folder / (category if category in CATEGORY_FOLDERS else UNSORTED)
+    place = next((p for p in dict.fromkeys((home, *_places(folder)))  # 범주 폴더 먼저, 같은 곳은 한 번만
+                  if (p / f"{stem}.json").exists() or (p / f"{stem}.mp3").exists()), home)
+    return place / f"{stem}.json", place / f"{stem}.mp3"
 
 
 def save_script(path: Path, result: ScriptResult) -> None:
@@ -315,6 +334,6 @@ def load_script(path: Path) -> ScriptResult | None:
 
 
 def saved_audio(folder: Path, run_id: str) -> Path | None:
-    """이 업무로 만든 가장 최근 MP3 (🕘 지난 업무 창)."""
-    hits = list(folder.glob(f"듣기_*_{run_id[:8]}_*.mp3")) if folder.is_dir() else []
+    """이 업무로 만든 가장 최근 MP3 (🕘 지난 업무 창) — 범주 폴더들과 팀 폴더 바로 아래(예전 파일)에서 찾는다."""
+    hits = [p for place in _places(folder) if place.is_dir() for p in place.glob(f"듣기_*_{run_id[:8]}_*.mp3")]
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None

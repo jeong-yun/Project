@@ -111,9 +111,15 @@ def export_adopted(
 
 
 def list_results(results_root: Path, team_id: str, limit: int = 20) -> list[Path]:
-    """저장된 결과 파일 (최근 것부터)."""
+    """저장된 결과 파일 (최근 것부터) — 팀 폴더 바로 아래와 그 한 단계 아래 폴더
+    (개념 팀의 범주별 듣기용 MP3 — results/concept/AI-App/ 등, core/listen.py)."""
     folder = results_root / team_id
     if not folder.exists():
         return []
-    files = [p for p in folder.iterdir() if p.suffix in RESULT_SUFFIXES]
+    files = []
+    for p in folder.iterdir():
+        if p.suffix in RESULT_SUFFIXES:
+            files.append(p)
+        elif not p.suffix and p.is_dir():  # 폴더만 확인 — 확장자 있는 파일마다 is_dir 를 부르지 않게
+            files += [q for q in p.iterdir() if q.suffix in RESULT_SUFFIXES]
     return sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)[:limit]

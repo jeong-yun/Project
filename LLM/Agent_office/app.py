@@ -457,7 +457,7 @@ with st.sidebar:
             st.download_button(
                 {".html": "🗺 ", ".mp3": "🎵 ", ".docx": "📝 ", ".hwpx": "📝 ", ".zip": "🎁 "}.get(path.suffix, "📄 ") + stem + path.suffix,
                 data=path.read_bytes(), file_name=path.name,
-                mime=MIME.get(path.suffix, "text/markdown"), key=f"dl_{path.name}", use_container_width=True,
+                mime=MIME.get(path.suffix, "text/markdown"), key=f"dl_{path.parent.name}/{path.name}", use_container_width=True,
             )
 
     # 모델·검증 설정 — 평소에는 접어 두고 한 줄 요약만
@@ -1556,8 +1556,8 @@ def render_final_and_decision(run: dict, run_key: tuple) -> None:
     if final:
         st.markdown(f"#### 📌 최종 결과 — {name_of(final.node_id)}" + (f" · {version}" if version else ""))
         if is_concept:
-            entry = concept_ui.result_tabs(final.content, run)  # 최종본·검증 로그·GitHub 요약·적용 계획
-            concept_ui.listen_panel(entry, run, RESULTS_DIR / team_id, models, save_monitor)  # 🎧 듣기용 MP3
+            entry, category = concept_ui.result_tabs(final.content, run)  # 최종본·검증 로그·GitHub 요약·적용 계획
+            concept_ui.listen_panel(entry, run, RESULTS_DIR / team_id, models, save_monitor, category)  # 🎧 results/<팀>/<범주>/
         else:
             with st.container(height=420, border=True):
                 st.markdown(education_ui.result_text(run, final.content) if is_edu else final.content)  # 퀴즈 정답은 감춤

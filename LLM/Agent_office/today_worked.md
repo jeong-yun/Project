@@ -2808,6 +2808,24 @@
   전체 테스트 **1,489 통과**(9분 45초, 실패 0).
 - 확인 못 한 것: 다른 기기에서 직접 접속해 보기(같은 PC 에서 내부망 주소로만 확인). 켜져 있던 앱(8501)은 진행 중 업무 때문에 다시 켜지 않음 — 다음에 켤 때부터 적용.
 
+**🎧 듣기용 MP3 를 개념 범주별 폴더에 저장 (`results/concept/AI-App/` 등)**
+- 배경: 듣기용 대본(.json)·MP3 가 모두 `results/concept/` 한 폴더에 채택 결과 .md 와 섞여 쌓였다. 범주별로 모아 듣고 싶다는 요청.
+- 작업:
+  - 폴더 이름은 사용자에게 확인 — 카탈로그 분류 이름 그대로(`Cloud` · `AI-App` · `AI-Model` · `Security`, 옛 카탈로그의 `AI` 포함), 적용 계획에 범주가 없거나 모르는 값이면 `미분류`.
+    모델이 쓴 값이 그대로 경로가 되지 않게 아는 이름만 쓴다(`../밖` 같은 값도 미분류).
+  - `listen.paths(folder, run_id, entry, category)` — 새 파일은 `<팀 폴더>/<범주>/`. 같은 이름 파일이 이미 팀 폴더 바로 아래(예전 파일)나 다른 범주 폴더(채택 때 범주를 바꾼 경우)에
+    있으면 그 자리를 그대로 쓴다 → 예전 파일은 옮기지 않고, 이미 만든 MP3 를 다시 만들지 않는다. `saved_audio`(🕘 지난 업무)도 범주 폴더들 + 팀 폴더 바로 아래를 함께 찾는다.
+  - 범주는 결과 화면이 이미 읽는 적용 계획에서 — `concept_ui.result_tabs` 가 (최종본, 범주)를 돌려주고 `app.py` 가 `listen_panel` 에 넘긴다 (결과를 두 번 읽지 않게).
+    결과 화면 설명에 저장 폴더(`concept/AI-App/`)를 보인다.
+  - 사이드바 '📂 저장된 결과 파일'(`exporter.list_results`)이 팀 폴더 한 단계 아래 폴더의 결과 파일도 본다 (대본 .json 은 원래대로 뺌). 내려받기 버튼 키에 폴더 이름을 넣어 같은 이름이 겹쳐도 멈추지 않게.
+  - 실패하는 테스트 16건부터(`tests/test_listen.py`, 가짜 모델·`fake_tts`): 범주 폴더 · 미분류(경로 넘기기 값 포함) · 예전 자리 재사용 · 다른 범주 재사용 · 🕘 지난 업무 예전/새 파일 · 사이드바 목록 · 결과 화면 범주 전달.
+- 기술: 경로 화이트리스트(아는 범주만 폴더 이름으로), 옮기지 않는 이전(찾는 곳을 넓혀 예전 자리 유지), Streamlit AppTest 로 화면 반환값 확인.
+- 성과: `test_listen.py` 24 → 40 통과, 관련 7개 파일 172 통과, 전체 테스트 **1,505 통과**(1,489 + 새 16건, 8분 39초, 실패 0).
+  다시 그리기마다 도는 비용(가짜 파일 tmp 폴더 — .md 30개 + 예전 듣기 3쌍 + 범주 폴더 2개에 3쌍씩, 300번 중앙값, 테스트 끝난 뒤 같은 PC, 두 번 재서 비슷):
+  `paths` 아직 안 만든 본문 0.01 → 0.93ms, `saved_audio` 0.85 → 1.6ms, `list_results` 2.8~3.1 → 4.1ms (범주 폴더 안 MP3 6개를 더 보이는 몫 포함). 결과 화면에서 늘어나는 몫(`paths` + `list_results`) 약 2ms 는 2026-10-22 에 잰 화면 한 번 그리기(99~150ms)의 2% 안팎.
+- 확인 못 한 것: 실제 앱(8501)에서 직접 눌러 보기 — 켜 둔 앱 폴더는 건드리지 않아 화면 확인은 테스트(AppTest)로만 했다. 이 PC 의 예전 대본 1개(`results/concept/듣기_은닉_상태_캐시_….json`)는 그 자리에 그대로 두었다.
+- 다음 할 일: 범주 폴더별로 한꺼번에 듣기(재생 목록)가 필요하면 그때 화면 추가. 음성 모델 교체 작업(`core/listen.py`)과 합칠 때 충돌 확인.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
