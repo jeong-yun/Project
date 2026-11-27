@@ -187,6 +187,116 @@ def test_empty_catalog_says_what_to_do(tmp_path):
     assert at.info and not at.button
 
 
+# ─── 직접 적은 글 → MP3 (concept_ui.catalog_listen 의 '✍️ 직접 적은 글') ─────────
+
+MINE = """플래시어텐션 다시 보기 (내 메모)
+플래시어텐션은 GPU 메모리 계층을 생각해 어텐션을 타일 단위로 나눠 계산한다.
+타일 하나를 빠른 메모리에 올려 계산을 마친 뒤 다음 타일로 넘어간다.
+시퀀스 길이 2048 에서 GPT-2 학습이 3배 빨라졌다."""  # GOOD 대본의 숫자·영문 용어가 모두 들어 있다 — 코드 검사로 다시 쓰지 않는다
+
+
+def _own_text(at, text: str):
+    at = at.radio(key="cl_source_concept").set_value("text").run()
+    at = at.text_area(key="cl_text_concept").set_value(text).run()
+    assert not at.exception, at.exception
+    return at
+
+
+def test_own_text_becomes_mp3_in_its_own_folder_for_each_tone(fake_tts, use_script, catalog_root, tmp_path):
+    folder = tmp_path / "results" / "concept"
+    s = use_script(Script(ListenScript=[GOOD, GOOD]))
+    at = _app(_catalog_page, root=str(catalog_root), folder=str(folder))
+    at = _own_text(at, MINE)
+    assert s.calls == [] and fake_tts == []  # 적기만 해서는 부르지 않는다
+    assert at.radio(key=f"listen_level_{listen.TEXT_RUN}").value == "easy"  # 말투 고르기 (기본 쉽게)
+    at = _click(at, "듣기용 MP3 만들기")
+    prompt = s.prompts("ListenScript")[0]
+    assert "빠른 메모리에 올려" in prompt and "초등학생" in prompt  # 적은 글로, 쉽게
+    assert "카탈로그 항목 본문" not in prompt  # 적은 글을 카탈로그 항목이라고 부르지 않는다
+    at = _click(at, "음성 만들기")
+    assert len(at.get("audio")) == 1
+    own = folder / listen.OWN_TEXT
+    easy = list(own.glob("*.mp3"))
+    assert len(easy) == 1 and listen.TEXT_RUN in easy[0].name and easy[0].stem.endswith("_쉽게")  # 직접 적은 글 폴더에, 말투 표시
+    assert any(listen.OWN_TEXT in c.value for c in at.caption)  # 저장한 폴더를 알려 준다
+    at = at.radio(key=f"listen_level_{listen.TEXT_RUN}").set_value("normal").run()  # 보통은 따로 — 저절로 만들지 않는다
+    assert not at.get("audio") and len(s.calls) == 1
+    at = _click(at, "듣기용 MP3 만들기")
+    assert "초등학생" not in s.prompts("ListenScript")[1]
+    at = _click(at, "음성 만들기")
+    assert len(list(own.glob("*.mp3"))) == 2  # 쉽게·보통 둘 다 저장
+    n_tts = len(fake_tts)
+    at = at.text_area(key="cl_text_concept").set_value(MINE + "\n").run()  # 같은 글 (끝 줄바꿈만 다름) → 저장한 MP3 그대로
+    assert len(at.get("audio")) == 1 and len(fake_tts) == n_tts and len(s.calls) == 2
+
+
+def test_own_text_box_waits_for_text(fake_tts, use_script, catalog_root, tmp_path):
+    s = use_script(Script(ListenScript=GOOD))
+    at = _app(_catalog_page, root=str(catalog_root), folder=str(tmp_path / "results"))
+    at = at.radio(key="cl_source_concept").set_value("text").run()
+    assert not any("듣기용 MP3 만들기" in b.label for b in at.button) and s.calls == []
+
+
+def test_own_text_works_without_catalog(fake_tts, use_script, tmp_path):
+    root = tmp_path / "빈 카탈로그"
+    root.mkdir()
+    use_script(Script(ListenScript=GOOD))
+    at = _app(_catalog_page, root=str(root), folder=str(tmp_path / "results"))
+    at = _own_text(at, MINE)
+    assert any("듣기용 MP3 만들기" in b.label for b in at.button)  # 카탈로그가 비어도 적은 글은 된다
+
+
+def test_own_text_too_long_says_only_front_is_used(catalog_root, tmp_path):
+    at = _app(_catalog_page, root=str(catalog_root), folder=str(tmp_path / "results"))
+    at = _own_text(at, "가" * (listen.ENTRY_LIMIT + 10))
+    assert at.warning and str(listen.ENTRY_LIMIT) in at.warning[0].value.replace(",", "")
+
+
+def test_long_text_is_checked_against_the_part_the_model_saw(use_script, models):
+    """모델은 앞 ENTRY_LIMIT 자만 본다 — 뒷부분에만 있는 숫자·영문 용어로 코드 검사를 통과하면 안 된다."""
+    head = ("GPU 메모리를 덜 오가게 나눠 계산하는 어텐션 이야기. " * 400)[: listen.ENTRY_LIMIT]
+    text = head + "\n시퀀스 길이 2048 에서 GPT-2 학습이 3배 빨라졌다."  # GOOD 대본의 숫자·용어는 뒷부분에만
+    s = use_script(Script(ListenScript=[GOOD, GOOD]))
+    result = listen.make_script(text, models)
+    assert "2048" not in s.prompts("ListenScript")[0]  # 모델은 뒷부분을 못 봤다
+    assert result.calls == 2 and any("2048" in w for w in result.warnings)  # 그러니 그 숫자는 걸린다
+
+
+def test_switching_source_keeps_text_tone_and_catalog_pick(fake_tts, use_script, catalog_root, tmp_path):
+    entries = cat.Catalog.load(catalog_root).entries
+    second = entries[1].name
+    s = use_script(Script(ListenScript=GOOD))
+    at = _app(_catalog_page, root=str(catalog_root), folder=str(tmp_path / "results"))
+    at = at.selectbox(key="cl_target_concept").set_value(second).run()
+    at = _own_text(at, MINE)
+    at = at.radio(key=f"listen_level_{listen.TEXT_RUN}").set_value("normal").run()
+    at = at.radio(key="cl_source_concept").set_value("catalog").run()  # 카탈로그 개념을 보러 갔다가
+    assert at.selectbox(key="cl_target_concept").value == second  # 고른 개념 그대로
+    at = at.radio(key="cl_source_concept").set_value("text").run()  # 다시 적은 글로
+    assert not at.exception, at.exception
+    assert at.text_area(key="cl_text_concept").value == MINE  # 적던 글 그대로
+    assert at.radio(key=f"listen_level_{listen.TEXT_RUN}").value == "normal"  # 고른 말투 그대로
+    assert any("듣기용 MP3 만들기" in b.label for b in at.button) and s.calls == []
+
+
+def test_listen_task_works_for_own_text_without_catalog_folder(tmp_path, monkeypatch, set_keys):
+    from streamlit.testing.v1 import AppTest
+
+    set_keys()
+    monkeypatch.setenv("AGENT_OFFICE_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("AGENT_OFFICE_RESULTS_DIR", str(tmp_path / "results"))
+    at = AppTest.from_file(str(Path(__file__).resolve().parent.parent / "app.py"), default_timeout=90)
+    at.query_params["team"] = "concept"
+    at.query_params["view"] = "team"
+    at = at.run()
+    at = at.text_input(key="concept_root").set_value(str(tmp_path / "없는 폴더")).run()  # 카탈로그를 아직 안 받은 PC
+    at = at.selectbox(key="dept_task_research").set_value("concept:listen").run()
+    assert not at.exception, at.exception
+    assert any("직접 적은 글" in w.value for w in at.warning)  # 카탈로그 쪽: 폴더를 맞추라고 + 적은 글은 된다고
+    at = _own_text(at, MINE)
+    assert any("듣기용 MP3 만들기" in b.label for b in at.button)  # 적은 글은 카탈로그 없이도 만든다
+
+
 def test_listen_task_in_app_opens_catalog_picker(catalog_root, tmp_path, monkeypatch, set_keys):
     from streamlit.testing.v1 import AppTest
 

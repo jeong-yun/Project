@@ -3,7 +3,7 @@
 메인 화면의 조직도·에이전트 패널·이미지 편집·타임라인·최종 결정은 다른 팀과 똑같이 쓰고,
 개념 편집 팀에만 필요한 부분만 여기서 그린다.
   - 사이드바: 카탈로그(GitHub jeong-yun/CS 의 Term/Every_day) 위치·git 상태
-  - 업무 입력: ✍️ 작성(기존에 있으면 수정 · 없으면 추가 — 자동 판정) / 🗑 삭제 / 🎧 개념 듣기(카탈로그 개념 하나 → 듣기용 MP3)
+  - 업무 입력: ✍️ 작성(기존에 있으면 수정 · 없으면 추가 — 자동 판정) / 🗑 삭제 / 🎧 개념 듣기(카탈로그 개념 하나나 직접 적은 글 → 듣기용 MP3)
   - 최종 결과: 최종본·검증 로그·GitHub 요약·적용 계획 탭, 형식 검사
     · 기존 항목 수정이면 맨 앞에 '✏️ 변경 제안' 탭 — 변경마다 고치기 전 → 고친 뒤와 근거를 보고 반영할지 고른다 (원본은 그대로,
       고른 변경만 코드가 끼워 넣는다. 근거 글은 화면에만 — 카탈로그·커밋 메시지에는 들어가지 않는다)
@@ -566,7 +566,8 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls, category
     level = st.session_state.get(level_key, listen.DEFAULT_LEVEL)  # 아래 말투 고르기 칸의 값 — 그리기 전에 파일 이름을 정한다
     json_path, mp3_path = (listen.level_path(p, level) for p in listen.paths(folder, rid, entry, category))
     saved = listen.load_script(json_path)
-    with st.expander("🎧 듣기용 MP3 — 들으며 이해하기", expanded=saved is not None or rid == listen.CATALOG_RUN):
+    direct = rid in (listen.CATALOG_RUN, listen.TEXT_RUN)  # 🎧 개념 듣기 업무 — 업무 결과가 아니라 고른 개념·적은 글
+    with st.expander("🎧 듣기용 MP3 — 들으며 이해하기", expanded=saved is not None or direct):
         st.radio("대본 말투", list(listen.LEVELS), format_func=listen.LEVELS.get, key=level_key, horizontal=True,
                  help="쉽게: 초등학생도 알아듣게 짧은 문장과 일상 비유로, 어려운 말은 처음 나올 때 풀어 말합니다. 보통: 강의 말투. "
                       "두 말투는 따로 저장되어 바꿔 가며 들을 수 있습니다 (말투를 고르기 전에 만든 MP3 는 '보통'에 있습니다).")
@@ -577,7 +578,8 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls, category
             st.caption(f"{music.fmt_time(music.audio_duration(mp3_path))} · 대본 {listen.script_chars(saved.script) if saved else '?'}자 · "
                        f"{_made_with((saved.audio_model if saved else '') or listen.OLD_TTS)} · AI 로 합성한 음성 · "
                        f"`{mp3_path.parent.relative_to(folder.parent).as_posix()}/` 폴더에 저장 — 앱을 다시 켜도 "
-                       + ("같은 개념을 고르면 여기서" if rid == listen.CATALOG_RUN else "🕘 지난 업무에서") + " 들을 수 있습니다.")
+                       + {listen.CATALOG_RUN: "같은 개념을 고르면 여기서", listen.TEXT_RUN: "같은 글을 다시 넣으면 여기서"}.get(rid, "🕘 지난 업무에서")
+                       + " 들을 수 있습니다.")
             c1, c2, c3 = st.columns(3)
             c1.download_button("⬇ MP3 받기", data=data, file_name=mp3_path.name, mime="audio/mpeg",
                                key=f"listen_dl_{rid}", use_container_width=True)
@@ -595,7 +597,8 @@ def listen_panel(entry: str, run: dict, folder: Path, models, on_calls, category
         model = _pick_tts(models)
         if saved is None:
             minutes, usd = listen.estimate(listen.MAX_SCRIPT_CHARS, model)
-            st.caption(f"카탈로그 본문으로 {listen.MIN_SCRIPT_CHARS}~{listen.MAX_SCRIPT_CHARS}자(약 3~{minutes:.0f}분) 읽기용 대본을 먼저 쓰고, "
+            st.caption(f"{'적은 글로' if rid == listen.TEXT_RUN else '카탈로그 본문으로'} "
+                       f"{listen.MIN_SCRIPT_CHARS}~{listen.MAX_SCRIPT_CHARS}자(약 3~{minutes:.0f}분) 읽기용 대본을 먼저 쓰고, "
                        f"예상 요금을 확인한 뒤 음성을 만듭니다. 대본은 보조 모델 1~2번 호출, 음성은 많아야 약 ${usd:.2f} "
                        f"(추정 — {listen.provider_name(model)} {model} 기준).")
             if st.button("🎧 듣기용 MP3 만들기 (1/2 대본 쓰기)", key=f"listen_script_{rid}", type="primary"):
@@ -650,13 +653,38 @@ def history_listen(folder: Path, run_id: str) -> None:
                            key=f"hist_listen_{run_id}")
 
 
-def catalog_listen(ctx: CatalogContext, team_id: str, folder: Path, models) -> None:
-    """🎧 개념 듣기 — 카탈로그에 이미 있는 개념 하나를 골라 듣기용 MP3 (결과 화면과 같은 listen_panel: 대본 → 예상 요금 확인 → 음성).
+LISTEN_SOURCES = {"catalog": "📚 카탈로그 개념", "text": "✍️ 직접 적은 글"}
+
+
+def catalog_listen(ctx: CatalogContext | None, team_id: str, folder: Path, models) -> None:
+    """🎧 개념 듣기 — 카탈로그 개념 하나나 직접 적은 글로 듣기용 MP3 (결과 화면과 같은 listen_panel: 말투 → 대본 → 예상 요금 확인 → 음성).
 
     한 번에 하나씩, 버튼을 눌렀을 때만 만든다 (여러 개를 한꺼번에 만드는 기능은 요금 때문에 두지 않는다).
-    파일 이름의 업무 번호 자리는 listen.CATALOG_RUN — 같은 개념을 다시 고르면 저장한 대본·MP3 를 그대로 쓰고,
-    카탈로그 본문이 바뀌면(채택·직접 수정) 지문이 달라져 새로 만든다. 업무가 아니라 ⏱ 호출 기록은 저장하지 않고 🏠 사용량에만 남는다.
+    파일 이름의 업무 번호 자리는 listen.CATALOG_RUN · listen.TEXT_RUN — 같은 개념을 고르거나 같은 글을 다시 넣으면 저장한 대본·MP3 를
+    그대로 쓰고, 본문이 바뀌면(채택·직접 수정·글 고침) 지문이 달라져 새로 만든다. 카탈로그 개념은 항목의 범주 폴더에,
+    적은 글은 listen.OWN_TEXT 폴더에 저장한다. 업무가 아니라 ⏱ 호출 기록은 저장하지 않고 🏠 사용량에만 남는다.
+    ctx 가 None(카탈로그 폴더가 없음)이어도 적은 글은 된다 — 카탈로그 개념 쪽에서만 폴더를 맞추라고 알린다.
     """
+    # Streamlit 은 이번 실행에서 그리지 않은 위젯의 값을 지운다 → 카탈로그 ↔ 적은 글을 오가면 적던 글·말투·고른 개념이 사라진다.
+    # 그리기 전에 값을 다시 넣어 두면 지우지 않는다 (Streamlit 문서의 '위젯 정리 막기' 방법 — 1.54~1.66 모두 같음)
+    for key in (f"cl_text_{team_id}", f"cl_target_{team_id}", f"listen_level_{listen.TEXT_RUN}", f"listen_level_{listen.CATALOG_RUN}"):
+        if key in st.session_state:
+            st.session_state[key] = st.session_state[key]
+    source = st.radio("무엇으로 만들까요", list(LISTEN_SOURCES), format_func=LISTEN_SOURCES.get, key=f"cl_source_{team_id}",
+                      horizontal=True)
+    if source == "text":
+        text = st.text_area("들을 글 — 개념 설명이나 공부할 내용을 붙여 넣으세요 (첫 줄이 파일 이름이 됩니다)", key=f"cl_text_{team_id}",
+                            height=220, placeholder="예: 다른 곳에서 정리한 개념 설명, 수업 메모, 책에서 옮겨 적은 글").strip()
+        if not text:
+            st.caption("글을 넣으면 말투(쉽게·보통)를 고르고 대본 → 음성 순서로 만들 수 있습니다. 넣기만 해서는 모델을 부르지 않습니다.")
+            return
+        if len(text) > listen.ENTRY_LIMIT:
+            st.warning(f"글이 {len(text):,}자로 깁니다. 대본은 앞 {listen.ENTRY_LIMIT:,}자만 보고 씁니다 — 나머지는 나눠서 따로 만들어 주세요.")
+        listen_panel(text, {"run_id": listen.TEXT_RUN, "team_id": team_id}, folder, models, lambda run: None, listen.OWN_TEXT)
+        return
+    if ctx is None:
+        st.warning("사이드바의 '📁 개념 카탈로그' 폴더를 먼저 맞춰 주세요. ✍️ 직접 적은 글은 카탈로그 없이도 만들 수 있습니다.")
+        return
     entries = ctx.catalog.entries
     if not entries:
         st.info("카탈로그에 항목이 없습니다. 사이드바 '📁 개념 카탈로그'의 폴더 경로를 확인해 주세요.")
