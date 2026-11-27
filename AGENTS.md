@@ -1,7 +1,8 @@
 # AGENTS.md — AI 코딩 도구 공통 원칙
 
-이 저장소의 **모든 하위 프로젝트**에서 코드를 쓰는 AI 도구(Claude Code, Codex, Gemini CLI, Copilot, Cursor 등)가 따르는 원천 파일이다.
+이 저장소의 **모든 하위 프로젝트**에서 코드를 쓰는 AI 도구(Claude Code, Codex, Gemini CLI, Antigravity CLI, Copilot, Cursor 등)가 따르는 원천 파일이다.
 하위 폴더에 `AGENTS.md` 가 있으면 그 프로젝트 전용 규칙이고, 이 파일 위에 더해진다. 규칙을 바꿀 때는 해당 `AGENTS.md` 만 고친다.
+하위 프로젝트의 파일을 읽거나 고치기 전에 그 프로젝트 폴더에 `AGENTS.md` 가 있으면 먼저 읽는다 (하위 폴더 규칙을 저절로 읽지 않는 도구가 있다 — 예: Antigravity CLI 를 저장소 루트에서 켰을 때).
 원칙은 Addy Osmani 의 글에서 영감을 받아 이 저장소에 맞게 다듬었다.
 
 ## 1. 손대기 전 5가지 질문
@@ -52,7 +53,7 @@
 | `LLM/LLM 에이전트 기반 게임 IP …` | 작은 LLM 실험 |
 | `Arcus`, `분석`, `PredictStock`, `Titanic`, `wine_qualityN_data`, `GAME`, `Contect` | 학습용 실험 (유지보수 안 함) |
 
-문서: [README.md](README.md)(목록) · [PROJECTS.md](PROJECTS.md)(프로젝트 요약·진행) · [SECURITY.md](SECURITY.md)(비밀·자동 검사) · 검토 프롬프트 [docs/AI_검토_프롬프트.md](docs/AI_검토_프롬프트.md).
+문서: [README.md](README.md)(목록) · [PROJECTS.md](PROJECTS.md)(프로젝트 요약·진행) · [SECURITY.md](SECURITY.md)(비밀·자동 검사) · 검토 프롬프트 [docs/AI_검토_프롬프트.md](docs/AI_검토_프롬프트.md) · Antigravity CLI 설치·사용법 [docs/Antigravity_CLI_사용법.md](docs/Antigravity_CLI_사용법.md).
 
 **새 하위 프로젝트를 시작할 때**
 1. 알맞은 폴더 아래에 새 폴더를 만들고, 위 표와 [README.md](README.md) 에 한 줄 추가한다.
