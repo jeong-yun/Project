@@ -245,12 +245,15 @@ agy
 - 설치 명령의 동작(설치 위치, PATH 등록, 이미 설치된 PC 에서 다시 실행했을 때), 첫 실행 화면, 3절의 명령·단축키, 5절의 대처.
 
 **확인하지 못한 것 — 처음 쓸 때 한 번 본다**
-- [ ] `/context` 에 루트 `AGENTS.md` 가 실제로 나오는가. `LLM\Agent_office` 에서 켜면 두 개가 나오는가.
-- [ ] `git worktree` 로 만든 폴더에서 켜도 저장소 루트를 제대로 찾는가 (변경 기록 1.1.12 에는 worktree 를 챙겼다고 나온다).
-- [ ] `agy --add-dir LLM\Agent_office` 로 루트에서 켜도 Agent Office 규칙이 실리는가 (문서로는 그렇게 읽힌다).
-- [ ] 한글 입력, 줄바꿈(Shift+Enter)이 이 PC 터미널에서 문제없는가.
-- [ ] 다른 PC 에서 처음 설치할 때 1절이 적힌 순서대로 되는가.
-- [ ] auto 모드가 되는 PC 에서 `python -m pytest` 와 올리기 전 검사가 샌드박스 안에서 도는가.
+
+확인하는 방법과 진행 표시는 할 일 문서 [TODO_Antigravity_CLI_확인.md](TODO_Antigravity_CLI_확인.md) 에 있다.
+
+- `/context` 에 루트 `AGENTS.md` 가 실제로 나오는가. `LLM\Agent_office` 에서 켜면 두 개가 나오는가.
+- `git worktree` 로 만든 폴더에서 켜도 저장소 루트를 제대로 찾는가 (변경 기록 1.1.12 에는 worktree 를 챙겼다고 나온다).
+- `agy --add-dir LLM\Agent_office` 로 루트에서 켜도 Agent Office 규칙이 실리는가 (문서로는 그렇게 읽힌다).
+- 한글 입력, 줄바꿈(Shift+Enter)이 이 PC 터미널에서 문제없는가.
+- 다른 PC 에서 처음 설치할 때 1절이 적힌 순서대로 되는가.
+- auto 모드가 되는 PC 에서 `python -m pytest` 와 올리기 전 검사가 샌드박스 안에서 도는가.
 
 대화형 실행을 확인하지 못한 까닭: 이 문서는 Claude Code 로 작성했다. 4절의 약관 안내 때문에 Claude Code 가 `agy` 대화를 대신 실행하지 않았다. 위 항목은 사람이 터미널에서 직접 본 뒤 이 문서를 고친다.
 
