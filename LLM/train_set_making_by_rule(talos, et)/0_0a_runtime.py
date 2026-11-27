@@ -23,8 +23,15 @@ def now_iso():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def _zombie(stat_text):
+    """/proc/<pid>/stat 내용 → 좀비(끝났지만 부모가 아직 거두지 않음)인지. 이름에 ')' 가 있을 수 있어 마지막 ')' 뒤를 본다."""
+    return stat_text.rsplit(")", 1)[-1].split()[:1] == ["Z"]
+
+
 def pid_alive(pid):
-    """프로세스가 살아 있는지 (Windows: OpenProcess + 종료 코드, 그 외: kill 0)."""
+    """프로세스가 살아 있는지 (Windows: OpenProcess + 종료 코드, 그 외: kill 0 + Linux 는 좀비 빼기).
+    2026-11-25~: 화면이 띄운 작업(spawn 은 기다리지 않음)이 끝나도 화면이 거두기 전까지 좀비로 남아 kill 0 이 성공 →
+    '학습 로그에 반영' 이 1시간 동안 '도는 중' 으로 보이고 다음 날짜를 막던 문제. /proc 을 못 읽으면 (macOS 등) kill 0 결과대로."""
     try:
         pid = int(pid)
     except (TypeError, ValueError):
@@ -43,9 +50,12 @@ def pid_alive(pid):
         return bool(ok) and code.value == 259                  # STILL_ACTIVE
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    try:
+        return not _zombie(Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return True
 
 
 def read_lock(name):
