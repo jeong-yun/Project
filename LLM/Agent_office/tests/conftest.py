@@ -2,6 +2,7 @@
 
 - 실제 웹 검색·LLM 호출을 모두 막고 가짜로 바꾼다 → API 키·비용·네트워크 없이 테스트
 - 실제 TTS(🎧 듣기용 MP3 — Google·OpenAI)도 막는다 (no_real_tts) — 음성이 필요한 테스트는 fake_tts (짧은 무음 — Google 은 WAV, OpenAI 는 MP3)
+- 임시 폴더 밖 저장소의 GitHub 접속 git(fetch·push 등)도 막는다 (no_network_git) — 진짜 CS 저장소가 있는 PC 에서도 네트워크 없이
 - 모든 테스트에서 `.env` 를 읽지 않고 제공처 키를 지운다. 가짜 모델을 끼우지 않고 모델을 만들면 그 테스트는 실패한다
   (no_real_keys · no_real_models — 확인: tests/test_conftest_guards.py)
 - GitHub 검사에서 실패하면 실패한 테스트 이름을 주석(::error)으로 찍는다 → 로그인 없이 보인다 (맨 아래 pytest_terminal_summary)
@@ -237,6 +238,33 @@ def no_network_market(monkeypatch):
         raise RuntimeError("테스트 중 네트워크 금지")
 
     monkeypatch.setattr(market, "fetch_history", blocked)
+
+
+NETWORK_GIT = ("fetch", "push", "pull", "clone", "ls-remote")  # GitHub 에 접속하는 git 명령
+
+
+@pytest.fixture(autouse=True)
+def no_network_git(monkeypatch):
+    """개념 팀 사이드바의 GitHub 받아오기·커밋 후 푸시(core/catalog.git)가 테스트 중 진짜 저장소로 접속하지 않게 한다.
+    앱 기준 ../../../CS 에 진짜 CS 저장소가 있는 PC 에서는 개념 팀 화면을 띄우는 앱 테스트가 실제 git fetch 를 했다
+    (2026-11-27 그 접속이 멈춰 전체 테스트가 12시간 멈춤). 임시 폴더 안의 저장소(test_concept 의 가짜 origin)와
+    네트워크가 없는 명령(status·commit 등)은 그대로 실행한다. 막힌 호출은 반환 리스트에 '명령 저장소' 로 기록된다."""
+    import tempfile
+
+    from core import catalog
+
+    real_git = catalog.git
+    temp_root = Path(tempfile.gettempdir()).resolve()
+    blocked: list[str] = []
+
+    def guarded(repo, *args, **kwargs):
+        if args and args[0] in NETWORK_GIT and not Path(repo).resolve().is_relative_to(temp_root):
+            blocked.append(f"{args[0]} {repo}")
+            return False, "테스트 중에는 진짜 저장소로 GitHub 에 접속하지 않습니다 (tests/conftest.py no_network_git)"
+        return real_git(repo, *args, **kwargs)
+
+    monkeypatch.setattr(catalog, "git", guarded)
+    return blocked
 
 
 @pytest.fixture(autouse=True)

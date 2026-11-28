@@ -2909,6 +2909,24 @@
 - 확인 못 한 것: 진짜 모델·음성으로 적은 글 MP3 만들기(요금 — 허락 뒤), 실제 앱 화면에서 눌러 보기(켜 둔 앱 폴더는 건드리지 않음).
 - 다음 할 일: 진짜 음성 샘플 1개로 기본 음성 모델·말투 확정(허락 뒤). 원하면 적은 글 MP3 를 내 목소리로 바꾸는 안내(🗣 일상 말 팀, 본인·동의한 목소리만).
 
+## 2026-11-28
+
+**테스트가 진짜 저장소로 GitHub 에 접속하던 것 막기 (전체 테스트 12시간 멈춤의 원인)**
+- 배경: 11-27 저녁 전체 테스트가 27%(372건 통과)에서 12시간 멈췄다. 멈춘 pytest 아래에 `git -c core.quotepath=false fetch origin` 이 혼자 남아 있었다.
+  원인: 새 PC 는 앱 기준 `../../../CS` 에 진짜 CS 저장소가 있어서, 개념 팀 화면을 띄우는 앱 테스트(AppTest)가 첫 화면의 기본 경로로
+  사이드바 `fetch_remote` → `catalog.git_fetch` 를 실제로 실행했다(GitHub 검사의 리눅스에는 그 폴더가 없어 생기지 않음).
+  재현: 앱 테스트 1건만 돌려도 진짜 `CS/.git/FETCH_HEAD` 시각이 바뀌었다. 그날 저녁에는 그 접속이 응답 없이 멈췄다(같은 테스트가 다음 날 아침엔 통과).
+- 작업: `tests/conftest.py` 에 자동 적용 fixture `no_network_git` — `core.catalog.git` 을 감싸, **임시 폴더 밖** 저장소의
+  fetch·push·pull·clone·ls-remote 는 실행하지 않고 실패(쉬운 안내 문구)로 돌려준다. 임시 폴더 안 저장소(`test_concept` 의 가짜 origin 으로
+  하는 실제 git 테스트)와 네트워크가 없는 명령(status·commit 등)은 그대로 실행한다. 막힌 호출은 fixture 반환 리스트에 기록된다.
+- 기술: 기존 `no_network_*` fixture 와 같은 방식(monkeypatch)으로 한 곳(`catalog.git`)만 감쌈 — 앱 코드는 바꾸지 않음. 경로 판정은 `Path.is_relative_to`(3.9+).
+- 테스트: `tests/test_conftest_guards.py` 2건(먼저 실패 확인 → 통과) — 진짜 저장소의 fetch·push 는 git 을 실행하지 않고 막힘,
+  임시 폴더 저장소의 fetch 와 진짜 저장소의 status 는 그대로 실행. 개념 테스트 40건(임시 저장소로 실제 git) 통과.
+  앱 테스트 뒤 진짜 `CS/.git/FETCH_HEAD` 시각이 바뀌지 않음을 확인. 전체 테스트 **1,548 통과**(10분 35초, 실패 0 — 1,546 + 새 2),
+  전체 실행 동안에도 진짜 CS 저장소의 받아오기 기록이 바뀌지 않음.
+- 성과: 이 PC 에서 테스트가 네트워크 상태에 따라 멈추던 원인 하나를 없앰. 진짜 CS 저장소의 원격 추적 정보도 테스트가 더는 바꾸지 않음.
+- 확인 못 한 것: 다른 경로(앱 코드 밖 스크립트 등)에서 테스트가 네트워크 git 을 부르는 곳이 더 있는지 — `catalog.git` 을 거치지 않는 git 호출은 막지 않는다.
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트

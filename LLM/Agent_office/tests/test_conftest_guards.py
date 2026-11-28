@@ -161,3 +161,43 @@ def test_github_annotations_are_capped_and_escaped():
     assert line.endswith("tests/test_b.py — ImportError: no module")
     (line,) = github_error_lines([report(1, "RuntimeError: " + "가" * 500)])
     assert len(line.split(" — ", 1)[1]) == 200  # 오류 첫 줄은 200자까지
+
+
+# ─── 진짜 저장소로 GitHub 에 접속하지 않기 (no_network_git) ─────────────────
+# 앱 기준 ../../../CS 에 진짜 CS 저장소가 있는 PC 에서는, 개념 팀 화면을 띄우는 앱 테스트가 사이드바의 git fetch 로
+# 실제 GitHub 에 접속했다 (2026-11-27 그 접속이 멈춰 전체 테스트가 12시간 멈춤). 임시 폴더 안의 저장소는 그대로 둔다.
+
+
+def _record_git(monkeypatch):
+    from core import catalog
+
+    ran: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        ran.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(catalog.subprocess, "run", fake_run)
+    return ran
+
+
+def test_network_git_is_blocked_for_a_repo_outside_temp(no_network_git, monkeypatch):
+    from core import catalog
+
+    ran = _record_git(monkeypatch)
+    real_repo = Path(__file__).resolve().parents[3]  # 이 저장소 — 임시 폴더 밖
+    for call in (lambda: catalog.git_fetch(real_repo, quiet=True), lambda: catalog.git_push(real_repo)):
+        ok, log = call()
+        assert not ok and "테스트" in log
+    assert ran == []  # git 을 아예 실행하지 않았다
+    assert [b.split()[0] for b in no_network_git] == ["fetch", "push"]
+
+
+def test_temp_repos_and_local_git_still_run(no_network_git, monkeypatch, tmp_path):
+    from core import catalog
+
+    ran = _record_git(monkeypatch)
+    real_repo = Path(__file__).resolve().parents[3]
+    assert catalog.git_fetch(tmp_path, quiet=True)[0]  # 임시 폴더의 가짜 origin 은 test_concept 이 실제로 쓴다
+    catalog.git_status(real_repo, "LLM")  # 진짜 저장소라도 네트워크가 없는 명령은 그대로
+    assert [c[3] for c in ran] == ["fetch", "status"] and no_network_git == []
