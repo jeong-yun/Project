@@ -18,7 +18,7 @@ LangChain 과 Streamlit 으로 만든 작은 LLM 앱 실험이다. 기능은 네
 | 영어 단어장 | `pages/1_english_word_maker.py` | `english_word_maker/` | 화면이 키 없이 열리고 저장된 단어가 표에 보임. 파싱·Word·PDF 내려받기는 테스트로 확인 |
 | AI 안전성 평가 | `pages/2_ai_safety_eval.py` | `ai_safety/` | 대상을 '일반 채팅 / RAG' 가운데 고른다. 가짜 모델로 '실행 → 코드 검사 → 채점 → 방어율 → 표 → 내려받기'까지 확인. 실제 방어율은 확인 안 함 |
 | 문서 Q&A (RAG) | `pages/3_rag_docs_qa.py` | `rag/` | 검색은 모델 없이 측정함(질문 15개 중 14개가 상위 3개 안). 가짜 모델로 '질문 → 검색 → 답 → 출처 검사'까지 확인. 실제 답변 품질은 확인 안 함 |
-| 자동 테스트 | `tests/` | | 61건. 가짜 모델만 사용하고, `.env` 를 읽거나 진짜 모델을 만들면 실패하게 막아 둠. 실행: `python -m pytest -q` |
+| 자동 테스트 | `tests/` | | 63건. 가짜 모델만 사용하고, `.env` 를 읽거나 진짜 모델을 만들면 실패하게 막아 둠. 실행: `python -m pytest -q` |
 
 ## 폴더 구조
 
@@ -143,7 +143,7 @@ RAG 는 '찾아서(Retrieval) 덧붙여(Augmented) 답하기(Generation)'다. �
    - Windows 에서 pip 24 가 이 파일의 한글 주석을 cp949 로 읽다 `UnicodeDecodeError` 로 멈추면, `PYTHONUTF8=1`(PowerShell: `$env:PYTHONUTF8=1`)을 켜고 다시 설치한다.
    - `langchain`(본체)·`langchainhub`·`langchain-teddynote` 는 더 이상 쓰지 않는다.
 2. 이 폴더에 `.env` 를 만들고 OpenAI 키(`OPENAI_API_KEY`)를 넣는다. LangSmith 기록을 쓰려면 그 키도 넣는다. **`.env` 는 커밋하지 않는다.**
-3. 이 폴더에서 `streamlit run app.py`. 사이드바에서 페이지를 고른다.
+3. 이 폴더에서 `streamlit run app.py`. 사이드바에서 페이지를 고른다. 앱은 이 PC 에서만 열린다 — 로그인이 없어서 `.streamlit/config.toml` 이 같은 네트워크의 다른 기기와, 바깥 이름으로 붙는 연결을 막는다. 다른 폴더에서 켜면 이 설정이 빠진다.
 4. 테스트: 이 폴더에서 `python -m pytest -q` (키 없이 돈다. 실제 모델을 부르지 않는다).
 5. PDF 문서를 올리려면 `pip install pypdf` (없어도 `.md`·`.txt` 는 된다).
 

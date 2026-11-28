@@ -29,6 +29,14 @@ fileWatcherType = "none"
 # 앱을 이 PC 안쪽 주소(127.0.0.1)에서만 연다 — 같은 와이파이·랜의 다른 기기(휴대폰·다른 PC)는 들어올 수 없다.
 # 이유: 앱에는 로그인이 없어 들어오면 내 API 키로 업무를 돌리고 지난 기록·올린 파일을 볼 수 있다. Streamlit 기본값은 모든 네트워크 주소에서 여는 것이다
 # (2026-11-23 새 PC — 방화벽이 막고 있었지만 '허용'을 한 번 누르면 열린다). 이 PC 에서는 http://localhost:8501 로 그대로 열린다.
-# 다른 기기에서 꼭 봐야 하면 그때만 `streamlit run app.py --server.address 0.0.0.0` 으로 켠다.
+# 다른 기기에서 꼭 봐야 하면 그때만 `streamlit run app.py --server.address 0.0.0.0 --server.allowedHosts localhost --server.allowedHosts <이 PC 의 주소>` 로 켠다
+# (명령줄에 적은 이름이 아래 allowedHosts 목록을 대신한다 — 다른 기기가 주소창에 넣을 이름을 빠짐없이 적는다).
 # 이 설정도 tests/test_config.py 가 실제로 적용되는지 확인한다.
 address = "127.0.0.1"
+
+# 주소창 이름이 localhost · 127.0.0.1 일 때만 화면 연결(웹소켓)을 받는다 (포트는 보지 않는다).
+# 이유: 앱에는 로그인이 없다. 위 설정으로 이 PC 에서만 열어도, 브라우저로 연 다른 사이트가 자기 이름을 127.0.0.1 로 다시 가리키게 하면
+# (DNS 리바인딩) 그 사이트가 이 앱에 붙어 내 API 키로 업무를 돌릴 수 있다. Streamlit 은 이 목록이 비어 있으면 어떤 이름이든 받는다 (2026-11-28 보안 점검).
+# Streamlit 1.61 부터 있는 옵션이다. 그 전 버전은 경고만 내고 무시하므로 requirements.txt 의 최소 버전을 1.61 로 올렸다.
+# 이 설정도 tests/test_config.py 가 실제로 적용되는지(바깥 이름이 거절되는지) 확인한다.
+allowedHosts = ["localhost", "127.0.0.1"]

@@ -1,0 +1,13 @@
+# Streamlit 설정 — 앱을 이 폴더(LLM/AI_Agent)에서 켤 때 읽힌다 (`streamlit run app.py`).
+# 다른 폴더에서 켜면 이 설정이 빠진다. tests/test_streamlit_config.py 가 실제로 적용되는지 확인한다.
+
+[server]
+# 앱을 이 PC 안쪽 주소(127.0.0.1)에서만 연다 — 같은 와이파이·랜의 다른 기기(휴대폰·다른 PC)는 들어올 수 없다.
+# 이유: 앱에는 로그인이 없어 들어오면 내 OpenAI 키로 모델·발음(TTS)을 부를 수 있다. Streamlit 기본값은 모든 네트워크 주소에서 여는 것이다
+# (2026-11-28 보안 점검). 이 PC 에서는 http://localhost:8501 로 그대로 열린다.
+address = "127.0.0.1"
+
+# 주소창 이름이 localhost · 127.0.0.1 일 때만 화면 연결(웹소켓)을 받는다 (포트는 보지 않는다).
+# 이유: 이 PC 에서만 열어도, 브라우저로 연 다른 사이트가 자기 이름을 127.0.0.1 로 다시 가리키게 하면(DNS 리바인딩) 그 사이트가 이 앱에 붙을 수 있다.
+# Streamlit 은 이 목록이 비어 있으면 어떤 이름이든 받는다. Streamlit 1.61 부터 있는 옵션이다 (requirements.txt 의 최소 버전).
+allowedHosts = ["localhost", "127.0.0.1"]

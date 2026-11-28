@@ -5,7 +5,7 @@
 # today_worked.md 2026-11-13 '의존성 보안 권고' · 2026-11-17 'langchain·langgraph 1.x' 항목에 있다.
 
 # UI
-streamlit>=1.54,<1.67   # 1.54 미만: Windows 에서 NTLM 자격 증명이 새는 SSRF (GHSA-7p48-42j8-8846). 1.66 에서 검증. 1.67 이상은 검증 후 올린다 — 1.66 서버 기록에 '없어질 옵션' 경고가 남아 있다:
+streamlit>=1.61,<1.67   # 1.61 미만: .streamlit/config.toml 의 허용 호스트 이름(server.allowedHosts) 옵션이 없어 무시된다 (1.54 미만은 Windows 에서 NTLM 자격 증명이 새는 SSRF, GHSA-7p48-42j8-8846). 1.66 에서 검증. 1.67 이상은 검증 후 올린다 — 1.66 서버 기록에 '없어질 옵션' 경고가 남아 있다:
                         # use_container_width (화면 코드 15개 파일, 1.66 에서는 동작). 지도·보드·탭 제목의 HTML 창은 frame_ui.py 가
                         # 새 함수 st.iframe(1.66) / 옛 함수 st.components.v1.html(1.43) 중 있는 것을 골라 경고가 없다
 pyarrow>=19,<20         # Streamlit 표·데이터를 그리는 라이브러리. 25.0 에서 앱이 arrow.dll 접근 위반(0xc0000005)으로 두 번 강제 종료(2026-11-02·11-05)

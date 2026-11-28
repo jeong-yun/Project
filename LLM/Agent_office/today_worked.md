@@ -2927,6 +2927,25 @@
 - 성과: 이 PC 에서 테스트가 네트워크 상태에 따라 멈추던 원인 하나를 없앰. 진짜 CS 저장소의 원격 추적 정보도 테스트가 더는 바꾸지 않음.
 - 확인 못 한 것: 다른 경로(앱 코드 밖 스크립트 등)에서 테스트가 네트워크 git 을 부르는 곳이 더 있는지 — `catalog.git` 을 거치지 않는 git 호출은 막지 않는다.
 
+**🔒 로그인 없는 앱에 바깥 이름으로 붙는 연결 막기 (Agent Office · AI_Agent `.streamlit/config.toml`)**
+- 배경: 저장소를 읽기만 하는 보안 점검(Cloudflare security-audit-skill 방식)에서 나온 것 가운데 설정으로 막을 수 있는 2건.
+  ① Agent Office 는 127.0.0.1 에서만 열지만 허용 호스트 이름을 정하지 않아, 브라우저로 연 다른 사이트가 자기 이름을 127.0.0.1 로
+  다시 가리키면(DNS 리바인딩) 그 이름으로 앱에 붙을 수 있다. ② AI_Agent 는 설정 파일이 없어 안내대로 켜면 모든 네트워크 주소에서 열린다.
+- 작업: Agent Office 에 `server.allowedHosts = ["localhost", "127.0.0.1"]` 추가. AI_Agent 에 `.streamlit/config.toml` 을 새로 만들어
+  `server.address = "127.0.0.1"` 과 같은 허용 이름을 넣음. 두 `requirements.txt` 의 Streamlit 최소 버전을 1.54 → 1.61 로 올림
+  (이 옵션은 1.61 부터 있고 그 전 버전은 경고만 내고 무시한다 — GitHub 의 버전별 `config.py` 로 확인: 1.60 에 없음, 1.61 에 있음).
+- 기술: Streamlit 은 화면 연결(웹소켓)의 Host 이름을 `server.allowedHosts` 와 견준다 (포트는 보지 않고, 목록이 비면 모두 받는다).
+  명령줄 `--server.allowedHosts` 는 파일의 목록을 대신한다 (`streamlit config show` 로 확인).
+- 테스트: 먼저 실패 확인 → 통과. `tests/test_config.py` 1건 — 설정값과 함께, Streamlit 의 검사 함수로 localhost·127.0.0.1 은 통과하고
+  바깥 이름(`rebind.example`)은 거절되는지 본다 (고치기 전에는 같은 함수가 바깥 이름을 통과시켰다). AI_Agent `tests/test_streamlit_config.py` 2건.
+  Agent Office 전체 테스트 **1,549 통과**(10분 23초, 실패 0 — 같은 날 먼저 올라간 `d680370` 의 1,548 + 새 1. 그 커밋 전 기준으로도 1,547 통과). AI_Agent 전체 테스트 **63 통과**(24초, 새 2건 포함) —
+  처음에는 이 PC 가상환경에 `fpdf2`·`xlsxwriter` 가 없어 5건 실패 + 1파일을 모으지 못했다. `pip install -r requirements.txt` 로
+  그 둘만 설치한 뒤(다른 패키지는 그대로, `pip check` 이상 없음) 모두 통과.
+- 성과: 바깥 이름으로 온 화면 연결은 Streamlit 이 받지 않는다. AI_Agent 는 같은 네트워크의 다른 기기에서 열리지 않는다.
+- 확인 못 한 것: 실제 브라우저에서 DNS 리바인딩을 재현해 막히는지 (격리 환경이 없어 하지 않음). 이 옵션은 화면 연결만 거르고,
+  정적 파일 같은 다른 요청은 거르지 않는다. 켜 둔 앱에는 다시 켜야 적용된다.
+- 다음 할 일: 점검에서 나온 나머지 항목을 하나씩 확인하고 고칠 것을 정하기 (점검 결과는 저장소 밖에 둔다).
+
 ## 누적 요약
 
 - **핵심 역량 키워드**: Multi-Agent System(Supervisor 패턴), LangGraph(Human-in-the-loop·interrupt·체크포인트), LangChain, LLM-as-a-Judge(심각도 등급·Best-of-N), Self-Correction, 평가 하네스(PRM/ORM), RLVR 응용 결정론적 검증, Multi-LLM Orchestration(OpenAI · Anthropic · Google · Upstage · 무료 모델 FreeLLMAPI · Claude 구독 CLI), 계층형 모델 거버넌스(팀원별 모델 선택·상하 관계 상한·대안 상한), 장애 대응(재시도·폴백·쿨다운), 동시성(의존성 스케줄링·provider 세마포어), 멀티모달(비전·오디오 이해), 생성 오디오(Gemini Lyria) + DSP 후처리(pedalboard·LUFS), CAD/BIM(shapely·ezdxf·trimesh·IFC), 제약 최적화(OR-Tools CP-SAT), Prompt Engineering(Desired State·CoT·Few-shot), Streamlit, Git 자동화, LLM 비용 관측(토큰·추정 비용·키별 집계), 설정 기반(Config-driven) 설계, pytest 모의 모델 테스트
